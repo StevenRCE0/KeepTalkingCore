@@ -1,6 +1,18 @@
 import Foundation
 
+public enum KeepTalkingKVServiceError: Error {
+    case notImplemented
+}
+
 public final class KeepTalkingHTTPKVService: KeepTalkingKVService, @unchecked Sendable {
+    public func storeNodeID(_ node: UUID) async throws {
+        throw KeepTalkingKVServiceError.notImplemented
+    }
+
+    public func loadNodeIDs() async throws -> [UUID] {
+        throw KeepTalkingKVServiceError.notImplemented
+    }
+
     private struct StoreRequest: Codable {
         let userID: String
         let nodeID: String

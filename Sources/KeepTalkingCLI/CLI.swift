@@ -3,23 +3,20 @@ import KeepTalkingSDK
 
 let keepTalkingUsage = """
 Usage:
-  KeepTalking [--signal-url <ws-url>] [--session <sid>] [--id <uid>] [--user-id <user-id>] [--channel <label>] [--message <text>]
+  KeepTalking [--signal-url <ws-url>] [--session <sid>] [--node <uuid>] [--channel <label>] [--db-path <sqlite-file>] [--message <text>]
 
 Environment fallbacks:
   KT_SIGNAL_URL (default: ws://127.0.0.1:17000/ws)
   KT_SESSION    (default: ion)
-  KT_ID         (default: random UUID)
-  KT_USER_ID    (optional, for KV node registry)
+  KT_NODE       (default: random UUID)
   KT_CHANNEL    (default: keep-talking.chat)
+  KT_DB_PATH    (optional, local sqlite file path)
 
 Examples:
-  KeepTalking --session room1 --id alice
-  KeepTalking --id bob --message "hello from ion-sfu"
+  KeepTalking --session room1 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
+  KeepTalking --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --message "hello from ion-sfu"
 
 Interactive commands:
-  /peer <id>   set default target peer
-  /peer all    clear target (broadcast)
-  /peer        show current target
   /stats       print local send/receive counters
   /quit        exit
 """
@@ -28,6 +25,8 @@ enum CliError: LocalizedError {
     case unknownFlag(String)
     case missingValue(String)
     case invalidSignalURL(String)
+    case invalidDBPath(String)
+    case invalidNodeID(String)
 
     var errorDescription: String? {
         switch self {
@@ -37,21 +36,26 @@ enum CliError: LocalizedError {
             return "Missing value for \(flag)"
         case let .invalidSignalURL(raw):
             return "Invalid signal URL: \(raw)"
+        case let .invalidDBPath(raw):
+            return "Invalid db path: \(raw)"
+        case let .invalidNodeID(raw):
+            return "Invalid node UUID: \(raw)"
         }
     }
 }
 
 struct CliConfig {
     let sdkConfig: KeepTalkingConfig
+    let databaseURL: URL?
     let singleMessage: String?
 
     static func parse() throws -> CliConfig {
         let env = ProcessInfo.processInfo.environment
         var signalURLRaw = env["KT_SIGNAL_URL"] ?? "ws://127.0.0.1:17000/ws"
         var session = env["KT_SESSION"] ?? "ion"
-        var participantID = env["KT_ID"] ?? UUID().uuidString.lowercased()
-        var userID = env["KT_USER_ID"]
+        var nodeIDRaw = env["KT_NODE"] ?? UUID().uuidString
         var channel = env["KT_CHANNEL"] ?? "keep-talking.chat"
+        var databasePathRaw = env["KT_DB_PATH"]
         var singleMessage: String?
 
         let args = Array(CommandLine.arguments.dropFirst())
@@ -70,18 +74,18 @@ struct CliConfig {
                 index += 1
                 guard index < args.count else { throw CliError.missingValue(arg) }
                 session = args[index]
-            case "--id":
+            case "--node", "--id":
                 index += 1
                 guard index < args.count else { throw CliError.missingValue(arg) }
-                participantID = args[index]
-            case "--user-id":
-                index += 1
-                guard index < args.count else { throw CliError.missingValue(arg) }
-                userID = args[index]
+                nodeIDRaw = args[index]
             case "--channel":
                 index += 1
                 guard index < args.count else { throw CliError.missingValue(arg) }
                 channel = args[index]
+            case "--db-path":
+                index += 1
+                guard index < args.count else { throw CliError.missingValue(arg) }
+                databasePathRaw = args[index]
             case "--message":
                 index += 1
                 guard index < args.count else { throw CliError.missingValue(arg) }
@@ -95,16 +99,34 @@ struct CliConfig {
         guard let signalURL = URL(string: signalURLRaw) else {
             throw CliError.invalidSignalURL(signalURLRaw)
         }
+        guard let nodeID = UUID(uuidString: nodeIDRaw) else {
+            throw CliError.invalidNodeID(nodeIDRaw)
+        }
+        let databaseURL = try resolveDatabaseURL(databasePathRaw)
 
         return CliConfig(
             sdkConfig: KeepTalkingConfig(
                 signalURL: signalURL,
                 session: session,
-                participantID: participantID,
                 channel: channel,
-                userID: userID
+                node: nodeID
             ),
+            databaseURL: databaseURL,
             singleMessage: singleMessage
         )
+    }
+
+    private static func resolveDatabaseURL(_ raw: String?) throws -> URL? {
+        guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        if raw.hasPrefix("file://") {
+            guard let url = URL(string: raw), url.isFileURL else {
+                throw CliError.invalidDBPath(raw)
+            }
+            return url
+        }
+        let expanded = NSString(string: raw).expandingTildeInPath
+        return URL(fileURLWithPath: expanded)
     }
 }

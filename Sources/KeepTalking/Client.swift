@@ -1,0 +1,251 @@
+import Foundation
+
+public enum KeepTalkingClientError: LocalizedError {
+    case kvServiceNotConfigured
+    case missingNode
+
+    public var errorDescription: String? {
+        switch self {
+        case .kvServiceNotConfigured:
+            return "KV service is not configured."
+        case .missingNode:
+            return
+                "KeepTalkingConfig.node is required for KV node registration."
+        }
+    }
+}
+
+public final class KeepTalkingClient: @unchecked Sendable {
+    public typealias MessageHandler =
+        @Sendable (KeepTalkingContextMessage) -> Void
+    public typealias EnvelopeHandler =
+        @Sendable (KeepTalkingP2PEnvelope) -> Void
+    public typealias RawMessageHandler = @Sendable (String) -> Void
+    public typealias LogHandler = @Sendable (String) -> Void
+
+    public var onMessage: MessageHandler?
+    public var onEnvelope: EnvelopeHandler?
+    public var onRawMessage: RawMessageHandler?
+    public var onLog: LogHandler? {
+        didSet { rtcClient.onLog = onLog }
+    }
+
+    private let config: KeepTalkingConfig
+    private let rtcClient: KeepTalkingRTCClient
+    private let kvService: (any KeepTalkingKVService)?
+    private let localStore: any KeepTalkingLocalStore
+
+    public init(
+        config: KeepTalkingConfig,
+        kvService: (any KeepTalkingKVService)? = nil,
+        localStore: any KeepTalkingLocalStore =
+            KeepTalkingClient.makeDefaultLocalStore()
+    ) {
+        self.config = config
+        self.kvService = kvService
+        self.localStore = localStore
+        self.rtcClient = KeepTalkingRTCClient(config: config)
+
+        rtcClient.onLog = { [weak self] line in
+            self?.onLog?(line)
+        }
+        rtcClient.onRawMessage = { [weak self] raw in
+            self?.onRawMessage?(raw)
+        }
+        rtcClient.onMessage = { [weak self] message in
+            Task {
+                try await self?.handleIncomingMessage(message)
+            }
+        }
+        rtcClient.onEnvelope = { [weak self] envelope in
+            Task {
+                try await self?.handleIncomingEnvelope(envelope)
+            }
+        }
+    }
+
+    public static func makeDefaultLocalStore() -> any KeepTalkingLocalStore {
+        do {
+            return try KeepTalkingModelStore()
+        } catch {
+            return KeepTalkingInMemoryStore()
+        }
+    }
+
+    public func connect() async throws {
+        try await rtcClient.start()
+        try await persistMyNode()
+        if kvService != nil {
+            try await registerCurrentNodeID()
+        }
+    }
+
+    public func disconnect() {
+        rtcClient.stop()
+    }
+
+    public func send(_ text: String, in context: KeepTalkingContext)
+        async throws
+    {
+        let node = try await getCurrentNodeInstance()
+        try await context.save(on: localStore.database)
+
+        let message = KeepTalkingContextMessage(
+            context: context,
+            sender: .node(node: try node.requireID()),
+            content: text
+        )
+        context.updatedAt = message.timestamp
+        _ = try await context.$messages.get(on: localStore.database)
+
+        try await message.save(on: localStore.database)
+        try await context.save(on: localStore.database)
+
+        try rtcClient.sendEnvelope(.message(message))
+    }
+
+    public func announceCurrentNode() async throws {
+        let node = try await getCurrentNodeInstance()
+        try blocking {
+            try await node.save(on: self.localStore.database)
+        }
+        try rtcClient.sendEnvelope(.node(node))
+    }
+
+    public func sendConversationContext(
+        _ context: KeepTalkingConversationContext
+    ) async throws {
+        try await saveContext(context)
+        try rtcClient.sendEnvelope(.context(context))
+    }
+
+    public func registerCurrentNodeID() async throws {
+        guard let kvService else {
+            throw KeepTalkingClientError.kvServiceNotConfigured
+        }
+        try await kvService.storeNodeID(config.node)
+    }
+
+    public func fetchNodeIDs(for userID: String? = nil) async throws -> [UUID] {
+        guard let kvService else {
+            throw KeepTalkingClientError.kvServiceNotConfigured
+        }
+        return try await kvService.loadNodeIDs()
+    }
+
+    public func runtimeStats() -> KeepTalkingRuntimeStats {
+        rtcClient.runtimeStats()
+    }
+
+    private func getCurrentNodeInstance() async throws -> KeepTalkingNode {
+        if let node = try await KeepTalkingNode.query(on: localStore.database)
+            .filter(\.$id, .equal, config.node)
+            .first()
+        {
+            return node
+        }
+
+        let node = KeepTalkingNode(id: config.node)
+        try await node.save(on: localStore.database)
+        return node
+    }
+
+    private func persistMyNode(_ explicitNode: KeepTalkingNode? = nil)
+        async throws
+    {
+        let node: KeepTalkingNode
+        if let explicitNode {
+            node = explicitNode
+        } else {
+            node = try await getCurrentNodeInstance()
+        }
+
+        try await node.save(on: localStore.database)
+    }
+
+    private func mergeContext(_ context: KeepTalkingContext) {
+        Task {
+            try? await self.saveContext(context)
+        }
+    }
+
+    private func handleIncomingMessage(_ message: KeepTalkingContextMessage)
+        async throws
+    {
+        Task {
+            try? await message.save(on: localStore.database)
+        }
+
+        let node = try await getCurrentNodeInstance()
+
+        if case .node(let nodeID) = message.sender {
+            if try await KeepTalkingNode
+                .query(on: localStore.database)
+                .filter(\.$id, .equal, nodeID)
+                .count() == 0
+            {
+
+                let senderNode = KeepTalkingNode(id: nodeID)
+                try await senderNode.save(on: localStore.database)
+                let relationship = KeepTalkingNodeRelation(
+                    from: node,
+                    to: senderNode,
+                    relationship: .pending  // TODO: Update conditionally
+                )
+                try await relationship.save(on: localStore.database)
+            }
+        }
+
+        onMessage?(message)
+    }
+
+    private func handleIncomingEnvelope(_ envelope: KeepTalkingP2PEnvelope)
+        async throws
+    {
+        switch envelope {
+        case .message(let message):
+            try await handleIncomingMessage(message)
+        case .node(let node):
+            try await node.save(on: localStore.database)
+        case .context(let context):
+            mergeContext(context)
+            if let latestMessage = context.messages.max(by: {
+                $0.timestamp < $1.timestamp
+            }) {
+                onMessage?(latestMessage)
+            }
+        }
+
+        onEnvelope?(envelope)
+    }
+
+    private func saveContext(_ context: KeepTalkingContext) async throws {
+        try await context.save(on: localStore.database)
+        for message in context.messages {
+            message.context = context
+            try await message.save(on: localStore.database)
+        }
+    }
+
+    private func blocking<T: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> T
+    ) throws -> T {
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Result<T, Error>?
+
+        Task {
+            do {
+                result = .success(try await operation())
+            } catch {
+                result = .failure(error)
+            }
+            semaphore.signal()
+        }
+
+        semaphore.wait()
+        guard let result else {
+            fatalError("Blocking operation did not produce a result.")
+        }
+        return try result.get()
+    }
+}

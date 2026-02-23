@@ -37,11 +37,11 @@ let config = KeepTalkingConfig(
 )
 
 let kv = KeepTalkingHTTPKVService(baseURL: URL(string: "https://your-kv.example.com")!)
-let store = KeepTalkingFileStore()
+let store = try KeepTalkingModelStore()
 
 let client = KeepTalkingClient(config: config, kvService: kv, localStore: store)
 client.onMessage = { message in
-    print("[\(message.from)] \(message.text)")
+    print("[\(message.senderNodeID)] \(message.text)")
 }
 
 try await client.connect()
@@ -65,6 +65,12 @@ Interactive mode:
 swift run KeepTalking --signal-url ws://127.0.0.1:17000/ws --session room1 --id alice --channel keep-talking.chat
 ```
 
+Custom DB location:
+
+```bash
+swift run KeepTalking --session room1 --id alice --db-path ~/Library/Application\ Support/KeepTalking/custom.sqlite
+```
+
 One-shot message:
 
 ```bash
@@ -79,18 +85,17 @@ export KT_SESSION="room1"
 export KT_ID="alice"
 export KT_USER_ID="alice-user"
 export KT_CHANNEL="keep-talking.chat"
+export KT_DB_PATH="$HOME/Library/Application Support/KeepTalking/custom.sqlite"
 swift run KeepTalking
 ```
 
 Interactive commands:
-- `/peer <id>` set a default target peer for outgoing messages
-- `/peer all` clear target and broadcast to all peers
-- `/peer` show current target
 - `/stats` show local send/receive counters and outbound channel state
 - `/quit` disconnect
 
 Notes:
-- Targeting is an app-level filter on top of shared data channels. Messages still traverse the session, but non-target peers ignore envelopes with a different `to` value.
-- SDK now supports P2P envelopes for `node`, `friendNode`, `conversation`, `stateBundle`, and `stateRequest`.
-- Local persistence stores `myNodes`, `conversations`, and `friendNodes` in `~/Library/Application Support/KeepTalking/state.json` by default.
+- Messages are broadcast as context updates; no peer-level `from/to` targeting is used.
+- SDK now supports P2P envelopes for `node`, `context`, `stateBundle`, and `stateRequest`.
+- Local persistence stores `nodes` and `contexts` in Fluent SQLite (`~/Library/Application Support/KeepTalking/state.sqlite`) by default.
+- `KeepTalkingClient` defaults to `KeepTalkingModelStore`; if initialization fails, it falls back to `KeepTalkingInMemoryStore`.
 - `KeepTalkingKVService` is protocol-based; implement your own KV backend, or use `KeepTalkingHTTPKVService`.
