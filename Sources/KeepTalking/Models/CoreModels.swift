@@ -6,17 +6,26 @@ public struct KeepTalkingConfig: Sendable {
     public let session: String
     public let channel: String
     public let node: UUID
+    public let p2pPreferredRemoteID: String?
+    public let p2pAttemptTimeoutSeconds: TimeInterval
+    public let p2pStunServers: [String]
 
     public init(
         signalURL: URL,
         session: String,
         channel: String = "keep-talking.chat",
-        node: UUID = UUID()
+        node: UUID = UUID(),
+        p2pPreferredRemoteID: String? = nil,
+        p2pAttemptTimeoutSeconds: TimeInterval = 5,
+        p2pStunServers: [String] = ["stun:stun.l.google.com:19302"]
     ) {
         self.signalURL = signalURL
         self.session = session
         self.channel = channel
         self.node = node
+        self.p2pPreferredRemoteID = p2pPreferredRemoteID
+        self.p2pAttemptTimeoutSeconds = p2pAttemptTimeoutSeconds
+        self.p2pStunServers = p2pStunServers
     }
 }
 
@@ -28,6 +37,7 @@ public struct KeepTalkingRuntimeStats: Sendable {
     public let inboundLabel: String?
     public let inboundState: Int?
     public let retainedChannels: Int
+    public let route: String?
 
     init(
         sent: Int,
@@ -36,7 +46,8 @@ public struct KeepTalkingRuntimeStats: Sendable {
         outboundState: Int?,
         inboundLabel: String?,
         inboundState: Int?,
-        retainedChannels: Int
+        retainedChannels: Int,
+        route: String?
     ) {
         self.sent = sent
         self.received = received
@@ -45,6 +56,7 @@ public struct KeepTalkingRuntimeStats: Sendable {
         self.inboundLabel = inboundLabel
         self.inboundState = inboundState
         self.retainedChannels = retainedChannels
+        self.route = route
     }
 }
 
@@ -57,10 +69,57 @@ public protocol KeepTalkingLocalStore: Sendable {
     var database: any Database { get }
 }
 
+public struct KeepTalkingP2PSignalData: Codable, Sendable {
+    public let kind: String
+    public let type: String?
+    public let sdp: String?
+    public let candidate: String?
+    public let sdpMid: String?
+    public let sdpMLineIndex: Int32?
+
+    public init(
+        kind: String,
+        type: String?,
+        sdp: String?,
+        candidate: String?,
+        sdpMid: String?,
+        sdpMLineIndex: Int32?
+    ) {
+        self.kind = kind
+        self.type = type
+        self.sdp = sdp
+        self.candidate = candidate
+        self.sdpMid = sdpMid
+        self.sdpMLineIndex = sdpMLineIndex
+    }
+}
+
+public struct KeepTalkingP2PSignalPayload: Codable, Sendable {
+    public let from: UUID
+    public let to: UUID
+    public let data: KeepTalkingP2PSignalData
+
+    public init(from: UUID, to: UUID, data: KeepTalkingP2PSignalData) {
+        self.from = from
+        self.to = to
+        self.data = data
+    }
+}
+
+public struct KeepTalkingP2PPresencePayload: Codable, Sendable {
+    public let node: UUID
+
+    public init(node: UUID) {
+        self.node = node
+    }
+}
+
 public enum KeepTalkingP2PEnvelope: Codable, Sendable {
     case message(KeepTalkingContextMessage)
     case context(KeepTalkingContext)
     case node(KeepTalkingNode)
+    case p2pSignal(KeepTalkingP2PSignalPayload)
+    case p2pPresence(KeepTalkingP2PPresencePayload)
 }
 
 enum KeepTalkingInternalError: LocalizedError {

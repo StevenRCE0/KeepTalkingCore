@@ -1,4 +1,5 @@
 import Foundation
+import FluentKit
 
 public enum KeepTalkingClientError: LocalizedError {
     case kvServiceNotConfigured
@@ -31,7 +32,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     }
 
     private let config: KeepTalkingConfig
-    private let rtcClient: KeepTalkingRTCClient
+    private let rtcClient: any KeepTalkingTransportClient
     private let kvService: (any KeepTalkingKVService)?
     private let localStore: any KeepTalkingLocalStore
 
@@ -44,7 +45,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.config = config
         self.kvService = kvService
         self.localStore = localStore
-        self.rtcClient = KeepTalkingRTCClient(config: config)
+        self.rtcClient = KeepTalkingHybridRTCClient(
+            config: config,
+            localStore: localStore
+        )
 
         rtcClient.onLog = { [weak self] line in
             self?.onLog?(line)
@@ -178,16 +182,27 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
         let node = try await getCurrentNodeInstance()
 
-        if case .node(let nodeID) = message.sender {
-            if try await KeepTalkingNode
+        if case .node(let nodeID) = message.sender, nodeID != config.node {
+            let senderNode: KeepTalkingNode
+            if let existingSenderNode = try await KeepTalkingNode
                 .query(on: localStore.database)
                 .filter(\.$id, .equal, nodeID)
-                .count() == 0
+                .first()
             {
-
-                let senderNode = KeepTalkingNode(id: nodeID)
+                senderNode = existingSenderNode
+            } else {
+                senderNode = KeepTalkingNode(id: nodeID)
                 try await senderNode.save(on: localStore.database)
-                let relationship = KeepTalkingNodeRelation(
+            }
+
+            let relationExists = try await KeepTalkingNodeRelation
+                .query(on: localStore.database)
+                .filter(\.$from.$id, .equal, try node.requireID())
+                .filter(\.$to.$id, .equal, nodeID)
+                .count() > 0
+
+            if !relationExists {
+                let relationship = try KeepTalkingNodeRelation(
                     from: node,
                     to: senderNode,
                     relationship: .pending  // TODO: Update conditionally
@@ -214,6 +229,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
             }) {
                 onMessage?(latestMessage)
             }
+        case .p2pSignal, .p2pPresence:
+            break  // Never reached since it gets intercepted
         }
 
         onEnvelope?(envelope)

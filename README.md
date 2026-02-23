@@ -21,6 +21,31 @@ cd /Users/steven/Developer/Example/KeepTalking
 swift build
 ```
 
+## Package For Distribution (macOS)
+
+Create a runnable distribution folder containing `KeepTalking` and `LiveKitWebRTC.framework`:
+
+```bash
+cd /Users/steven/Developer/Example/KeepTalking
+./scripts/package-macos.sh
+```
+
+Output defaults to:
+
+`/Users/steven/Developer/Example/KeepTalking/dist/KeepTalking-macos`
+
+Optional signing identity:
+
+```bash
+KT_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/package-macos.sh
+```
+
+If artifacts are already built and you want to package without rebuilding:
+
+```bash
+KT_SKIP_BUILD=1 ./scripts/package-macos.sh
+```
+
 ## SDK Usage
 
 Add the package and import `KeepTalkingSDK`, then:
@@ -62,19 +87,19 @@ let snapshot = try client.loadLocalSnapshot()
 Interactive mode:
 
 ```bash
-swift run KeepTalking --signal-url ws://127.0.0.1:17000/ws --session room1 --id alice --channel keep-talking.chat
+swift run KeepTalking --signal-url ws://127.0.0.1:17000/ws --session room1 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --channel keep-talking.chat
 ```
 
 Custom DB location:
 
 ```bash
-swift run KeepTalking --session room1 --id alice --db-path ~/Library/Application\ Support/KeepTalking/custom.sqlite
+swift run KeepTalking --session room1 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --db-path ~/Library/Application\ Support/KeepTalking/custom.sqlite
 ```
 
 One-shot message:
 
 ```bash
-swift run KeepTalking --session room1 --id alice --message "hello from swift"
+swift run KeepTalking --session room1 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --message "hello from swift"
 ```
 
 Environment variables are supported:
@@ -82,11 +107,17 @@ Environment variables are supported:
 ```bash
 export KT_SIGNAL_URL="ws://127.0.0.1:17000/ws"
 export KT_SESSION="room1"
-export KT_ID="alice"
-export KT_USER_ID="alice-user"
+export KT_NODE="2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9"
 export KT_CHANNEL="keep-talking.chat"
 export KT_DB_PATH="$HOME/Library/Application Support/KeepTalking/custom.sqlite"
 swift run KeepTalking
+```
+
+For P2P upgrade tests, run peers with distinct node IDs:
+
+```bash
+swift run KeepTalking --session room1 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
+swift run KeepTalking --session room1 --node E3BD62F8-4C27-4E66-B9D2-1F7D27F57102
 ```
 
 Interactive commands:

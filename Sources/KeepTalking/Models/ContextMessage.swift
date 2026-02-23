@@ -4,7 +4,6 @@ import Foundation
 
 
 public final class KeepTalkingContextMessage: Model, @unchecked Sendable {
-    
     public static let schema = "kt_context_messages"
 
     @ID(key: .id)

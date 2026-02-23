@@ -24,15 +24,15 @@ enum RTCError: LocalizedError {
     }
 }
 
-private struct LegacyKeepTalkingMessage: Codable {
-    let from: String
-    let text: String
-}
-
-final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
+final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
+    @unchecked Sendable
+{
     private enum Target {
         static let publisher = 0
         static let subscriber = 1
+    }
+    private enum ChannelLabel {
+        static let signaling = "keep-talking.signaling"
     }
 
     var onMessage: (@Sendable (KeepTalkingContextMessage) -> Void)?
@@ -51,6 +51,8 @@ final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
     private var peerPool: [Int: LKRTCPeerConnection] = [:]
     private var outboundChannel: LKRTCDataChannel?
     private var inboundChatChannel: LKRTCDataChannel?
+    private var outboundSignalingChannel: LKRTCDataChannel?
+    private var inboundSignalingChannel: LKRTCDataChannel?
     private var retainedChannels: [ObjectIdentifier: LKRTCDataChannel] = [:]
     private var pendingCandidates: [Int: [LKRTCIceCandidate]] = [:]
     private var sentMessageCount = 0
@@ -73,17 +75,10 @@ final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
         )
         try await signal.connect()
 
-        let rtcConfig = LKRTCConfiguration()
-        rtcConfig.sdpSemantics = .unifiedPlan
-        rtcConfig.iceServers = []
-        rtcConfig.continualGatheringPolicy = .gatherContinually
-
-        let constraints = LKRTCMediaConstraints(
-            mandatoryConstraints: nil,
-            optionalConstraints: [
-                "DtlsSrtpKeyAgreement": kLKRTCMediaConstraintsValueTrue
-            ]
+        let rtcConfig = RTCShared.makeRTCConfiguration(
+            iceServerURLs: config.p2pStunServers
         )
+        let constraints = RTCShared.makePeerConnectionConstraints()
 
         guard
             let publisher = peerFactory.peerConnection(
@@ -121,6 +116,21 @@ final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
             retainChannel(apiChannel)
         }
 
+        let signalingChannelConfig = LKRTCDataChannelConfiguration()
+        signalingChannelConfig.isOrdered = true
+        guard
+            let signalingChannel = publisher.dataChannel(
+                forLabel: ChannelLabel.signaling,
+                configuration: signalingChannelConfig
+            )
+        else {
+            throw RTCError.dataChannelCreateFailed(ChannelLabel.signaling)
+        }
+        signalingChannel.delegate = self
+        outboundSignalingChannel = signalingChannel
+        retainChannel(signalingChannel)
+        debug("created signaling channel label=\(signalingChannel.label)")
+
         let chatChannelConfig = LKRTCDataChannelConfiguration()
         chatChannelConfig.isOrdered = true
         guard
@@ -137,11 +147,18 @@ final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
         retainChannel(chatChannel)
         debug("created outbound data channel label=\(chatChannel.label)")
 
-        let localOffer = try await createOffer(on: publisher)
+        let localOffer = try await RTCShared.createOffer(
+            on: publisher,
+            missingSdpError: RTCError.missingSdp
+        )
         debug(
             "local offer type=\(localOffer.type) sdpBytes=\(localOffer.sdp.utf8.count)"
         )
-        try await setLocalDescription(localOffer, on: publisher)
+        try await RTCShared.setLocalDescription(
+            localOffer,
+            on: publisher,
+            invalidSdpTypeError: RTCError.invalidSdpType
+        )
 
         let answerPayload = try await signal.join(
             session: config.session,
@@ -151,7 +168,11 @@ final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
         debug(
             "join answer type=\(answerPayload.type) sdpBytes=\(answerPayload.sdp.utf8.count)"
         )
-        try await setRemoteDescription(answerPayload, on: publisher)
+        try await RTCShared.setRemoteDescription(
+            answerPayload,
+            on: publisher,
+            invalidSdpTypeError: RTCError.invalidSdpType
+        )
         flushPendingCandidates(for: Target.publisher)
 
         guard await waitForOutboundChannelOpen(timeoutSeconds: 8) else {
@@ -163,20 +184,40 @@ final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
         debug("stopping sent=\(sentMessageCount) recv=\(recvMessageCount)")
         outboundChannel?.close()
         inboundChatChannel?.close()
+        outboundSignalingChannel?.close()
+        inboundSignalingChannel?.close()
         for peer in peerPool.values {
             peer.close()
         }
         peerPool.removeAll()
         outboundChannel = nil
         inboundChatChannel = nil
+        outboundSignalingChannel = nil
+        inboundSignalingChannel = nil
         retainedChannels.removeAll()
         pendingCandidates.removeAll()
         signal.close()
     }
 
     func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws {
-        guard let sendChannel = preferredSendChannel() else {
-            throw RTCError.dataChannelCreateFailed(config.channel)
+        let useSignalingChannel: Bool
+        switch envelope {
+        case .p2pSignal, .p2pPresence:
+            useSignalingChannel = true
+        default:
+            useSignalingChannel = false
+        }
+
+        let sendChannel: LKRTCDataChannel?
+        if useSignalingChannel {
+            sendChannel = preferredSignalingChannel()
+        } else {
+            sendChannel = preferredSendChannel()
+        }
+        guard let sendChannel else {
+            throw RTCError.dataChannelCreateFailed(
+                useSignalingChannel ? ChannelLabel.signaling : config.channel
+            )
         }
 
         guard sendChannel.readyState == .open else {
@@ -202,7 +243,8 @@ final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
             outboundState: outboundChannel?.readyState.rawValue,
             inboundLabel: inboundChatChannel?.label,
             inboundState: inboundChatChannel?.readyState.rawValue,
-            retainedChannels: retainedChannels.count
+            retainedChannels: retainedChannels.count,
+            route: "sfu"
         )
     }
 
@@ -213,98 +255,16 @@ final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
         return outboundChannel
     }
 
+    private func preferredSignalingChannel() -> LKRTCDataChannel? {
+        if let inboundSignalingChannel, inboundSignalingChannel.readyState == .open
+        {
+            return inboundSignalingChannel
+        }
+        return outboundSignalingChannel
+    }
+
     private func retainChannel(_ channel: LKRTCDataChannel) {
         retainedChannels[ObjectIdentifier(channel)] = channel
-    }
-
-    private func createOffer(on peer: LKRTCPeerConnection) async throws
-        -> SessionDescriptionPayload
-    {
-        let constraints = LKRTCMediaConstraints(
-            mandatoryConstraints: [
-                kLKRTCMediaConstraintsOfferToReceiveAudio:
-                    kLKRTCMediaConstraintsValueFalse,
-                kLKRTCMediaConstraintsOfferToReceiveVideo:
-                    kLKRTCMediaConstraintsValueFalse,
-            ],
-            optionalConstraints: nil
-        )
-
-        return try await withCheckedThrowingContinuation { continuation in
-            peer.offer(for: constraints) { offer, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let offer {
-                    continuation.resume(returning: Self.toPayload(offer))
-                } else {
-                    continuation.resume(throwing: RTCError.missingSdp)
-                }
-            }
-        }
-    }
-
-    private func createAnswer(on peer: LKRTCPeerConnection) async throws
-        -> SessionDescriptionPayload
-    {
-        let constraints = LKRTCMediaConstraints(
-            mandatoryConstraints: [
-                kLKRTCMediaConstraintsOfferToReceiveAudio:
-                    kLKRTCMediaConstraintsValueFalse,
-                kLKRTCMediaConstraintsOfferToReceiveVideo:
-                    kLKRTCMediaConstraintsValueFalse,
-            ],
-            optionalConstraints: nil
-        )
-
-        return try await withCheckedThrowingContinuation { continuation in
-            peer.answer(for: constraints) { answer, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let answer {
-                    continuation.resume(returning: Self.toPayload(answer))
-                } else {
-                    continuation.resume(throwing: RTCError.missingSdp)
-                }
-            }
-        }
-    }
-
-    private func setLocalDescription(
-        _ payload: SessionDescriptionPayload,
-        on peer: LKRTCPeerConnection
-    ) async throws {
-        let type = try Self.sdpType(from: payload.type)
-        let description = LKRTCSessionDescription(type: type, sdp: payload.sdp)
-
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, Error>) in
-            peer.setLocalDescription(description) { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: ())
-                }
-            }
-        }
-    }
-
-    private func setRemoteDescription(
-        _ payload: SessionDescriptionPayload,
-        on peer: LKRTCPeerConnection
-    ) async throws {
-        let type = try Self.sdpType(from: payload.type)
-        let description = LKRTCSessionDescription(type: type, sdp: payload.sdp)
-
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, Error>) in
-            peer.setRemoteDescription(description) { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: ())
-                }
-            }
-        }
     }
 
     private func acceptRemoteOffer(_ payload: SessionDescriptionPayload) {
@@ -319,14 +279,25 @@ final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
         Task { [weak self, subscriber] in
             guard let self else { return }
             do {
-                try await setRemoteDescription(payload, on: subscriber)
+                try await RTCShared.setRemoteDescription(
+                    payload,
+                    on: subscriber,
+                    invalidSdpTypeError: RTCError.invalidSdpType
+                )
                 flushPendingCandidates(for: Target.subscriber)
 
-                let answer = try await createAnswer(on: subscriber)
+                let answer = try await RTCShared.createAnswer(
+                    on: subscriber,
+                    missingSdpError: RTCError.missingSdp
+                )
                 debug(
                     "local answer generated type=\(answer.type) sdpBytes=\(answer.sdp.utf8.count)"
                 )
-                try await setLocalDescription(answer, on: subscriber)
+                try await RTCShared.setLocalDescription(
+                    answer,
+                    on: subscriber,
+                    invalidSdpTypeError: RTCError.invalidSdpType
+                )
                 signal.answer(answer)
                 debug("answer sent")
             } catch {
@@ -350,16 +321,20 @@ final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
             sdpMid: trickle.candidate.sdpMid
         )
 
-        if peer.remoteDescription != nil {
-            peer.add(candidate) { _ in }
+        var buffer = pendingCandidates[target, default: []]
+        let applied = RTCShared.applyOrBufferCandidate(
+            candidate,
+            on: peer,
+            buffer: &buffer
+        )
+        pendingCandidates[target] = buffer
+
+        if applied {
             debug(
                 "applied trickle target=\(target) mid=\(candidate.sdpMid ?? "nil") mline=\(candidate.sdpMLineIndex)"
             )
         } else {
-            pendingCandidates[target, default: []].append(candidate)
-            debug(
-                "buffered trickle target=\(target) pending=\(pendingCandidates[target, default: []].count)"
-            )
+            debug("buffered trickle target=\(target) pending=\(buffer.count)")
         }
     }
 
@@ -369,14 +344,12 @@ final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
             return
         }
 
-        let pending = pendingCandidates[target, default: []]
-        if !pending.isEmpty {
-            debug("flush pending target=\(target) count=\(pending.count)")
+        var buffer = pendingCandidates[target, default: []]
+        let count = RTCShared.flushBufferedCandidates(on: peer, buffer: &buffer)
+        pendingCandidates[target] = buffer
+        if count > 0 {
+            debug("flush pending target=\(target) count=\(count)")
         }
-        for candidate in pending {
-            peer.add(candidate) { _ in }
-        }
-        pendingCandidates[target] = []
     }
 
     private func peer(for target: Int) -> LKRTCPeerConnection? {
@@ -393,50 +366,17 @@ final class KeepTalkingRTCClient: NSObject, @unchecked Sendable {
     private func waitForOutboundChannelOpen(timeoutSeconds: TimeInterval) async
         -> Bool
     {
-        let start = Date()
-        while Date().timeIntervalSince(start) < timeoutSeconds {
-            if let outboundChannel, outboundChannel.readyState == .open {
-                return true
-            }
-            try? await Task.sleep(nanoseconds: 200_000_000)
+        let opened = await RTCShared.waitForOpenDataChannel(
+            timeoutSeconds: timeoutSeconds
+        ) { [weak self] in
+            self?.outboundChannel
         }
-        debug("timeout waiting for outbound channel open")
-        return false
+        if !opened {
+            debug("timeout waiting for outbound channel open")
+        }
+        return opened
     }
 
-    private static func sdpType(from raw: String) throws -> LKRTCSdpType {
-        switch raw.lowercased() {
-        case "offer":
-            return .offer
-        case "answer":
-            return .answer
-        case "pranswer":
-            return .prAnswer
-        case "rollback":
-            return .rollback
-        default:
-            throw RTCError.invalidSdpType(raw)
-        }
-    }
-
-    private static func toPayload(_ description: LKRTCSessionDescription)
-        -> SessionDescriptionPayload
-    {
-        let type: String
-        switch description.type {
-        case .offer:
-            type = "offer"
-        case .answer:
-            type = "answer"
-        case .prAnswer:
-            type = "pranswer"
-        case .rollback:
-            type = "rollback"
-        @unknown default:
-            type = "offer"
-        }
-        return SessionDescriptionPayload(type: type, sdp: description.sdp)
-    }
 }
 
 extension KeepTalkingRTCClient: LKRTCPeerConnectionDelegate {
@@ -531,6 +471,9 @@ extension KeepTalkingRTCClient: LKRTCPeerConnectionDelegate {
         if dataChannel.label == config.channel {
             inboundChatChannel = dataChannel
             debug("bound inbound chat channel label=\(dataChannel.label)")
+        } else if dataChannel.label == ChannelLabel.signaling {
+            inboundSignalingChannel = dataChannel
+            debug("bound inbound signaling channel label=\(dataChannel.label)")
         }
     }
 }
@@ -551,7 +494,10 @@ extension KeepTalkingRTCClient: LKRTCDataChannelDelegate {
             "recv dc label=\(dataChannel.label) bytes=\(buffer.data.count) binary=\(buffer.isBinary)"
         )
 
-        guard dataChannel.label == config.channel else {
+        guard
+            dataChannel.label == config.channel
+                || dataChannel.label == ChannelLabel.signaling
+        else {
             if let text = String(data: buffer.data, encoding: .utf8) {
                 debug(
                     "ignored non-chat label=\(dataChannel.label) text=\(text)"
@@ -570,12 +516,16 @@ extension KeepTalkingRTCClient: LKRTCDataChannelDelegate {
         ) {
             switch envelope {
             case .message(let message):
-                onMessage?(message)
+                if dataChannel.label == config.channel {
+                    onMessage?(message)
                     debug("delivered chat sender=\(message.sender)")
+                } else {
+                    debug("ignored message envelope on signaling channel")
+                }
 
             default:
                 onEnvelope?(envelope)
-                debug("delivered envelope \(envelope)")
+                debug("delivered envelope label=\(dataChannel.label) \(envelope)")
             }
             return
         }

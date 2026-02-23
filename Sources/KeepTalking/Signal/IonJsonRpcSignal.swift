@@ -26,6 +26,7 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
     private var openWaiter: CheckedContinuation<Void, Error>?
     private var pending = [String: (Result<Data, Error>) -> Void]()
     private var isOpen = false
+    private var isClosing = false
 
     var onOffer: ((SessionDescriptionPayload) -> Void)?
     var onTrickle: ((TricklePayload) -> Void)?
@@ -63,6 +64,10 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
             return
         }
 
+        stateQueue.sync {
+            isClosing = false
+        }
+
         debug("opening websocket \(url.absoluteString)")
         socketTask = session.webSocketTask(with: url)
         socketTask?.resume()
@@ -76,6 +81,9 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
     }
 
     func close() {
+        stateQueue.sync {
+            isClosing = true
+        }
         debug("closing websocket")
         socketTask?.cancel(with: .normalClosure, reason: nil)
         failAllPending(with: SignalError.closed)
@@ -159,7 +167,12 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
 
             switch result {
             case let .failure(error):
-                self.debug("receive failed error=\(error.localizedDescription)")
+                let isIntentionalClose = self.stateQueue.sync { self.isClosing }
+                if isIntentionalClose {
+                    return
+                } else {
+                    self.debug("receive failed error=\(error.localizedDescription)")
+                }
                 self.failAllPending(with: error)
             case let .success(message):
                 switch message {
@@ -265,7 +278,7 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
     }
 
     private func failAllPending(with error: Error) {
-        let all: [(Result<Data, Error>) -> Void] = stateQueue.sync {
+        let allAndState: (callbacks: [(Result<Data, Error>) -> Void], shouldLog: Bool) = stateQueue.sync {
             let callbacks = Array(pending.values)
             pending.removeAll()
 
@@ -274,11 +287,13 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
             isOpen = false
             waiter?.resume(throwing: error)
 
-            return callbacks
+            return (callbacks, !isClosing)
         }
 
-        debug("fail all pending count=\(all.count) error=\(error.localizedDescription)")
-        for callback in all {
+        if allAndState.shouldLog {
+            debug("fail all pending count=\(allAndState.callbacks.count) error=\(error.localizedDescription)")
+        }
+        for callback in allAndState.callbacks {
             callback(.failure(error))
         }
     }
@@ -293,6 +308,7 @@ extension IonJsonRpcSignal: URLSessionWebSocketDelegate {
         debug("websocket opened")
         stateQueue.sync {
             isOpen = true
+            isClosing = false
             openWaiter?.resume()
             openWaiter = nil
         }
@@ -304,10 +320,13 @@ extension IonJsonRpcSignal: URLSessionWebSocketDelegate {
         didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
         reason closeReason: Data?
     ) {
-        if let closeReason {
-            debug("websocket closed code=\(closeCode.rawValue) reason=\(preview(closeReason))")
-        } else {
-            debug("websocket closed code=\(closeCode.rawValue)")
+        let shouldLog = stateQueue.sync { !isClosing }
+        if shouldLog {
+            if let closeReason {
+                debug("websocket closed code=\(closeCode.rawValue) reason=\(preview(closeReason))")
+            } else {
+                debug("websocket closed code=\(closeCode.rawValue)")
+            }
         }
         failAllPending(with: SignalError.closed)
     }

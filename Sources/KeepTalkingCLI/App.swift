@@ -66,6 +66,12 @@ struct KeepTalkingApp {
 
             print("Connecting to \(config.signalURL.absoluteString)")
             print("Session=\(config.session) Node=\(config.node.uuidString.lowercased()) Channel=\(config.channel)")
+            print(
+                "P2P upgrade timeout=\(Int(config.p2pAttemptTimeoutSeconds))s stun=\(config.p2pStunServers.joined(separator: ","))"
+            )
+            if let peer = config.p2pPreferredRemoteID {
+                print("P2P preferred peer=\(peer)")
+            }
             if let databaseURL = cliConfig.databaseURL {
                 print("DB=\(databaseURL.path)")
             }
@@ -91,7 +97,7 @@ struct KeepTalkingApp {
                 case .stats:
                     let stats = client.runtimeStats()
                     print(
-                        "Stats: sent=\(stats.sent) recv=\(stats.received) outbound=\(stats.outboundLabel ?? "nil") state=\(stats.outboundState.map(String.init) ?? "nil") inbound=\(stats.inboundLabel ?? "nil") inboundState=\(stats.inboundState.map(String.init) ?? "nil") retained=\(stats.retainedChannels)"
+                        "Stats: route=\(stats.route ?? "unknown") sent=\(stats.sent) recv=\(stats.received) outbound=\(stats.outboundLabel ?? "nil") state=\(stats.outboundState.map(String.init) ?? "nil") inbound=\(stats.inboundLabel ?? "nil") inboundState=\(stats.inboundState.map(String.init) ?? "nil") retained=\(stats.retainedChannels)"
                     )
                 case .send(let text):
                     do {

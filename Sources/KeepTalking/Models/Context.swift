@@ -39,15 +39,13 @@ public final class KeepTalkingContext: Model, @unchecked Sendable {
     )
     public var operators: [KeepTalkingNode]
 
-    @Field(key: "updated_at")
-    public var updatedAt: Date
+    @Timestamp(key: "updated_at", on: .update)
+    public var updatedAt: Date?
 
     @Children(for: \.$context)
     public var messages: [KeepTalkingContextMessage]
 
-    public init() {
-        self.updatedAt = Date()
-    }
+    public init() {}
 
     public init(
         id: UUID = UUID(),

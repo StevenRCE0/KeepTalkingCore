@@ -3,7 +3,7 @@ import KeepTalkingSDK
 
 let keepTalkingUsage = """
 Usage:
-  KeepTalking [--signal-url <ws-url>] [--session <sid>] [--node <uuid>] [--channel <label>] [--db-path <sqlite-file>] [--message <text>]
+  KeepTalking [--signal-url <ws-url>] [--session <sid>] [--node <uuid>] [--channel <label>] [--db-path <sqlite-file>] [--message <text>] [--p2p-peer <peer-id>] [--p2p-timeout <seconds>] [--stun-url <stun-url>]
 
 Environment fallbacks:
   KT_SIGNAL_URL (default: ws://127.0.0.1:17000/ws)
@@ -11,6 +11,9 @@ Environment fallbacks:
   KT_NODE       (default: random UUID)
   KT_CHANNEL    (default: keep-talking.chat)
   KT_DB_PATH    (optional, local sqlite file path)
+  KT_P2P_PEER_ID    (optional, preferred remote peer ID)
+  KT_P2P_TIMEOUT    (default: 5)
+  KT_STUN_URL       (default: stun:stun.l.google.com:19302)
 
 Examples:
   KeepTalking --session room1 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
@@ -27,6 +30,7 @@ enum CliError: LocalizedError {
     case invalidSignalURL(String)
     case invalidDBPath(String)
     case invalidNodeID(String)
+    case invalidP2PTimeout(String)
 
     var errorDescription: String? {
         switch self {
@@ -40,6 +44,8 @@ enum CliError: LocalizedError {
             return "Invalid db path: \(raw)"
         case let .invalidNodeID(raw):
             return "Invalid node UUID: \(raw)"
+        case let .invalidP2PTimeout(raw):
+            return "Invalid p2p timeout: \(raw)"
         }
     }
 }
@@ -56,6 +62,9 @@ struct CliConfig {
         var nodeIDRaw = env["KT_NODE"] ?? UUID().uuidString
         var channel = env["KT_CHANNEL"] ?? "keep-talking.chat"
         var databasePathRaw = env["KT_DB_PATH"]
+        var p2pPeerID = env["KT_P2P_PEER_ID"]
+        var p2pTimeoutRaw = env["KT_P2P_TIMEOUT"] ?? "5"
+        var stunURLs = [env["KT_STUN_URL"] ?? "stun:stun.l.google.com:19302"]
         var singleMessage: String?
 
         let args = Array(CommandLine.arguments.dropFirst())
@@ -86,6 +95,18 @@ struct CliConfig {
                 index += 1
                 guard index < args.count else { throw CliError.missingValue(arg) }
                 databasePathRaw = args[index]
+            case "--p2p-peer":
+                index += 1
+                guard index < args.count else { throw CliError.missingValue(arg) }
+                p2pPeerID = args[index]
+            case "--p2p-timeout":
+                index += 1
+                guard index < args.count else { throw CliError.missingValue(arg) }
+                p2pTimeoutRaw = args[index]
+            case "--stun-url":
+                index += 1
+                guard index < args.count else { throw CliError.missingValue(arg) }
+                stunURLs.append(args[index])
             case "--message":
                 index += 1
                 guard index < args.count else { throw CliError.missingValue(arg) }
@@ -99,17 +120,24 @@ struct CliConfig {
         guard let signalURL = URL(string: signalURLRaw) else {
             throw CliError.invalidSignalURL(signalURLRaw)
         }
+        guard let p2pTimeout = TimeInterval(p2pTimeoutRaw), p2pTimeout > 0 else {
+            throw CliError.invalidP2PTimeout(p2pTimeoutRaw)
+        }
         guard let nodeID = UUID(uuidString: nodeIDRaw) else {
             throw CliError.invalidNodeID(nodeIDRaw)
         }
         let databaseURL = try resolveDatabaseURL(databasePathRaw)
+        stunURLs = Array(Set(stunURLs.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })).sorted()
 
         return CliConfig(
             sdkConfig: KeepTalkingConfig(
                 signalURL: signalURL,
                 session: session,
                 channel: channel,
-                node: nodeID
+                node: nodeID,
+                p2pPreferredRemoteID: p2pPeerID,
+                p2pAttemptTimeoutSeconds: p2pTimeout,
+                p2pStunServers: stunURLs
             ),
             databaseURL: databaseURL,
             singleMessage: singleMessage
