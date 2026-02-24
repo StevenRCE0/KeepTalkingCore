@@ -1,5 +1,5 @@
 {
-  "originHash" : "94f30a44adf59c5b7cac1c910ce507452708cfe0a91b03f17a97d3a96a374525",
+  "originHash" : "656b2a25c91d8e1250b1524919b956d8cd96590174817855e8eb00bb750404cf",
   "pins" : [
     {
       "identity" : "async-kit",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "6f3615ccf2ac3c2ae0c8087d527546e9544a43dd",
         "version" : "1.21.0"
+      }
+    },
+    {
+      "identity" : "eventsource",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mattt/eventsource.git",
+      "state" : {
+        "revision" : "bd64824505da71a1a403adb221f6e25413c0bc7f",
+        "version" : "1.4.0"
       }
     },
     {
@@ -125,6 +134,15 @@
       "state" : {
         "revision" : "0c0290ff6b24942dadb83a929ffaaa1481df04a2",
         "version" : "1.1.1"
+      }
+    },
+    {
+      "identity" : "swift-sdk",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/modelcontextprotocol/swift-sdk.git",
+      "state" : {
+        "revision" : "6112a3995a992d159ad0e82c2d62a008ce932666",
+        "version" : "0.11.0"
       }
     },
     {

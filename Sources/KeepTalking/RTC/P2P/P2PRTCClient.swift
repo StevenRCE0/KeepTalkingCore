@@ -34,6 +34,11 @@ enum P2PError: LocalizedError {
 final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     @unchecked Sendable
 {
+    private enum EnvelopeRoute {
+        case chat
+        case actionCall
+    }
+
     var onMessage: (@Sendable (KeepTalkingContextMessage) -> Void)?
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)?
     var onRawMessage: (@Sendable (String) -> Void)?
@@ -49,7 +54,10 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     private let peerFactory = LKRTCPeerConnectionFactory()
 
     private var peerConnection: LKRTCPeerConnection?
-    private var dataChannel: LKRTCDataChannel?
+    private var outboundChatChannel: LKRTCDataChannel?
+    private var outboundActionCallChannel: LKRTCDataChannel?
+    private var inboundChatChannel: LKRTCDataChannel?
+    private var inboundActionCallChannel: LKRTCDataChannel?
     private var pendingRemoteCandidates: [LKRTCIceCandidate] = []
     private var remotePeerID: UUID?
     private var sentMessageCount = 0
@@ -96,11 +104,13 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         debug("selected remotePeer=\(targetPeerID.uuidString.lowercased()) offerer=\(isOfferer)")
 
         if isOfferer {
-            try createOutboundDataChannel()
+            try createOutboundDataChannels()
             try await sendOffer(to: targetPeerID)
         }
 
-        guard await waitForDataChannelOpen(timeoutSeconds: config.p2pAttemptTimeoutSeconds)
+        guard await waitForRequiredChannelsOpen(
+            timeoutSeconds: config.p2pAttemptTimeoutSeconds
+        )
         else {
             throw P2PError.handshakeTimeout
         }
@@ -109,18 +119,37 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     func stop() {
         isStopping = true
         debug("stopping sent=\(sentMessageCount) recv=\(recvMessageCount)")
-        dataChannel?.close()
+        outboundChatChannel?.close()
+        outboundActionCallChannel?.close()
+        inboundChatChannel?.close()
+        inboundActionCallChannel?.close()
         peerConnection?.close()
         pendingRemoteCandidates.removeAll()
         peerConnection = nil
-        dataChannel = nil
+        outboundChatChannel = nil
+        outboundActionCallChannel = nil
+        inboundChatChannel = nil
+        inboundActionCallChannel = nil
         remotePeerID = nil
     }
 
+    func requestP2PTrial() {
+        debug("ignoring manual p2p trial: already using direct p2p transport")
+    }
+
     func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws {
+        let route = route(for: envelope)
+        let dataChannel: LKRTCDataChannel?
+        switch route {
+        case .chat:
+            dataChannel = preferredChatChannel()
+        case .actionCall:
+            dataChannel = preferredActionCallChannel()
+        }
+
         guard let dataChannel else {
             reportTransportDegraded("send failed: channel missing")
-            throw P2PError.dataChannelCreateFailed(config.channel)
+            throw P2PError.dataChannelCreateFailed(routeLabel(for: route))
         }
 
         guard dataChannel.readyState == .open else {
@@ -143,11 +172,11 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         KeepTalkingRuntimeStats(
             sent: sentMessageCount,
             received: recvMessageCount,
-            outboundLabel: dataChannel?.label,
-            outboundState: dataChannel?.readyState.rawValue,
-            inboundLabel: dataChannel?.label,
-            inboundState: dataChannel?.readyState.rawValue,
-            retainedChannels: dataChannel == nil ? 0 : 1,
+            outboundLabel: outboundChatChannel?.label,
+            outboundState: outboundChatChannel?.readyState.rawValue,
+            inboundLabel: inboundChatChannel?.label,
+            inboundState: inboundChatChannel?.readyState.rawValue,
+            retainedChannels: [outboundChatChannel, outboundActionCallChannel, inboundChatChannel, inboundActionCallChannel].compactMap { $0 }.count,
             route: "p2p"
         )
     }
@@ -181,25 +210,38 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         self.peerConnection = peerConnection
     }
 
-    private func createOutboundDataChannel() throws {
+    private func createOutboundDataChannels() throws {
         guard let peerConnection else {
             throw P2PError.peerConnectionCreateFailed
         }
 
-        let channelConfig = LKRTCDataChannelConfiguration()
-        channelConfig.isOrdered = true
+        let chatChannelConfig = LKRTCDataChannelConfiguration()
+        chatChannelConfig.isOrdered = true
         guard
-            let dataChannel = peerConnection.dataChannel(
-                forLabel: config.channel,
-                configuration: channelConfig
+            let chatChannel = peerConnection.dataChannel(
+                forLabel: config.chatChannelLabel,
+                configuration: chatChannelConfig
             )
         else {
-            throw P2PError.dataChannelCreateFailed(config.channel)
+            throw P2PError.dataChannelCreateFailed(config.chatChannelLabel)
         }
+        chatChannel.delegate = self
+        outboundChatChannel = chatChannel
+        debug("created outbound chat channel label=\(chatChannel.label)")
 
-        dataChannel.delegate = self
-        self.dataChannel = dataChannel
-        debug("created outbound data channel label=\(dataChannel.label)")
+        let actionChannelConfig = LKRTCDataChannelConfiguration()
+        actionChannelConfig.isOrdered = true
+        guard
+            let actionChannel = peerConnection.dataChannel(
+                forLabel: config.actionCallChannelLabel,
+                configuration: actionChannelConfig
+            )
+        else {
+            throw P2PError.dataChannelCreateFailed(config.actionCallChannelLabel)
+        }
+        actionChannel.delegate = self
+        outboundActionCallChannel = actionChannel
+        debug("created outbound action channel label=\(actionChannel.label)")
     }
 
     private func sendOffer(to peerID: UUID) async throws {
@@ -268,19 +310,31 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         throw P2PError.noRemotePeerFound
     }
 
-    private func waitForDataChannelOpen(timeoutSeconds: TimeInterval) async
+    private func waitForRequiredChannelsOpen(timeoutSeconds: TimeInterval) async
         -> Bool
     {
-        let opened = await RTCShared.waitForOpenDataChannel(
+        let chatOpened = await RTCShared.waitForOpenDataChannel(
             timeoutSeconds: timeoutSeconds
         ) { [weak self] in
-            self?.dataChannel
+            self?.preferredChatChannel()
         }
-        if !opened {
-            debug("timeout waiting for data channel open")
-            reportTransportDegraded("handshake timeout waiting for channel open")
+        if !chatOpened {
+            debug("timeout waiting for chat channel open")
+            reportTransportDegraded("handshake timeout waiting for chat channel")
+            return false
         }
-        return opened
+
+        let actionOpened = await RTCShared.waitForOpenDataChannel(
+            timeoutSeconds: timeoutSeconds
+        ) { [weak self] in
+            self?.preferredActionCallChannel()
+        }
+        if !actionOpened {
+            debug("timeout waiting for action channel open")
+            reportTransportDegraded("handshake timeout waiting for action channel")
+            return false
+        }
+        return true
     }
 
     private func reportTransportDegraded(_ reason: String) {
@@ -289,6 +343,40 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         didReportDegrade = true
         debug("transport degraded reason=\(reason)")
         onTransportDegraded?(reason)
+    }
+
+    private func preferredChatChannel() -> LKRTCDataChannel? {
+        if let inboundChatChannel, inboundChatChannel.readyState == .open {
+            return inboundChatChannel
+        }
+        return outboundChatChannel
+    }
+
+    private func preferredActionCallChannel() -> LKRTCDataChannel? {
+        if let inboundActionCallChannel,
+           inboundActionCallChannel.readyState == .open
+        {
+            return inboundActionCallChannel
+        }
+        return outboundActionCallChannel
+    }
+
+    private func route(for envelope: KeepTalkingP2PEnvelope) -> EnvelopeRoute {
+        switch envelope {
+        case .message:
+            return .chat
+        default:
+            return .actionCall
+        }
+    }
+
+    private func routeLabel(for route: EnvelopeRoute) -> String {
+        switch route {
+        case .chat:
+            return config.chatChannelLabel
+        case .actionCall:
+            return config.actionCallChannelLabel
+        }
     }
 
     private func handleSignal(from: UUID, data: KeepTalkingP2PSignalData) {
@@ -418,19 +506,17 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             sdpMLineIndex: candidate.sdpMLineIndex
         )
     }
-}
 
-extension KeepTalkingP2PRTCClient: LKRTCPeerConnectionDelegate {
-    func peerConnection(
+    func handlePeerConnectionSignalingStateChange(
         _ peerConnection: LKRTCPeerConnection,
-        didChange stateChanged: LKRTCSignalingState
+        stateChanged: LKRTCSignalingState
     ) {
         debug("signaling state=\(stateChanged.rawValue)")
     }
 
-    func peerConnection(
+    func handlePeerConnectionIceConnectionStateChange(
         _ peerConnection: LKRTCPeerConnection,
-        didChange newState: LKRTCIceConnectionState
+        newState: LKRTCIceConnectionState
     ) {
         debug("ice connection state=\(newState.rawValue)")
         switch newState {
@@ -443,16 +529,16 @@ extension KeepTalkingP2PRTCClient: LKRTCPeerConnectionDelegate {
         }
     }
 
-    func peerConnection(
+    func handlePeerConnectionIceGatheringStateChange(
         _ peerConnection: LKRTCPeerConnection,
-        didChange newState: LKRTCIceGatheringState
+        newState: LKRTCIceGatheringState
     ) {
         debug("ice gathering state=\(newState.rawValue)")
     }
 
-    func peerConnection(
+    func handlePeerConnectionDidGenerateCandidate(
         _ peerConnection: LKRTCPeerConnection,
-        didGenerate candidate: LKRTCIceCandidate
+        candidate: LKRTCIceCandidate
     ) {
         guard let remotePeerID else {
             return
@@ -460,45 +546,51 @@ extension KeepTalkingP2PRTCClient: LKRTCPeerConnectionDelegate {
         sendSignal(remotePeerID, Self.signalData(candidate: candidate))
     }
 
-    func peerConnection(
+    func handlePeerConnectionDidRemoveCandidates(
         _ peerConnection: LKRTCPeerConnection,
-        didRemove candidates: [LKRTCIceCandidate]
+        candidates: [LKRTCIceCandidate]
     ) {
         debug("removed candidates count=\(candidates.count)")
     }
 
-    func peerConnectionShouldNegotiate(_ peerConnection: LKRTCPeerConnection) {
+    func handlePeerConnectionShouldNegotiate(
+        _ peerConnection: LKRTCPeerConnection
+    ) {
         debug("should negotiate")
     }
 
-    func peerConnection(
+    func handlePeerConnectionDidAddStream(
         _ peerConnection: LKRTCPeerConnection,
-        didAdd stream: LKRTCMediaStream
+        stream: LKRTCMediaStream
     ) {}
 
-    func peerConnection(
+    func handlePeerConnectionDidRemoveStream(
         _ peerConnection: LKRTCPeerConnection,
-        didRemove stream: LKRTCMediaStream
+        stream: LKRTCMediaStream
     ) {}
 
-    func peerConnection(
+    func handlePeerConnectionDidOpenDataChannel(
         _ peerConnection: LKRTCPeerConnection,
-        didOpen dataChannel: LKRTCDataChannel
+        dataChannel: LKRTCDataChannel
     ) {
         dataChannel.delegate = self
-        if dataChannel.label == config.channel {
-            self.dataChannel = dataChannel
-            debug("bound inbound data channel label=\(dataChannel.label)")
+        if dataChannel.label == config.chatChannelLabel {
+            self.inboundChatChannel = dataChannel
+            debug("bound inbound chat channel label=\(dataChannel.label)")
+        } else if dataChannel.label == config.actionCallChannelLabel {
+            self.inboundActionCallChannel = dataChannel
+            debug("bound inbound action channel label=\(dataChannel.label)")
         }
     }
-}
 
-extension KeepTalkingP2PRTCClient: LKRTCDataChannelDelegate {
-    func dataChannelDidChangeState(_ dataChannel: LKRTCDataChannel) {
+    func handleDataChannelDidChangeState(_ dataChannel: LKRTCDataChannel) {
         debug(
             "channel state label=\(dataChannel.label) state=\(dataChannel.readyState.rawValue)"
         )
-        guard dataChannel.label == config.channel else {
+        guard
+            dataChannel.label == config.chatChannelLabel
+                || dataChannel.label == config.actionCallChannelLabel
+        else {
             return
         }
         switch dataChannel.readyState {
@@ -511,12 +603,15 @@ extension KeepTalkingP2PRTCClient: LKRTCDataChannelDelegate {
         }
     }
 
-    func dataChannel(
+    func handleDataChannelDidReceiveMessage(
         _ dataChannel: LKRTCDataChannel,
-        didReceiveMessageWith buffer: LKRTCDataBuffer
+        buffer: LKRTCDataBuffer
     ) {
         recvMessageCount += 1
-        guard dataChannel.label == config.channel else {
+        guard
+            dataChannel.label == config.chatChannelLabel
+                || dataChannel.label == config.actionCallChannelLabel
+        else {
             return
         }
 
@@ -526,7 +621,13 @@ extension KeepTalkingP2PRTCClient: LKRTCDataChannelDelegate {
         ) {
             switch envelope {
             case .message(let message):
-                onMessage?(message)
+                if dataChannel.label == config.chatChannelLabel {
+                    onMessage?(message)
+                } else {
+                    debug(
+                        "ignored message envelope on non-chat channel label=\(dataChannel.label)"
+                    )
+                }
             default:
                 onEnvelope?(envelope)
             }

@@ -27,6 +27,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     private var discoveredPeers = Set<UUID>()
     private var activeTransport: KeepTalkingTransportClient
     private var activeRoute = "sfu"
+    private var isP2PTrialRunning = false
 
     init(config: KeepTalkingConfig, localStore: any KeepTalkingLocalStore) {
         self.config = config
@@ -49,36 +50,15 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         rememberPeer(config.node)
         sendPresence()
         debug("sfu route selected")
-
-        guard config.p2pAttemptTimeoutSeconds > 0 else {
-            debug(
-                "p2p upgrade disabled timeout=\(config.p2pAttemptTimeoutSeconds)"
-            )
-            return
-        }
-
-        let p2pClient = makeP2PClient()
-        self.p2pClient = p2pClient
-        bindCallbacks()
-
-        p2pUpgradeTask = Task { [weak self, p2pClient] in
-            guard let self else { return }
-            do {
-                try await p2pClient.start()
-                setActiveTransport(p2pClient, route: "p2p")
-                debug("p2p route selected; keeping sfu as warm fallback")
-            } catch {
-                p2pClient.stop()
-                debug(
-                    "p2p upgrade failed; staying on sfu error=\(error.localizedDescription)"
-                )
-            }
-        }
+        beginP2PTrial(trigger: "startup")
     }
 
     func stop() {
         p2pUpgradeTask?.cancel()
         p2pUpgradeTask = nil
+        stateQueue.sync {
+            isP2PTrialRunning = false
+        }
         p2pClient?.stop()
         sfuClient.stop()
     }
@@ -115,6 +95,10 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         }
     }
 
+    func requestP2PTrial() {
+        beginP2PTrial(trigger: "manual")
+    }
+
     private func setActiveTransport(
         _ transport: KeepTalkingTransportClient,
         route: String
@@ -134,6 +118,62 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         }
         if switched {
             debug("route switched to sfu reason=\(reason)")
+        }
+    }
+
+    private func beginP2PTrial(trigger: String) {
+        guard config.p2pAttemptTimeoutSeconds > 0 else {
+            debug(
+                "p2p trial skipped trigger=\(trigger) timeout=\(config.p2pAttemptTimeoutSeconds)"
+            )
+            return
+        }
+
+        let state = stateQueue.sync { () -> (route: String, running: Bool) in
+            (activeRoute, isP2PTrialRunning)
+        }
+        guard state.route != "p2p" else {
+            debug("p2p trial skipped trigger=\(trigger) reason=already-on-p2p")
+            return
+        }
+        guard !state.running else {
+            debug("p2p trial skipped trigger=\(trigger) reason=trial-in-progress")
+            return
+        }
+
+        p2pUpgradeTask?.cancel()
+        p2pUpgradeTask = nil
+        p2pClient?.stop()
+
+        let p2pClient = makeP2PClient()
+        self.p2pClient = p2pClient
+        bindCallbacks()
+        stateQueue.sync {
+            isP2PTrialRunning = true
+        }
+        debug(
+            "starting p2p trial trigger=\(trigger) timeout=\(config.p2pAttemptTimeoutSeconds)"
+        )
+
+        p2pUpgradeTask = Task { [weak self, p2pClient] in
+            guard let self else { return }
+            defer {
+                self.stateQueue.sync {
+                    self.isP2PTrialRunning = false
+                }
+                self.p2pUpgradeTask = nil
+            }
+
+            do {
+                try await p2pClient.start()
+                setActiveTransport(p2pClient, route: "p2p")
+                debug("p2p route selected; keeping sfu as warm fallback")
+            } catch {
+                p2pClient.stop()
+                debug(
+                    "p2p trial failed trigger=\(trigger) error=\(error.localizedDescription)"
+                )
+            }
         }
     }
 
@@ -203,11 +243,19 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                 .filter(\.$relationship ~~ [.owner, .trusted, .pending])
                 .count() > 0
 
-            debug("I should\(shouldConnect ? "" : " not") connect")
+            debug("presence node=\(presence.node.uuidString.lowercased()) connect=\(shouldConnect)")
 
             if presence.node == config.node {
                 debug(
                     "received presence for local node id=\(config.node.uuidString.lowercased()); check that each client uses a unique --node UUID"
+                )
+            } else if shouldConnect {
+                beginP2PTrial(
+                    trigger: "presence:\(presence.node.uuidString.lowercased())"
+                )
+            } else {
+                debug(
+                    "presence ignored for p2p trial: relation policy does not allow node=\(presence.node.uuidString.lowercased())"
                 )
             }
             rememberPeer(presence.node)

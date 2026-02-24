@@ -10,4 +10,5 @@ protocol KeepTalkingTransportClient: AnyObject {
     func stop()
     func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws
     func runtimeStats() -> KeepTalkingRuntimeStats
+    func requestP2PTrial()
 }

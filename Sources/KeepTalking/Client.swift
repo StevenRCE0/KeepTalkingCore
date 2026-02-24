@@ -141,6 +141,46 @@ public final class KeepTalkingClient: @unchecked Sendable {
         rtcClient.runtimeStats()
     }
 
+    public func requestP2PTrial() {
+        rtcClient.requestP2PTrial()
+    }
+
+    public func trust(node targetNodeID: UUID) async throws {
+        guard targetNodeID != config.node else { return }
+
+        let localNode = try await getCurrentNodeInstance()
+        let localNodeID = try localNode.requireID()
+
+        let remoteNode: KeepTalkingNode
+        if let existing = try await KeepTalkingNode.query(on: localStore.database)
+            .filter(\.$id, .equal, targetNodeID)
+            .first()
+        {
+            remoteNode = existing
+        } else {
+            remoteNode = KeepTalkingNode(id: targetNodeID)
+            try await remoteNode.save(on: localStore.database)
+        }
+
+        if let relation = try await KeepTalkingNodeRelation
+            .query(on: localStore.database)
+            .filter(\.$from.$id, .equal, localNodeID)
+            .filter(\.$to.$id, .equal, targetNodeID)
+            .first()
+        {
+            relation.relationship = .trusted
+            try await relation.save(on: localStore.database)
+            return
+        }
+
+        let relation = try KeepTalkingNodeRelation(
+            from: localNode,
+            to: remoteNode,
+            relationship: .trusted
+        )
+        try await relation.save(on: localStore.database)
+    }
+
     private func getCurrentNodeInstance() async throws -> KeepTalkingNode {
         if let node = try await KeepTalkingNode.query(on: localStore.database)
             .filter(\.$id, .equal, config.node)

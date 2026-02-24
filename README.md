@@ -1,12 +1,18 @@
 # KeepTalking
 
-Swift package for `ion-sfu` text chat over WebRTC data channels.
+Swift package for `ion-sfu` collaboration over WebRTC data channels.
 
 It includes:
 - `KeepTalkingSDK` (library product) for app integration
 - `KeepTalking` (CLI executable) built on top of the SDK
 
-The transport uses `ion-sfu` JSON-RPC signaling (`/ws`) plus WebRTC DataChannels.
+The transport uses `ion-sfu` JSON-RPC signaling (`/ws`) plus WebRTC DataChannels:
+- `chat` channel for chat messages
+- `action_call` channel for non-chat envelopes (context/node/action flow)
+
+Both `chat` and `action_call` labels are suffixed with the context ID:
+- `keep-talking.chat.<context-id>`
+- `keep-talking.action_call.<context-id>`
 
 ## Prerequisites
 
@@ -56,9 +62,10 @@ import KeepTalkingSDK
 let config = KeepTalkingConfig(
     signalURL: URL(string: "ws://127.0.0.1:17000/ws")!,
     session: "room1",
-    participantID: "alice",
     channel: "keep-talking.chat",
-    userID: "alice-user"
+    actionCallChannel: "keep-talking.action_call",
+    contextID: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+    node: UUID(uuidString: "2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9")!
 )
 
 let kv = KeepTalkingHTTPKVService(baseURL: URL(string: "https://your-kv.example.com")!)
@@ -87,7 +94,7 @@ let snapshot = try client.loadLocalSnapshot()
 Interactive mode:
 
 ```bash
-swift run KeepTalking --signal-url ws://127.0.0.1:17000/ws --session room1 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --channel keep-talking.chat
+swift run KeepTalking --signal-url ws://127.0.0.1:17000/ws --session room1 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --context 11111111-2222-3333-4444-555555555555 --channel keep-talking.chat --action-channel keep-talking.action_call
 ```
 
 Custom DB location:
@@ -108,7 +115,9 @@ Environment variables are supported:
 export KT_SIGNAL_URL="ws://127.0.0.1:17000/ws"
 export KT_SESSION="room1"
 export KT_NODE="2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9"
+export KT_CONTEXT="11111111-2222-3333-4444-555555555555"
 export KT_CHANNEL="keep-talking.chat"
+export KT_ACTION_CHANNEL="keep-talking.action_call"
 export KT_DB_PATH="$HOME/Library/Application Support/KeepTalking/custom.sqlite"
 swift run KeepTalking
 ```
@@ -116,12 +125,16 @@ swift run KeepTalking
 For P2P upgrade tests, run peers with distinct node IDs:
 
 ```bash
-swift run KeepTalking --session room1 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
-swift run KeepTalking --session room1 --node E3BD62F8-4C27-4E66-B9D2-1F7D27F57102
+swift run KeepTalking --session room1 --context 11111111-2222-3333-4444-555555555555 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
+swift run KeepTalking --session room1 --context 11111111-2222-3333-4444-555555555555 --node E3BD62F8-4C27-4E66-B9D2-1F7D27F57102
 ```
 
 Interactive commands:
+- `/new` create and join a new context (new channel suffix)
+- `/join <context-uuid>` join another context/channel suffix
+- `/trust <node-uuid>` mark a node relation as trusted
 - `/stats` show local send/receive counters and outbound channel state
+- `/p2p` manually start a new direct P2P upgrade trial
 - `/quit` disconnect
 
 Notes:

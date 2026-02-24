@@ -34,6 +34,11 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     private enum ChannelLabel {
         static let signaling = "keep-talking.signaling"
     }
+    private enum EnvelopeRoute {
+        case chat
+        case actionCall
+        case signaling
+    }
 
     var onMessage: (@Sendable (KeepTalkingContextMessage) -> Void)?
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)?
@@ -49,8 +54,10 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     private let peerFactory = LKRTCPeerConnectionFactory()
 
     private var peerPool: [Int: LKRTCPeerConnection] = [:]
-    private var outboundChannel: LKRTCDataChannel?
+    private var outboundChatChannel: LKRTCDataChannel?
+    private var outboundActionCallChannel: LKRTCDataChannel?
     private var inboundChatChannel: LKRTCDataChannel?
+    private var inboundActionCallChannel: LKRTCDataChannel?
     private var outboundSignalingChannel: LKRTCDataChannel?
     private var inboundSignalingChannel: LKRTCDataChannel?
     private var retainedChannels: [ObjectIdentifier: LKRTCDataChannel] = [:]
@@ -71,7 +78,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
     func start() async throws {
         debug(
-            "starting session=\(config.session) id=\(config.node.uuidString) channel=\(config.channel)"
+            "starting session=\(config.session) id=\(config.node.uuidString) context=\(config.contextID.uuidString.lowercased()) chat=\(config.chatChannelLabel) action=\(config.actionCallChannelLabel)"
         )
         try await signal.connect()
 
@@ -135,17 +142,35 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         chatChannelConfig.isOrdered = true
         guard
             let chatChannel = publisher.dataChannel(
-                forLabel: config.channel,
+                forLabel: config.chatChannelLabel,
                 configuration: chatChannelConfig
             )
         else {
-            throw RTCError.dataChannelCreateFailed(config.channel)
+            throw RTCError.dataChannelCreateFailed(config.chatChannelLabel)
         }
 
         chatChannel.delegate = self
-        outboundChannel = chatChannel
+        outboundChatChannel = chatChannel
         retainChannel(chatChannel)
-        debug("created outbound data channel label=\(chatChannel.label)")
+        debug("created outbound chat channel label=\(chatChannel.label)")
+
+        let actionCallChannelConfig = LKRTCDataChannelConfiguration()
+        actionCallChannelConfig.isOrdered = true
+        guard
+            let actionCallChannel = publisher.dataChannel(
+                forLabel: config.actionCallChannelLabel,
+                configuration: actionCallChannelConfig
+            )
+        else {
+            throw RTCError.dataChannelCreateFailed(config.actionCallChannelLabel)
+        }
+
+        actionCallChannel.delegate = self
+        outboundActionCallChannel = actionCallChannel
+        retainChannel(actionCallChannel)
+        debug(
+            "created outbound action channel label=\(actionCallChannel.label)"
+        )
 
         let localOffer = try await RTCShared.createOffer(
             on: publisher,
@@ -175,23 +200,27 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         )
         flushPendingCandidates(for: Target.publisher)
 
-        guard await waitForOutboundChannelOpen(timeoutSeconds: 8) else {
-            throw RTCError.dataChannelNotOpen(config.channel)
+        guard await waitForRequiredChannelsOpen(timeoutSeconds: 8) else {
+            throw RTCError.dataChannelNotOpen(config.chatChannelLabel)
         }
     }
 
     func stop() {
         debug("stopping sent=\(sentMessageCount) recv=\(recvMessageCount)")
-        outboundChannel?.close()
+        outboundChatChannel?.close()
+        outboundActionCallChannel?.close()
         inboundChatChannel?.close()
+        inboundActionCallChannel?.close()
         outboundSignalingChannel?.close()
         inboundSignalingChannel?.close()
         for peer in peerPool.values {
             peer.close()
         }
         peerPool.removeAll()
-        outboundChannel = nil
+        outboundChatChannel = nil
+        outboundActionCallChannel = nil
         inboundChatChannel = nil
+        inboundActionCallChannel = nil
         outboundSignalingChannel = nil
         inboundSignalingChannel = nil
         retainedChannels.removeAll()
@@ -199,25 +228,25 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         signal.close()
     }
 
+    func requestP2PTrial() {
+        debug("ignoring manual p2p trial: sfu transport has no direct p2p upgrade path")
+    }
+
     func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws {
-        let useSignalingChannel: Bool
-        switch envelope {
-        case .p2pSignal, .p2pPresence:
-            useSignalingChannel = true
-        default:
-            useSignalingChannel = false
-        }
+        let route = route(for: envelope)
 
         let sendChannel: LKRTCDataChannel?
-        if useSignalingChannel {
+        switch route {
+        case .signaling:
             sendChannel = preferredSignalingChannel()
-        } else {
-            sendChannel = preferredSendChannel()
+        case .chat:
+            sendChannel = preferredChatChannel()
+        case .actionCall:
+            sendChannel = preferredActionCallChannel()
         }
+
         guard let sendChannel else {
-            throw RTCError.dataChannelCreateFailed(
-                useSignalingChannel ? ChannelLabel.signaling : config.channel
-            )
+            throw RTCError.dataChannelCreateFailed(routeLabel(for: route))
         }
 
         guard sendChannel.readyState == .open else {
@@ -239,8 +268,8 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         KeepTalkingRuntimeStats(
             sent: sentMessageCount,
             received: recvMessageCount,
-            outboundLabel: outboundChannel?.label,
-            outboundState: outboundChannel?.readyState.rawValue,
+            outboundLabel: outboundChatChannel?.label,
+            outboundState: outboundChatChannel?.readyState.rawValue,
             inboundLabel: inboundChatChannel?.label,
             inboundState: inboundChatChannel?.readyState.rawValue,
             retainedChannels: retainedChannels.count,
@@ -248,11 +277,20 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         )
     }
 
-    private func preferredSendChannel() -> LKRTCDataChannel? {
+    private func preferredChatChannel() -> LKRTCDataChannel? {
         if let inboundChatChannel, inboundChatChannel.readyState == .open {
             return inboundChatChannel
         }
-        return outboundChannel
+        return outboundChatChannel
+    }
+
+    private func preferredActionCallChannel() -> LKRTCDataChannel? {
+        if let inboundActionCallChannel,
+           inboundActionCallChannel.readyState == .open
+        {
+            return inboundActionCallChannel
+        }
+        return outboundActionCallChannel
     }
 
     private func preferredSignalingChannel() -> LKRTCDataChannel? {
@@ -265,6 +303,28 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
     private func retainChannel(_ channel: LKRTCDataChannel) {
         retainedChannels[ObjectIdentifier(channel)] = channel
+    }
+
+    private func route(for envelope: KeepTalkingP2PEnvelope) -> EnvelopeRoute {
+        switch envelope {
+        case .message:
+            return .chat
+        case .p2pSignal, .p2pPresence:
+            return .signaling
+        default:
+            return .actionCall
+        }
+    }
+
+    private func routeLabel(for route: EnvelopeRoute) -> String {
+        switch route {
+        case .chat:
+            return config.chatChannelLabel
+        case .actionCall:
+            return config.actionCallChannelLabel
+        case .signaling:
+            return ChannelLabel.signaling
+        }
     }
 
     private func acceptRemoteOffer(_ payload: SessionDescriptionPayload) {
@@ -363,34 +423,42 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         return nil
     }
 
-    private func waitForOutboundChannelOpen(timeoutSeconds: TimeInterval) async
+    private func waitForRequiredChannelsOpen(timeoutSeconds: TimeInterval) async
         -> Bool
     {
-        let opened = await RTCShared.waitForOpenDataChannel(
+        let chatOpened = await RTCShared.waitForOpenDataChannel(
             timeoutSeconds: timeoutSeconds
         ) { [weak self] in
-            self?.outboundChannel
+            self?.outboundChatChannel
         }
-        if !opened {
-            debug("timeout waiting for outbound channel open")
+        if !chatOpened {
+            debug("timeout waiting for outbound chat channel open")
+            return false
         }
-        return opened
+
+        let actionOpened = await RTCShared.waitForOpenDataChannel(
+            timeoutSeconds: timeoutSeconds
+        ) { [weak self] in
+            self?.outboundActionCallChannel
+        }
+        if !actionOpened {
+            debug("timeout waiting for outbound action channel open")
+            return false
+        }
+        return true
     }
 
-}
-
-extension KeepTalkingRTCClient: LKRTCPeerConnectionDelegate {
-    func peerConnection(
+    func handlePeerConnectionSignalingStateChange(
         _ peerConnection: LKRTCPeerConnection,
-        didChange stateChanged: LKRTCSignalingState
+        stateChanged: LKRTCSignalingState
     ) {
         let target = target(for: peerConnection) ?? -1
         debug("signaling state target=\(target) state=\(stateChanged.rawValue)")
     }
 
-    func peerConnection(
+    func handlePeerConnectionIceConnectionStateChange(
         _ peerConnection: LKRTCPeerConnection,
-        didChange newState: LKRTCIceConnectionState
+        newState: LKRTCIceConnectionState
     ) {
         let target = target(for: peerConnection) ?? -1
         debug(
@@ -398,17 +466,17 @@ extension KeepTalkingRTCClient: LKRTCPeerConnectionDelegate {
         )
     }
 
-    func peerConnection(
+    func handlePeerConnectionIceGatheringStateChange(
         _ peerConnection: LKRTCPeerConnection,
-        didChange newState: LKRTCIceGatheringState
+        newState: LKRTCIceGatheringState
     ) {
         let target = target(for: peerConnection) ?? -1
         debug("ice gathering state target=\(target) state=\(newState.rawValue)")
     }
 
-    func peerConnection(
+    func handlePeerConnectionDidGenerateCandidate(
         _ peerConnection: LKRTCPeerConnection,
-        didGenerate candidate: LKRTCIceCandidate
+        candidate: LKRTCIceCandidate
     ) {
         guard let target = target(for: peerConnection) else {
             return
@@ -429,38 +497,40 @@ extension KeepTalkingRTCClient: LKRTCPeerConnectionDelegate {
         signal.trickle(payload)
     }
 
-    func peerConnection(
+    func handlePeerConnectionDidRemoveCandidates(
         _ peerConnection: LKRTCPeerConnection,
-        didRemove candidates: [LKRTCIceCandidate]
+        candidates: [LKRTCIceCandidate]
     ) {
         let target = target(for: peerConnection) ?? -1
         debug("removed candidates target=\(target) count=\(candidates.count)")
     }
 
-    func peerConnectionShouldNegotiate(_ peerConnection: LKRTCPeerConnection) {
+    func handlePeerConnectionShouldNegotiate(
+        _ peerConnection: LKRTCPeerConnection
+    ) {
         let target = target(for: peerConnection) ?? -1
         debug("should negotiate target=\(target)")
     }
 
-    func peerConnection(
+    func handlePeerConnectionDidAddStream(
         _ peerConnection: LKRTCPeerConnection,
-        didAdd stream: LKRTCMediaStream
+        stream: LKRTCMediaStream
     ) {
         let target = target(for: peerConnection) ?? -1
         debug("stream added target=\(target) streamId=\(stream.streamId)")
     }
 
-    func peerConnection(
+    func handlePeerConnectionDidRemoveStream(
         _ peerConnection: LKRTCPeerConnection,
-        didRemove stream: LKRTCMediaStream
+        stream: LKRTCMediaStream
     ) {
         let target = target(for: peerConnection) ?? -1
         debug("stream removed target=\(target) streamId=\(stream.streamId)")
     }
 
-    func peerConnection(
+    func handlePeerConnectionDidOpenDataChannel(
         _ peerConnection: LKRTCPeerConnection,
-        didOpen dataChannel: LKRTCDataChannel
+        dataChannel: LKRTCDataChannel
     ) {
         let target = target(for: peerConnection) ?? -1
         dataChannel.delegate = self
@@ -468,26 +538,27 @@ extension KeepTalkingRTCClient: LKRTCPeerConnectionDelegate {
         debug(
             "inbound data channel opened label=\(dataChannel.label) target=\(target)"
         )
-        if dataChannel.label == config.channel {
+        if dataChannel.label == config.chatChannelLabel {
             inboundChatChannel = dataChannel
             debug("bound inbound chat channel label=\(dataChannel.label)")
+        } else if dataChannel.label == config.actionCallChannelLabel {
+            inboundActionCallChannel = dataChannel
+            debug("bound inbound action channel label=\(dataChannel.label)")
         } else if dataChannel.label == ChannelLabel.signaling {
             inboundSignalingChannel = dataChannel
             debug("bound inbound signaling channel label=\(dataChannel.label)")
         }
     }
-}
 
-extension KeepTalkingRTCClient: LKRTCDataChannelDelegate {
-    func dataChannelDidChangeState(_ dataChannel: LKRTCDataChannel) {
+    func handleDataChannelDidChangeState(_ dataChannel: LKRTCDataChannel) {
         debug(
             "channel state label=\(dataChannel.label) state=\(dataChannel.readyState.rawValue)"
         )
     }
 
-    func dataChannel(
+    func handleDataChannelDidReceiveMessage(
         _ dataChannel: LKRTCDataChannel,
-        didReceiveMessageWith buffer: LKRTCDataBuffer
+        buffer: LKRTCDataBuffer
     ) {
         recvMessageCount += 1
         debug(
@@ -495,7 +566,8 @@ extension KeepTalkingRTCClient: LKRTCDataChannelDelegate {
         )
 
         guard
-            dataChannel.label == config.channel
+            dataChannel.label == config.chatChannelLabel
+                || dataChannel.label == config.actionCallChannelLabel
                 || dataChannel.label == ChannelLabel.signaling
         else {
             if let text = String(data: buffer.data, encoding: .utf8) {
@@ -516,11 +588,13 @@ extension KeepTalkingRTCClient: LKRTCDataChannelDelegate {
         ) {
             switch envelope {
             case .message(let message):
-                if dataChannel.label == config.channel {
+                if dataChannel.label == config.chatChannelLabel {
                     onMessage?(message)
                     debug("delivered chat sender=\(message.sender)")
                 } else {
-                    debug("ignored message envelope on signaling channel")
+                    debug(
+                        "ignored message envelope on non-chat channel label=\(dataChannel.label)"
+                    )
                 }
 
             default:

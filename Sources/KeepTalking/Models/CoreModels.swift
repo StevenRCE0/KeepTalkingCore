@@ -5,6 +5,8 @@ public struct KeepTalkingConfig: Sendable {
     public let signalURL: URL
     public let session: String
     public let channel: String
+    public let actionCallChannel: String
+    public let contextID: UUID
     public let node: UUID
     public let p2pPreferredRemoteID: String?
     public let p2pAttemptTimeoutSeconds: TimeInterval
@@ -14,6 +16,8 @@ public struct KeepTalkingConfig: Sendable {
         signalURL: URL,
         session: String,
         channel: String = "keep-talking.chat",
+        actionCallChannel: String = "keep-talking.action_call",
+        contextID: UUID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!,
         node: UUID = UUID(),
         p2pPreferredRemoteID: String? = nil,
         p2pAttemptTimeoutSeconds: TimeInterval = 5,
@@ -22,10 +26,34 @@ public struct KeepTalkingConfig: Sendable {
         self.signalURL = signalURL
         self.session = session
         self.channel = channel
+        self.actionCallChannel = actionCallChannel
+        self.contextID = contextID
         self.node = node
         self.p2pPreferredRemoteID = p2pPreferredRemoteID
         self.p2pAttemptTimeoutSeconds = p2pAttemptTimeoutSeconds
         self.p2pStunServers = p2pStunServers
+    }
+
+    public var chatChannelLabel: String {
+        "\(channel).\(contextID.uuidString.lowercased())"
+    }
+
+    public var actionCallChannelLabel: String {
+        "\(actionCallChannel).\(contextID.uuidString.lowercased())"
+    }
+
+    public func withContextID(_ contextID: UUID) -> KeepTalkingConfig {
+        KeepTalkingConfig(
+            signalURL: signalURL,
+            session: session,
+            channel: channel,
+            actionCallChannel: actionCallChannel,
+            contextID: contextID,
+            node: node,
+            p2pPreferredRemoteID: p2pPreferredRemoteID,
+            p2pAttemptTimeoutSeconds: p2pAttemptTimeoutSeconds,
+            p2pStunServers: p2pStunServers
+        )
     }
 }
 

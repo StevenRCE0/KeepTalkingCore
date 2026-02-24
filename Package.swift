@@ -13,9 +13,22 @@ let package = Package(
         .executable(name: "KeepTalking", targets: ["KeepTalking"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/livekit/webrtc-xcframework.git", exact: "137.7151.12"),
-        .package(url: "https://github.com/vapor/fluent-kit.git", from: "1.55.0"),
-        .package(url: "https://github.com/vapor/fluent-sqlite-driver.git", from: "4.6.0"),
+        .package(
+            url: "https://github.com/livekit/webrtc-xcframework.git",
+            exact: "137.7151.12"
+        ),
+        .package(
+            url: "https://github.com/vapor/fluent-kit.git",
+            from: "1.55.0"
+        ),
+        .package(
+            url: "https://github.com/vapor/fluent-sqlite-driver.git",
+            from: "4.6.0"
+        ),
+        .package(
+            url: "https://github.com/modelcontextprotocol/swift-sdk.git",
+            from: "0.11.0"
+        ),
     ],
     targets: [
         .target(
@@ -23,7 +36,11 @@ let package = Package(
             dependencies: [
                 .product(name: "LiveKitWebRTC", package: "webrtc-xcframework"),
                 .product(name: "FluentKit", package: "fluent-kit"),
-                .product(name: "FluentSQLiteDriver", package: "fluent-sqlite-driver"),
+                .product(
+                    name: "FluentSQLiteDriver",
+                    package: "fluent-sqlite-driver"
+                ),
+                .product(name: "MCP", package: "swift-sdk"),
             ],
             path: "Sources/KeepTalking"
         ),
