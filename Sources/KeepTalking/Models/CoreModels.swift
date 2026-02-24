@@ -2,10 +2,11 @@ import FluentKit
 import Foundation
 
 public struct KeepTalkingConfig: Sendable {
+    public static let signalingChannel = "keep-talking.signaling"
+    public static let chatChannelPrefix = "keep-talking.chat"
+    public static let actionCallChannelPrefix = "keep-talking.action_call"
+
     public let signalURL: URL
-    public let session: String
-    public let channel: String
-    public let actionCallChannel: String
     public let contextID: UUID
     public let node: UUID
     public let p2pPreferredRemoteID: String?
@@ -14,9 +15,6 @@ public struct KeepTalkingConfig: Sendable {
 
     public init(
         signalURL: URL,
-        session: String,
-        channel: String = "keep-talking.chat",
-        actionCallChannel: String = "keep-talking.action_call",
         contextID: UUID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!,
         node: UUID = UUID(),
         p2pPreferredRemoteID: String? = nil,
@@ -24,9 +22,6 @@ public struct KeepTalkingConfig: Sendable {
         p2pStunServers: [String] = ["stun:stun.l.google.com:19302"]
     ) {
         self.signalURL = signalURL
-        self.session = session
-        self.channel = channel
-        self.actionCallChannel = actionCallChannel
         self.contextID = contextID
         self.node = node
         self.p2pPreferredRemoteID = p2pPreferredRemoteID
@@ -35,19 +30,24 @@ public struct KeepTalkingConfig: Sendable {
     }
 
     public var chatChannelLabel: String {
-        "\(channel).\(contextID.uuidString.lowercased())"
+        "\(Self.chatChannelPrefix).\(scopedSessionID)"
     }
 
     public var actionCallChannelLabel: String {
-        "\(actionCallChannel).\(contextID.uuidString.lowercased())"
+        "\(Self.actionCallChannelPrefix).\(scopedSessionID)"
+    }
+
+    public var signalingChannelLabel: String {
+        Self.signalingChannel
+    }
+
+    public var scopedSessionID: String {
+        contextID.uuidString.lowercased()
     }
 
     public func withContextID(_ contextID: UUID) -> KeepTalkingConfig {
         KeepTalkingConfig(
             signalURL: signalURL,
-            session: session,
-            channel: channel,
-            actionCallChannel: actionCallChannel,
             contextID: contextID,
             node: node,
             p2pPreferredRemoteID: p2pPreferredRemoteID,

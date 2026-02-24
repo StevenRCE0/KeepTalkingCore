@@ -29,6 +29,7 @@ let package = Package(
             url: "https://github.com/modelcontextprotocol/swift-sdk.git",
             from: "0.11.0"
         ),
+        .package(url: "https://github.com/MacPaw/OpenAI.git", .upToNextMajor(from: "0.4.7")),
     ],
     targets: [
         .target(
@@ -41,6 +42,7 @@ let package = Package(
                     package: "fluent-sqlite-driver"
                 ),
                 .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "OpenAI", package: "openai")
             ],
             path: "Sources/KeepTalking"
         ),

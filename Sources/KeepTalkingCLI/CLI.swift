@@ -3,22 +3,19 @@ import KeepTalkingSDK
 
 let keepTalkingUsage = """
 Usage:
-  KeepTalking [--signal-url <ws-url>] [--session <sid>] [--node <uuid>] [--context <uuid>] [--channel <label>] [--action-channel <label>] [--db-path <sqlite-file>] [--message <text>] [--p2p-peer <peer-id>] [--p2p-timeout <seconds>] [--stun-url <stun-url>]
+  KeepTalking [--signal-url <ws-url>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--p2p-peer <peer-id>] [--p2p-timeout <seconds>] [--stun-url <stun-url>]
 
 Environment fallbacks:
   KT_SIGNAL_URL (default: ws://127.0.0.1:17000/ws)
-  KT_SESSION    (default: ion)
   KT_NODE       (default: random UUID)
   KT_CONTEXT    (default: 00000000-0000-0000-0000-000000000000)
-  KT_CHANNEL    (default: keep-talking.chat)
-  KT_ACTION_CHANNEL (default: keep-talking.action_call)
   KT_DB_PATH    (optional, local sqlite file path)
   KT_P2P_PEER_ID    (optional, preferred remote peer ID)
   KT_P2P_TIMEOUT    (default: 5)
   KT_STUN_URL       (default: stun:stun.l.google.com:19302)
 
 Examples:
-  KeepTalking --session room1 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
+  KeepTalking --context 11111111-2222-3333-4444-555555555555 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
   KeepTalking --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --message "hello from ion-sfu"
 
 Interactive commands:
@@ -67,13 +64,9 @@ struct CliConfig {
     static func parse() throws -> CliConfig {
         let env = ProcessInfo.processInfo.environment
         var signalURLRaw = env["KT_SIGNAL_URL"] ?? "ws://127.0.0.1:17000/ws"
-        var session = env["KT_SESSION"] ?? "ion"
         var nodeIDRaw = env["KT_NODE"] ?? UUID().uuidString
         var contextIDRaw = env["KT_CONTEXT"]
             ?? "00000000-0000-0000-0000-000000000000"
-        var channel = env["KT_CHANNEL"] ?? "keep-talking.chat"
-        var actionCallChannel = env["KT_ACTION_CHANNEL"]
-            ?? "keep-talking.action_call"
         var databasePathRaw = env["KT_DB_PATH"]
         var p2pPeerID = env["KT_P2P_PEER_ID"]
         var p2pTimeoutRaw = env["KT_P2P_TIMEOUT"] ?? "5"
@@ -92,10 +85,6 @@ struct CliConfig {
                 index += 1
                 guard index < args.count else { throw CliError.missingValue(arg) }
                 signalURLRaw = args[index]
-            case "--session":
-                index += 1
-                guard index < args.count else { throw CliError.missingValue(arg) }
-                session = args[index]
             case "--node", "--id":
                 index += 1
                 guard index < args.count else { throw CliError.missingValue(arg) }
@@ -104,14 +93,6 @@ struct CliConfig {
                 index += 1
                 guard index < args.count else { throw CliError.missingValue(arg) }
                 contextIDRaw = args[index]
-            case "--channel":
-                index += 1
-                guard index < args.count else { throw CliError.missingValue(arg) }
-                channel = args[index]
-            case "--action-channel":
-                index += 1
-                guard index < args.count else { throw CliError.missingValue(arg) }
-                actionCallChannel = args[index]
             case "--db-path":
                 index += 1
                 guard index < args.count else { throw CliError.missingValue(arg) }
@@ -156,9 +137,6 @@ struct CliConfig {
         return CliConfig(
             sdkConfig: KeepTalkingConfig(
                 signalURL: signalURL,
-                session: session,
-                channel: channel,
-                actionCallChannel: actionCallChannel,
                 contextID: contextID,
                 node: nodeID,
                 p2pPreferredRemoteID: p2pPeerID,

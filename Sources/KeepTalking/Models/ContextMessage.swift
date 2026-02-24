@@ -1,8 +1,6 @@
 import FluentKit
 import Foundation
 
-
-
 public final class KeepTalkingContextMessage: Model, @unchecked Sendable {
     public static let schema = "kt_context_messages"
 
@@ -38,8 +36,8 @@ public final class KeepTalkingContextMessage: Model, @unchecked Sendable {
     }
 }
 
-public extension KeepTalkingContextMessage {
-    enum Sender: Codable, Sendable, Hashable {
+extension KeepTalkingContextMessage {
+    public enum Sender: Codable, Sendable, Hashable {
         case node(node: UUID)
         case autonomous(name: String)
     }

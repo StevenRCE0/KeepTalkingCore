@@ -9,6 +9,7 @@ enum InteractiveCommand {
     case join(String)
     case send(String)
     case trust(String)
+    case ai(String)
 
     static func parse(_ rawLine: String) -> InteractiveCommand? {
         let text = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -38,6 +39,17 @@ enum InteractiveCommand {
             let node = parts.count > 1 ? String(parts[1]) : ""
             return .trust(node)
         }
+        if text.hasPrefix("/ai") {
+            let prefix = "/ai"
+            let prompt =
+                text.count > prefix.count
+                ? String(
+                    text.dropFirst(prefix.count).trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                ) : ""
+            return .ai(prompt)
+        }
         return .send(text)
     }
 }
@@ -60,6 +72,16 @@ struct KeepTalkingApp {
                 localStore: localStore
             )
             var activeContext = KeepTalkingContext(id: currentConfig.contextID)
+            let openAI: OpenAIConnector? = {
+                guard
+                    let key = ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                    !key.isEmpty
+                else {
+                    return nil
+                }
+                return OpenAIConnector(apiKey: key)
+            }()
 
             func bindCallbacks(to client: KeepTalkingClient) {
                 client.onLog = { line in
@@ -83,10 +105,10 @@ struct KeepTalkingApp {
             func printRuntimeConfig(_ config: KeepTalkingConfig) {
                 print("Connecting to \(config.signalURL.absoluteString)")
                 print(
-                    "Session=\(config.session) Node=\(config.node.uuidString.lowercased()) Context=\(config.contextID.uuidString.lowercased())"
+                    "Session=\(config.scopedSessionID) Node=\(config.node.uuidString.lowercased()) Context=\(config.contextID.uuidString.lowercased())"
                 )
                 print(
-                    "Channels: chat=\(config.chatChannelLabel) action_call=\(config.actionCallChannelLabel)"
+                    "Channels: signaling=\(config.signalingChannelLabel) chat=\(config.chatChannelLabel) action_call=\(config.actionCallChannelLabel)"
                 )
                 print(
                     "P2P upgrade timeout=\(Int(config.p2pAttemptTimeoutSeconds))s stun=\(config.p2pStunServers.joined(separator: ","))"
@@ -111,12 +133,18 @@ struct KeepTalkingApp {
             }
 
             print(
-                "Connected. Commands: /new, /join <context-id>, /trust <node-id>, /p2p, /stats, /quit."
+                "Connected. Commands: /new, /join <context-id>, /trust <node-id>, /p2p, /stats, /quit, /ai <message>."
             )
+
+            if openAI == nil {
+                print("[ai] disabled: set OPENAI_API_KEY to enable /ai.")
+            }
+
             while let line = readLine(strippingNewline: true) {
                 guard let command = InteractiveCommand.parse(line) else {
                     continue
                 }
+
                 switch command {
                 case .quit:
                     client.disconnect()
@@ -152,7 +180,7 @@ struct KeepTalkingApp {
                             "[local] created and joined context=\(nextContextID.uuidString.lowercased())"
                         )
                         print(
-                            "[local] channels chat=\(currentConfig.chatChannelLabel) action_call=\(currentConfig.actionCallChannelLabel)"
+                            "[local] channels signaling=\(currentConfig.signalingChannelLabel) chat=\(currentConfig.chatChannelLabel) action_call=\(currentConfig.actionCallChannelLabel)"
                         )
                     } catch {
                         candidateClient.disconnect()
@@ -219,7 +247,7 @@ struct KeepTalkingApp {
                             "[local] joined context=\(nextContextID.uuidString.lowercased())"
                         )
                         print(
-                            "[local] channels chat=\(currentConfig.chatChannelLabel) action_call=\(currentConfig.actionCallChannelLabel)"
+                            "[local] channels signaling=\(currentConfig.signalingChannelLabel) chat=\(currentConfig.chatChannelLabel) action_call=\(currentConfig.actionCallChannelLabel)"
                         )
                     } catch {
                         candidateClient.disconnect()
@@ -256,13 +284,20 @@ struct KeepTalkingApp {
                         try await client.send(text, in: activeContext)
                         print("[you] \(text)")
                     } catch {
-                        fputs("Send failed: \(error.localizedDescription)\n", stderr)
+                        fputs(
+                            "Send failed: \(error.localizedDescription)\n",
+                            stderr
+                        )
                     }
                 case .trust(let nodeID):
-                    let trimmedNodeID = nodeID.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trimmedNodeID = nodeID.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
                     if trimmedNodeID.isEmpty {
                         print("Usage: /trust <node-uuid>")
-                    } else if let trustedNodeID = UUID(uuidString: trimmedNodeID) {
+                    } else if let trustedNodeID = UUID(
+                        uuidString: trimmedNodeID
+                    ) {
                         do {
                             try await client.trust(node: trustedNodeID)
                             print(
@@ -277,12 +312,42 @@ struct KeepTalkingApp {
                     } else {
                         print("Invalid node UUID: \(trimmedNodeID)")
                     }
+                case .ai(let prompt):
+                    guard let openAI else {
+                        print("[ai] disabled: set OPENAI_API_KEY to enable /ai.")
+                        break
+                    }
+                    let trimmedPrompt = prompt.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                    guard !trimmedPrompt.isEmpty else {
+                        print("Usage: /ai <prompt>")
+                        break
+                    }
+                    do {
+                        print("[ai] querying...")
+                        let aiResponse = try await openAI.chat(prompt: trimmedPrompt)
+                        print(aiResponse)
+                        try await client.send(
+                            aiResponse,
+                            in: activeContext,
+                            sender: .autonomous(name: "ai")
+                        )
+                    } catch {
+                        fputs(
+                            "AI query failed: \(error.localizedDescription)\n",
+                            stderr
+                        )
+                    }
                 }
             }
 
             client.disconnect()
         } catch {
-            if let data = "Error: \(error.localizedDescription)\n\n\(keepTalkingUsage)\n".data(using: .utf8) {
+            if let data =
+                "Error: \(error.localizedDescription)\n\n\(keepTalkingUsage)\n"
+                .data(using: .utf8)
+            {
                 FileHandle.standardError.write(data)
             }
             Foundation.exit(1)

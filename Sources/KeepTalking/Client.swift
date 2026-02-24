@@ -88,7 +88,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         rtcClient.stop()
     }
 
-    public func send(_ text: String, in context: KeepTalkingContext)
+    public func send(_ text: String, in context: KeepTalkingContext, sender: KeepTalkingContextMessage.Sender? = nil)
         async throws
     {
         let node = try await getCurrentNodeInstance()
@@ -96,7 +96,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
         let message = KeepTalkingContextMessage(
             context: context,
-            sender: .node(node: try node.requireID()),
+            sender: try sender ?? .node(node: node.requireID()),
             content: text
         )
         context.updatedAt = message.timestamp

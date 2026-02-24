@@ -31,9 +31,6 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         static let publisher = 0
         static let subscriber = 1
     }
-    private enum ChannelLabel {
-        static let signaling = "keep-talking.signaling"
-    }
     private enum EnvelopeRoute {
         case chat
         case actionCall
@@ -78,7 +75,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
     func start() async throws {
         debug(
-            "starting session=\(config.session) id=\(config.node.uuidString) context=\(config.contextID.uuidString.lowercased()) chat=\(config.chatChannelLabel) action=\(config.actionCallChannelLabel)"
+            "starting session=\(config.scopedSessionID) id=\(config.node.uuidString) context=\(config.contextID.uuidString.lowercased()) chat=\(config.chatChannelLabel) action=\(config.actionCallChannelLabel)"
         )
         try await signal.connect()
 
@@ -127,11 +124,11 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         signalingChannelConfig.isOrdered = true
         guard
             let signalingChannel = publisher.dataChannel(
-                forLabel: ChannelLabel.signaling,
+                forLabel: config.signalingChannelLabel,
                 configuration: signalingChannelConfig
             )
         else {
-            throw RTCError.dataChannelCreateFailed(ChannelLabel.signaling)
+            throw RTCError.dataChannelCreateFailed(config.signalingChannelLabel)
         }
         signalingChannel.delegate = self
         outboundSignalingChannel = signalingChannel
@@ -186,7 +183,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         )
 
         let answerPayload = try await signal.join(
-            session: config.session,
+            session: config.scopedSessionID,
             uid: config.node.uuidString,
             offer: localOffer
         )
@@ -323,7 +320,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         case .actionCall:
             return config.actionCallChannelLabel
         case .signaling:
-            return ChannelLabel.signaling
+            return config.signalingChannelLabel
         }
     }
 
@@ -544,7 +541,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         } else if dataChannel.label == config.actionCallChannelLabel {
             inboundActionCallChannel = dataChannel
             debug("bound inbound action channel label=\(dataChannel.label)")
-        } else if dataChannel.label == ChannelLabel.signaling {
+        } else if dataChannel.label == config.signalingChannelLabel {
             inboundSignalingChannel = dataChannel
             debug("bound inbound signaling channel label=\(dataChannel.label)")
         }
@@ -568,7 +565,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         guard
             dataChannel.label == config.chatChannelLabel
                 || dataChannel.label == config.actionCallChannelLabel
-                || dataChannel.label == ChannelLabel.signaling
+                || dataChannel.label == config.signalingChannelLabel
         else {
             if let text = String(data: buffer.data, encoding: .utf8) {
                 debug(
