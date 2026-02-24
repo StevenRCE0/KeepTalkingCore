@@ -260,6 +260,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             }
             rememberPeer(presence.node)
             p2pClient?.receivePresence(from: presence.node)
+            onEnvelope?(envelope)
         case .p2pSignal(let signalPayload):
             if signalPayload.from == config.node {
                 debug(
@@ -268,6 +269,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             }
             rememberPeer(signalPayload.from)
             p2pClient?.receiveSignal(signalPayload)
+            onEnvelope?(envelope)
         default:
             onEnvelope?(envelope)
         }

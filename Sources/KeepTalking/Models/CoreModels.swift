@@ -146,6 +146,8 @@ public enum KeepTalkingP2PEnvelope: Codable, Sendable {
     case message(KeepTalkingContextMessage)
     case context(KeepTalkingContext)
     case node(KeepTalkingNode)
+    case actionCallRequest(KeepTalkingActionCallRequest)
+    case actionCallResult(KeepTalkingActionCallResult)
     case p2pSignal(KeepTalkingP2PSignalPayload)
     case p2pPresence(KeepTalkingP2PPresencePayload)
 }

@@ -2,6 +2,19 @@ import Foundation
 import OpenAI
 
 public actor OpenAIConnector {
+    public struct ToolPlanningResult: Sendable {
+        public let assistantText: String?
+        public let toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]
+
+        public init(
+            assistantText: String?,
+            toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]
+        ) {
+            self.assistantText = assistantText
+            self.toolCalls = toolCalls
+        }
+    }
+
     public enum ConnectorError: Error, LocalizedError {
         case missingAPIKey
         case emptyResponse
@@ -37,16 +50,13 @@ public actor OpenAIConnector {
     public func chat(prompt: String, model: String = "gpt-4o") async throws
         -> String
     {
-        let query = ChatQuery(
-            messages: [
-                .user(.init(content: .string(prompt)))
-            ],
+        let result = try await planTools(
+            prompt: prompt,
+            tools: [],
             model: model
         )
-
-        let result = try await client.chats(query: query)
         guard
-            let reply = result.choices.first?.message.content?
+            let reply = result.assistantText?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
             !reply.isEmpty
         else {
@@ -54,5 +64,28 @@ public actor OpenAIConnector {
         }
 
         return reply
+    }
+
+    public func planTools(
+        prompt: String,
+        tools: [ChatQuery.ChatCompletionToolParam],
+        model: String = .gpt4
+    ) async throws -> ToolPlanningResult {
+        let query = ChatQuery(
+            messages: [
+                .user(.init(content: .string(prompt)))
+            ],
+            model: model,
+            toolChoice: tools.isEmpty ? nil : .auto,
+            tools: tools.isEmpty ? nil : tools
+        )
+
+        let result = try await client.chats(query: query)
+        let assistantText = result.choices.first?.message.content
+        let toolCalls = result.choices.first?.message.toolCalls ?? []
+        return ToolPlanningResult(
+            assistantText: assistantText,
+            toolCalls: toolCalls
+        )
     }
 }

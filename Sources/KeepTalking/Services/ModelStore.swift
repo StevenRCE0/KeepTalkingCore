@@ -64,9 +64,11 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore, @unchecked Send
         manager.databases.use(.sqlite(sqliteConfiguration), as: databaseID, isDefault: true)
         manager.migrations.add(
             CreateKeepTalkingNodesMigration(),
+            AddDiscoveredDuringLogonToNodesMigration(),
             CreateKeepTalkingActionsMigration(),
             CreateKeepTalkingNodeRelationsMigration(),
             CreateNodeRelationsActionsRelationsMigration(),
+            AddApprovingContextToNodeRelationActionRelationMigration(),
             CreateKeepTalkingContextsMigration(),
             CreateKeepTalkingOperatorContextsMigration(),
             CreateKeepTalkingContextMessagesMigration(),

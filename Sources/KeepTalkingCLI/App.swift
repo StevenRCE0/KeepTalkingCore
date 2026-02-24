@@ -9,7 +9,10 @@ enum InteractiveCommand {
     case join(String)
     case send(String)
     case trust(String)
+    case actionsList
+    case actionsGrant(nodeID: String, actionID: String, scope: String)
     case ai(String)
+    case mcpRegister(name: String, url: String, description: String)
 
     static func parse(_ rawLine: String) -> InteractiveCommand? {
         let text = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -50,6 +53,33 @@ enum InteractiveCommand {
                 ) : ""
             return .ai(prompt)
         }
+        if text.hasPrefix("/mcp") {
+            let parts = text.split(maxSplits: 4, whereSeparator: \.isWhitespace)
+            if parts.count >= 4, parts[1] == "add" {
+                let name = String(parts[2])
+                let url = String(parts[3])
+                let description = parts.count > 4 ? String(parts[4]) : ""
+                return .mcpRegister(name: name, url: url, description: description)
+            }
+            return .mcpRegister(name: "", url: "", description: "")
+        }
+        if text.hasPrefix("/actions") {
+            let parts = text.split(maxSplits: 4, whereSeparator: \.isWhitespace)
+            if parts.count == 1 || parts[1] == "list" {
+                return .actionsList
+            }
+            if parts.count >= 4, parts[1] == "grant" {
+                let nodeID = String(parts[2])
+                let actionID = String(parts[3])
+                let scope = parts.count > 4 ? String(parts[4]) : "context"
+                return .actionsGrant(
+                    nodeID: nodeID,
+                    actionID: actionID,
+                    scope: scope
+                )
+            }
+            return .actionsList
+        }
         return .send(text)
     }
 }
@@ -72,16 +102,6 @@ struct KeepTalkingApp {
                 localStore: localStore
             )
             var activeContext = KeepTalkingContext(id: currentConfig.contextID)
-            let openAI: OpenAIConnector? = {
-                guard
-                    let key = ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?
-                        .trimmingCharacters(in: .whitespacesAndNewlines),
-                    !key.isEmpty
-                else {
-                    return nil
-                }
-                return OpenAIConnector(apiKey: key)
-            }()
 
             func bindCallbacks(to client: KeepTalkingClient) {
                 client.onLog = { line in
@@ -133,10 +153,10 @@ struct KeepTalkingApp {
             }
 
             print(
-                "Connected. Commands: /new, /join <context-id>, /trust <node-id>, /p2p, /stats, /quit, /ai <message>."
+                "Connected. Commands: /new, /join <context-id>, /trust <node-id>, /actions list, /actions grant <node-id> <action-id> [context|all], /mcp add <name> <url> [description], /p2p, /stats, /quit, /ai <message>."
             )
 
-            if openAI == nil {
+            if !client.aiEnabled {
                 print("[ai] disabled: set OPENAI_API_KEY to enable /ai.")
             }
 
@@ -312,8 +332,113 @@ struct KeepTalkingApp {
                     } else {
                         print("Invalid node UUID: \(trimmedNodeID)")
                     }
+                case .actionsList:
+                    do {
+                        let actions = try await client.listAvailableActions()
+                        if actions.isEmpty {
+                            print("[actions] none")
+                            break
+                        }
+
+                        print("[actions] total=\(actions.count)")
+                        for action in actions {
+                            let owner =
+                                action.ownerNodeID?.uuidString.lowercased()
+                                ?? "unknown"
+                            let hosted = action.hostedLocally
+                                ? "local" : "remote"
+                            let remote = action.remoteAuthorisable
+                                ? "remote-ok" : "local-only"
+                            print(
+                                "- id=\(action.actionID.uuidString.lowercased()) owner=\(owner) host=\(hosted) mode=\(remote) name=\(action.name)"
+                            )
+                            if !action.description.isEmpty {
+                                print("  desc=\(action.description)")
+                            }
+                            if action.grants.isEmpty {
+                                print("  grants=none")
+                            } else {
+                                for grant in action.grants {
+                                    let scope: String
+                                    switch grant.approvingContext {
+                                    case .none, .all:
+                                        scope = "all"
+                                    case .context(let context):
+                                        scope =
+                                            "context=\(context.id?.uuidString.lowercased() ?? "nil")"
+                                    }
+                                    print(
+                                        "  grant to=\(grant.toNodeID.uuidString.lowercased()) scope=\(scope)"
+                                    )
+                                }
+                            }
+                        }
+                    } catch {
+                        fputs(
+                            "List actions failed: \(error.localizedDescription)\n",
+                            stderr
+                        )
+                    }
+                case .actionsGrant(let nodeIDRaw, let actionIDRaw, let scopeRaw):
+                    let trimmedNodeID = nodeIDRaw.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                    let trimmedActionID = actionIDRaw.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                    guard let nodeID = UUID(uuidString: trimmedNodeID) else {
+                        print("Invalid node UUID: \(trimmedNodeID)")
+                        break
+                    }
+                    guard let actionID = UUID(uuidString: trimmedActionID) else {
+                        print("Invalid action UUID: \(trimmedActionID)")
+                        break
+                    }
+
+                    let scopeToken = scopeRaw.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ).lowercased()
+                    let scope: KeepTalkingActionPermissionScope?
+                    if scopeToken.isEmpty || scopeToken == "context"
+                        || scopeToken == "current"
+                    {
+                        let contextID = activeContext.id ?? currentConfig.contextID
+                        scope = .context(KeepTalkingContext(id: contextID))
+                    } else if scopeToken == "all" {
+                        scope = .all
+                    } else {
+                        print(
+                            "Invalid scope: \(scopeRaw). Use `context` or `all`."
+                        )
+                        scope = nil
+                    }
+                    guard let scope else {
+                        break
+                    }
+
+                    do {
+                        try await client.grantActionPermission(
+                            actionID: actionID,
+                            toNodeID: nodeID,
+                            scope: scope
+                        )
+                        let scopeLabel: String = switch scope {
+                        case .all:
+                            "all"
+                        case .context(let context):
+                            "context=\(context.id?.uuidString.lowercased() ?? "nil")"
+                        }
+                        print(
+                            "[local] granted action=\(actionID.uuidString.lowercased()) to=\(nodeID.uuidString.lowercased()) scope=\(scopeLabel)"
+                        )
+                    } catch {
+                        fputs(
+                            "Grant action failed: \(error.localizedDescription)\n",
+                            stderr
+                        )
+                    }
                 case .ai(let prompt):
-                    guard let openAI else {
+                    guard client.aiEnabled else {
                         print("[ai] disabled: set OPENAI_API_KEY to enable /ai.")
                         break
                     }
@@ -326,7 +451,10 @@ struct KeepTalkingApp {
                     }
                     do {
                         print("[ai] querying...")
-                        let aiResponse = try await openAI.chat(prompt: trimmedPrompt)
+                        let aiResponse = try await client.runAI(
+                            prompt: trimmedPrompt,
+                            in: activeContext
+                        )
                         print(aiResponse)
                         try await client.send(
                             aiResponse,
@@ -336,6 +464,53 @@ struct KeepTalkingApp {
                     } catch {
                         fputs(
                             "AI query failed: \(error.localizedDescription)\n",
+                            stderr
+                        )
+                    }
+                case .mcpRegister(let name, let urlRaw, let description):
+                    let trimmedName = name.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                    let trimmedURL = urlRaw.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                    guard !trimmedName.isEmpty, !trimmedURL.isEmpty else {
+                        print("Usage: /mcp add <name> <url> [description]")
+                        break
+                    }
+                    guard let url = URL(string: trimmedURL) else {
+                        print("Invalid MCP URL: \(trimmedURL)")
+                        break
+                    }
+
+                    let trimmedDescription = description.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                    let indexDescription =
+                        trimmedDescription.isEmpty
+                        ? "MCP server: \(trimmedName)"
+                        : trimmedDescription
+
+                    do {
+                        let action = try await client.registerMCPAction(
+                            bundle: KeepTalkingMCPBundle(
+                                name: trimmedName,
+                                indexDescription: indexDescription,
+                                service: .http(
+                                    url: url,
+                                    payload: Data(),
+                                    headers: [:]
+                                )
+                            )
+                        )
+                        let actionID =
+                            action.id?.uuidString.lowercased() ?? "unknown"
+                        print(
+                            "[local] registered mcp action=\(actionID) name=\(trimmedName) url=\(url.absoluteString)"
+                        )
+                    } catch {
+                        fputs(
+                            "MCP registration failed: \(error.localizedDescription)\n",
                             stderr
                         )
                     }

@@ -22,6 +22,13 @@ Interactive commands:
   /new         create and join a new context
   /join <id>   join an existing context
   /trust <id>  mark a node as trusted
+  /actions list
+               list known actions and current grants
+  /actions grant <node-id> <action-id> [context|all]
+               grant action permission to a trusted/owned node
+  /mcp add <name> <url> [description]
+               register a local MCP HTTP action
+  /ai <prompt> run AI tool planning and execution in active context
   /stats       print local send/receive counters
   /p2p         manually start a p2p upgrade trial
   /quit        exit
