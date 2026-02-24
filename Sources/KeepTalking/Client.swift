@@ -92,18 +92,18 @@ public final class KeepTalkingClient: @unchecked Sendable {
         async throws
     {
         let node = try await getCurrentNodeInstance()
-        try await context.save(on: localStore.database)
+        let persistedContext = try await upsertContext(context)
 
         let message = KeepTalkingContextMessage(
-            context: context,
+            context: persistedContext,
             sender: try sender ?? .node(node: node.requireID()),
             content: text
         )
-        context.updatedAt = message.timestamp
-        _ = try await context.$messages.get(on: localStore.database)
+        persistedContext.updatedAt = message.timestamp
+        _ = try await persistedContext.$messages.get(on: localStore.database)
 
         try await message.save(on: localStore.database)
-        try await context.save(on: localStore.database)
+        try await persistedContext.save(on: localStore.database)
 
         try rtcClient.sendEnvelope(.message(message))
     }
@@ -277,11 +277,38 @@ public final class KeepTalkingClient: @unchecked Sendable {
     }
 
     private func saveContext(_ context: KeepTalkingContext) async throws {
-        try await context.save(on: localStore.database)
+        let persistedContext = try await upsertContext(context)
         for message in context.messages {
-            message.context = context
+            message.context = persistedContext
             try await message.save(on: localStore.database)
         }
+    }
+
+    private func upsertContext(_ context: KeepTalkingContext) async throws
+        -> KeepTalkingContext
+    {
+        guard let contextID = context.id else {
+            try await context.save(on: localStore.database)
+            return context
+        }
+
+        if let existing = try await KeepTalkingContext.query(on: localStore.database)
+            .filter(\.$id, .equal, contextID)
+            .first()
+        {
+            if let updatedAt = context.updatedAt {
+                if let existingUpdatedAt = existing.updatedAt {
+                    existing.updatedAt = max(existingUpdatedAt, updatedAt)
+                } else {
+                    existing.updatedAt = updatedAt
+                }
+                try await existing.save(on: localStore.database)
+            }
+            return existing
+        }
+
+        try await context.save(on: localStore.database)
+        return context
     }
 
     private func blocking<T: Sendable>(
