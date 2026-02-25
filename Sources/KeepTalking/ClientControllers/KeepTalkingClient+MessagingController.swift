@@ -107,6 +107,21 @@ extension KeepTalkingClient {
             }
         case .actionCallResult(let result):
             _ = resolvePendingActionCall(result)
+        case .p2pPresence(let presence):
+            guard presence.node != config.node else {
+                break
+            }
+            let nodeIDText = presence.node.uuidString.lowercased()
+            do {
+                try await markNodeDiscovered(presence.node)
+            } catch {
+                rtcClient.debug(
+                    "mark node discovered failed node=\(nodeIDText) error=\(error.localizedDescription)"
+                )
+            }
+            scheduleDebouncedNodeStateBroadcast(
+                reason: "p2pPresence node=\(nodeIDText)"
+            )
         default:
             break
         }

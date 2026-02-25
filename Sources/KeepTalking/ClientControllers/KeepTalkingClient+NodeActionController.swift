@@ -241,6 +241,11 @@ extension KeepTalkingClient {
             )
             try await link.save(on: localStore.database)
         }
+
+        await broadcastLocalNodeState(
+            reason:
+                "grant action=\(actionID.uuidString.lowercased()) to=\(toNodeID.uuidString.lowercased())"
+        )
     }
 
     func mergeNodeActions(_ actions: [KeepTalkingAction]) async throws {

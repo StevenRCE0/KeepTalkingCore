@@ -69,6 +69,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     )
     var pendingActionCallResults:
         [UUID: CheckedContinuation<KeepTalkingActionCallResult, Error>] = [:]
+    var nodeStateBroadcastDebounceTask: Task<Void, Never>?
 
     public init(
         config: KeepTalkingConfig,
@@ -141,10 +142,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
         if kvService != nil {
             try await registerCurrentNodeID()
         }
+
+        await broadcastLocalNodeState(reason: "connect")
     }
 
     public func disconnect() {
         failAllPendingActionCalls(error: SignalError.closed)
+        cancelDebouncedNodeStateBroadcast()
         rtcClient.stop()
     }
 

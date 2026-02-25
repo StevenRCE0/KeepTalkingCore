@@ -136,7 +136,8 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
 
     private func beginP2PTrial(
         trigger: String,
-        allowWhileOnP2P: Bool = false
+        allowWhileOnP2P: Bool = false,
+        expectedPeerID: UUID? = nil
     ) {
         guard config.p2pAttemptTimeoutSeconds > 0 else {
             debug(
@@ -192,6 +193,17 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                 debug(
                     "p2p trial failed trigger=\(trigger) error=\(error.localizedDescription)"
                 )
+                let reconnectPeerID = expectedPeerID
+                    ?? self.stateQueue.sync {
+                        self.discoveredPeers.first(where: { $0 != self.config.node })
+                    }
+                if let reconnectPeerID {
+                    self.reportPeerConnected(
+                        reconnectPeerID,
+                        source: "p2p-failed",
+                        force: true
+                    )
+                }
             }
         }
     }
@@ -243,15 +255,23 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         }
     }
 
-    private func reportPeerConnected(_ nodeID: UUID, source: String) {
+    private func reportPeerConnected(
+        _ nodeID: UUID,
+        source: String,
+        force: Bool = false
+    ) {
         guard nodeID != config.node else { return }
-        let inserted = stateQueue.sync { () -> Bool in
+        let shouldNotify = stateQueue.sync { () -> Bool in
             discoveredPeers.insert(nodeID)
+            if force {
+                notifiedConnectedPeers.insert(nodeID)
+                return true
+            }
             return notifiedConnectedPeers.insert(nodeID).inserted
         }
-        guard inserted else { return }
+        guard shouldNotify else { return }
         debug(
-            "peer reachable source=\(source) node=\(nodeID.uuidString.lowercased())"
+            "peer reachable source=\(source) forced=\(force) node=\(nodeID.uuidString.lowercased())"
         )
         onPeerConnect?(nodeID)
     }
@@ -283,7 +303,8 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                 )
             } else if shouldConnect {
                 beginP2PTrial(
-                    trigger: "presence:\(presence.node.uuidString.lowercased())"
+                    trigger: "presence:\(presence.node.uuidString.lowercased())",
+                    expectedPeerID: presence.node
                 )
             } else {
                 debug(

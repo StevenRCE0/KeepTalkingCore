@@ -24,6 +24,8 @@ public struct KeepTalkingActionSummary: Sendable {
 }
 
 extension KeepTalkingClient {
+    private static let nodeBroadcastDebounceNanoseconds: UInt64 =
+        1_000_000_000
 
     public func registerCurrentNodeID() async throws {
         guard let kvService else {
@@ -77,7 +79,10 @@ extension KeepTalkingClient {
         try await relation.save(on: localStore.database)
     }
 
-    func currentNodeStatus(contextID: UUID? = nil) async throws
+    func currentNodeStatus(
+        contextID: UUID? = nil,
+        includeActionPayloads: Bool = true
+    ) async throws
         -> KeepTalkingNodeStatus
     {
         let node = try await getCurrentNodeInstance()
@@ -133,11 +138,20 @@ extension KeepTalkingClient {
                 continue
             }
 
+            let outgoingActions: [KeepTalkingAction]
+            if includeActionPayloads {
+                outgoingActions = relationActions
+            } else {
+                outgoingActions = relationActions.map {
+                    redactedBroadcastAction(from: $0)
+                }
+            }
+
             relationStatuses.append(
                 KeepTalkingNodeRelationStatus(
                     toNodeID: relation.$to.id,
                     relationship: relation.relationship,
-                    actions: relationActions
+                    actions: outgoingActions
                 )
             )
         }
@@ -162,7 +176,10 @@ extension KeepTalkingClient {
     public func broadcastCurrentNodeStatus(in contextID: UUID? = nil)
         async throws
     {
-        let status = try await currentNodeStatus(contextID: contextID)
+        let status = try await currentNodeStatus(
+            contextID: contextID,
+            includeActionPayloads: false
+        )
         rtcClient.debug(
             "[broadcastCurrentNodeStatus] " + String(decoding: try! JSONEncoder().encode(status), as: UTF8.self)
         )
@@ -174,18 +191,9 @@ extension KeepTalkingClient {
         onPeerConnect?(nodeID)
         let nodeIDText = nodeID.uuidString.lowercased()
         rtcClient.debug("peer connected node=\(nodeIDText)")
-
-        do {
-            try await announceCurrentNode()
-            try await broadcastCurrentNodeStatus()
-            rtcClient.debug(
-                "peer connect sync complete node=\(nodeIDText)"
-            )
-        } catch {
-            rtcClient.debug(
-                "peer connect sync failed node=\(nodeIDText) error=\(error.localizedDescription)"
-            )
-        }
+        await broadcastLocalNodeState(
+            reason: "peer-connect node=\(nodeIDText)"
+        )
     }
 
     func mergeDiscoveredNodeStatus(_ status: KeepTalkingNodeStatus) async throws
@@ -391,5 +399,52 @@ extension KeepTalkingClient {
             ),
             object: nil
         )
+    }
+
+    private func redactedBroadcastAction(from action: KeepTalkingAction)
+        -> KeepTalkingAction
+    {
+        let redacted = KeepTalkingAction()
+        redacted.id = action.id
+        redacted.$node.id = action.$node.id
+        redacted.descriptor = action.descriptor
+        redacted.payload = nil
+        redacted.remoteAuthorisable = action.remoteAuthorisable
+        redacted.blockingAuthorisation = action.blockingAuthorisation
+        redacted.createdAt = action.createdAt
+        redacted.lastUsed = action.lastUsed
+        return redacted
+    }
+
+    func broadcastLocalNodeState(reason: String) async {
+        do {
+            try await announceCurrentNode()
+            try await broadcastCurrentNodeStatus()
+            rtcClient.debug("node state broadcast complete reason=\(reason)")
+        } catch {
+            rtcClient.debug(
+                "node state broadcast failed reason=\(reason) error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    func scheduleDebouncedNodeStateBroadcast(reason: String) {
+        cancelDebouncedNodeStateBroadcast()
+        nodeStateBroadcastDebounceTask = Task { [weak self] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: Self.nodeBroadcastDebounceNanoseconds
+                )
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            await self.broadcastLocalNodeState(reason: "debounced \(reason)")
+        }
+    }
+
+    func cancelDebouncedNodeStateBroadcast() {
+        nodeStateBroadcastDebounceTask?.cancel()
+        nodeStateBroadcastDebounceTask = nil
     }
 }

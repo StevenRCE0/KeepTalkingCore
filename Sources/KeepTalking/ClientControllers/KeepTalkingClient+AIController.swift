@@ -372,14 +372,19 @@ extension KeepTalkingClient {
         ownerNodeID: UUID
     ) async throws -> [KeepTalkingActionToolDefinition] {
         guard let actionID = action.id else { return [] }
-        guard case .mcpBundle(let bundle) = action.payload else { return [] }
+        let bundle: KeepTalkingMCPBundle?
+        if case .mcpBundle(let decodedBundle) = action.payload {
+            bundle = decodedBundle
+        } else {
+            bundle = nil
+        }
 
-        let baseDescription =
-            action.descriptor?.action?.description
-            ?? bundle.indexDescription
-        let virtualToolName = bundle.name.trimmingCharacters(
+        let baseDescription = action.descriptor?.action?.description
+            ?? bundle?.indexDescription
+            ?? "Virtual action call routed by node ownership."
+        let virtualToolName = bundle?.name.trimmingCharacters(
             in: .whitespacesAndNewlines
-        )
+        ) ?? ""
         let selectedToolName: String? = virtualToolName.isEmpty
             ? nil
             : virtualToolName
