@@ -40,11 +40,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public typealias MessageHandler = @Sendable (KeepTalkingContextMessage) -> Void
     public typealias EnvelopeHandler = @Sendable (KeepTalkingP2PEnvelope) -> Void
     public typealias RawMessageHandler = @Sendable (String) -> Void
+    public typealias PeerConnectHandler = @Sendable (UUID) -> Void
     public typealias LogHandler = @Sendable (String) -> Void
 
     public var onMessage: MessageHandler?
     public var onEnvelope: EnvelopeHandler?
     public var onRawMessage: RawMessageHandler?
+    public var onPeerConnect: PeerConnectHandler?
     public var onLog: LogHandler? {
         didSet { rtcClient.onLog = onLog }
     }
@@ -109,6 +111,11 @@ public final class KeepTalkingClient: @unchecked Sendable {
                 try await self?.handleIncomingEnvelope(envelope)
             }
         }
+        rtcClient.onPeerConnect = { [weak self] nodeID in
+            Task {
+                await self?.handlePeerConnect(nodeID: nodeID)
+            }
+        }
     }
 
     public static func makeDefaultLocalStore() -> any KeepTalkingLocalStore {
@@ -147,5 +154,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     public func requestP2PTrial() {
         rtcClient.requestP2PTrial()
+    }
+
+    func debug(_ message: String) {
+        rtcClient.debug(message)
     }
 }

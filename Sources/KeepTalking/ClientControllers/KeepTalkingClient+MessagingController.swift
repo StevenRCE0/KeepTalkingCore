@@ -2,6 +2,7 @@ import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
+
     public func send(
         _ text: String,
         in context: KeepTalkingContext,
@@ -22,14 +23,6 @@ extension KeepTalkingClient {
         try await persistedContext.save(on: localStore.database)
 
         try rtcClient.sendEnvelope(.message(message))
-    }
-
-    public func announceCurrentNode() async throws {
-        let node = try await getCurrentNodeInstance()
-        try blocking {
-            try await node.save(on: self.localStore.database)
-        }
-        try rtcClient.sendEnvelope(.node(node))
     }
 
     public func sendConversationContext(
@@ -56,7 +49,8 @@ extension KeepTalkingClient {
 
         if case .node(let nodeID) = message.sender, nodeID != config.node {
             let senderNode: KeepTalkingNode
-            if let existingSenderNode = try await KeepTalkingNode
+            if let existingSenderNode =
+                try await KeepTalkingNode
                 .query(on: localStore.database)
                 .filter(\.$id, .equal, nodeID)
                 .first()
@@ -67,7 +61,8 @@ extension KeepTalkingClient {
                 try await senderNode.save(on: localStore.database)
             }
 
-            let relationExists = try await KeepTalkingNodeRelation
+            let relationExists =
+                try await KeepTalkingNodeRelation
                 .query(on: localStore.database)
                 .filter(\.$from.$id, .equal, try node.requireID())
                 .filter(\.$to.$id, .equal, nodeID)
@@ -92,8 +87,11 @@ extension KeepTalkingClient {
         switch envelope {
         case .message(let message):
             try await handleIncomingMessage(message)
+            rtcClient.debug("Message cast to envelope")
         case .node(let node):
             try await mergeDiscoveredNode(node)
+        case .nodeStatus(let status):
+            try await mergeDiscoveredNodeStatus(status)
         case .context(let context):
             mergeContext(context)
             if let latestMessage = context.messages.max(by: {
@@ -109,10 +107,8 @@ extension KeepTalkingClient {
             }
         case .actionCallResult(let result):
             _ = resolvePendingActionCall(result)
-        case .p2pSignal(let signalPayload):
-            try await markNodeDiscoveredBySignaling(signalPayload.from)
-        case .p2pPresence(let presence):
-            try await markNodeDiscoveredBySignaling(presence.node)
+        default:
+            break
         }
 
         onEnvelope?(envelope)
@@ -134,10 +130,11 @@ extension KeepTalkingClient {
             return context
         }
 
-        if let existing = try await KeepTalkingContext.query(on: localStore.database)
-            .filter(\.$id, .equal, contextID)
-            .first()
-        {
+        if let existing = try await KeepTalkingContext.query(
+            on: localStore.database
+        )
+        .filter(\.$id, .equal, contextID)
+        .first() {
             if let updatedAt = context.updatedAt {
                 if let existingUpdatedAt = existing.updatedAt {
                     existing.updatedAt = max(existingUpdatedAt, updatedAt)

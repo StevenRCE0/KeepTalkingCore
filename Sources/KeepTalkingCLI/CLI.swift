@@ -3,7 +3,7 @@ import KeepTalkingSDK
 
 let keepTalkingUsage = """
 Usage:
-  KeepTalking [--signal-url <ws-url>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--p2p-peer <peer-id>] [--p2p-timeout <seconds>] [--stun-url <stun-url>]
+  KeepTalking [--signal-url <ws-url>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--mcp <list|remove|add-http|add-stdio> ...] [--p2p-peer <peer-id>] [--p2p-timeout <seconds>] [--stun-url <stun-url>]
 
 Environment fallbacks:
   KT_SIGNAL_URL (default: ws://127.0.0.1:17000/ws)
@@ -17,6 +17,7 @@ Environment fallbacks:
 Examples:
   KeepTalking --context 11111111-2222-3333-4444-555555555555 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
   KeepTalking --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --message "hello from ion-sfu"
+  KeepTalking --mcp add-stdio foo --env OPENAI_API_KEY=sk-... --env MODEL=gpt-4.1 -- npx -y @modelcontextprotocol/server-github
 
 Interactive commands:
   /new         create and join a new context
@@ -26,13 +27,29 @@ Interactive commands:
                list known actions and current grants
   /actions grant <node-id> <action-id> [context|all]
                grant action permission to a trusted/owned node
-  /mcp add <name> <url> [description]
+  /mcp add-http <name> <url> [description]
                register a local MCP HTTP action
+  /mcp add-stdio <name> [--env KEY=VALUE ...] -- <command> [args...]
+               register a local MCP stdio action
+  /mcp list    list registered MCP actions
+  /mcp remove <action-id>
+               remove a local MCP action
   /ai <prompt> run AI tool planning and execution in active context
   /stats       print local send/receive counters
   /p2p         manually start a p2p upgrade trial
   /quit        exit
 """
+
+enum MCPManagementCommand {
+    case list
+    case remove(actionID: UUID)
+    case addHTTP(name: String, url: URL, description: String?)
+    case addSTDIO(
+        name: String,
+        command: [String],
+        environment: [String: String]
+    )
+}
 
 enum CliError: LocalizedError {
     case unknownFlag(String)
@@ -42,6 +59,10 @@ enum CliError: LocalizedError {
     case invalidNodeID(String)
     case invalidContextID(String)
     case invalidP2PTimeout(String)
+    case invalidMCPCommand(String)
+    case invalidMCPURL(String)
+    case invalidActionID(String)
+    case invalidMCPEnvironment(String)
 
     var errorDescription: String? {
         switch self {
@@ -59,6 +80,14 @@ enum CliError: LocalizedError {
             return "Invalid context UUID: \(raw)"
         case let .invalidP2PTimeout(raw):
             return "Invalid p2p timeout: \(raw)"
+        case let .invalidMCPCommand(raw):
+            return "Invalid --mcp command: \(raw)"
+        case let .invalidMCPURL(raw):
+            return "Invalid MCP URL: \(raw)"
+        case let .invalidActionID(raw):
+            return "Invalid action UUID: \(raw)"
+        case let .invalidMCPEnvironment(raw):
+            return "Invalid MCP env assignment: \(raw). Expected KEY=VALUE."
         }
     }
 }
@@ -67,6 +96,7 @@ struct CliConfig {
     let sdkConfig: KeepTalkingConfig
     let databaseURL: URL?
     let singleMessage: String?
+    let mcpCommand: MCPManagementCommand?
 
     static func parse() throws -> CliConfig {
         let env = ProcessInfo.processInfo.environment
@@ -79,6 +109,7 @@ struct CliConfig {
         var p2pTimeoutRaw = env["KT_P2P_TIMEOUT"] ?? "5"
         var stunURLs = [env["KT_STUN_URL"] ?? "stun:stun.l.google.com:19302"]
         var singleMessage: String?
+        var mcpCommand: MCPManagementCommand?
 
         let args = Array(CommandLine.arguments.dropFirst())
         var index = 0
@@ -120,6 +151,67 @@ struct CliConfig {
                 index += 1
                 guard index < args.count else { throw CliError.missingValue(arg) }
                 singleMessage = args[index]
+            case "--mcp":
+                index += 1
+                guard index < args.count else { throw CliError.missingValue(arg) }
+                let command = args[index]
+                switch command {
+                case "list":
+                    mcpCommand = .list
+                case "remove":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue("--mcp remove") }
+                    guard let actionID = UUID(uuidString: args[index]) else {
+                        throw CliError.invalidActionID(args[index])
+                    }
+                    mcpCommand = .remove(actionID: actionID)
+                case "add-http":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue("--mcp add-http <name>") }
+                    let name = args[index]
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue("--mcp add-http <url>") }
+                    let urlRaw = args[index]
+                    guard let url = URL(string: urlRaw) else {
+                        throw CliError.invalidMCPURL(urlRaw)
+                    }
+                    var descriptionParts: [String] = []
+                    while index + 1 < args.count, !args[index + 1].hasPrefix("--") {
+                        index += 1
+                        descriptionParts.append(args[index])
+                    }
+                    let description = descriptionParts.isEmpty
+                        ? nil
+                        : descriptionParts.joined(separator: " ")
+                    mcpCommand = .addHTTP(
+                        name: name,
+                        url: url,
+                        description: description
+                    )
+                case "add-stdio":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue("--mcp add-stdio <name>") }
+                    let name = args[index]
+                    let specStart = index + 1
+                    let specParts = specStart < args.count
+                        ? Array(args[specStart...])
+                        : []
+                    let parsed = try parseStdioSpec(specParts)
+                    let commandParts = parsed.command
+                    guard !commandParts.isEmpty else {
+                        throw CliError.missingValue(
+                            "--mcp add-stdio <name> [--env KEY=VALUE ...] -- <command> [args...]"
+                        )
+                    }
+                    mcpCommand = .addSTDIO(
+                        name: name,
+                        command: commandParts,
+                        environment: parsed.environment
+                    )
+                    index = args.count - 1
+                default:
+                    throw CliError.invalidMCPCommand(command)
+                }
             default:
                 throw CliError.unknownFlag(arg)
             }
@@ -151,7 +243,8 @@ struct CliConfig {
                 p2pStunServers: stunURLs
             ),
             databaseURL: databaseURL,
-            singleMessage: singleMessage
+            singleMessage: singleMessage,
+            mcpCommand: mcpCommand
         )
     }
 
@@ -167,5 +260,47 @@ struct CliConfig {
         }
         let expanded = NSString(string: raw).expandingTildeInPath
         return URL(fileURLWithPath: expanded)
+    }
+
+    private static func parseStdioSpec(
+        _ tokens: [String]
+    ) throws -> (command: [String], environment: [String: String]) {
+        guard !tokens.isEmpty else {
+            return ([], [:])
+        }
+
+        var environment: [String: String] = [:]
+        var command: [String] = []
+        var index = 0
+        var parsingEnv = true
+
+        while index < tokens.count {
+            let token = tokens[index]
+            if token == "--" {
+                parsingEnv = false
+                index += 1
+                continue
+            }
+
+            if parsingEnv && token == "--env" {
+                index += 1
+                guard index < tokens.count else {
+                    throw CliError.missingValue("--env KEY=VALUE")
+                }
+                let assignment = tokens[index]
+                guard let eq = assignment.firstIndex(of: "="), eq != assignment.startIndex else {
+                    throw CliError.invalidMCPEnvironment(assignment)
+                }
+                let key = String(assignment[..<eq])
+                let value = String(assignment[assignment.index(after: eq)...])
+                environment[key] = value
+            } else {
+                parsingEnv = false
+                command.append(token)
+            }
+            index += 1
+        }
+
+        return (command, environment)
     }
 }

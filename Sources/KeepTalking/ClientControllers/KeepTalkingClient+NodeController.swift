@@ -8,12 +8,14 @@ public enum KeepTalkingActionPermissionScope: Sendable {
 
 public struct KeepTalkingActionGrantSummary: Sendable {
     public let toNodeID: UUID
-    public let approvingContext: KeepTalkingNodeRelationActionRelation.ApprovingContext?
+    public let approvingContext:
+        KeepTalkingNodeRelationActionRelation.ApprovingContext?
 }
 
 public struct KeepTalkingActionSummary: Sendable {
     public let actionID: UUID
     public let ownerNodeID: UUID?
+    public let isMCP: Bool
     public let name: String
     public let description: String
     public let hostedLocally: Bool
@@ -22,197 +24,6 @@ public struct KeepTalkingActionSummary: Sendable {
 }
 
 extension KeepTalkingClient {
-    public func registerMCPAction(
-        bundle: KeepTalkingMCPBundle,
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool = true,
-        blockingAuthorisation: Bool = false
-    ) async throws -> KeepTalkingAction {
-        let node = try await getCurrentNodeInstance()
-
-        let action = KeepTalkingAction(
-            payload: .mcpBundle(bundle),
-            remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: blockingAuthorisation
-        )
-        action.$node.id = try node.requireID()
-        action.descriptor = descriptor ?? defaultDescriptor(for: bundle)
-
-        try await action.save(on: localStore.database)
-        try await mcpManager.registerMCPAction(action)
-        return action
-    }
-
-    public func modifyMCPAction(
-        actionID: UUID,
-        bundle: KeepTalkingMCPBundle? = nil,
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool? = nil,
-        blockingAuthorisation: Bool? = nil
-    ) async throws -> KeepTalkingAction {
-        guard
-            let action = try await KeepTalkingAction.query(on: localStore.database)
-                .filter(\.$id, .equal, actionID)
-                .filter(\.$node.$id, .equal, config.node)
-                .first()
-        else {
-            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
-        }
-
-        if let bundle {
-            action.payload = .mcpBundle(bundle)
-        }
-        if let descriptor {
-            action.descriptor = descriptor
-        } else if action.descriptor == nil,
-                  case .mcpBundle(let existingBundle) = action.payload
-        {
-            action.descriptor = defaultDescriptor(for: existingBundle)
-        }
-        if let remoteAuthorisable {
-            action.remoteAuthorisable = remoteAuthorisable
-        }
-        if let blockingAuthorisation {
-            action.blockingAuthorisation = blockingAuthorisation
-        }
-
-        try await action.save(on: localStore.database)
-        try await mcpManager.refreshMCPAction(action)
-        return action
-    }
-
-    public func removeMCPAction(actionID: UUID) async throws {
-        guard
-            let action = try await KeepTalkingAction.query(on: localStore.database)
-                .filter(\.$id, .equal, actionID)
-                .filter(\.$node.$id, .equal, config.node)
-                .first()
-        else {
-            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
-        }
-
-        let relations = try await KeepTalkingNodeRelationActionRelation
-            .query(on: localStore.database)
-            .filter(\.$action.$id, .equal, actionID)
-            .all()
-        for relation in relations {
-            try await relation.delete(on: localStore.database)
-        }
-
-        try await action.delete(on: localStore.database)
-        await mcpManager.unregisterAction(actionID: actionID)
-    }
-
-    public func listAvailableActions() async throws -> [KeepTalkingActionSummary] {
-        let actions = try await KeepTalkingAction.query(on: localStore.database).all()
-        var summaries: [KeepTalkingActionSummary] = []
-
-        for action in actions {
-            guard let actionID = action.id else { continue }
-
-            let grants = try await KeepTalkingNodeRelationActionRelation
-                .query(on: localStore.database)
-                .filter(\.$action.$id, .equal, actionID)
-                .with(\.$relation)
-                .all()
-                .compactMap { link -> KeepTalkingActionGrantSummary? in
-                    let relation = link.relation
-                    guard relation.$from.id == config.node else { return nil }
-                    return KeepTalkingActionGrantSummary(
-                        toNodeID: relation.$to.id,
-                        approvingContext: link.approvingContext
-                    )
-                }
-
-            let name: String
-            let description: String
-            if case .mcpBundle(let bundle) = action.payload {
-                name = bundle.name
-                description =
-                    action.descriptor?.action?.description
-                    ?? bundle.indexDescription
-            } else {
-                name = "unknown"
-                description = action.descriptor?.action?.description ?? ""
-            }
-
-            summaries.append(
-                KeepTalkingActionSummary(
-                    actionID: actionID,
-                    ownerNodeID: action.$node.id,
-                    name: name,
-                    description: description,
-                    hostedLocally: action.$node.id == config.node,
-                    remoteAuthorisable: action.remoteAuthorisable ?? false,
-                    grants: grants
-                )
-            )
-        }
-
-        return summaries.sorted { lhs, rhs in
-            if lhs.hostedLocally != rhs.hostedLocally {
-                return lhs.hostedLocally && !rhs.hostedLocally
-            }
-            if lhs.name != rhs.name {
-                return lhs.name < rhs.name
-            }
-            return lhs.actionID.uuidString < rhs.actionID.uuidString
-        }
-    }
-
-    public func grantActionPermission(
-        actionID: UUID,
-        toNodeID: UUID,
-        scope: KeepTalkingActionPermissionScope
-    ) async throws {
-        guard
-            let action = try await KeepTalkingAction.query(on: localStore.database)
-                .filter(\.$id, .equal, actionID)
-                .filter(\.$node.$id, .equal, config.node)
-                .first()
-        else {
-            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
-        }
-
-        guard
-            let relation = try await KeepTalkingNodeRelation
-                .query(on: localStore.database)
-                .filter(\.$from.$id, .equal, config.node)
-                .filter(\.$to.$id, .equal, toNodeID)
-                .filter(\.$relationship ~~ [.owner, .trusted])
-                .first()
-        else {
-            throw KeepTalkingClientError.relationNotTrustedOrOwned(toNodeID)
-        }
-        guard let relationID = relation.id else {
-            throw KeepTalkingClientError.relationNotTrustedOrOwned(toNodeID)
-        }
-
-        let approvingContext: KeepTalkingNodeRelationActionRelation.ApprovingContext =
-            switch scope {
-            case .all:
-                .all
-            case .context(let context):
-                .context(context)
-            }
-
-        if let existing = try await KeepTalkingNodeRelationActionRelation
-            .query(on: localStore.database)
-            .filter(\.$relation.$id, .equal, relationID)
-            .filter(\.$action.$id, .equal, actionID)
-            .first()
-        {
-            existing.approvingContext = approvingContext
-            try await existing.save(on: localStore.database)
-        } else {
-            let link = try KeepTalkingNodeRelationActionRelation(
-                relation: relation,
-                action: action,
-                approvingContext: approvingContext
-            )
-            try await link.save(on: localStore.database)
-        }
-    }
 
     public func registerCurrentNodeID() async throws {
         guard let kvService else {
@@ -235,17 +46,19 @@ extension KeepTalkingClient {
         let localNodeID = try localNode.requireID()
 
         let remoteNode: KeepTalkingNode
-        if let existing = try await KeepTalkingNode.query(on: localStore.database)
-            .filter(\.$id, .equal, targetNodeID)
-            .first()
-        {
+        if let existing = try await KeepTalkingNode.query(
+            on: localStore.database
+        )
+        .filter(\.$id, .equal, targetNodeID)
+        .first() {
             remoteNode = existing
         } else {
             remoteNode = KeepTalkingNode(id: targetNodeID)
             try await remoteNode.save(on: localStore.database)
         }
 
-        if let relation = try await KeepTalkingNodeRelation
+        if let relation =
+            try await KeepTalkingNodeRelation
             .query(on: localStore.database)
             .filter(\.$from.$id, .equal, localNodeID)
             .filter(\.$to.$id, .equal, targetNodeID)
@@ -262,6 +75,224 @@ extension KeepTalkingClient {
             relationship: .trusted
         )
         try await relation.save(on: localStore.database)
+    }
+
+    func currentNodeStatus(contextID: UUID? = nil) async throws
+        -> KeepTalkingNodeStatus
+    {
+        let node = try await getCurrentNodeInstance()
+        let activeContextID = contextID ?? config.contextID
+
+        let localActions = try await KeepTalkingAction.query(
+            on: localStore.database
+        )
+        .filter(\.$node.$id, .equal, config.node)
+        .all()
+        let sortedLocalActions = deduplicatedAndSortedActions(localActions)
+
+        let relations = try await KeepTalkingNodeRelation.query(
+            on: localStore.database
+        )
+        .filter(\.$from.$id, .equal, config.node)
+        .filter(\.$relationship ~~ [.owner, .trusted])
+        .all()
+
+        var relationStatuses: [KeepTalkingNodeRelationStatus] = []
+        relationStatuses.reserveCapacity(relations.count)
+
+        for relation in relations {
+            let relationActions: [KeepTalkingAction]
+            switch relation.relationship {
+            case .owner:
+                relationActions = sortedLocalActions
+            case .trusted:
+                guard let relationID = relation.id else {
+                    relationActions = []
+                    break
+                }
+                let links =
+                    try await KeepTalkingNodeRelationActionRelation
+                    .query(on: localStore.database)
+                    .filter(\.$relation.$id, .equal, relationID)
+                    .with(\.$action)
+                    .all()
+                relationActions = deduplicatedAndSortedActions(
+                    links.compactMap { link in
+                        guard
+                            approvingContextAllows(
+                                link.approvingContext,
+                                contextID: activeContextID
+                            )
+                        else {
+                            return nil
+                        }
+                        return link.action
+                    }
+                )
+            case .pending:
+                continue
+            }
+
+            relationStatuses.append(
+                KeepTalkingNodeRelationStatus(
+                    toNodeID: relation.$to.id,
+                    relationship: relation.relationship,
+                    actions: relationActions
+                )
+            )
+        }
+
+        return KeepTalkingNodeStatus(
+            node: node,
+            contextID: activeContextID,
+            nodeRelations: relationStatuses.sorted {
+                $0.toNodeID.uuidString < $1.toNodeID.uuidString
+            }
+        )
+    }
+
+    public func announceCurrentNode() async throws {
+        let node = try await getCurrentNodeInstance()
+        try blocking {
+            try await node.save(on: self.localStore.database)
+        }
+        try rtcClient.sendEnvelope(.node(node))
+    }
+
+    public func broadcastCurrentNodeStatus(in contextID: UUID? = nil)
+        async throws
+    {
+        let status = try await currentNodeStatus(contextID: contextID)
+        rtcClient.debug(
+            "[broadcastCurrentNodeStatus] " + String(decoding: try! JSONEncoder().encode(status), as: UTF8.self)
+        )
+        try rtcClient.sendEnvelope(.nodeStatus(status))
+    }
+
+    func handlePeerConnect(nodeID: UUID) async {
+        guard nodeID != config.node else { return }
+        onPeerConnect?(nodeID)
+        let nodeIDText = nodeID.uuidString.lowercased()
+        rtcClient.debug("peer connected node=\(nodeIDText)")
+
+        do {
+            try await announceCurrentNode()
+            try await broadcastCurrentNodeStatus()
+            rtcClient.debug(
+                "peer connect sync complete node=\(nodeIDText)"
+            )
+        } catch {
+            rtcClient.debug(
+                "peer connect sync failed node=\(nodeIDText) error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    func mergeDiscoveredNodeStatus(_ status: KeepTalkingNodeStatus) async throws
+    {
+        try await mergeDiscoveredNode(status.node)
+
+        let advertisedActions = deduplicatedAndSortedActions(
+            status.nodeRelations.flatMap(\.actions)
+        )
+
+        try await mergeNodeActions(advertisedActions)
+        try await mergeIncomingActionAuthorisations(
+            from: status,
+            advertisedActions: advertisedActions
+        )
+    }
+
+    private func mergeIncomingActionAuthorisations(
+        from status: KeepTalkingNodeStatus,
+        advertisedActions: [KeepTalkingAction]
+    ) async throws {
+        guard let remoteNodeID = status.node.id, remoteNodeID != config.node else {
+            return
+        }
+
+        let grantsForLocal = status.nodeRelations.filter {
+            $0.toNodeID == config.node
+                && ($0.relationship == .owner || $0.relationship == .trusted)
+        }
+        guard !grantsForLocal.isEmpty else {
+            return
+        }
+
+        let localNode = try await getCurrentNodeInstance()
+        let remoteNode: KeepTalkingNode
+        if let existingRemote = try await KeepTalkingNode.query(
+            on: localStore.database
+        )
+        .filter(\.$id, .equal, remoteNodeID)
+        .first() {
+            remoteNode = existingRemote
+        } else {
+            let created = KeepTalkingNode(id: remoteNodeID)
+            try await created.save(on: localStore.database)
+            remoteNode = created
+        }
+
+        let relation: KeepTalkingNodeRelation
+        if let existingRelation = try await KeepTalkingNodeRelation.query(
+            on: localStore.database
+        )
+        .filter(\.$from.$id, .equal, config.node)
+        .filter(\.$to.$id, .equal, remoteNodeID)
+        .first() {
+            relation = existingRelation
+        } else {
+            let created = try KeepTalkingNodeRelation(
+                from: localNode,
+                to: remoteNode,
+                relationship: .pending
+            )
+            try await created.save(on: localStore.database)
+            relation = created
+        }
+
+        let advertisedByID: [UUID: KeepTalkingAction] = Dictionary(
+            uniqueKeysWithValues: advertisedActions.compactMap { action in
+                guard let actionID = action.id else { return nil }
+                return (actionID, action)
+            }
+        )
+        let grantedActionIDs = Set(
+            grantsForLocal.flatMap(\.actions).compactMap(\.id)
+        )
+        if grantedActionIDs.isEmpty {
+            return
+        }
+
+        let approvingContext =
+            KeepTalkingNodeRelationActionRelation.ApprovingContext.context(
+                KeepTalkingContext(id: status.contextID)
+            )
+
+        guard let relationID = relation.id else { return }
+        for actionID in grantedActionIDs {
+            guard let action = advertisedByID[actionID] else {
+                continue
+            }
+
+            if let existingLink =
+                try await KeepTalkingNodeRelationActionRelation
+                .query(on: localStore.database)
+                .filter(\.$relation.$id, .equal, relationID)
+                .filter(\.$action.$id, .equal, actionID)
+                .first()
+            {
+                existingLink.approvingContext = approvingContext
+                try await existingLink.save(on: localStore.database)
+            } else {
+                let link = try KeepTalkingNodeRelationActionRelation(
+                    relation: relation,
+                    action: action,
+                    approvingContext: approvingContext
+                )
+                try await link.save(on: localStore.database)
+            }
+        }
     }
 
     func getCurrentNodeInstance() async throws -> KeepTalkingNode {
@@ -300,11 +331,13 @@ extension KeepTalkingClient {
             return
         }
 
-        if let existing = try await KeepTalkingNode.query(on: localStore.database)
-            .filter(\.$id, .equal, incomingNodeID)
-            .first()
-        {
+        if let existing = try await KeepTalkingNode.query(
+            on: localStore.database
+        )
+        .filter(\.$id, .equal, incomingNodeID)
+        .first() {
             existing.lastSeenAt = max(existing.lastSeenAt, incoming.lastSeenAt)
+            existing.discoveredDuringLogon = logon
             try await existing.save(on: localStore.database)
             return
         }
@@ -312,12 +345,12 @@ extension KeepTalkingClient {
         let node = KeepTalkingNode(
             id: incomingNodeID,
             lastSeenAt: incoming.lastSeenAt,
-            discoveredDuringLogon: nil
+            discoveredDuringLogon: logon
         )
         try await node.save(on: localStore.database)
     }
 
-    func markNodeDiscoveredBySignaling(_ nodeID: UUID) async throws {
+    func markNodeDiscovered(_ nodeID: UUID) async throws {
         guard nodeID != config.node else {
             return
         }
@@ -326,10 +359,11 @@ extension KeepTalkingClient {
         }
 
         let node: KeepTalkingNode
-        if let existing = try await KeepTalkingNode.query(on: localStore.database)
-            .filter(\.$id, .equal, nodeID)
-            .first()
-        {
+        if let existing = try await KeepTalkingNode.query(
+            on: localStore.database
+        )
+        .filter(\.$id, .equal, nodeID)
+        .first() {
             node = existing
         } else {
             node = KeepTalkingNode(id: nodeID)
@@ -347,7 +381,7 @@ extension KeepTalkingClient {
             .count() > 0
     }
 
-    private func defaultDescriptor(
+    func defaultDescriptor(
         for bundle: KeepTalkingMCPBundle
     ) -> KeepTalkingActionDescriptor {
         KeepTalkingActionDescriptor(

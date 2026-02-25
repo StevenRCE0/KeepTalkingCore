@@ -2,10 +2,9 @@ import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
-    func handleIncomingActionCallRequest(
+    func executeActionCallRequest(
         _ request: KeepTalkingActionCallRequest
-    ) async throws {
-        let result: KeepTalkingActionCallResult
+    ) async -> KeepTalkingActionCallResult {
         do {
             let action = try await resolveLocalActionForExecution(
                 actionID: request.call.action
@@ -28,7 +27,8 @@ extension KeepTalkingClient {
                 action: action,
                 call: request.call
             )
-            result = KeepTalkingActionCallResult(
+
+            return KeepTalkingActionCallResult(
                 requestID: request.id,
                 contextID: request.contextID,
                 callerNodeID: request.callerNodeID,
@@ -39,7 +39,7 @@ extension KeepTalkingClient {
                 errorMessage: nil
             )
         } catch {
-            result = KeepTalkingActionCallResult(
+            return KeepTalkingActionCallResult(
                 requestID: request.id,
                 contextID: request.contextID,
                 callerNodeID: request.callerNodeID,
@@ -50,7 +50,12 @@ extension KeepTalkingClient {
                 errorMessage: error.localizedDescription
             )
         }
+    }
 
+    func handleIncomingActionCallRequest(
+        _ request: KeepTalkingActionCallRequest
+    ) async throws {
+        let result = await executeActionCallRequest(request)
         try rtcClient.sendEnvelope(.actionCallResult(result))
     }
 
@@ -59,27 +64,17 @@ extension KeepTalkingClient {
         call: KeepTalkingActionCall,
         contextID: UUID
     ) async throws -> KeepTalkingActionCallResult {
-        if actionOwner == config.node {
-            let action = try await resolveLocalActionForExecution(actionID: call.action)
-            let localResult = try await mcpManager.callAction(action: action, call: call)
-            return KeepTalkingActionCallResult(
-                requestID: UUID(),
-                contextID: contextID,
-                callerNodeID: config.node,
-                targetNodeID: config.node,
-                actionID: call.action,
-                content: localResult.content,
-                isError: localResult.isError ?? false,
-                errorMessage: nil
-            )
-        }
-
         let request = KeepTalkingActionCallRequest(
             contextID: contextID,
             callerNodeID: config.node,
             targetNodeID: actionOwner,
             call: call
         )
+
+        if actionOwner == config.node {
+            return await executeActionCallRequest(request)
+        }
+
         try rtcClient.sendEnvelope(.actionCallRequest(request))
 
         return try await waitForActionCallResult(
@@ -99,7 +94,11 @@ extension KeepTalkingClient {
                     throw KeepTalkingClientError.actionCallTimeout(requestID)
                 }
                 return try await withCheckedThrowingContinuation {
-                    (continuation: CheckedContinuation<KeepTalkingActionCallResult, Error>) in
+                    (
+                        continuation: CheckedContinuation<
+                            KeepTalkingActionCallResult, Error
+                        >
+                    ) in
                     self.actionCallQueue.sync {
                         self.pendingActionCallResults[requestID] = continuation
                     }
@@ -130,9 +129,11 @@ extension KeepTalkingClient {
         -> Bool
     {
         actionCallQueue.sync {
-            guard let continuation = pendingActionCallResults.removeValue(
-                forKey: result.requestID
-            ) else {
+            guard
+                let continuation = pendingActionCallResults.removeValue(
+                    forKey: result.requestID
+                )
+            else {
                 return false
             }
             continuation.resume(returning: result)
@@ -142,9 +143,11 @@ extension KeepTalkingClient {
 
     func failPendingActionCall(requestID: UUID, error: Error) {
         actionCallQueue.sync {
-            guard let continuation = pendingActionCallResults.removeValue(
-                forKey: requestID
-            ) else {
+            guard
+                let continuation = pendingActionCallResults.removeValue(
+                    forKey: requestID
+                )
+            else {
                 return
             }
             continuation.resume(throwing: error)
@@ -165,10 +168,12 @@ extension KeepTalkingClient {
         -> KeepTalkingAction
     {
         guard
-            let action = try await KeepTalkingAction.query(on: localStore.database)
-                .filter(\.$id, .equal, actionID)
-                .filter(\.$node.$id, .equal, config.node)
-                .first()
+            let action = try await KeepTalkingAction.query(
+                on: localStore.database
+            )
+            .filter(\.$id, .equal, actionID)
+            .filter(\.$node.$id, .equal, config.node)
+            .first()
         else {
             throw KeepTalkingClientError.actionNotHostedLocally(actionID)
         }
@@ -184,11 +189,13 @@ extension KeepTalkingClient {
             return true
         }
 
-        let relations = try await KeepTalkingNodeRelation.query(on: localStore.database)
-            .filter(\.$from.$id, .equal, config.node)
-            .filter(\.$to.$id, .equal, callerNodeID)
-            .filter(\.$relationship ~~ [.owner, .trusted])
-            .all()
+        let relations = try await KeepTalkingNodeRelation.query(
+            on: localStore.database
+        )
+        .filter(\.$from.$id, .equal, config.node)
+        .filter(\.$to.$id, .equal, callerNodeID)
+        .filter(\.$relationship ~~ [.owner, .trusted])
+        .all()
 
         guard !relations.isEmpty else {
             return false
@@ -196,13 +203,19 @@ extension KeepTalkingClient {
 
         for relation in relations {
             guard let relationID = relation.id else { continue }
-            let links = try await KeepTalkingNodeRelationActionRelation
+            let links =
+                try await KeepTalkingNodeRelationActionRelation
                 .query(on: localStore.database)
                 .filter(\.$relation.$id, .equal, relationID)
                 .filter(\.$action.$id, .equal, actionID)
                 .all()
 
-            if links.contains(where: { approvingContextAllows($0.approvingContext, contextID: contextID) }) {
+            if links.contains(where: {
+                approvingContextAllows(
+                    $0.approvingContext,
+                    contextID: contextID
+                )
+            }) {
                 return true
             }
         }
@@ -211,7 +224,8 @@ extension KeepTalkingClient {
     }
 
     func approvingContextAllows(
-        _ approvingContext: KeepTalkingNodeRelationActionRelation.ApprovingContext?,
+        _ approvingContext: KeepTalkingNodeRelationActionRelation
+            .ApprovingContext?,
         contextID: UUID
     ) -> Bool {
         switch approvingContext {

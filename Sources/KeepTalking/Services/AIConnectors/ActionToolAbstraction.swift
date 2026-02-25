@@ -5,6 +5,7 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
     public let functionName: String
     public let actionID: UUID
     public let ownerNodeID: UUID
+    public let mcpToolName: String?
     public let description: String
     public let parameters: JSONSchema
 
@@ -12,12 +13,14 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         functionName: String,
         actionID: UUID,
         ownerNodeID: UUID,
+        mcpToolName: String? = nil,
         description: String,
         parameters: JSONSchema
     ) {
         self.functionName = functionName
         self.actionID = actionID
         self.ownerNodeID = ownerNodeID
+        self.mcpToolName = mcpToolName
         self.description = description
         self.parameters = parameters
     }
@@ -35,7 +38,8 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
 
     public static func normalizedFunctionName(
         ownerNodeID: UUID,
-        actionID: UUID
+        actionID: UUID,
+        mcpToolName: String? = nil
     ) -> String {
         let owner = ownerNodeID.uuidString
             .replacingOccurrences(of: "-", with: "")
@@ -43,13 +47,49 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         let action = actionID.uuidString
             .replacingOccurrences(of: "-", with: "")
             .lowercased()
-        // Must stay <= 64 chars for OpenAI function names.
-        return "kt_\(owner.prefix(24))_\(action.prefix(24))"
+        var normalized = "kt_\(owner.prefix(24))_\(action.prefix(24))"
+
+        if let mcpToolName {
+            let cleaned = mcpToolName
+                .lowercased()
+                .map { $0.isLetter || $0.isNumber ? $0 : "_" }
+            let prefix = String(cleaned.prefix(6))
+                .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+            let checksum = String(
+                format: "%04x",
+                mcpToolName.utf8.reduce(UInt32(2166136261)) { partial, byte in
+                    (partial ^ UInt32(byte)) &* 16777619
+                } & 0xffff
+            )
+            let token = prefix.isEmpty ? checksum : "\(prefix)_\(checksum)"
+            if !token.isEmpty {
+                // Keep OpenAI function name <= 64 chars.
+                normalized += "_\(token)"
+            }
+        }
+
+        return normalized
     }
 
     public static var permissiveObjectParameters: JSONSchema {
         JSONSchema(
             .type(.object),
+            .properties([
+                "tool": JSONSchema(
+                    .type(.string),
+                    .description(
+                        "Target MCP tool name on the server. If omitted, defaults to action name."
+                    )
+                ),
+                "arguments": JSONSchema(
+                    .type(.object),
+                    .description(
+                        "Arguments object passed to the MCP tool."
+                    ),
+                    .properties([:]),
+                    .additionalProperties(.boolean(true))
+                )
+            ]),
             .additionalProperties(.boolean(true))
         )
     }
@@ -57,13 +97,9 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
 
 public struct KeepTalkingActionToolCatalog: Sendable {
     public let definitions: [KeepTalkingActionToolDefinition]
-    private let byFunctionName: [String: KeepTalkingActionToolDefinition]
 
     public init(definitions: [KeepTalkingActionToolDefinition]) {
         self.definitions = definitions
-        self.byFunctionName = definitions.reduce(into: [:]) { partial, item in
-            partial[item.functionName] = item
-        }
     }
 
     public var openAITools: [ChatQuery.ChatCompletionToolParam] {
@@ -73,6 +109,6 @@ public struct KeepTalkingActionToolCatalog: Sendable {
     public func definition(functionName: String)
         -> KeepTalkingActionToolDefinition?
     {
-        byFunctionName[functionName]
+        definitions.first { $0.functionName == functionName }
     }
 }

@@ -4,6 +4,7 @@ protocol KeepTalkingTransportClient: AnyObject {
     var onMessage: (@Sendable (KeepTalkingContextMessage) -> Void)? { get set }
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)? { get set }
     var onRawMessage: (@Sendable (String) -> Void)? { get set }
+    var onPeerConnect: (@Sendable (UUID) -> Void)? { get set }
     var onLog: (@Sendable (String) -> Void)? { get set }
 
     func start() async throws
@@ -11,4 +12,5 @@ protocol KeepTalkingTransportClient: AnyObject {
     func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws
     func runtimeStats() -> KeepTalkingRuntimeStats
     func requestP2PTrial()
+    func debug(_ message: String)
 }

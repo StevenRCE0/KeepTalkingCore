@@ -142,10 +142,43 @@ public struct KeepTalkingP2PPresencePayload: Codable, Sendable {
     }
 }
 
+public struct KeepTalkingNodeRelationStatus: Codable, Sendable {
+    public let toNodeID: UUID
+    public let relationship: KeepTalkingRelationship
+    public let actions: [KeepTalkingAction]
+
+    public init(
+        toNodeID: UUID,
+        relationship: KeepTalkingRelationship,
+        actions: [KeepTalkingAction]
+    ) {
+        self.toNodeID = toNodeID
+        self.relationship = relationship
+        self.actions = actions
+    }
+}
+
+public struct KeepTalkingNodeStatus: Codable, Sendable {
+    public let node: KeepTalkingNode
+    public let contextID: UUID
+    public let nodeRelations: [KeepTalkingNodeRelationStatus]
+
+    public init(
+        node: KeepTalkingNode,
+        contextID: UUID,
+        nodeRelations: [KeepTalkingNodeRelationStatus]
+    ) {
+        self.node = node
+        self.contextID = contextID
+        self.nodeRelations = nodeRelations
+    }
+}
+
 public enum KeepTalkingP2PEnvelope: Codable, Sendable {
     case message(KeepTalkingContextMessage)
     case context(KeepTalkingContext)
     case node(KeepTalkingNode)
+    case nodeStatus(KeepTalkingNodeStatus)
     case actionCallRequest(KeepTalkingActionCallRequest)
     case actionCallResult(KeepTalkingActionCallResult)
     case p2pSignal(KeepTalkingP2PSignalPayload)

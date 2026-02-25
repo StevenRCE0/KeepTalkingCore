@@ -13,6 +13,9 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     var onRawMessage: (@Sendable (String) -> Void)? {
         didSet { bindCallbacks() }
     }
+    var onPeerConnect: (@Sendable (UUID) -> Void)? {
+        didSet { bindCallbacks() }
+    }
     var onLog: (@Sendable (String) -> Void)? {
         didSet { bindCallbacks() }
     }
@@ -25,6 +28,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
 
     private let stateQueue = DispatchQueue(label: "KeepTalking.hybrid.state")
     private var discoveredPeers = Set<UUID>()
+    private var notifiedConnectedPeers = Set<UUID>()
     private var activeTransport: KeepTalkingTransportClient
     private var activeRoute = "sfu"
     private var isP2PTrialRunning = false
@@ -39,12 +43,20 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         bindCallbacks()
     }
 
-    private func debug(_ message: String) {
+    func debug(_ message: String) {
         let ts = ISO8601DateFormatter().string(from: Date())
         onLog?("[\(ts)] [hybrid] \(message)")
     }
 
+    func logAsHybridClient(_ message: String) {
+        debug(message)
+    }
+
     func start() async throws {
+        stateQueue.sync {
+            discoveredPeers.removeAll()
+            notifiedConnectedPeers.removeAll()
+        }
         try await sfuClient.start()
         setActiveTransport(sfuClient, route: "sfu")
         rememberPeer(config.node)
@@ -58,6 +70,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         p2pUpgradeTask = nil
         stateQueue.sync {
             isP2PTrialRunning = false
+            notifiedConnectedPeers.removeAll()
         }
         p2pClient?.stop()
         sfuClient.stop()
@@ -96,7 +109,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     }
 
     func requestP2PTrial() {
-        beginP2PTrial(trigger: "manual")
+        beginP2PTrial(trigger: "manual", allowWhileOnP2P: true)
     }
 
     private func setActiveTransport(
@@ -121,7 +134,10 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         }
     }
 
-    private func beginP2PTrial(trigger: String) {
+    private func beginP2PTrial(
+        trigger: String,
+        allowWhileOnP2P: Bool = false
+    ) {
         guard config.p2pAttemptTimeoutSeconds > 0 else {
             debug(
                 "p2p trial skipped trigger=\(trigger) timeout=\(config.p2pAttemptTimeoutSeconds)"
@@ -132,13 +148,16 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         let state = stateQueue.sync { () -> (route: String, running: Bool) in
             (activeRoute, isP2PTrialRunning)
         }
-        guard state.route != "p2p" else {
+        guard state.route != "p2p" || allowWhileOnP2P else {
             debug("p2p trial skipped trigger=\(trigger) reason=already-on-p2p")
             return
         }
-        guard !state.running else {
+        guard !state.running || allowWhileOnP2P else {
             debug("p2p trial skipped trigger=\(trigger) reason=trial-in-progress")
             return
+        }
+        if state.route == "p2p" {
+            fallbackToSFU(reason: "forcing p2p retrial trigger=\(trigger)")
         }
 
         p2pUpgradeTask?.cancel()
@@ -224,6 +243,19 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         }
     }
 
+    private func reportPeerConnected(_ nodeID: UUID, source: String) {
+        guard nodeID != config.node else { return }
+        let inserted = stateQueue.sync { () -> Bool in
+            discoveredPeers.insert(nodeID)
+            return notifiedConnectedPeers.insert(nodeID).inserted
+        }
+        guard inserted else { return }
+        debug(
+            "peer reachable source=\(source) node=\(nodeID.uuidString.lowercased())"
+        )
+        onPeerConnect?(nodeID)
+    }
+
     private func peersSnapshot() -> [UUID] {
         stateQueue.sync {
             Array(discoveredPeers)
@@ -299,6 +331,9 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             }
         }
         sfuClient.onRawMessage = forwardRaw
+        sfuClient.onPeerConnect = { [weak self] nodeID in
+            self?.reportPeerConnected(nodeID, source: "sfu")
+        }
         sfuClient.onLog = logger
 
         p2pClient?.onMessage = forwardMessage
@@ -306,6 +341,9 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             self?.onEnvelope?(envelope)
         }
         p2pClient?.onRawMessage = forwardRaw
+        p2pClient?.onPeerConnect = { [weak self] nodeID in
+            self?.reportPeerConnected(nodeID, source: "p2p")
+        }
         p2pClient?.onTransportDegraded = { [weak self] reason in
             self?.fallbackToSFU(reason: reason)
         }

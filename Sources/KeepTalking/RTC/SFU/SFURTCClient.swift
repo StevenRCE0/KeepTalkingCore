@@ -40,6 +40,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     var onMessage: (@Sendable (KeepTalkingContextMessage) -> Void)?
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)?
     var onRawMessage: (@Sendable (String) -> Void)?
+    var onPeerConnect: (@Sendable (UUID) -> Void)?
     var onLog: (@Sendable (String) -> Void)? {
         didSet {
             signal.onLog = onLog
@@ -61,6 +62,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     private var pendingCandidates: [Int: [LKRTCIceCandidate]] = [:]
     private var sentMessageCount = 0
     private var recvMessageCount = 0
+    private var notifiedConnectedPeers = Set<UUID>()
 
     init(config: KeepTalkingConfig) {
         self.config = config
@@ -68,12 +70,13 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         super.init()
     }
 
-    private func debug(_ message: String) {
+    func debug(_ message: String) {
         let ts = ISO8601DateFormatter().string(from: Date())
         onLog?("[\(ts)] [rtc] \(message)")
     }
 
     func start() async throws {
+        notifiedConnectedPeers.removeAll()
         debug(
             "starting session=\(config.scopedSessionID) id=\(config.node.uuidString) context=\(config.contextID.uuidString.lowercased()) chat=\(config.chatChannelLabel) action=\(config.actionCallChannelLabel)"
         )
@@ -159,7 +162,9 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
                 configuration: actionCallChannelConfig
             )
         else {
-            throw RTCError.dataChannelCreateFailed(config.actionCallChannelLabel)
+            throw RTCError.dataChannelCreateFailed(
+                config.actionCallChannelLabel
+            )
         }
 
         actionCallChannel.delegate = self
@@ -222,11 +227,14 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         inboundSignalingChannel = nil
         retainedChannels.removeAll()
         pendingCandidates.removeAll()
+        notifiedConnectedPeers.removeAll()
         signal.close()
     }
 
     func requestP2PTrial() {
-        debug("ignoring manual p2p trial: sfu transport has no direct p2p upgrade path")
+        debug(
+            "ignoring manual p2p trial: sfu transport has no direct p2p upgrade path"
+        )
     }
 
     func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws {
@@ -283,7 +291,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
     private func preferredActionCallChannel() -> LKRTCDataChannel? {
         if let inboundActionCallChannel,
-           inboundActionCallChannel.readyState == .open
+            inboundActionCallChannel.readyState == .open
         {
             return inboundActionCallChannel
         }
@@ -291,7 +299,8 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     }
 
     private func preferredSignalingChannel() -> LKRTCDataChannel? {
-        if let inboundSignalingChannel, inboundSignalingChannel.readyState == .open
+        if let inboundSignalingChannel,
+            inboundSignalingChannel.readyState == .open
         {
             return inboundSignalingChannel
         }
@@ -304,11 +313,11 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
     private func route(for envelope: KeepTalkingP2PEnvelope) -> EnvelopeRoute {
         switch envelope {
-        case .message:
+            case .message, .node, .nodeStatus, .context:
             return .chat
         case .p2pSignal, .p2pPresence:
             return .signaling
-        default:
+        case .actionCallRequest, .actionCallResult:
             return .actionCall
         }
     }
@@ -583,6 +592,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             KeepTalkingP2PEnvelope.self,
             from: buffer.data
         ) {
+            reportConnectedPeers(from: envelope)
             switch envelope {
             case .message(let message):
                 if dataChannel.label == config.chatChannelLabel {
@@ -596,7 +606,9 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
             default:
                 onEnvelope?(envelope)
-                debug("delivered envelope label=\(dataChannel.label) \(envelope)")
+                debug(
+                    "delivered envelope label=\(dataChannel.label) \(envelope)"
+                )
             }
             return
         }
@@ -608,5 +620,46 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             debug("chat decode failed; non-utf8 bytes=\(buffer.data.count)")
             onRawMessage?("<\(buffer.data.count) bytes>")
         }
+    }
+
+    private func reportConnectedPeers(from envelope: KeepTalkingP2PEnvelope) {
+        switch envelope {
+        case .message(let message):
+            if case .node(let nodeID) = message.sender {
+                reportPeerConnected(nodeID)
+            }
+        case .context(let context):
+            for message in context.messages {
+                if case .node(let nodeID) = message.sender {
+                    reportPeerConnected(nodeID)
+                }
+            }
+        case .node(let node):
+            if let nodeID = node.id {
+                reportPeerConnected(nodeID)
+            }
+        case .nodeStatus(let status):
+            if let nodeID = status.node.id {
+                reportPeerConnected(nodeID)
+            }
+        case .actionCallRequest(let request):
+            reportPeerConnected(request.callerNodeID)
+            reportPeerConnected(request.targetNodeID)
+        case .actionCallResult(let result):
+            reportPeerConnected(result.callerNodeID)
+            reportPeerConnected(result.targetNodeID)
+        case .p2pSignal(let signal):
+            reportPeerConnected(signal.from)
+        case .p2pPresence(let presence):
+            reportPeerConnected(presence.node)
+        }
+    }
+
+    private func reportPeerConnected(_ nodeID: UUID) {
+        guard nodeID != config.node else { return }
+        let inserted = notifiedConnectedPeers.insert(nodeID).inserted
+        guard inserted else { return }
+        debug("peer reachable node=\(nodeID.uuidString.lowercased())")
+        onPeerConnect?(nodeID)
     }
 }

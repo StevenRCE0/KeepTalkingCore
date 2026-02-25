@@ -42,7 +42,8 @@ public actor OpenAIConnector {
 
         let configuration = OpenAI.Configuration(
             token: key,
-            organizationIdentifier: organizationID
+            organizationIdentifier: organizationID,
+            timeoutInterval: 30
         )
         self.client = OpenAI(configuration: configuration)
     }
@@ -50,8 +51,10 @@ public actor OpenAIConnector {
     public func chat(prompt: String, model: String = "gpt-4o") async throws
         -> String
     {
-        let result = try await planTools(
-            prompt: prompt,
+        let result = try await completeTurn(
+            messages: [
+                .user(.init(content: .string(prompt)))
+            ],
             tools: [],
             model: model
         )
@@ -71,13 +74,30 @@ public actor OpenAIConnector {
         tools: [ChatQuery.ChatCompletionToolParam],
         model: String = .gpt4
     ) async throws -> ToolPlanningResult {
-        let query = ChatQuery(
+        try await completeTurn(
             messages: [
                 .user(.init(content: .string(prompt)))
             ],
+            tools: tools,
+            model: model
+        )
+    }
+
+    public func completeTurn(
+        messages: [ChatQuery.ChatCompletionMessageParam],
+        tools: [ChatQuery.ChatCompletionToolParam],
+        model: String = .gpt4,
+        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam? = nil
+    ) async throws -> ToolPlanningResult {
+        let resolvedTools = tools.isEmpty ? nil : tools
+        let resolvedToolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam? =
+            resolvedTools == nil ? nil : (toolChoice ?? .auto)
+
+        let query = ChatQuery(
+            messages: messages,
             model: model,
-            toolChoice: tools.isEmpty ? nil : .auto,
-            tools: tools.isEmpty ? nil : tools
+            toolChoice: resolvedToolChoice,
+            tools: resolvedTools
         )
 
         let result = try await client.chats(query: query)

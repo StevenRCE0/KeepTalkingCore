@@ -4,53 +4,109 @@ import MCP
 import OpenAI
 
 extension KeepTalkingClient {
+    private static let listingToolFunctionName = "kt_list_available_actions"
+
     public func runAI(
         prompt: String,
         in context: KeepTalkingContext,
         model: OpenAIModel = .gpt4_o
     ) async throws -> String {
+
         guard let openAIConnector else {
             throw KeepTalkingClientError.aiNotConfigured
         }
 
         let contextID = context.id ?? config.contextID
         let catalog = try await discoverActionToolCatalog(in: contextID)
-        let planning = try await openAIConnector.planTools(
-            prompt: prompt,
-            tools: catalog.openAITools,
-            model: model
-        )
+        onLog?("[ai] catalog has \(catalog.definitions.count) virtual tool(s)")
 
-        guard !planning.toolCalls.isEmpty else {
-            return planning.assistantText ?? ""
+        let listingTool = makeListingTool()
+        let allTools = [listingTool] + catalog.openAITools
+        let contextTranscript = try await agentContextTranscript(
+            contextID: contextID
+        )
+        var messages: [ChatQuery.ChatCompletionMessageParam] = [
+            .developer(
+                .init(
+                    content: .textContent(
+                        """
+                        You are a KeepTalking agent. You must call \(Self.listingToolFunctionName) first before any other tool call, then use tool outputs to answer the user.
+                        Use the provided conversation context when deciding tool calls and in your final response.
+
+                        Conversation context:
+                        \(contextTranscript)
+                        """
+                    )
+                )
+            ),
+            .user(.init(content: .string(prompt))),
+        ]
+
+        // Force the first step to be a listing call.
+        let listingTurn = try await openAIConnector.completeTurn(
+            messages: messages,
+            tools: [listingTool],
+            model: model,
+            toolChoice: .function(Self.listingToolFunctionName)
+        )
+        if let assistantMessage = assistantMessage(from: listingTurn) {
+            messages.append(assistantMessage)
         }
 
-        var renderedOutputs: [String] = []
-        for toolCall in planning.toolCalls {
-            let functionName = toolCall.function.name
-            guard let tool = catalog.definition(functionName: functionName)
-            else {
-                throw KeepTalkingClientError.unknownTool(functionName)
-            }
-
-            let arguments = try decodeToolArguments(toolCall.function.arguments)
-            let actionCall = KeepTalkingActionCall(
-                action: tool.actionID,
-                arguments: arguments
-            )
-
-            let result = try await dispatchActionCall(
-                actionOwner: tool.ownerNodeID,
-                call: actionCall,
+        var listingToolCalls = listingTurn.toolCalls
+        if listingToolCalls.isEmpty {
+            let syntheticID = UUID().uuidString.lowercased()
+            listingToolCalls = [
+                .init(
+                    id: syntheticID,
+                    function: .init(
+                        arguments: "{}",
+                        name: Self.listingToolFunctionName
+                    )
+                )
+            ]
+        }
+        messages.append(
+            contentsOf: try await executeAgentToolCalls(
+                listingToolCalls,
+                catalog: catalog,
                 contextID: contextID
             )
-            renderedOutputs.append(renderToolResult(result, for: functionName))
+        )
+
+        var latestAssistantText = listingTurn.assistantText
+        for _ in 0..<8 {
+            let turn = try await openAIConnector.completeTurn(
+                messages: messages,
+                tools: allTools,
+                model: model,
+                toolChoice: .auto
+            )
+
+            if let assistantMessage = assistantMessage(from: turn) {
+                messages.append(assistantMessage)
+            }
+            if let assistantText = turn.assistantText,
+                !assistantText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty
+            {
+                latestAssistantText = assistantText
+            }
+
+            guard !turn.toolCalls.isEmpty else {
+                break
+            }
+            messages.append(
+                contentsOf: try await executeAgentToolCalls(
+                    turn.toolCalls,
+                    catalog: catalog,
+                    contextID: contextID
+                )
+            )
         }
 
-        if renderedOutputs.isEmpty {
-            return planning.assistantText ?? ""
-        }
-        return renderedOutputs.joined(separator: "\n")
+        return latestAssistantText?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     public func discoverActionToolCatalog(in contextID: UUID) async throws
@@ -63,21 +119,6 @@ extension KeepTalkingClient {
                 .all()
                 .compactMap(\.id)
         )
-
-        let localActions = try await KeepTalkingAction.query(
-            on: localStore.database
-        )
-        .filter(\.$node.$id, .equal, config.node)
-        .all()
-        for action in localActions {
-            guard
-                let definition = normalizedToolDefinition(
-                    for: action,
-                    ownerNodeID: config.node
-                )
-            else { continue }
-            definitionsByName[definition.functionName] = definition
-        }
 
         let relations = try await KeepTalkingNodeRelation.query(
             on: localStore.database
@@ -119,13 +160,13 @@ extension KeepTalkingClient {
                     }
                 }
 
-                guard
-                    let definition = normalizedToolDefinition(
-                        for: action,
-                        ownerNodeID: actionOwner
-                    )
-                else { continue }
-                definitionsByName[definition.functionName] = definition
+                let definitions = try await normalizedToolDefinitions(
+                    for: action,
+                    ownerNodeID: actionOwner
+                )
+                for definition in definitions {
+                    definitionsByName[definition.functionName] = definition
+                }
             }
         }
 
@@ -136,31 +177,230 @@ extension KeepTalkingClient {
         )
     }
 
-    func normalizedToolDefinition(
+    private func makeListingTool() -> ChatQuery.ChatCompletionToolParam {
+        ChatQuery.ChatCompletionToolParam(
+            function: .init(
+                name: Self.listingToolFunctionName,
+                description:
+                    "List virtual KeepTalking actions available in the current context. Call this first.",
+                parameters: JSONSchema(
+                    .type(.object),
+                    .properties([:]),
+                    .additionalProperties(.boolean(false))
+                ),
+                strict: false
+            )
+        )
+    }
+
+    private func assistantMessage(
+        from turn: OpenAIConnector.ToolPlanningResult
+    ) -> ChatQuery.ChatCompletionMessageParam? {
+        let text = turn.assistantText?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let content: ChatQuery.ChatCompletionMessageParam.TextOrRefusalContent? =
+            (text?.isEmpty == false) ? .textContent(text!) : nil
+        let toolCalls = turn.toolCalls.isEmpty ? nil : turn.toolCalls
+        if content == nil, toolCalls == nil {
+            return nil
+        }
+        return .assistant(
+            .init(
+                content: content,
+                toolCalls: toolCalls
+            )
+        )
+    }
+
+    private func executeAgentToolCalls(
+        _ toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam],
+        catalog: KeepTalkingActionToolCatalog,
+        contextID: UUID
+    ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
+        var messages: [ChatQuery.ChatCompletionMessageParam] = []
+
+        for toolCall in toolCalls {
+            let toolCallID = toolCall.id.isEmpty
+                ? UUID().uuidString.lowercased()
+                : toolCall.id
+            let functionName = toolCall.function.name
+
+            let payload: String
+            if functionName == Self.listingToolFunctionName {
+                payload = renderCatalogListing(catalog, contextID: contextID)
+            } else if let tool = catalog.definition(functionName: functionName)
+            {
+                var arguments = try decodeToolArguments(
+                    toolCall.function.arguments
+                )
+                if let mcpToolName = tool.mcpToolName,
+                    arguments["tool"] == nil
+                {
+                    arguments = [
+                        "tool": .string(mcpToolName),
+                        "arguments": .object(arguments),
+                    ]
+                }
+
+                let actionCall = KeepTalkingActionCall(
+                    action: tool.actionID,
+                    arguments: arguments
+                )
+                let result = try await dispatchActionCall(
+                    actionOwner: tool.ownerNodeID,
+                    call: actionCall,
+                    contextID: contextID
+                )
+                payload = renderAgentToolPayload(
+                    functionName: functionName,
+                    result: result
+                )
+            } else {
+                payload = jsonString([
+                    "ok": false,
+                    "error": "unknown_tool",
+                    "function_name": functionName,
+                ])
+            }
+
+            messages.append(
+                .tool(
+                    .init(
+                        content: .textContent(payload),
+                        toolCallId: toolCallID
+                    )
+                )
+            )
+        }
+
+        return messages
+    }
+
+    private func renderCatalogListing(
+        _ catalog: KeepTalkingActionToolCatalog,
+        contextID: UUID
+    ) -> String {
+        let rows = catalog.definitions.map { definition in
+            [
+                "function_name": definition.functionName,
+                "action_id": definition.actionID.uuidString.lowercased(),
+                "owner_node_id": definition.ownerNodeID.uuidString.lowercased(),
+                "mcp_tool_name": definition.mcpToolName ?? "",
+                "description": definition.description,
+            ]
+        }
+        return jsonString([
+            "ok": true,
+            "context_id": contextID.uuidString.lowercased(),
+            "count": rows.count,
+            "tools": rows,
+        ])
+    }
+
+    private func renderAgentToolPayload(
+        functionName: String,
+        result: KeepTalkingActionCallResult
+    ) -> String {
+        let renderedContent = result.content.map { content -> String in
+            switch content {
+            case .text(let text):
+                return text
+            default:
+                if let data = try? JSONEncoder().encode(content),
+                    let json = String(data: data, encoding: .utf8)
+                {
+                    return json
+                }
+                return "<non-text content>"
+            }
+        }
+        return jsonString([
+            "ok": !result.isError,
+            "function_name": functionName,
+            "request_id": result.requestID.uuidString.lowercased(),
+            "action_id": result.actionID.uuidString.lowercased(),
+            "caller_node_id": result.callerNodeID.uuidString.lowercased(),
+            "target_node_id": result.targetNodeID.uuidString.lowercased(),
+            "error_message": result.errorMessage ?? "",
+            "content": renderedContent,
+        ])
+    }
+
+    private func agentContextTranscript(contextID: UUID) async throws -> String {
+        let recentMessages = try await KeepTalkingContextMessage.query(
+            on: localStore.database
+        )
+        .filter(\.$context.$id, .equal, contextID)
+        .sort(\.$timestamp, .descending)
+        .limit(30)
+        .all()
+        .sorted { $0.timestamp < $1.timestamp }
+
+        guard !recentMessages.isEmpty else {
+            return "No prior messages in this context."
+        }
+
+        return recentMessages.map { message in
+            let sender: String = switch message.sender {
+            case .node(let nodeID):
+                "node:\(nodeID.uuidString.lowercased())"
+            case .autonomous(let name):
+                "agent:\(name)"
+            }
+            return "[\(sender)] \(message.content)"
+        }.joined(separator: "\n")
+    }
+
+    private func jsonString(_ object: Any) -> String {
+        guard JSONSerialization.isValidJSONObject(object) else {
+            return "{\"ok\":false,\"error\":\"invalid_json_object\"}"
+        }
+        guard
+            let data = try? JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            ),
+            let text = String(data: data, encoding: .utf8)
+        else {
+            return "{\"ok\":false,\"error\":\"json_encoding_failed\"}"
+        }
+        return text
+    }
+
+    func normalizedToolDefinitions(
         for action: KeepTalkingAction,
         ownerNodeID: UUID
-    ) -> KeepTalkingActionToolDefinition? {
-        guard let actionID = action.id else { return nil }
-        guard case .mcpBundle(let bundle) = action.payload else { return nil }
+    ) async throws -> [KeepTalkingActionToolDefinition] {
+        guard let actionID = action.id else { return [] }
+        guard case .mcpBundle(let bundle) = action.payload else { return [] }
 
-        let description =
+        let baseDescription =
             action.descriptor?.action?.description
             ?? bundle.indexDescription
-
+        let virtualToolName = bundle.name.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let selectedToolName: String? = virtualToolName.isEmpty
+            ? nil
+            : virtualToolName
         let functionName =
             KeepTalkingActionToolDefinition.normalizedFunctionName(
                 ownerNodeID: ownerNodeID,
-                actionID: actionID
+                actionID: actionID,
+                mcpToolName: selectedToolName
             )
-
-        return KeepTalkingActionToolDefinition(
-            functionName: functionName,
-            actionID: actionID,
-            ownerNodeID: ownerNodeID,
-            description: description,
-            parameters: KeepTalkingActionToolDefinition
-                .permissiveObjectParameters
-        )
+        return [
+            KeepTalkingActionToolDefinition(
+                functionName: functionName,
+                actionID: actionID,
+                ownerNodeID: ownerNodeID,
+                mcpToolName: selectedToolName,
+                description:
+                    "\(baseDescription) Virtual action call routed by node ownership.",
+                parameters: KeepTalkingActionToolDefinition
+                    .permissiveObjectParameters
+            )
+        ]
     }
 
     func decodeToolArguments(_ raw: String) throws -> [String: Value] {

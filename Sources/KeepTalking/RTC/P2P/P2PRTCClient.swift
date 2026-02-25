@@ -9,6 +9,7 @@ enum P2PError: LocalizedError {
     case dataChannelCreateFailed(String)
     case dataChannelNotOpen(String)
     case handshakeTimeout
+    case signalingInP2P
 
     var errorDescription: String? {
         switch self {
@@ -27,6 +28,8 @@ enum P2PError: LocalizedError {
             return "Data channel '\(label)' is not open yet."
         case .handshakeTimeout:
             return "P2P handshake timed out."
+        case .signalingInP2P:
+            return "Cannot perform this operation while in P2P mode."
         }
     }
 }
@@ -42,6 +45,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     var onMessage: (@Sendable (KeepTalkingContextMessage) -> Void)?
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)?
     var onRawMessage: (@Sendable (String) -> Void)?
+    var onPeerConnect: (@Sendable (UUID) -> Void)?
     var onLog: (@Sendable (String) -> Void)?
     var onTransportDegraded: (@Sendable (String) -> Void)?
 
@@ -64,11 +68,14 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     private var recvMessageCount = 0
     private var isStopping = false
     private var didReportDegrade = false
+    private var notifiedConnectedPeers = Set<UUID>()
 
     init(
         config: KeepTalkingConfig,
         localNodeID: UUID,
-        sendSignal: @escaping @Sendable (_ to: UUID, _ data: KeepTalkingP2PSignalData) -> Void,
+        sendSignal:
+            @escaping @Sendable (_ to: UUID, _ data: KeepTalkingP2PSignalData)
+            -> Void,
         announcePresence: @escaping @Sendable () -> Void,
         peersSnapshot: @escaping @Sendable () -> [UUID]
     ) {
@@ -80,7 +87,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         super.init()
     }
 
-    private func debug(_ message: String) {
+    func debug(_ message: String) {
         let ts = ISO8601DateFormatter().string(from: Date())
         onLog?("[\(ts)] [p2p] \(message)")
     }
@@ -88,6 +95,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     func start() async throws {
         isStopping = false
         didReportDegrade = false
+        notifiedConnectedPeers.removeAll()
         debug(
             "starting localPeer=\(localNodeID.uuidString.lowercased()) timeout=\(config.p2pAttemptTimeoutSeconds)s"
         )
@@ -99,20 +107,27 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         )
         remotePeerID = targetPeerID
 
-        let isOfferer = localNodeID.uuidString.lowercased()
+        let isOfferer =
+            localNodeID.uuidString.lowercased()
             < targetPeerID.uuidString.lowercased()
-        debug("selected remotePeer=\(targetPeerID.uuidString.lowercased()) offerer=\(isOfferer)")
+        debug(
+            "selected remotePeer=\(targetPeerID.uuidString.lowercased()) offerer=\(isOfferer)"
+        )
 
         if isOfferer {
             try createOutboundDataChannels()
             try await sendOffer(to: targetPeerID)
         }
 
-        guard await waitForRequiredChannelsOpen(
-            timeoutSeconds: config.p2pAttemptTimeoutSeconds
-        )
+        guard
+            await waitForRequiredChannelsOpen(
+                timeoutSeconds: config.p2pAttemptTimeoutSeconds
+            )
         else {
             throw P2PError.handshakeTimeout
+        }
+        if let remotePeerID {
+            reportPeerConnected(remotePeerID)
         }
     }
 
@@ -125,6 +140,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         inboundActionCallChannel?.close()
         peerConnection?.close()
         pendingRemoteCandidates.removeAll()
+        notifiedConnectedPeers.removeAll()
         peerConnection = nil
         outboundChatChannel = nil
         outboundActionCallChannel = nil
@@ -138,7 +154,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     }
 
     func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws {
-        let route = route(for: envelope)
+        let route = try route(for: envelope)
         let dataChannel: LKRTCDataChannel?
         switch route {
         case .chat:
@@ -176,7 +192,10 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             outboundState: outboundChatChannel?.readyState.rawValue,
             inboundLabel: inboundChatChannel?.label,
             inboundState: inboundChatChannel?.readyState.rawValue,
-            retainedChannels: [outboundChatChannel, outboundActionCallChannel, inboundChatChannel, inboundActionCallChannel].compactMap { $0 }.count,
+            retainedChannels: [
+                outboundChatChannel, outboundActionCallChannel,
+                inboundChatChannel, inboundActionCallChannel,
+            ].compactMap { $0 }.count,
             route: "p2p"
         )
     }
@@ -237,7 +256,9 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
                 configuration: actionChannelConfig
             )
         else {
-            throw P2PError.dataChannelCreateFailed(config.actionCallChannelLabel)
+            throw P2PError.dataChannelCreateFailed(
+                config.actionCallChannelLabel
+            )
         }
         actionChannel.delegate = self
         outboundActionCallChannel = actionChannel
@@ -275,8 +296,8 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             let peers = peersSnapshot().filter { $0 != localNodeID }
 
             if let preferred = config.p2pPreferredRemoteID,
-               let preferredID = UUID(uuidString: preferred),
-               peers.contains(preferredID)
+                let preferredID = UUID(uuidString: preferred),
+                peers.contains(preferredID)
             {
                 return preferredID
             }
@@ -302,7 +323,8 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         }
 
         let discovered = Set(peersSnapshot())
-        let discoveredIDs = discovered
+        let discoveredIDs =
+            discovered
             .map { $0.uuidString.lowercased() }
             .sorted()
             .joined(separator: ",")
@@ -320,7 +342,9 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         }
         if !chatOpened {
             debug("timeout waiting for chat channel open")
-            reportTransportDegraded("handshake timeout waiting for chat channel")
+            reportTransportDegraded(
+                "handshake timeout waiting for chat channel"
+            )
             return false
         }
 
@@ -331,7 +355,9 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         }
         if !actionOpened {
             debug("timeout waiting for action channel open")
-            reportTransportDegraded("handshake timeout waiting for action channel")
+            reportTransportDegraded(
+                "handshake timeout waiting for action channel"
+            )
             return false
         }
         return true
@@ -345,6 +371,14 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         onTransportDegraded?(reason)
     }
 
+    private func reportPeerConnected(_ nodeID: UUID) {
+        guard nodeID != localNodeID else { return }
+        let inserted = notifiedConnectedPeers.insert(nodeID).inserted
+        guard inserted else { return }
+        debug("peer reachable node=\(nodeID.uuidString.lowercased())")
+        onPeerConnect?(nodeID)
+    }
+
     private func preferredChatChannel() -> LKRTCDataChannel? {
         if let inboundChatChannel, inboundChatChannel.readyState == .open {
             return inboundChatChannel
@@ -354,18 +388,22 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
 
     private func preferredActionCallChannel() -> LKRTCDataChannel? {
         if let inboundActionCallChannel,
-           inboundActionCallChannel.readyState == .open
+            inboundActionCallChannel.readyState == .open
         {
             return inboundActionCallChannel
         }
         return outboundActionCallChannel
     }
 
-    private func route(for envelope: KeepTalkingP2PEnvelope) -> EnvelopeRoute {
+    private func route(for envelope: KeepTalkingP2PEnvelope) throws
+        -> EnvelopeRoute
+    {
         switch envelope {
-        case .message:
+        case .message, .node, .nodeStatus, .context:
             return .chat
-        default:
+        case .p2pSignal, .p2pPresence:
+            throw P2PError.signalingInP2P
+        case .actionCallRequest, .actionCallResult:
             return .actionCall
         }
     }
@@ -381,7 +419,9 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
 
     private func handleSignal(from: UUID, data: KeepTalkingP2PSignalData) {
         if let configuredRemote = remotePeerID, configuredRemote != from {
-            debug("ignoring signal from unexpected peer \(from.uuidString.lowercased())")
+            debug(
+                "ignoring signal from unexpected peer \(from.uuidString.lowercased())"
+            )
             return
         }
 
@@ -415,10 +455,15 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
                         on: peerConnection,
                         invalidSdpTypeError: P2PError.invalidSdpType
                     )
-                    sendSignal(from, Self.signalData(kind: "answer", description: answer))
+                    sendSignal(
+                        from,
+                        Self.signalData(kind: "answer", description: answer)
+                    )
                     debug("answer sent peer=\(from.uuidString.lowercased())")
                 } catch {
-                    debug("failed processing offer error=\(error.localizedDescription)")
+                    debug(
+                        "failed processing offer error=\(error.localizedDescription)"
+                    )
                 }
             }
         case "answer":
@@ -437,7 +482,9 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
                     flushPendingRemoteCandidates()
                     debug("answer applied")
                 } catch {
-                    debug("failed processing answer error=\(error.localizedDescription)")
+                    debug(
+                        "failed processing answer error=\(error.localizedDescription)"
+                    )
                 }
             }
         case "ice":
@@ -458,7 +505,9 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             if applied {
                 debug("applied remote candidate")
             } else {
-                debug("buffered remote candidate count=\(pendingRemoteCandidates.count)")
+                debug(
+                    "buffered remote candidate count=\(pendingRemoteCandidates.count)"
+                )
             }
         default:
             debug("unhandled signal kind=\(data.kind)")
