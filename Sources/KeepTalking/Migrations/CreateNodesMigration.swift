@@ -5,6 +5,7 @@ struct CreateKeepTalkingNodesMigration: Migration {
         database.schema(KeepTalkingNode.schema)
             .id()
             .field("last_seen_at", .datetime, .required)
+            .field("discovered_during_logon", .uuid)
             .create()
     }
 

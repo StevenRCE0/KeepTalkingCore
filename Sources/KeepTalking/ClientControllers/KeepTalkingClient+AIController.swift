@@ -16,15 +16,13 @@ extension KeepTalkingClient {
             throw KeepTalkingClientError.aiNotConfigured
         }
 
-        let contextID = context.id ?? config.contextID
-        let catalog = try await discoverActionToolCatalog(in: contextID)
+        let catalog = try await discoverActionToolCatalog(in: context)
         onLog?("[ai] catalog has \(catalog.definitions.count) virtual tool(s)")
 
         let listingTool = makeListingTool()
         let allTools = [listingTool] + catalog.openAITools
-        let contextTranscript = try await agentContextTranscript(
-            contextID: contextID
-        )
+        let contextTranscript = try await agentContextTranscript(context)
+
         var messages: [ChatQuery.ChatCompletionMessageParam] = [
             .developer(
                 .init(
@@ -70,7 +68,7 @@ extension KeepTalkingClient {
             contentsOf: try await executeAgentToolCalls(
                 listingToolCalls,
                 catalog: catalog,
-                contextID: contextID
+                context: context
             )
         )
 
@@ -100,7 +98,7 @@ extension KeepTalkingClient {
                 contentsOf: try await executeAgentToolCalls(
                     turn.toolCalls,
                     catalog: catalog,
-                    contextID: contextID
+                    context: context
                 )
             )
         }
@@ -109,7 +107,8 @@ extension KeepTalkingClient {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    public func discoverActionToolCatalog(in contextID: UUID) async throws
+    public func discoverActionToolCatalog(in context: KeepTalkingContext)
+        async throws
         -> KeepTalkingActionToolCatalog
     {
         var definitionsByName: [String: KeepTalkingActionToolDefinition] = [:]
@@ -120,53 +119,60 @@ extension KeepTalkingClient {
                 .compactMap(\.id)
         )
 
-        let relations = try await KeepTalkingNodeRelation.query(
-            on: localStore.database
+        let selfNode = try await ensure(
+            config.node,
+            for: KeepTalkingNode.self,
+            strict: true
         )
-        .filter(\.$from.$id, .equal, config.node)
-        .filter(\.$relationship ~~ [.owner, .trusted])
-        .all()
 
-        for relation in relations {
-            guard let relationID = relation.id else { continue }
+        let localActions = try await selfNode.$actions.query(
+            on: localStore.database
+        ).all()
 
-            let links =
-                try await KeepTalkingNodeRelationActionRelation
-                .query(on: localStore.database)
-                .filter(\.$relation.$id, .equal, relationID)
-                .with(\.$action)
-                .all()
+        let onlineOutgoingRelations = try await selfNode.$outgoingNodeRelations
+            .query(on: localStore.database).filter(
+                \.$to.$id ~~ onlineNodeIDs
+            ).all()
 
-            for link in links {
-                guard
-                    approvingContextAllows(
-                        link.approvingContext,
-                        contextID: contextID
+        let remoteActions = try await withThrowingTaskGroup(
+            of: [KeepTalkingAction].self,
+            returning: [KeepTalkingAction].self
+        ) { group in
+            for relation in onlineOutgoingRelations {
+                group.addTask {
+                    let actionRelations = try await relation.$actionRelations
+                        .query(on: self.localStore.database)
+                        .with(\.$action)
+                        .all()
+
+                    return try await self.authorizedActions(
+                        actionRelations.map(\.action),
+                        for: KeepTalkingNode(id: relation.$to.id),
+                        context: context
                     )
-                else {
-                    continue
                 }
+            }
 
-                let action = link.action
-                let actionOwner = action.$node.id ?? relation.$to.id
+            var result: [KeepTalkingAction] = []
 
-                // Remote discoverability is limited to remote-authorisable actions.
-                if actionOwner != config.node {
-                    guard onlineNodeIDs.contains(actionOwner) else {
-                        continue
-                    }
-                    if action.remoteAuthorisable != true {
-                        continue
-                    }
-                }
+            for try await actions in group {
+                result.append(contentsOf: actions)
+            }
 
-                let definitions = try await normalizedToolDefinitions(
-                    for: action,
-                    ownerNodeID: actionOwner
-                )
-                for definition in definitions {
-                    definitionsByName[definition.functionName] = definition
-                }
+            return result
+        }
+
+        for action in localActions + remoteActions {
+            guard let ownerNodeID = action.$node.id else {
+                continue
+            }
+
+            let definitions = try await normalizedToolDefinitions(
+                for: action,
+                ownerNodeID: ownerNodeID
+            )
+            for definition in definitions {
+                definitionsByName[definition.functionName] = definition
             }
         }
 
@@ -198,8 +204,9 @@ extension KeepTalkingClient {
     ) -> ChatQuery.ChatCompletionMessageParam? {
         let text = turn.assistantText?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let content: ChatQuery.ChatCompletionMessageParam.TextOrRefusalContent? =
-            (text?.isEmpty == false) ? .textContent(text!) : nil
+        let content:
+            ChatQuery.ChatCompletionMessageParam.TextOrRefusalContent? =
+                (text?.isEmpty == false) ? .textContent(text!) : nil
         let toolCalls = turn.toolCalls.isEmpty ? nil : turn.toolCalls
         if content == nil, toolCalls == nil {
             return nil
@@ -213,21 +220,26 @@ extension KeepTalkingClient {
     }
 
     private func executeAgentToolCalls(
-        _ toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam],
+        _ toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
+            .ToolCallParam],
         catalog: KeepTalkingActionToolCatalog,
-        contextID: UUID
+        context: KeepTalkingContext
     ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
         var messages: [ChatQuery.ChatCompletionMessageParam] = []
 
         for toolCall in toolCalls {
-            let toolCallID = toolCall.id.isEmpty
+            let toolCallID =
+                toolCall.id.isEmpty
                 ? UUID().uuidString.lowercased()
                 : toolCall.id
             let functionName = toolCall.function.name
 
             let payload: String
             if functionName == Self.listingToolFunctionName {
-                payload = renderCatalogListing(catalog, contextID: contextID)
+                payload = renderCatalogListing(
+                    catalog,
+                    contextID: try context.requireID()
+                )
             } else if let tool = catalog.definition(functionName: functionName)
             {
                 var arguments = try decodeToolArguments(
@@ -246,11 +258,13 @@ extension KeepTalkingClient {
                     action: tool.actionID,
                     arguments: arguments
                 )
+
                 let result = try await dispatchActionCall(
                     actionOwner: tool.ownerNodeID,
                     call: actionCall,
-                    contextID: contextID
+                    context: context
                 )
+
                 payload = renderAgentToolPayload(
                     functionName: functionName,
                     result: result
@@ -326,7 +340,14 @@ extension KeepTalkingClient {
         ])
     }
 
-    private func agentContextTranscript(contextID: UUID) async throws -> String {
+    private func agentContextTranscript(_ context: KeepTalkingContext)
+        async throws -> String
+    {
+        let persistedContext = try await upsertContext(context)
+        guard let contextID = persistedContext.id else {
+            return "No prior messages in this context."
+        }
+
         let recentMessages = try await KeepTalkingContextMessage.query(
             on: localStore.database
         )
@@ -334,19 +355,19 @@ extension KeepTalkingClient {
         .sort(\.$timestamp, .descending)
         .limit(30)
         .all()
-        .sorted { $0.timestamp < $1.timestamp }
 
         guard !recentMessages.isEmpty else {
             return "No prior messages in this context."
         }
 
         return recentMessages.map { message in
-            let sender: String = switch message.sender {
-            case .node(let nodeID):
-                "node:\(nodeID.uuidString.lowercased())"
-            case .autonomous(let name):
-                "agent:\(name)"
-            }
+            let sender: String =
+                switch message.sender {
+                case .node(let nodeID):
+                    "node:\(nodeID.uuidString.lowercased())"
+                case .autonomous(let name):
+                    "agent:\(name)"
+                }
             return "[\(sender)] \(message.content)"
         }.joined(separator: "\n")
     }
@@ -379,13 +400,16 @@ extension KeepTalkingClient {
             bundle = nil
         }
 
-        let baseDescription = action.descriptor?.action?.description
+        let baseDescription =
+            action.descriptor?.action?.description
             ?? bundle?.indexDescription
             ?? "Virtual action call routed by node ownership."
-        let virtualToolName = bundle?.name.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        ) ?? ""
-        let selectedToolName: String? = virtualToolName.isEmpty
+        let virtualToolName =
+            bundle?.name.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ) ?? ""
+        let selectedToolName: String? =
+            virtualToolName.isEmpty
             ? nil
             : virtualToolName
         let functionName =

@@ -11,6 +11,11 @@ public enum KeepTalkingClientError: LocalizedError {
     case relationNotTrustedOrOwned(UUID)
     case actionCallNotAuthorized(action: UUID, caller: UUID, context: UUID)
     case actionCallTimeout(UUID)
+    case localIdentityPrivateKeyMissing
+    case remoteIdentityPublicKeyMissing(UUID)
+    case remoteIdentityPublicKeyInvalid(UUID)
+    case malformedEncryptedActionCall
+    case malformedEncryptedNodeStatus
 
     public var errorDescription: String? {
         switch self {
@@ -32,18 +37,26 @@ public enum KeepTalkingClientError: LocalizedError {
             return "Action call is not authorized. action=\(actionID) caller=\(caller) context=\(context)"
         case .actionCallTimeout(let requestID):
             return "Timed out waiting for remote action call result: \(requestID)"
+        case .localIdentityPrivateKeyMissing:
+            return "Local private identity key is missing."
+        case .remoteIdentityPublicKeyMissing(let nodeID):
+            return "No remote public key is known for node: \(nodeID)"
+        case .remoteIdentityPublicKeyInvalid(let nodeID):
+            return "Remote public key is invalid for node: \(nodeID)"
+        case .malformedEncryptedActionCall:
+            return "Encrypted action-call envelope payload is malformed."
+        case .malformedEncryptedNodeStatus:
+            return "Encrypted node-status envelope payload is malformed."
         }
     }
 }
 
 public final class KeepTalkingClient: @unchecked Sendable {
-    public typealias MessageHandler = @Sendable (KeepTalkingContextMessage) -> Void
     public typealias EnvelopeHandler = @Sendable (KeepTalkingP2PEnvelope) -> Void
     public typealias RawMessageHandler = @Sendable (String) -> Void
     public typealias PeerConnectHandler = @Sendable (UUID) -> Void
     public typealias LogHandler = @Sendable (String) -> Void
 
-    public var onMessage: MessageHandler?
     public var onEnvelope: EnvelopeHandler?
     public var onRawMessage: RawMessageHandler?
     public var onPeerConnect: PeerConnectHandler?
@@ -102,14 +115,15 @@ public final class KeepTalkingClient: @unchecked Sendable {
         rtcClient.onRawMessage = { [weak self] raw in
             self?.onRawMessage?(raw)
         }
-        rtcClient.onMessage = { [weak self] message in
-            Task {
-                try await self?.handleIncomingMessage(message)
-            }
-        }
         rtcClient.onEnvelope = { [weak self] envelope in
             Task {
-                try await self?.handleIncomingEnvelope(envelope)
+                do {
+                    try await self?.handleIncomingEnvelope(envelope)
+                } catch {
+                    self?.onLog?(
+                        "[client] failed handling envelope error=\(error.localizedDescription)"
+                    )
+                }
             }
         }
         rtcClient.onPeerConnect = { [weak self] nodeID in

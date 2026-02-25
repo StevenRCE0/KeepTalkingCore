@@ -8,16 +8,39 @@
 import FluentKit
 import Foundation
 
+public enum KeepTalkingRelationship: Codable, Sendable, Equatable {
+    case pending
+    case owner
+    case trusted([KeepTalkingContext])
+    case trustedInAllContext
 
+    public var isTrustedOrOwner: Bool {
+        switch self {
+        case .owner, .trusted, .trustedInAllContext:
+            return true
+        case .pending:
+            return false
+        }
+    }
+
+    public func allows(context: KeepTalkingContext?) -> Bool {
+        switch self {
+        case .owner, .trustedInAllContext:
+            return true
+        case .trusted(let contexts):
+            guard let context else { return false }
+            return contexts.contains(context)
+        case .pending:
+            return false
+        }
+    }
+}
 
 public final class KeepTalkingNodeRelation: Model, @unchecked Sendable {
     public static let schema = "kt_node_relation"
 
     @ID(key: .id)
     public var id: UUID?
-
-    @Field(key: "authorised_actions")
-    public var authorisedActionsData: Data
 
     @Field(key: "relationship")
     public var relationship: KeepTalkingRelationship
@@ -28,28 +51,29 @@ public final class KeepTalkingNodeRelation: Model, @unchecked Sendable {
     @Parent(key: "to")
     public var to: KeepTalkingNode
 
-    @Siblings(
-        through: KeepTalkingNodeRelationActionRelation.self,
-        from: \.$relation,
-        to: \.$action
-    )
-    public var authorisedActions: [KeepTalkingAction]
+    @Children(for: \.$relation)
+    public var actionRelations: [KeepTalkingNodeRelationActionRelation]
+
+    @Children(for: \.$relation)
+    public var identityKeys: [KeepTalkingNodeIdentityKey]
 
     public init() {
-        authorisedActionsData = Data()
+        relationship = .pending
     }
 
     public init(
         id: UUID = UUID(),
         from: KeepTalkingNode,
         to: KeepTalkingNode,
-        relationship: KeepTalkingRelationship,
-        authorisedActionsData: Data = Data()
+        relationship: KeepTalkingRelationship
     ) throws {
         self.id = id
         self.$from.id = try from.requireID()
         self.$to.id = try to.requireID()
         self.relationship = relationship
-        self.authorisedActionsData = authorisedActionsData
+    }
+
+    public func allows(context: KeepTalkingContext?) -> Bool {
+        relationship.allows(context: context)
     }
 }

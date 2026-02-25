@@ -37,7 +37,6 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         case signaling
     }
 
-    var onMessage: (@Sendable (KeepTalkingContextMessage) -> Void)?
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
@@ -313,11 +312,15 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
     private func route(for envelope: KeepTalkingP2PEnvelope) -> EnvelopeRoute {
         switch envelope {
-            case .message, .node, .nodeStatus, .context:
+        case .message, .node, .nodeStatus, .encryptedNodeStatus, .context:
             return .chat
         case .p2pSignal, .p2pPresence:
             return .signaling
-        case .actionCallRequest, .actionCallResult:
+        case
+            .actionCallRequest,
+            .actionCallResult,
+            .encryptedActionCallRequest,
+            .encryptedActionCallResult:
             return .actionCall
         }
     }
@@ -593,23 +596,19 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             from: buffer.data
         ) {
             reportConnectedPeers(from: envelope)
-            switch envelope {
-            case .message(let message):
-                if dataChannel.label == config.chatChannelLabel {
-                    onMessage?(message)
-                    debug("delivered chat sender=\(message.sender)")
-                } else {
-                    debug(
-                        "ignored message envelope on non-chat channel label=\(dataChannel.label)"
-                    )
-                }
-
-            default:
-                onEnvelope?(envelope)
+            if case .message = envelope,
+                dataChannel.label != config.chatChannelLabel
+            {
                 debug(
-                    "delivered envelope label=\(dataChannel.label) \(envelope)"
+                    "ignored message envelope on non-chat channel label=\(dataChannel.label)"
                 )
+                return
             }
+
+            onEnvelope?(envelope)
+            debug(
+                "delivered envelope label=\(dataChannel.label) \(envelope)"
+            )
             return
         }
 
@@ -642,12 +641,21 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             if let nodeID = status.node.id {
                 reportPeerConnected(nodeID)
             }
+        case .encryptedNodeStatus(let envelope):
+            reportPeerConnected(envelope.senderNodeID)
+            reportPeerConnected(envelope.recipientNodeID)
         case .actionCallRequest(let request):
             reportPeerConnected(request.callerNodeID)
             reportPeerConnected(request.targetNodeID)
         case .actionCallResult(let result):
             reportPeerConnected(result.callerNodeID)
             reportPeerConnected(result.targetNodeID)
+        case .encryptedActionCallRequest(let envelope):
+            reportPeerConnected(envelope.senderNodeID)
+            reportPeerConnected(envelope.recipientNodeID)
+        case .encryptedActionCallResult(let envelope):
+            reportPeerConnected(envelope.senderNodeID)
+            reportPeerConnected(envelope.recipientNodeID)
         case .p2pSignal(let signal):
             reportPeerConnected(signal.from)
         case .p2pPresence(let presence):

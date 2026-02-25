@@ -74,10 +74,8 @@ final class KeepTalkingCLIController {
     }
 
     func bindCallbacks(to targetClient: KeepTalkingClient) {
-        targetClient.onLog = { line in
-            print(line)
-        }
-        targetClient.onMessage = { (message: KeepTalkingContextMessage) in
+        let renderMessage: @Sendable (KeepTalkingContextMessage) -> String = {
+            message in
             let senderLabel: String
             switch message.sender {
             case .node(let node):
@@ -85,7 +83,25 @@ final class KeepTalkingCLIController {
             case .autonomous(let name):
                 senderLabel = name
             }
-            print("[\(senderLabel)] \(message.content)")
+            return "[\(senderLabel)] \(message.content)"
+        }
+
+        targetClient.onLog = { line in
+            print(line)
+        }
+        targetClient.onEnvelope = { (envelope: KeepTalkingP2PEnvelope) in
+            switch envelope {
+            case .message(let message):
+                print(renderMessage(message))
+            case .context(let context):
+                if let latestMessage = context.messages.max(by: {
+                    $0.timestamp < $1.timestamp
+                }) {
+                    print(renderMessage(latestMessage))
+                }
+            default:
+                break
+            }
         }
         targetClient.onRawMessage = { (raw: String) in
             print("[remote/raw] \(raw)")
@@ -113,7 +129,7 @@ final class KeepTalkingCLIController {
 
     func printConnectedBanner() {
         print(
-            "Connected. Commands: /new, /join <context-id>, /trust <node-id>, /actions list, /actions grant <node-id> <action-id> [context|all], /mcp add http <name> <url> [description], /mcp add stdio <name> [--env KEY=VALUE ...] -- <command> [args...], /mcp list, /mcp remove <action-id>, /p2p, /stats, /quit, /ai <message>."
+            "Connected. Commands: /new, /join <context-id>, /trust <node-id> [all|context|<context-id>], /lure <node-id> <pubkey>, /actions list, /actions grant <node-id> <action-id> [context|all], /mcp add http <name> <url> [description], /mcp add stdio <name> [--env KEY=VALUE ...] -- <command> [args...], /mcp list, /mcp remove <action-id>, /p2p, /stats, /quit, /ai <message>."
         )
     }
 }

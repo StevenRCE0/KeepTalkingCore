@@ -1,7 +1,9 @@
+import CryptoKit
 import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
+    private static let encryptedMessagePrefix = "ktenc:v1:"
 
     public func send(
         _ text: String,
@@ -22,7 +24,8 @@ extension KeepTalkingClient {
         try await message.save(on: localStore.database)
         try await persistedContext.save(on: localStore.database)
 
-        try rtcClient.sendEnvelope(.message(message))
+        let encryptedMessage = try await encryptedOutboundMessage(message)
+        try rtcClient.sendEnvelope(.message(encryptedMessage))
     }
 
     public func sendConversationContext(
@@ -41,6 +44,12 @@ extension KeepTalkingClient {
     func handleIncomingMessage(_ message: KeepTalkingContextMessage)
         async throws
     {
+        let contextID = message.$context.id
+        message.content = await decryptedContentIfNeeded(
+            message.content,
+            contextID: contextID
+        )
+
         Task {
             try? await message.save(on: localStore.database)
         }
@@ -78,7 +87,6 @@ extension KeepTalkingClient {
             }
         }
 
-        onMessage?(message)
     }
 
     func handleIncomingEnvelope(_ envelope: KeepTalkingP2PEnvelope)
@@ -92,13 +100,14 @@ extension KeepTalkingClient {
             try await mergeDiscoveredNode(node)
         case .nodeStatus(let status):
             try await mergeDiscoveredNodeStatus(status)
+        case .encryptedNodeStatus(let envelope):
+            guard envelope.recipientNodeID == config.node else {
+                break
+            }
+            let status = try await decryptNodeStatusEnvelope(envelope)
+            try await mergeDiscoveredNodeStatus(status)
         case .context(let context):
             mergeContext(context)
-            if let latestMessage = context.messages.max(by: {
-                $0.timestamp < $1.timestamp
-            }) {
-                onMessage?(latestMessage)
-            }
         case .actionCallRequest(let request):
             if request.targetNodeID == config.node {
                 Task { [weak self] in
@@ -106,6 +115,20 @@ extension KeepTalkingClient {
                 }
             }
         case .actionCallResult(let result):
+            _ = resolvePendingActionCall(result)
+        case .encryptedActionCallRequest(let envelope):
+            guard envelope.recipientNodeID == config.node else {
+                break
+            }
+            let request = try await decryptActionCallRequestEnvelope(envelope)
+            Task { [weak self] in
+                try await self?.handleIncomingActionCallRequest(request)
+            }
+        case .encryptedActionCallResult(let envelope):
+            guard envelope.recipientNodeID == config.node else {
+                break
+            }
+            let result = try await decryptActionCallResultEnvelope(envelope)
             _ = resolvePendingActionCall(result)
         case .p2pPresence(let presence):
             guard presence.node != config.node else {
@@ -165,25 +188,129 @@ extension KeepTalkingClient {
         return context
     }
 
-    func blocking<T: Sendable>(
-        _ operation: @escaping @Sendable () async throws -> T
-    ) throws -> T {
-        let semaphore = DispatchSemaphore(value: 0)
-        var result: Result<T, Error>?
-
-        Task {
-            do {
-                result = .success(try await operation())
-            } catch {
-                result = .failure(error)
-            }
-            semaphore.signal()
+    public func ensureGroupChatSecret(for contextID: UUID) async throws -> Data
+    {
+        if let existing = try await KeepTalkingContextGroupSecret.query(
+            on: localStore.database
+        )
+        .filter(\.$id, .equal, contextID)
+        .first() {
+            return existing.secret
         }
 
-        semaphore.wait()
-        guard let result else {
-            fatalError("Blocking operation did not produce a result.")
+        _ = try await upsertContext(KeepTalkingContext(id: contextID))
+        let key = SymmetricKey(size: .bits256)
+        let secret = key.withUnsafeBytes { Data($0) }
+        let contextSecret = KeepTalkingContextGroupSecret(
+            contextID: contextID,
+            secret: secret
+        )
+        try await contextSecret.save(on: localStore.database)
+        return secret
+    }
+
+    public func setGroupChatSecret(_ secret: Data, for contextID: UUID)
+        async throws
+    {
+        guard !secret.isEmpty else {
+            throw KeepTalkingKVServiceError.invalidStoredValue
         }
-        return try result.get()
+
+        _ = try await upsertContext(KeepTalkingContext(id: contextID))
+        if let existing = try await KeepTalkingContextGroupSecret.query(
+            on: localStore.database
+        )
+        .filter(\.$id, .equal, contextID)
+        .first() {
+            existing.secret = secret
+            try await existing.save(on: localStore.database)
+            return
+        }
+
+        let contextSecret = KeepTalkingContextGroupSecret(
+            contextID: contextID,
+            secret: secret
+        )
+        try await contextSecret.save(on: localStore.database)
+    }
+
+    private func encryptedOutboundMessage(
+        _ message: KeepTalkingContextMessage
+    ) async throws -> KeepTalkingContextMessage {
+        let contextID = message.$context.id
+        let encryptedContent = try await encryptContent(
+            message.content,
+            contextID: contextID
+        )
+        let outbound = KeepTalkingContextMessage(
+            id: message.id ?? UUID(),
+            context: KeepTalkingContext(id: contextID),
+            sender: message.sender,
+            content: encryptedContent,
+            timestamp: message.timestamp
+        )
+        return outbound
+    }
+
+    private func encryptContent(_ content: String, contextID: UUID) async throws
+        -> String
+    {
+        let secret = try await ensureGroupChatSecret(for: contextID)
+        let key = SymmetricKey(data: secret)
+        let plaintext = Data(content.utf8)
+        let sealed = try AES.GCM.seal(plaintext, using: key)
+        guard let combined = sealed.combined else {
+            return content
+        }
+        return Self.encryptedMessagePrefix + combined.base64EncodedString()
+    }
+
+    private func decryptedContentIfNeeded(_ content: String, contextID: UUID)
+        async -> String
+    {
+        guard content.hasPrefix(Self.encryptedMessagePrefix) else {
+            return content
+        }
+        let secret: Data?
+        do {
+            secret = try await loadGroupChatSecret(for: contextID)
+        } catch {
+            rtcClient.debug(
+                "loading group secret failed for context=\(contextID.uuidString.lowercased()) error=\(error.localizedDescription)"
+            )
+            return content
+        }
+        guard let secret else {
+            rtcClient.debug(
+                "encrypted message received but no group secret found for context=\(contextID.uuidString.lowercased())"
+            )
+            return content
+        }
+        let payload = String(
+            content.dropFirst(Self.encryptedMessagePrefix.count)
+        )
+        guard let combined = Data(base64Encoded: payload) else {
+            return content
+        }
+
+        do {
+            let sealed = try AES.GCM.SealedBox(combined: combined)
+            let key = SymmetricKey(data: secret)
+            let decrypted = try AES.GCM.open(sealed, using: key)
+            return String(decoding: decrypted, as: UTF8.self)
+        } catch {
+            rtcClient.debug(
+                "failed to decrypt message for context=\(contextID.uuidString.lowercased()) error=\(error.localizedDescription)"
+            )
+            return content
+        }
+    }
+
+    private func loadGroupChatSecret(for contextID: UUID) async throws -> Data?
+    {
+        try await KeepTalkingContextGroupSecret.query(on: localStore.database)
+            .filter(\.$id, .equal, contextID)
+            .first()?
+            .secret
     }
 }

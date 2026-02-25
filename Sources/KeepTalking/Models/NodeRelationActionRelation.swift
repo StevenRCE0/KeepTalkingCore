@@ -15,7 +15,7 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
 
     public enum ApprovingContext: Codable, Sendable {
         case all
-        case context(KeepTalkingContext)
+        case contexts([KeepTalkingContext])
     }
 
     @ID(key: .id)
@@ -42,5 +42,16 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
         self.$relation.id = try relation.requireID()
         self.$action.id = try action.requireID()
         self.approvingContext = approvingContext
+    }
+
+    public func applicable(in context: KeepTalkingContext?) -> Bool {
+        switch approvingContext {
+        case .all:
+            return true
+        case .contexts(let contexts):
+            return context == nil ? false : contexts.contains(context!)
+        case nil:
+            return false
+        }
     }
 }

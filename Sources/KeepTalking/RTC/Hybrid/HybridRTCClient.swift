@@ -4,9 +4,6 @@ import Foundation
 final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     @unchecked Sendable
 {
-    var onMessage: (@Sendable (KeepTalkingContextMessage) -> Void)? {
-        didSet { bindCallbacks() }
-    }
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)? {
         didSet { bindCallbacks() }
     }
@@ -86,7 +83,9 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             guard shouldFallback else {
                 throw error
             }
-            debug("p2p send failed; falling back to sfu error=\(error.localizedDescription)")
+            debug(
+                "p2p send failed; falling back to sfu error=\(error.localizedDescription)"
+            )
             fallbackToSFU(reason: "p2p send failure")
             try sfuClient.sendEnvelope(envelope)
         }
@@ -154,7 +153,9 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             return
         }
         guard !state.running || allowWhileOnP2P else {
-            debug("p2p trial skipped trigger=\(trigger) reason=trial-in-progress")
+            debug(
+                "p2p trial skipped trigger=\(trigger) reason=trial-in-progress"
+            )
             return
         }
         if state.route == "p2p" {
@@ -193,9 +194,12 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                 debug(
                     "p2p trial failed trigger=\(trigger) error=\(error.localizedDescription)"
                 )
-                let reconnectPeerID = expectedPeerID
+                let reconnectPeerID =
+                    expectedPeerID
                     ?? self.stateQueue.sync {
-                        self.discoveredPeers.first(where: { $0 != self.config.node })
+                        self.discoveredPeers.first(where: {
+                            $0 != self.config.node
+                        })
                     }
                 if let reconnectPeerID {
                     self.reportPeerConnected(
@@ -287,15 +291,34 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     {
         switch envelope {
         case .p2pPresence(let presence):
-            let shouldConnect =
+            let relations =
                 try await KeepTalkingNodeRelation
                 .query(on: localStore.database)
                 .filter(\.$from.$id == config.node)
                 .filter(\.$to.$id == presence.node)
-                .filter(\.$relationship ~~ [.owner, .trusted, .pending])
-                .count() > 0
+                .all()
 
-            debug("presence node=\(presence.node.uuidString.lowercased()) connect=\(shouldConnect)")
+            guard
+                let currentContext = try await KeepTalkingContext.query(
+                    on: localStore
+                        .database
+                ).filter(\.$id == config.contextID).first()
+            else {
+                throw KeepTalkingClientError.missingNode  // TODO: Actually missing context.
+            }
+
+            let shouldConnect = relations.contains { relation in
+                switch relation.relationship {
+                case .pending, .owner, .trustedInAllContext:
+                    return true
+                case .trusted(_):
+                    return relation.allows(context: currentContext)
+                }
+            }
+
+            debug(
+                "presence node=\(presence.node.uuidString.lowercased()) connect=\(shouldConnect)"
+            )
 
             if presence.node == config.node {
                 debug(
@@ -303,7 +326,8 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                 )
             } else if shouldConnect {
                 beginP2PTrial(
-                    trigger: "presence:\(presence.node.uuidString.lowercased())",
+                    trigger:
+                        "presence:\(presence.node.uuidString.lowercased())",
                     expectedPeerID: presence.node
                 )
             } else {
@@ -329,16 +353,11 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     }
 
     private func bindCallbacks() {
-        let forwardMessage: @Sendable (KeepTalkingContextMessage) -> Void = {
-            [weak self] message in
-            self?.onMessage?(message)
-        }
         let forwardRaw: @Sendable (String) -> Void = { [weak self] raw in
             self?.onRawMessage?(raw)
         }
         let logger = onLog
 
-        sfuClient.onMessage = forwardMessage
         sfuClient.onEnvelope = { [weak self] envelope in
             Task {
                 guard let self else { return }
@@ -357,7 +376,6 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         }
         sfuClient.onLog = logger
 
-        p2pClient?.onMessage = forwardMessage
         p2pClient?.onEnvelope = { [weak self] envelope in
             self?.onEnvelope?(envelope)
         }

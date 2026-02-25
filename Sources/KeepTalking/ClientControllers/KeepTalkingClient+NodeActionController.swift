@@ -189,57 +189,74 @@ extension KeepTalkingClient {
         toNodeID: UUID,
         scope: KeepTalkingActionPermissionScope
     ) async throws {
+
         guard
-            let action = try await KeepTalkingAction.query(
-                on: localStore.database
-            )
-            .filter(\.$id, .equal, actionID)
-            .filter(\.$node.$id, .equal, config.node)
-            .first()
+            let action = try await KeepTalkingAction.find(
+                actionID,
+                on: localStore
+                    .database
+            ),
+            action.$node.id == config.node
         else {
             throw KeepTalkingClientError.actionNotHostedLocally(actionID)
         }
 
+        let selfNode = try await ensure(
+            config.node,
+            for: KeepTalkingNode.self,
+            strict: true
+        )
+
         guard
-            let relation =
-                try await KeepTalkingNodeRelation
+            let relation = try await selfNode.$outgoingNodeRelations
                 .query(on: localStore.database)
-                .filter(\.$from.$id, .equal, config.node)
-                .filter(\.$to.$id, .equal, toNodeID)
-                .filter(\.$relationship ~~ [.owner, .trusted])
+                .filter(\.$to.$id == toNodeID)
                 .first()
         else {
-            throw KeepTalkingClientError.relationNotTrustedOrOwned(toNodeID)
-        }
-        guard let relationID = relation.id else {
+            // TODO: The error is inaccurate
             throw KeepTalkingClientError.relationNotTrustedOrOwned(toNodeID)
         }
 
-        let approvingContext:
-            KeepTalkingNodeRelationActionRelation.ApprovingContext =
-                switch scope {
-                case .all:
-                    .all
-                case .context(let context):
-                    .context(context)
-                }
+        var targetActionRelation = try await relation.$actionRelations.query(
+            on: localStore
+                .database
+        ).filter(\.$action.$id == actionID).first()
 
-        if let existing =
-            try await KeepTalkingNodeRelationActionRelation
-            .query(on: localStore.database)
-            .filter(\.$relation.$id, .equal, relationID)
-            .filter(\.$action.$id, .equal, actionID)
-            .first()
-        {
-            existing.approvingContext = approvingContext
-            try await existing.save(on: localStore.database)
+        if targetActionRelation == nil {
+            switch scope {
+            case .all:
+                targetActionRelation = try .init(
+                    relation: relation,
+                    action: action,
+                    approvingContext: .all
+                )
+            case .context(let approvingContext):
+                targetActionRelation = try .init(
+                    relation: relation,
+                    action: action,
+                    approvingContext: .contexts([approvingContext])
+                )
+            }
+
+            try await targetActionRelation!.create(on: localStore.database)
         } else {
-            let link = try KeepTalkingNodeRelationActionRelation(
-                relation: relation,
-                action: action,
-                approvingContext: approvingContext
-            )
-            try await link.save(on: localStore.database)
+            switch scope {
+            case .all:
+                targetActionRelation!.approvingContext = .all
+            case .context(let approvingContext):
+                switch targetActionRelation!.approvingContext {
+                case .all:
+                    targetActionRelation!.approvingContext = .all
+                case .contexts(let originalContexts):
+                    targetActionRelation!.approvingContext = .contexts(
+                        originalContexts + [approvingContext]
+                    )
+                default:
+                    break
+                }
+            }
+
+            try await targetActionRelation!.update(on: localStore.database)
         }
 
         await broadcastLocalNodeState(
@@ -261,31 +278,97 @@ extension KeepTalkingClient {
             rtcClient.onLog?("Merging action: \(actionID)")
 
             let persistedAction: KeepTalkingAction
+            let existingDescriptor: KeepTalkingActionDescriptor?
+            let existingPayload: KeepTalkingAction.Payload?
+            let existingRemoteAuthorisable: Bool?
+            let existingBlockingAuthorisation: Bool?
+
             if let existingAction = try await KeepTalkingAction.query(
                 on: localStore.database
             )
             .filter(\.$id, .equal, actionID)
             .first() {
                 persistedAction = existingAction
+                existingDescriptor = existingAction.descriptor
+                existingPayload = existingAction.payload
+                existingRemoteAuthorisable = existingAction.remoteAuthorisable
+                existingBlockingAuthorisation =
+                    existingAction
+                    .blockingAuthorisation
             } else {
                 let newAction = KeepTalkingAction()
                 newAction.id = actionID
                 persistedAction = newAction
+                existingDescriptor = nil
+                existingPayload = nil
+                existingRemoteAuthorisable = nil
+                existingBlockingAuthorisation = nil
             }
 
+            let fallbackDescription =
+                incomingAction.descriptor?.action?.description
+                ?? "Virtual remote action \(actionID.uuidString.lowercased())"
+            let resolvedDescriptor =
+                incomingAction.descriptor
+                ?? existingDescriptor
+                ?? KeepTalkingActionDescriptor(
+                    subject: nil,
+                    action: KeepTalkingActionWithDescription(
+                        description: fallbackDescription
+                    ),
+                    object: nil
+                )
+            let resolvedPayload: KeepTalkingAction.Payload =
+                incomingAction.payload
+                ?? existingPayload
+                ?? .mcpBundle(
+                    virtualRemoteMCPBundle(
+                        actionID: actionID,
+                        description: fallbackDescription
+                    )
+                )
+
             persistedAction.$node.id = incomingAction.$node.id
-            persistedAction.descriptor = incomingAction.descriptor
-            persistedAction.payload = incomingAction.payload
+            persistedAction.descriptor = resolvedDescriptor
+            persistedAction.payload = resolvedPayload
             persistedAction.remoteAuthorisable =
                 incomingAction.remoteAuthorisable
+                ?? existingRemoteAuthorisable
+                ?? true
             persistedAction.blockingAuthorisation =
                 incomingAction.blockingAuthorisation
+                ?? existingBlockingAuthorisation
+                ?? false
 
             try await persistedAction.save(on: localStore.database)
 
-            if case .mcpBundle = persistedAction.payload {
+            if persistedAction.$node.id == config.node,
+                case .mcpBundle = persistedAction.payload
+            {
                 try await mcpManager.refreshMCPAction(persistedAction)
             }
         }
+    }
+
+    private func virtualRemoteMCPBundle(
+        actionID: UUID,
+        description: String
+    ) -> KeepTalkingMCPBundle {
+        let shortID = actionID.uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
+            .prefix(8)
+        return KeepTalkingMCPBundle(
+            id: actionID,
+            name: "remote_\(shortID)",
+            indexDescription: description,
+            service: .stdio(
+                arguments: [
+                    "__kt_virtual_remote_action__",
+                    actionID.uuidString.lowercased(),
+                ],
+                environment: [:]
+            )
+        )
     }
 }

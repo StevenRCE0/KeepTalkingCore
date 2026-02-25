@@ -69,7 +69,7 @@ let config = KeepTalkingConfig(
     node: UUID(uuidString: "2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9")!
 )
 
-let kv = KeepTalkingHTTPKVService(baseURL: URL(string: "https://your-kv.example.com")!)
+let kv = KeepTalkingPassKVService(baseURL: URL(string: "https://your-kv.example.com")!)
 let store = try KeepTalkingModelStore()
 
 let client = KeepTalkingClient(config: config, kvService: kv, localStore: store)
@@ -140,4 +140,4 @@ Notes:
 - SDK now supports P2P envelopes for `node`, `context`, `stateBundle`, and `stateRequest`.
 - Local persistence stores `nodes` and `contexts` in Fluent SQLite (`~/Library/Application Support/KeepTalking/state.sqlite`) by default.
 - `KeepTalkingClient` defaults to `KeepTalkingModelStore`; if initialization fails, it falls back to `KeepTalkingInMemoryStore`.
-- `KeepTalkingKVService` is protocol-based; implement your own KV backend, or use `KeepTalkingHTTPKVService`.
+- `KeepTalkingKVService` is protocol-based; implement your own KV backend, or use `KeepTalkingPassKVService`.

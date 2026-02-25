@@ -27,6 +27,10 @@ struct CreateNodeRelationsActionsRelationsMigration: AsyncMigration {
                 .required,
                 .references(KeepTalkingAction.schema, "id")
             )
+            .field(
+                "approving_context",
+                .json,
+            )
             .create()
     }
 

@@ -5,7 +5,7 @@ struct CreateKeepTalkingContextMessagesMigration: Migration {
         database.schema(KeepTalkingContextMessage.schema)
             .id()
             .field("context", .uuid, .required, .references(KeepTalkingContext.schema, "id", onDelete: .cascade))
-            .field("sender", .data, .required)
+            .field("sender", .json, .required)
             .field("content", .string, .required)
             .field("timestamp", .datetime, .required)
             .create()

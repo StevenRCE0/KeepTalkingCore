@@ -26,7 +26,18 @@ public final class KeepTalkingOperatorContext: Model, @unchecked Sendable {
     }
 }
 
-public final class KeepTalkingContext: Model, @unchecked Sendable {
+public final class KeepTalkingContext: Model, Equatable, Hashable,
+    @unchecked Sendable
+{
+    public static func == (lhs: KeepTalkingContext, rhs: KeepTalkingContext)
+        -> Bool
+    {
+        if lhs.id == nil && rhs.id == nil {
+            return false
+        }
+        return lhs.id == rhs.id
+    }
+
     public static let schema = "kt_contexts"
 
     @ID(key: .id)
@@ -53,6 +64,11 @@ public final class KeepTalkingContext: Model, @unchecked Sendable {
     ) {
         self.id = id
         self.updatedAt = updatedAt
+    }
+
+    /// The Hasher protocol is merely satisfied by the ID, no message comparison logic.
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
     }
 }
 

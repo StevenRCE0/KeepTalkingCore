@@ -1,7 +1,6 @@
 import Foundation
 
 protocol KeepTalkingTransportClient: AnyObject {
-    var onMessage: (@Sendable (KeepTalkingContextMessage) -> Void)? { get set }
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)? { get set }
     var onRawMessage: (@Sendable (String) -> Void)? { get set }
     var onPeerConnect: (@Sendable (UUID) -> Void)? { get set }

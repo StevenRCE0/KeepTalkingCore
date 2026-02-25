@@ -7,7 +7,8 @@ enum InteractiveCommand {
     case newContext
     case join(String)
     case send(String)
-    case trust(String)
+    case trust(nodeID: String, scope: String)
+    case lure(nodeID: String, publicKey: String)
     case actionsList
     case actionsGrant(nodeID: String, actionID: String, scope: String)
     case ai(String)
@@ -44,9 +45,16 @@ enum InteractiveCommand {
             return .join(context)
         }
         if text.hasPrefix("/trust") {
-            let parts = text.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+            let parts = text.split(maxSplits: 2, whereSeparator: \.isWhitespace)
             let node = parts.count > 1 ? String(parts[1]) : ""
-            return .trust(node)
+            let scope = parts.count > 2 ? String(parts[2]) : "all"
+            return .trust(nodeID: node, scope: scope)
+        }
+        if text.hasPrefix("/lure") {
+            let parts = text.split(maxSplits: 2, whereSeparator: \.isWhitespace)
+            let node = parts.count > 1 ? String(parts[1]) : ""
+            let publicKey = parts.count > 2 ? String(parts[2]) : ""
+            return .lure(nodeID: node, publicKey: publicKey)
         }
         if text.hasPrefix("/ai") {
             let prefix = "/ai"

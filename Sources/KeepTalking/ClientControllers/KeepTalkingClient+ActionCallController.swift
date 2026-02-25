@@ -3,19 +3,25 @@ import Foundation
 
 extension KeepTalkingClient {
     func executeActionCallRequest(
-        _ request: KeepTalkingActionCallRequest
+        _ request: KeepTalkingActionCallRequest,
+        context: KeepTalkingContext?
     ) async -> KeepTalkingActionCallResult {
         do {
             let action = try await resolveLocalActionForExecution(
                 actionID: request.call.action
             )
-
-            let allowed = try await isCallerAuthorizedForAction(
-                callerNodeID: request.callerNodeID,
-                actionID: request.call.action,
-                contextID: request.contextID
+            let remoteNode = try await ensure(
+                request.callerNodeID,
+                for: KeepTalkingNode.self
             )
-            guard allowed else {
+
+            guard
+                try await isNodeAuthorizedForAction(
+                    node: remoteNode,
+                    action: action,
+                    context: context
+                )
+            else {
                 throw KeepTalkingClientError.actionCallNotAuthorized(
                     action: request.call.action,
                     caller: request.callerNodeID,
@@ -55,27 +61,43 @@ extension KeepTalkingClient {
     func handleIncomingActionCallRequest(
         _ request: KeepTalkingActionCallRequest
     ) async throws {
-        let result = await executeActionCallRequest(request)
-        try rtcClient.sendEnvelope(.actionCallResult(result))
+        let context = try await ensure(
+            request.contextID,
+            for: KeepTalkingContext.self
+        )
+
+        let result = await executeActionCallRequest(
+            request,
+            context: context
+        )
+
+        let encryptedResult = try await encryptActionCallResultEnvelope(result)
+
+        try rtcClient.sendEnvelope(.encryptedActionCallResult(encryptedResult))
     }
 
     func dispatchActionCall(
         actionOwner: UUID,
         call: KeepTalkingActionCall,
-        contextID: UUID
+        context: KeepTalkingContext
     ) async throws -> KeepTalkingActionCallResult {
         let request = KeepTalkingActionCallRequest(
-            contextID: contextID,
+            contextID: try context.requireID(),
             callerNodeID: config.node,
             targetNodeID: actionOwner,
             call: call
         )
 
         if actionOwner == config.node {
-            return await executeActionCallRequest(request)
+            return await executeActionCallRequest(request, context: context)
         }
 
-        try rtcClient.sendEnvelope(.actionCallRequest(request))
+        let encryptedRequest = try await encryptActionCallRequestEnvelope(
+            request
+        )
+        try rtcClient.sendEnvelope(
+            .encryptedActionCallRequest(encryptedRequest)
+        )
 
         return try await waitForActionCallResult(
             requestID: request.id,
@@ -180,59 +202,109 @@ extension KeepTalkingClient {
         return action
     }
 
-    func isCallerAuthorizedForAction(
-        callerNodeID: UUID,
-        actionID: UUID,
-        contextID: UUID
+    public func isNodeAuthorizedForAction(
+        node: KeepTalkingNode,
+        action: KeepTalkingAction,
+        context: KeepTalkingContext?
     ) async throws -> Bool {
-        guard callerNodeID != config.node else {
-            return true
-        }
-
-        let relations = try await KeepTalkingNodeRelation.query(
-            on: localStore.database
-        )
-        .filter(\.$from.$id, .equal, config.node)
-        .filter(\.$to.$id, .equal, callerNodeID)
-        .filter(\.$relationship ~~ [.owner, .trusted])
-        .all()
-
-        guard !relations.isEmpty else {
+        let nodeID = try node.requireID()
+        guard let actionOwnerID = action.$node.id else {
             return false
         }
 
-        for relation in relations {
-            guard let relationID = relation.id else { continue }
-            let links =
-                try await KeepTalkingNodeRelationActionRelation
-                .query(on: localStore.database)
-                .filter(\.$relation.$id, .equal, relationID)
-                .filter(\.$action.$id, .equal, actionID)
-                .all()
-
-            if links.contains(where: {
-                approvingContextAllows(
-                    $0.approvingContext,
-                    contextID: contextID
-                )
-            }) {
-                return true
-            }
+        guard actionOwnerID == config.node || actionOwnerID == nodeID else {
+            return false
         }
 
-        return false
+        if nodeID == config.node {
+            return actionOwnerID == config.node
+        }
+
+        guard action.remoteAuthorisable ?? false else {
+            return false
+        }
+
+        let selfNode = try await getCurrentNodeInstance()
+
+        let eligibleRelations = try await selfNode.$outgoingNodeRelations
+            .query(
+                on: localStore.database
+            ).filter(\.$to.$id == nodeID).all()
+            .filter { relation in
+                relation.allows(context: context)
+            }
+
+        guard !eligibleRelations.isEmpty else {
+            return false
+        }
+
+        if eligibleRelations.contains(where: { relation in
+            if case .owner = relation.relationship {
+                return true
+            }
+            return false
+        }) {
+            return true
+        }
+
+        let eligibleRelationIDs = eligibleRelations.compactMap(\.id)
+        guard !eligibleRelationIDs.isEmpty else {
+            return false
+        }
+
+        let actionID = try action.requireID()
+        let approvals = try await KeepTalkingNodeRelationActionRelation
+            .query(on: localStore.database)
+            .filter(\.$relation.$id ~~ eligibleRelationIDs)
+            .filter(\.$action.$id == actionID)
+            .all()
+
+        return approvals.contains { approval in
+            approvingContextAllows(
+                approval.approvingContext,
+                context: context
+            )
+        }
+    }
+
+    func authorizedActions(
+        _ actions: [KeepTalkingAction],
+        for node: KeepTalkingNode,
+        context: KeepTalkingContext?
+    ) async throws -> [KeepTalkingAction] {
+        var allowed: [KeepTalkingAction] = []
+        allowed.reserveCapacity(actions.count)
+
+        for action in actions {
+            guard
+                try await isNodeAuthorizedForAction(
+                    node: node,
+                    action: action,
+                    context: context
+                )
+            else {
+                continue
+            }
+            allowed.append(action)
+        }
+
+        return allowed
     }
 
     func approvingContextAllows(
         _ approvingContext: KeepTalkingNodeRelationActionRelation
             .ApprovingContext?,
-        contextID: UUID
+        context testContext: KeepTalkingContext?
     ) -> Bool {
         switch approvingContext {
         case .none, .all:
             return true
-        case .context(let context):
-            return context.id == contextID
+        case .contexts(let contexts):
+            guard let testContext else {
+                return false
+            }
+            return contexts.contains(testContext)
         }
     }
+
 }

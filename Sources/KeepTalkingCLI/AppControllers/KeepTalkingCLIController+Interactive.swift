@@ -15,7 +15,9 @@ extension KeepTalkingCLIController {
         }
     }
 
-    private func handleInteractiveCommand(_ command: InteractiveCommand) async -> Bool {
+    private func handleInteractiveCommand(_ command: InteractiveCommand) async
+        -> Bool
+    {
         switch command {
         case .quit:
             return false
@@ -30,7 +32,30 @@ extension KeepTalkingCLIController {
             print("[local] requested p2p trial")
             return true
         case .newContext:
-            return await switchContext(to: UUID(), verb: "created and joined")
+            let nextContextID = UUID()
+            let switched = await switchContext(
+                to: nextContextID,
+                verb: "created and joined",
+                createGroupSecret: true
+            )
+            guard switched else { return false }
+            do {
+                let secret = try await client.ensureGroupChatSecret(
+                    for: nextContextID
+                )
+                print(
+                    "[local] invite command: /join \(nextContextID.uuidString.lowercased())"
+                )
+                print(
+                    "[local] invite key (base64): \(secret.base64EncodedString())"
+                )
+            } catch {
+                fputs(
+                    "Failed to read new context key: \(error.localizedDescription)\n",
+                    stderr
+                )
+            }
+            return true
         case .join(let contextIDRaw):
             let trimmedContextID = contextIDRaw.trimmingCharacters(
                 in: .whitespacesAndNewlines
@@ -43,7 +68,34 @@ extension KeepTalkingCLIController {
                 print("Invalid context UUID: \(trimmedContextID)")
                 return true
             }
-            return await switchContext(to: nextContextID, verb: "joined")
+            let joinSecret = promptJoinSecret()
+            let switched = await switchContext(
+                to: nextContextID,
+                verb: "joined"
+            )
+            guard switched else { return false }
+
+            if let joinSecret {
+                do {
+                    try await client.setGroupChatSecret(
+                        joinSecret,
+                        for: nextContextID
+                    )
+                    print(
+                        "[local] encryption key saved for context=\(nextContextID.uuidString.lowercased())"
+                    )
+                } catch {
+                    fputs(
+                        "Failed to save encryption key: \(error.localizedDescription)\n",
+                        stderr
+                    )
+                }
+            } else {
+                print(
+                    "[local] joined without key. you can still share history, but encrypted messages may not decrypt."
+                )
+            }
+            return true
         case .send(let text):
             do {
                 try await client.send(text, in: activeContext)
@@ -52,30 +104,109 @@ extension KeepTalkingCLIController {
                 fputs("Send failed: \(error.localizedDescription)\n", stderr)
             }
             return true
-        case .trust(let nodeIDRaw):
+        case .trust(let nodeIDRaw, let scopeRaw):
+            guard
+                let currentContext = try? await KeepTalkingContext.find(
+                    currentConfig.contextID,
+                    on: localStore.database
+                )
+            else {
+                print("No active context")
+                return true
+            }
+
             let trimmedNodeID = nodeIDRaw.trimmingCharacters(
                 in: .whitespacesAndNewlines
             )
             guard !trimmedNodeID.isEmpty else {
-                print("Usage: /trust <node-uuid>")
+                print("Usage: /trust <node-uuid> [all|context|<context-uuid>]")
                 return true
             }
             guard let trustedNodeID = UUID(uuidString: trimmedNodeID) else {
                 print("Invalid node UUID: \(trimmedNodeID)")
                 return true
             }
+
+            let normalizedScope = scopeRaw.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).lowercased()
+
+            let trustScope: KeepTalkingNodeTrustScope
+            if normalizedScope.isEmpty || normalizedScope == "all" {
+                trustScope = .allContexts
+            } else if normalizedScope == "context"
+                || normalizedScope == "current"
+            {
+                trustScope = .context(currentContext)
+            } else if UUID(uuidString: normalizedScope) != nil {
+                trustScope = .context(currentContext)
+            } else {
+                print(
+                    "Invalid trust scope: \(scopeRaw). Use `all`, `context`, or a context UUID."
+                )
+                return true
+            }
             do {
-                try await client.trust(node: trustedNodeID)
-                print("[local] trusted node=\(trustedNodeID.uuidString.lowercased())")
+                let localPublicKey = try await client.trust(
+                    node: trustedNodeID,
+                    scope: trustScope
+                )
+                let scopeLabel: String =
+                    switch trustScope {
+                    case .allContexts:
+                        "all"
+                    case .context(let context):
+                        "context=\(context.id?.uuidString.lowercased() ?? "missing")"
+                    }
+                print(
+                    "[local] trusted node=\(trustedNodeID.uuidString.lowercased()) scope=\(scopeLabel)"
+                )
+                print(
+                    "[local] share this public key: \(localPublicKey)"
+                )
+                print(
+                    "[local] cast this lure on peer: /lure \(currentConfig.node.uuidString.lowercased()) \(localPublicKey)"
+                )
             } catch {
                 fputs("Trust failed: \(error.localizedDescription)\n", stderr)
+            }
+            return true
+        case .lure(let nodeIDRaw, let publicKeyRaw):
+            let trimmedNodeID = nodeIDRaw.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            let trimmedPublicKey = publicKeyRaw.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard !trimmedNodeID.isEmpty, !trimmedPublicKey.isEmpty else {
+                print("Usage: /lure <node-uuid> <pubkey>")
+                return true
+            }
+            guard let sourceNodeID = UUID(uuidString: trimmedNodeID) else {
+                print("Invalid node UUID: \(trimmedNodeID)")
+                return true
+            }
+            do {
+                try await client.lure(
+                    node: sourceNodeID,
+                    publicKey: trimmedPublicKey
+                )
+                print(
+                    "[lure] hooked node=\(sourceNodeID.uuidString.lowercased()) pubkey saved for trusted=\(currentConfig.node.uuidString.lowercased())"
+                )
+            } catch {
+                fputs("Lure failed: \(error.localizedDescription)\n", stderr)
             }
             return true
         case .actionsList:
             await listActions()
             return true
         case .actionsGrant(let nodeIDRaw, let actionIDRaw, let scopeRaw):
-            await grantAction(nodeIDRaw: nodeIDRaw, actionIDRaw: actionIDRaw, scopeRaw: scopeRaw)
+            await grantAction(
+                nodeIDRaw: nodeIDRaw,
+                actionIDRaw: actionIDRaw,
+                scopeRaw: scopeRaw
+            )
             return true
         case .ai(let prompt):
             runAI(prompt: prompt)
@@ -87,7 +218,11 @@ extension KeepTalkingCLIController {
             await removeMCPAction(actionIDRaw: actionIDRaw)
             return true
         case .mcpAddHTTP(let name, let urlRaw, let description):
-            await registerHTTPMCPAction(name: name, urlRaw: urlRaw, description: description)
+            await registerHTTPMCPAction(
+                name: name,
+                urlRaw: urlRaw,
+                description: description
+            )
             return true
         case .mcpAddSTDIO(let name, let command, let environment):
             await registerStdioMCPAction(
@@ -99,7 +234,11 @@ extension KeepTalkingCLIController {
         }
     }
 
-    private func switchContext(to nextContextID: UUID, verb: String) async -> Bool {
+    private func switchContext(
+        to nextContextID: UUID,
+        verb: String,
+        createGroupSecret: Bool = false
+    ) async -> Bool {
         let previousConfig = currentConfig
         client.disconnect()
 
@@ -112,10 +251,17 @@ extension KeepTalkingCLIController {
 
         do {
             try await candidateClient.connect()
+            if createGroupSecret {
+                _ = try await candidateClient.ensureGroupChatSecret(
+                    for: nextContextID
+                )
+            }
             currentConfig = candidateConfig
             activeContext = KeepTalkingContext(id: nextContextID)
             client = candidateClient
-            print("[local] \(verb) context=\(nextContextID.uuidString.lowercased())")
+            print(
+                "[local] \(verb) context=\(nextContextID.uuidString.lowercased())"
+            )
             print(
                 "[local] channels signaling=\(currentConfig.signalingChannelLabel) chat=\(currentConfig.chatChannelLabel) action_call=\(currentConfig.actionCallChannelLabel)"
             )
@@ -138,7 +284,9 @@ extension KeepTalkingCLIController {
                 currentConfig = previousConfig
                 activeContext = KeepTalkingContext(id: previousConfig.contextID)
                 client = fallbackClient
-                print("[local] restored context=\(previousConfig.contextID.uuidString.lowercased())")
+                print(
+                    "[local] restored context=\(previousConfig.contextID.uuidString.lowercased())"
+                )
                 return true
             } catch {
                 fputs(
@@ -147,6 +295,28 @@ extension KeepTalkingCLIController {
                 )
                 return false
             }
+        }
+    }
+
+    private func promptJoinSecret() -> Data? {
+        while true {
+            print(
+                "Encryption key (base64) for this context [press Enter to skip]: ",
+                terminator: ""
+            )
+            guard let input = readLine(strippingNewline: true) else {
+                return nil
+            }
+            let trimmed = input.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            if trimmed.isEmpty {
+                return nil
+            }
+            if let secret = Data(base64Encoded: trimmed), !secret.isEmpty {
+                return secret
+            }
+            print("Invalid base64 key. Try again.")
         }
     }
 
@@ -160,9 +330,11 @@ extension KeepTalkingCLIController {
 
             print("[actions] total=\(actions.count)")
             for action in actions {
-                let owner = action.ownerNodeID?.uuidString.lowercased() ?? "unknown"
+                let owner =
+                    action.ownerNodeID?.uuidString.lowercased() ?? "unknown"
                 let hosted = action.hostedLocally ? "local" : "remote"
-                let remote = action.remoteAuthorisable ? "remote-ok" : "local-only"
+                let remote =
+                    action.remoteAuthorisable ? "remote-ok" : "local-only"
                 let kind = action.isMCP ? "mcp" : "unknown"
                 print(
                     "- id=\(action.actionID.uuidString.lowercased()) type=\(kind) owner=\(owner) host=\(hosted) mode=\(remote) name=\(action.name)"
@@ -178,21 +350,35 @@ extension KeepTalkingCLIController {
                         switch grant.approvingContext {
                         case .none, .all:
                             scope = "all"
-                        case .context(let context):
-                            scope = "context=\(context.id?.uuidString.lowercased() ?? "nil")"
+                        case .contexts(let contexts):
+                            scope =
+                                "context=\(contexts)"
                         }
-                        print("  grant to=\(grant.toNodeID.uuidString.lowercased()) scope=\(scope)")
+                        print(
+                            "  grant to=\(grant.toNodeID.uuidString.lowercased()) scope=\(scope)"
+                        )
                     }
                 }
             }
         } catch {
-            fputs("List actions failed: \(error.localizedDescription)\n", stderr)
+            fputs(
+                "List actions failed: \(error.localizedDescription)\n",
+                stderr
+            )
         }
     }
 
-    private func grantAction(nodeIDRaw: String, actionIDRaw: String, scopeRaw: String) async {
-        let trimmedNodeID = nodeIDRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedActionID = actionIDRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func grantAction(
+        nodeIDRaw: String,
+        actionIDRaw: String,
+        scopeRaw: String
+    ) async {
+        let trimmedNodeID = nodeIDRaw.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let trimmedActionID = actionIDRaw.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
 
         guard let nodeID = UUID(uuidString: trimmedNodeID) else {
             print("Invalid node UUID: \(trimmedNodeID)")
@@ -203,9 +389,13 @@ extension KeepTalkingCLIController {
             return
         }
 
-        let scopeToken = scopeRaw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let scopeToken = scopeRaw.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).lowercased()
         let scope: KeepTalkingActionPermissionScope?
-        if scopeToken.isEmpty || scopeToken == "context" || scopeToken == "current" {
+        if scopeToken.isEmpty || scopeToken == "context"
+            || scopeToken == "current"
+        {
             let contextID = activeContext.id ?? currentConfig.contextID
             scope = .context(KeepTalkingContext(id: contextID))
         } else if scopeToken == "all" {
@@ -224,22 +414,28 @@ extension KeepTalkingCLIController {
                 toNodeID: nodeID,
                 scope: scope
             )
-            let scopeLabel: String = switch scope {
-            case .all:
-                "all"
-            case .context(let context):
-                "context=\(context.id?.uuidString.lowercased() ?? "nil")"
-            }
+            let scopeLabel: String =
+                switch scope {
+                case .all:
+                    "all"
+                case .context(let context):
+                    "context=\(context.id?.uuidString.lowercased() ?? "nil")"
+                }
             print(
                 "[local] granted action=\(actionID.uuidString.lowercased()) to=\(nodeID.uuidString.lowercased()) scope=\(scopeLabel)"
             )
         } catch {
-            fputs("Grant action failed: \(error.localizedDescription)\n", stderr)
+            fputs(
+                "Grant action failed: \(error.localizedDescription)\n",
+                stderr
+            )
         }
     }
 
     private func runAI(prompt: String) {
-        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPrompt = prompt.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
         guard !trimmedPrompt.isEmpty else {
             print("Usage: /ai <prompt>")
             return
@@ -254,7 +450,10 @@ extension KeepTalkingCLIController {
                 try await client.send(trimmedPrompt, in: context)
                 print("[you] \(trimmedPrompt)")
             } catch {
-                fputs("Failed to send /ai prompt: \(error.localizedDescription)\n", stderr)
+                fputs(
+                    "Failed to send /ai prompt: \(error.localizedDescription)\n",
+                    stderr
+                )
             }
 
             guard client.aiEnabled else {
@@ -272,10 +471,15 @@ extension KeepTalkingCLIController {
                 try await client.send(
                     aiResponse,
                     in: context,
-                    sender: KeepTalkingContextMessage.Sender.autonomous(name: "ai")
+                    sender: KeepTalkingContextMessage.Sender.autonomous(
+                        name: "ai"
+                    )
                 )
             } catch {
-                fputs("AI query failed: \(error.localizedDescription)\n", stderr)
+                fputs(
+                    "AI query failed: \(error.localizedDescription)\n",
+                    stderr
+                )
             }
         }
     }

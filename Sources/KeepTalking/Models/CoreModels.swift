@@ -89,7 +89,7 @@ public struct KeepTalkingRuntimeStats: Sendable {
 }
 
 public protocol KeepTalkingKVService: Sendable {
-    func storeNodeID(_ node: UUID) async throws
+    func storeNodeID(_ node: UUID, publicKey: String?) async throws
     func loadNodeIDs() async throws -> [UUID]
 }
 
@@ -160,17 +160,33 @@ public struct KeepTalkingNodeRelationStatus: Codable, Sendable {
 
 public struct KeepTalkingNodeStatus: Codable, Sendable {
     public let node: KeepTalkingNode
-    public let contextID: UUID
+    public let context: KeepTalkingContext
     public let nodeRelations: [KeepTalkingNodeRelationStatus]
 
     public init(
         node: KeepTalkingNode,
-        contextID: UUID,
+        context: KeepTalkingContext,
         nodeRelations: [KeepTalkingNodeRelationStatus]
     ) {
         self.node = node
-        self.contextID = contextID
+        self.context = context
         self.nodeRelations = nodeRelations
+    }
+}
+
+public struct KeepTalkingAsymmetricCipherEnvelope: Codable, Sendable {
+    public let senderNodeID: UUID
+    public let recipientNodeID: UUID
+    public let ciphertext: Data
+
+    public init(
+        senderNodeID: UUID,
+        recipientNodeID: UUID,
+        ciphertext: Data
+    ) {
+        self.senderNodeID = senderNodeID
+        self.recipientNodeID = recipientNodeID
+        self.ciphertext = ciphertext
     }
 }
 
@@ -179,8 +195,11 @@ public enum KeepTalkingP2PEnvelope: Codable, Sendable {
     case context(KeepTalkingContext)
     case node(KeepTalkingNode)
     case nodeStatus(KeepTalkingNodeStatus)
+    case encryptedNodeStatus(KeepTalkingAsymmetricCipherEnvelope)
     case actionCallRequest(KeepTalkingActionCallRequest)
     case actionCallResult(KeepTalkingActionCallResult)
+    case encryptedActionCallRequest(KeepTalkingAsymmetricCipherEnvelope)
+    case encryptedActionCallResult(KeepTalkingAsymmetricCipherEnvelope)
     case p2pSignal(KeepTalkingP2PSignalPayload)
     case p2pPresence(KeepTalkingP2PPresencePayload)
 }

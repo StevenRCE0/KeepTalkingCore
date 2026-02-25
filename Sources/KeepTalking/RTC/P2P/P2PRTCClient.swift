@@ -42,7 +42,6 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         case actionCall
     }
 
-    var onMessage: (@Sendable (KeepTalkingContextMessage) -> Void)?
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
@@ -399,11 +398,15 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         -> EnvelopeRoute
     {
         switch envelope {
-        case .message, .node, .nodeStatus, .context:
+        case .message, .node, .nodeStatus, .encryptedNodeStatus, .context:
             return .chat
         case .p2pSignal, .p2pPresence:
             throw P2PError.signalingInP2P
-        case .actionCallRequest, .actionCallResult:
+        case
+            .actionCallRequest,
+            .actionCallResult,
+            .encryptedActionCallRequest,
+            .encryptedActionCallResult:
             return .actionCall
         }
     }
@@ -668,18 +671,15 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             KeepTalkingP2PEnvelope.self,
             from: buffer.data
         ) {
-            switch envelope {
-            case .message(let message):
-                if dataChannel.label == config.chatChannelLabel {
-                    onMessage?(message)
-                } else {
-                    debug(
-                        "ignored message envelope on non-chat channel label=\(dataChannel.label)"
-                    )
-                }
-            default:
-                onEnvelope?(envelope)
+            if case .message = envelope,
+                dataChannel.label != config.chatChannelLabel
+            {
+                debug(
+                    "ignored message envelope on non-chat channel label=\(dataChannel.label)"
+                )
+                return
             }
+            onEnvelope?(envelope)
             return
         }
 

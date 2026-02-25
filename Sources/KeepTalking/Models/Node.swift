@@ -1,12 +1,6 @@
 import FluentKit
 import Foundation
 
-public enum KeepTalkingRelationship: String, Codable, Sendable, Hashable, Equatable {
-    case owner, trusted, pending
-}
-
-
-
 public final class KeepTalkingNode: Model, @unchecked Sendable {
     public static let schema = "kt_nodes"
 
@@ -25,13 +19,15 @@ public final class KeepTalkingNode: Model, @unchecked Sendable {
     @Siblings(through: KeepTalkingNodeRelation.self, from: \.$from, to: \.$to)
     public var nodeRelations: [KeepTalkingNode]
 
+    @Children(for: \.$from)
+    public var outgoingNodeRelations: [KeepTalkingNodeRelation]
+
     public init() {}
 
     public init(
         id: UUID = UUID(),
         lastSeenAt: Date = Date(),
-        discoveredDuringLogon: UUID? = nil,
-        actions: [KeepTalkingAction] = []
+        discoveredDuringLogon: UUID? = nil
     ) {
         self.id = id
         self.lastSeenAt = lastSeenAt

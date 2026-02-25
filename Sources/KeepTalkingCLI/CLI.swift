@@ -21,8 +21,11 @@ Examples:
 
 Interactive commands:
   /new         create and join a new context
-  /join <id>   join an existing context
-  /trust <id>  mark a node as trusted
+  /join <id>   join an existing context (prompts for encryption key)
+  /trust <id> [all|context|<context-uuid>]
+               mark a node as trusted (all contexts or scoped context)
+  /lure <node-id> <pubkey>
+               add a node->pubkey trust record for this node
   /actions list
                list known actions and current grants
   /actions grant <node-id> <action-id> [context|all]
