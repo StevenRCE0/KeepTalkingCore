@@ -5,7 +5,9 @@ public enum KeepTalkingKVServiceError: Error {
     case invalidStoredValue
 }
 
-public final class KeepTalkingPassKVService: KeepTalkingKVService, @unchecked Sendable {
+public final class KeepTalkingPassKVService: KeepTalkingKVService,
+    @unchecked Sendable
+{
     private enum KVDocumentKey {
         static let ownedNodes = "ktOwnedNodes"
 
@@ -20,36 +22,25 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService, @unchecked Se
         let purposes: [String]
     }
 
-    // PassKeyValue API shapes.
+    // PassKeyValue API shapes from PassKeyValue/README.md.
     private struct KVEntry: Codable {
         let key: String
         let value: String
     }
 
-    private struct KVGetResponse: Codable {
-        let item: KVEntry
+    private struct KVListResponse: Codable {
+        let items: [KVEntry]
     }
 
     private struct KVUpsertRequest: Codable {
         let value: String
     }
 
-    private struct DynamicCodingKey: CodingKey {
-        let stringValue: String
-        let intValue: Int?
-
-        init?(stringValue: String) {
-            self.stringValue = stringValue
-            intValue = nil
-        }
-
-        init?(intValue: Int) {
-            self.stringValue = "\(intValue)"
-            self.intValue = intValue
-        }
+    private struct KVUpsertResponse: Codable {
+        let item: KVEntry
     }
 
-    private struct KVDocument: Codable, Sendable {
+    private struct KVDocument: Sendable {
         var ktOwnedNodes: [String]
         var nodeRecords: [String: NodeMetadata]
         var pairPublicKeys: [String: String]
@@ -63,63 +54,10 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService, @unchecked Se
             self.nodeRecords = nodeRecords
             self.pairPublicKeys = pairPublicKeys
         }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: DynamicCodingKey.self)
-            var nodes: [String] = []
-            var records: [String: NodeMetadata] = [:]
-            var pairs: [String: String] = [:]
-
-            for key in container.allKeys {
-                if key.stringValue == KVDocumentKey.ownedNodes {
-                    nodes = (try? container.decode([String].self, forKey: key)) ?? []
-                    continue
-                }
-                if key.stringValue.hasPrefix(KVDocumentKey.Prefix.node.rawValue) {
-                    if let record = try? container.decode(NodeMetadata.self, forKey: key) {
-                        records[key.stringValue] = record
-                    }
-                    continue
-                }
-                if key.stringValue.hasPrefix(KVDocumentKey.Prefix.pair.rawValue) {
-                    if let publicKey = try? container.decode(String.self, forKey: key) {
-                        pairs[key.stringValue] = publicKey
-                    }
-                }
-            }
-
-            ktOwnedNodes = nodes
-            nodeRecords = records
-            pairPublicKeys = pairs
-        }
-
-        func encode(to encoder: Encoder) throws {
-            var container = encoder.container(keyedBy: DynamicCodingKey.self)
-            guard let ownedNodesKey = DynamicCodingKey(
-                stringValue: KVDocumentKey.ownedNodes
-            )
-            else {
-                return
-            }
-            try container.encode(ktOwnedNodes, forKey: ownedNodesKey)
-            for (nodeKey, metadata) in nodeRecords {
-                guard let codingKey = DynamicCodingKey(stringValue: nodeKey) else {
-                    continue
-                }
-                try container.encode(metadata, forKey: codingKey)
-            }
-            for (pairKey, publicKey) in pairPublicKeys {
-                guard let codingKey = DynamicCodingKey(stringValue: pairKey) else {
-                    continue
-                }
-                try container.encode(publicKey, forKey: codingKey)
-            }
-        }
     }
 
     private let baseURL: URL
     private let kvPath: String
-    private let documentKey: String
     private let session: URLSession
     private let defaultNodeName: String?
     private let defaultNodePurposes: [String]
@@ -129,14 +67,12 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService, @unchecked Se
     public init(
         baseURL: URL,
         kvPath: String = "/api/kv",
-        documentKey: String = "keep-talking",
         defaultNodeName: String? = nil,
         defaultNodePurposes: [String] = [],
         session: URLSession = .shared
     ) {
         self.baseURL = baseURL
         self.kvPath = kvPath
-        self.documentKey = documentKey
         self.defaultNodeName = defaultNodeName
         self.defaultNodePurposes = defaultNodePurposes
         self.session = session
@@ -146,7 +82,6 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService, @unchecked Se
     public convenience init(
         baseURL: URL,
         nodesPath: String,
-        documentKey: String = "keep-talking",
         defaultNodeName: String? = nil,
         defaultNodePurposes: [String] = [],
         session: URLSession = .shared
@@ -154,7 +89,6 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService, @unchecked Se
         self.init(
             baseURL: baseURL,
             kvPath: nodesPath,
-            documentKey: documentKey,
             defaultNodeName: defaultNodeName,
             defaultNodePurposes: defaultNodePurposes,
             session: session
@@ -191,16 +125,25 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService, @unchecked Se
         if !document.ktOwnedNodes.contains(normalizedID) {
             document.ktOwnedNodes.append(normalizedID)
         }
-        document.nodeRecords[nodeRecordKey(nodeID: normalizedID)] = NodeMetadata(
-            name: normalizedName(name) ?? normalizedID,
-            purposes: purposes
-        )
+
+        document.nodeRecords[nodeRecordKey(nodeID: normalizedID)] =
+            NodeMetadata(
+                name: normalizedName(name) ?? normalizedID,
+                purposes: purposes
+            )
+
         if let normalizedPublicKey = normalizedName(publicKey) {
-            let normalizedTrustedID = normalizedNodeID(trustedNodeID ?? normalizedID)
+            guard let trustedNodeID = trustedNodeID else {
+                try await saveDocument(document)
+                return
+            }
+
+            let normalizedTrustedID = normalizedNodeID(trustedNodeID)
             guard !normalizedTrustedID.isEmpty else {
                 try await saveDocument(document)
                 return
             }
+
             document.pairPublicKeys[
                 pairPublicKey(
                     nodeID: normalizedID,
@@ -208,6 +151,7 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService, @unchecked Se
                 )
             ] = normalizedPublicKey
         }
+
         try await saveDocument(document)
     }
 
@@ -301,7 +245,8 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService, @unchecked Se
         "\(KVDocumentKey.Prefix.node.rawValue)\(nodeID)"
     }
 
-    private func pairPublicKey(nodeID: String, trustedNodeID: String) -> String {
+    private func pairPublicKey(nodeID: String, trustedNodeID: String) -> String
+    {
         "\(KVDocumentKey.Prefix.pair.rawValue)\(nodeID):\(trustedNodeID)"
     }
 
@@ -309,7 +254,9 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService, @unchecked Se
         guard key.hasPrefix(KVDocumentKey.Prefix.node.rawValue) else {
             return nil
         }
-        let rawID = String(key.dropFirst(KVDocumentKey.Prefix.node.rawValue.count))
+        let rawID = String(
+            key.dropFirst(KVDocumentKey.Prefix.node.rawValue.count)
+        )
         let nodeID = normalizedNodeID(rawID)
         return nodeID.isEmpty ? nil : nodeID
     }
@@ -320,7 +267,9 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService, @unchecked Se
         guard key.hasPrefix(KVDocumentKey.Prefix.pair.rawValue) else {
             return nil
         }
-        let rawPair = String(key.dropFirst(KVDocumentKey.Prefix.pair.rawValue.count))
+        let rawPair = String(
+            key.dropFirst(KVDocumentKey.Prefix.pair.rawValue.count)
+        )
         let parts = rawPair.split(
             separator: ":",
             maxSplits: 1,
@@ -335,66 +284,128 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService, @unchecked Se
         return (nodeID, trustedNodeID)
     }
 
-    private func makeKVEntryURL() -> URL {
+    private func makeKVCollectionURL() -> URL {
         makeURL(path: trimSlashes(kvPath))
-            .appendingPathComponent(trimSlashes(documentKey), isDirectory: false)
+    }
+
+    private func makeKVEntryURL(key: String) throws -> URL {
+        guard let normalizedKey = normalizedName(key) else {
+            throw KeepTalkingKVServiceError.invalidStoredValue
+        }
+        return makeKVCollectionURL()
+            .appendingPathComponent(normalizedKey, isDirectory: false)
     }
 
     private func fetchDocument() async throws -> KVDocument {
-        var request = URLRequest(url: makeKVEntryURL())
+        var request = URLRequest(url: makeKVCollectionURL())
         request.httpMethod = "GET"
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
-
-        if http.statusCode == 404 {
-            return KVDocument()
-        }
         guard http.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
-        if data.isEmpty {
+        guard !data.isEmpty else {
             return KVDocument()
         }
 
-        let rawDocumentData: Data
-        if let wrapped = try? decoder.decode(KVGetResponse.self, from: data) {
-            guard let valueData = wrapped.item.value.data(using: .utf8) else {
-                throw KeepTalkingKVServiceError.invalidStoredValue
+        let list = try decodeListResponse(data)
+        var document = KVDocument()
+
+        for item in list.items {
+            if item.key == KVDocumentKey.ownedNodes {
+                guard let valueData = item.value.data(using: .utf8) else {
+                    continue
+                }
+                if let ownedNodes = try? decoder.decode(
+                    [String].self,
+                    from: valueData
+                ) {
+                    document.ktOwnedNodes = ownedNodes
+                }
+                continue
             }
-            rawDocumentData = valueData
-        } else {
-            // Legacy fallback for previous direct-document HTTP service.
-            rawDocumentData = data
+
+            if item.key.hasPrefix(KVDocumentKey.Prefix.node.rawValue) {
+                guard let valueData = item.value.data(using: .utf8) else {
+                    continue
+                }
+                if let metadata = try? decoder.decode(
+                    NodeMetadata.self,
+                    from: valueData
+                ) {
+                    document.nodeRecords[item.key] = metadata
+                }
+                continue
+            }
+
+            if item.key.hasPrefix(KVDocumentKey.Prefix.pair.rawValue),
+                let publicKey = normalizedName(item.value)
+            {
+                document.pairPublicKeys[item.key] = publicKey
+            }
         }
 
-        var document = try decodeDocument(rawDocumentData)
         document.ktOwnedNodes = normalizeOwnedNodes(document.ktOwnedNodes)
         document.nodeRecords = normalizeNodeRecords(document.nodeRecords)
-        document.pairPublicKeys = normalizePairPublicKeys(document.pairPublicKeys)
+        document.pairPublicKeys = normalizePairPublicKeys(
+            document.pairPublicKeys
+        )
         return document
     }
 
     private func saveDocument(_ document: KVDocument) async throws {
-        var request = URLRequest(url: makeKVEntryURL())
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let ownedNodesJSON = try encodeJSONString(
+            normalizeOwnedNodes(document.ktOwnedNodes)
+        )
+        try await upsertValue(ownedNodesJSON, forKey: KVDocumentKey.ownedNodes)
 
-        let documentData = try encoder.encode(document)
-        guard let documentJSON = String(data: documentData, encoding: .utf8) else {
-            throw KeepTalkingKVServiceError.invalidStoredValue
+        let normalizedRecords = normalizeNodeRecords(document.nodeRecords)
+        for (key, metadata) in normalizedRecords {
+            let metadataJSON = try encodeJSONString(metadata)
+            try await upsertValue(metadataJSON, forKey: key)
         }
-        request.httpBody = try encoder.encode(KVUpsertRequest(value: documentJSON))
 
-        let (_, response) = try await session.data(for: request)
-        try validateHTTP(response, expected: [200, 201])
+        let normalizedPairs = normalizePairPublicKeys(document.pairPublicKeys)
+        for (key, publicKey) in normalizedPairs {
+            try await upsertValue(publicKey, forKey: key)
+        }
     }
 
-    private func decodeDocument(_ data: Data) throws -> KVDocument {
-        if let document = try? decoder.decode(KVDocument.self, from: data) {
-            return document
+    private func upsertValue(_ value: String, forKey key: String) async throws {
+        var request = URLRequest(url: try makeKVEntryURL(key: key))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(KVUpsertRequest(value: value))
+
+        let (data, response) = try await session.data(for: request)
+        try validateHTTP(response, expected: [200, 201])
+        if !data.isEmpty {
+            _ = try decodeUpsertResponse(data)
+        }
+    }
+
+    private func encodeJSONString<T: Encodable>(_ value: T) throws -> String {
+        let data = try encoder.encode(value)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw KeepTalkingKVServiceError.invalidStoredValue
+        }
+        return json
+    }
+
+    private func decodeListResponse(_ data: Data) throws -> KVListResponse {
+        if let response = try? decoder.decode(KVListResponse.self, from: data) {
+            return response
+        }
+        throw KeepTalkingKVServiceError.invalidResponsePayload
+    }
+
+    private func decodeUpsertResponse(_ data: Data) throws -> KVUpsertResponse {
+        if let response = try? decoder.decode(KVUpsertResponse.self, from: data)
+        {
+            return response
         }
         throw KeepTalkingKVServiceError.invalidResponsePayload
     }
