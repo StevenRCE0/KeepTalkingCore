@@ -138,8 +138,12 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         inboundChatChannel?.close()
         inboundActionCallChannel?.close()
         peerConnection?.close()
-        pendingRemoteCandidates.removeAll()
-        notifiedConnectedPeers.removeAll()
+
+        defer {
+            pendingRemoteCandidates.removeAll()
+            notifiedConnectedPeers.removeAll()
+        }
+        
         peerConnection = nil
         outboundChatChannel = nil
         outboundActionCallChannel = nil
@@ -402,8 +406,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             return .chat
         case .p2pSignal, .p2pPresence:
             throw P2PError.signalingInP2P
-        case
-            .actionCallRequest,
+        case .actionCallRequest,
             .actionCallResult,
             .encryptedActionCallRequest,
             .encryptedActionCallResult:
