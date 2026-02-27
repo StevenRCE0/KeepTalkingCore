@@ -65,7 +65,7 @@ public final class KeepTalkingNodeRelation: Model, @unchecked Sendable {
         id: UUID = UUID(),
         from: KeepTalkingNode,
         to: KeepTalkingNode,
-        relationship: KeepTalkingRelationship
+        relationship: KeepTalkingRelationship,
     ) throws {
         self.id = id
         self.$from.id = try from.requireID()

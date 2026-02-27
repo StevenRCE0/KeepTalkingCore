@@ -37,14 +37,15 @@ extension KeepTalkingClient {
         guard let kvService else {
             throw KeepTalkingClientError.kvServiceNotConfigured
         }
-        let publicKey = try await ensureLocalNodeSigningKeypair().publicKey
-        try await kvService.storeNodeID(config.node, publicKey: publicKey)
+
+        try await kvService.storeNodeID(config.node)
     }
 
     public func fetchNodeIDs(for userID: String? = nil) async throws -> [UUID] {
         guard let kvService else {
             throw KeepTalkingClientError.kvServiceNotConfigured
         }
+
         return try await kvService.loadNodeIDs()
     }
 
@@ -98,6 +99,7 @@ extension KeepTalkingClient {
             to: remoteNode,
             relationship: newRelationship
         )
+
         try await relation.save(on: localStore.database)
         return localPublicKey
     }
@@ -696,6 +698,7 @@ extension KeepTalkingClient {
         redacted.blockingAuthorisation = action.blockingAuthorisation
         redacted.createdAt = action.createdAt
         redacted.lastUsed = action.lastUsed
+
         return redacted
     }
 
@@ -812,6 +815,7 @@ extension KeepTalkingClient {
             publicKey: publicKey,
             privateKey: Data(privateKey.rawRepresentation)
         )
+
         try await keypair.save(on: localStore.database)
         return keypair
     }
@@ -839,6 +843,7 @@ extension KeepTalkingClient {
             to: localNode,
             relationship: .owner
         )
+
         try await relation.save(on: localStore.database)
         return relation
     }

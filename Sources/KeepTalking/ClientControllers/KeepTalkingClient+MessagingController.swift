@@ -28,6 +28,19 @@ extension KeepTalkingClient {
         try rtcClient.sendEnvelope(.message(encryptedMessage))
     }
 
+    public func send(
+        _ text: String,
+        in context: UUID,
+        sender: KeepTalkingContextMessage.Sender? = nil
+    ) async throws {
+        let targetContext = try await ensure(
+            context,
+            for: KeepTalkingContext.self
+        )
+
+        try await send(text, in: targetContext, sender: sender)
+    }
+
     public func sendConversationContext(
         _ context: KeepTalkingConversationContext
     ) async throws {

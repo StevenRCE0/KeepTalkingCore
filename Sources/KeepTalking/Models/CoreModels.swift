@@ -89,8 +89,15 @@ public struct KeepTalkingRuntimeStats: Sendable {
 }
 
 public protocol KeepTalkingKVService: Sendable {
-    func storeNodeID(_ node: UUID, publicKey: String?) async throws
+    func storeNodeID(_ node: UUID) async throws
     func loadNodeIDs() async throws -> [UUID]
+    func storeNodeMetadata(
+        nodeID: String,
+        name: String,
+        purposes: [String],
+        publicKey: String?,
+        trustedNodeID: String?
+    ) async throws
 }
 
 public protocol KeepTalkingLocalStore: Sendable {

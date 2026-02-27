@@ -95,14 +95,13 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
         )
     }
 
-    public func storeNodeID(_ node: UUID, publicKey: String?) async throws {
+    public func storeNodeID(_ node: UUID) async throws {
         let nodeID = normalizedNodeID(node.uuidString)
         let name = normalizedName(defaultNodeName) ?? nodeID
         try await storeNodeMetadata(
             nodeID: nodeID,
             name: name,
-            purposes: defaultNodePurposes,
-            publicKey: publicKey
+            purposes: defaultNodePurposes
         )
     }
 

@@ -21,6 +21,10 @@ enum SignalError: LocalizedError {
 }
 
 final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
+    private static let keepAliveIntervalNanoseconds: UInt64 = 20_000_000_000
+    private static let reconnectBaseDelayNanoseconds: UInt64 = 500_000_000
+    private static let maxReconnectAttempts = 3
+
     private let url: URL
     private let stateQueue = DispatchQueue(label: "KeepTalking.signal.state")
     private var openWaiter: CheckedContinuation<Void, Error>?
@@ -37,6 +41,8 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
     }()
 
     private var socketTask: URLSessionWebSocketTask?
+    private var keepAliveTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
 
     init(url: URL) {
         self.url = url
@@ -59,21 +65,26 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
     }
 
     func connect() async throws {
-        if isOpen {
+        let alreadyOpen = stateQueue.sync { isOpen }
+        if alreadyOpen {
             debug("connect called while already open")
             return
         }
 
-        stateQueue.sync {
+        let task: URLSessionWebSocketTask = stateQueue.sync {
             isClosing = false
+            socketTask?.cancel(with: .goingAway, reason: nil)
+            let nextTask = session.webSocketTask(with: url)
+            socketTask = nextTask
+            return nextTask
         }
 
         debug("opening websocket \(url.absoluteString)")
-        socketTask = session.webSocketTask(with: url)
-        socketTask?.resume()
-        receiveNextMessage()
+        task.resume()
+        receiveNextMessage(on: task)
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             stateQueue.sync {
                 self.openWaiter = continuation
             }
@@ -83,20 +94,39 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
     func close() {
         stateQueue.sync {
             isClosing = true
+            keepAliveTask?.cancel()
+            keepAliveTask = nil
+            reconnectTask?.cancel()
+            reconnectTask = nil
         }
         debug("closing websocket")
         socketTask?.cancel(with: .normalClosure, reason: nil)
+        socketTask = nil
         failAllPending(with: SignalError.closed)
     }
 
-    func join(session sid: String, uid: String, offer: SessionDescriptionPayload) async throws -> SessionDescriptionPayload {
+    func join(
+        session sid: String,
+        uid: String,
+        offer: SessionDescriptionPayload
+    ) async throws -> SessionDescriptionPayload {
         let params = JoinParams(sid: sid, uid: uid, offer: offer)
-        return try await call(method: "join", params: params, responseType: SessionDescriptionPayload.self)
+        return try await call(
+            method: "join",
+            params: params,
+            responseType: SessionDescriptionPayload.self
+        )
     }
 
-    func offer(_ offer: SessionDescriptionPayload) async throws -> SessionDescriptionPayload {
+    func offer(
+        _ offer: SessionDescriptionPayload
+    ) async throws -> SessionDescriptionPayload {
         let params = OfferParams(desc: offer)
-        return try await call(method: "offer", params: params, responseType: SessionDescriptionPayload.self)
+        return try await call(
+            method: "offer",
+            params: params,
+            responseType: SessionDescriptionPayload.self
+        )
     }
 
     func answer(_ answer: SessionDescriptionPayload) {
@@ -113,7 +143,38 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
         params: Params,
         responseType _: Response.Type
     ) async throws -> Response {
-        guard socketTask != nil else {
+        var attempt = 0
+        while true {
+            do {
+                return try await callOnce(
+                    method: method,
+                    params: params,
+                    responseType: Response.self
+                )
+            } catch {
+                guard
+                    attempt == 0,
+                    shouldRetryAfterDisconnect(error),
+                    !stateQueue.sync(execute: { isClosing })
+                else {
+                    throw error
+                }
+
+                attempt += 1
+                debug(
+                    "rpc retry method=\(method) attempt=\(attempt + 1) error=\(error.localizedDescription)"
+                )
+                try await reconnectWithBackoff(reason: "rpc-\(method)")
+            }
+        }
+    }
+
+    private func callOnce<Params: Encodable, Response: Decodable & Sendable>(
+        method: String,
+        params: Params,
+        responseType _: Response.Type
+    ) async throws -> Response {
+        guard let socketTask else {
             throw SignalError.notConnected
         }
 
@@ -122,29 +183,41 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
         let encoded = try JSONEncoder().encode(request)
         debug("send request method=\(method) id=\(id) bytes=\(encoded.count)")
 
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Response, Error>) in
+        return try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Response, Error>) in
             stateQueue.sync {
                 pending[id] = { result in
                     switch result {
                     case let .failure(error):
-                        self.debug("response failed method=\(method) id=\(id) error=\(error.localizedDescription)")
+                        self.debug(
+                            "response failed method=\(method) id=\(id) error=\(error.localizedDescription)"
+                        )
                         continuation.resume(throwing: error)
                     case let .success(data):
                         do {
-                            let response = try JSONDecoder().decode(Response.self, from: data)
-                            self.debug("response ok method=\(method) id=\(id) bytes=\(data.count)")
+                            let response = try JSONDecoder().decode(
+                                Response.self,
+                                from: data
+                            )
+                            self.debug(
+                                "response ok method=\(method) id=\(id) bytes=\(data.count)"
+                            )
                             continuation.resume(returning: response)
                         } catch {
-                            self.debug("response decode failed method=\(method) id=\(id) error=\(error.localizedDescription) payload=\(self.preview(data))")
+                            self.debug(
+                                "response decode failed method=\(method) id=\(id) error=\(error.localizedDescription) payload=\(self.preview(data))"
+                            )
                             continuation.resume(throwing: error)
                         }
                     }
                 }
             }
 
-            socketTask?.send(.data(encoded)) { [weak self] error in
+            socketTask.send(.data(encoded)) { [weak self] error in
                 if let error {
-                    self?.debug("send failed method=\(method) id=\(id) error=\(error.localizedDescription)")
+                    self?.debug(
+                        "send failed method=\(method) id=\(id) error=\(error.localizedDescription)"
+                    )
                     self?.resolvePending(id: id, with: .failure(error))
                 }
             }
@@ -158,12 +231,28 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
             return
         }
         debug("send notify method=\(method) bytes=\(encoded.count)")
-        socketTask?.send(.data(encoded)) { _ in }
+        socketTask?.send(.data(encoded)) { [weak self] error in
+            guard let self, let error else {
+                return
+            }
+            self.debug(
+                "notify send failed method=\(method) error=\(error.localizedDescription)"
+            )
+            if self.shouldRetryAfterDisconnect(error) {
+                self.scheduleReconnect(reason: "notify-\(method)")
+            }
+        }
     }
 
-    private func receiveNextMessage() {
-        socketTask?.receive { [weak self] result in
+    private func receiveNextMessage(on task: URLSessionWebSocketTask) {
+        task.receive { [weak self] result in
             guard let self else { return }
+            let isCurrentSocket = self.stateQueue.sync {
+                self.socketTask === task
+            }
+            guard isCurrentSocket else {
+                return
+            }
 
             switch result {
             case let .failure(error):
@@ -174,6 +263,9 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
                     self.debug("receive failed error=\(error.localizedDescription)")
                 }
                 self.failAllPending(with: error)
+                if self.shouldRetryAfterDisconnect(error) {
+                    self.scheduleReconnect(reason: "receive-failed")
+                }
             case let .success(message):
                 switch message {
                 case let .string(text):
@@ -187,7 +279,170 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
                     break
                 }
 
-                self.receiveNextMessage()
+                self.receiveNextMessage(on: task)
+            }
+        }
+    }
+
+    private func shouldRetryAfterDisconnect(_ error: Error) -> Bool {
+        if let signalError = error as? SignalError {
+            switch signalError {
+            case .notConnected, .closed:
+                return true
+            case .invalidResponse, .remoteError:
+                return false
+            }
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == NSPOSIXErrorDomain {
+            if nsError.code == 57 || nsError.code == 54 || nsError.code == 32 {
+                return true
+            }
+        }
+        if nsError.domain == NSURLErrorDomain {
+            if nsError.code == NSURLErrorNetworkConnectionLost
+                || nsError.code == NSURLErrorNotConnectedToInternet
+                || nsError.code == NSURLErrorCannotConnectToHost
+            {
+                return true
+            }
+        }
+
+        let lowered = nsError.localizedDescription.lowercased()
+        return lowered.contains("socket is not connected")
+            || lowered.contains("not connected")
+    }
+
+    private func scheduleReconnect(reason: String) {
+        let shouldStart = stateQueue.sync { () -> Bool in
+            guard !isClosing else {
+                return false
+            }
+            guard reconnectTask == nil else {
+                return false
+            }
+
+            reconnectTask = Task { [weak self] in
+                guard let self else { return }
+                defer {
+                    self.stateQueue.sync {
+                        self.reconnectTask = nil
+                    }
+                }
+                do {
+                    try await self.reconnectWithBackoff(reason: reason)
+                } catch {
+                    self.debug(
+                        "reconnect abandoned reason=\(reason) error=\(error.localizedDescription)"
+                    )
+                }
+            }
+            return true
+        }
+
+        if shouldStart {
+            debug("reconnect scheduled reason=\(reason)")
+        }
+    }
+
+    private func reconnectWithBackoff(reason: String) async throws {
+        var attempt = 1
+        var lastError: Error = SignalError.notConnected
+
+        while attempt <= Self.maxReconnectAttempts {
+            if stateQueue.sync(execute: { isClosing }) {
+                throw SignalError.closed
+            }
+
+            do {
+                debug("reconnect attempt=\(attempt) reason=\(reason)")
+                try await connect()
+                startKeepAliveIfNeeded()
+                debug("reconnect succeeded attempt=\(attempt)")
+                return
+            } catch {
+                lastError = error
+                debug(
+                    "reconnect failed attempt=\(attempt) error=\(error.localizedDescription)"
+                )
+                guard attempt < Self.maxReconnectAttempts else {
+                    break
+                }
+                let delay =
+                    Self.reconnectBaseDelayNanoseconds * UInt64(1 << (attempt - 1))
+                try? await Task.sleep(nanoseconds: delay)
+                attempt += 1
+            }
+        }
+
+        throw lastError
+    }
+
+    private func startKeepAliveIfNeeded() {
+        let shouldStart = stateQueue.sync { () -> Bool in
+            if keepAliveTask != nil {
+                return false
+            }
+
+            keepAliveTask = Task { [weak self] in
+                guard let self else { return }
+                defer {
+                    self.stateQueue.sync {
+                        self.keepAliveTask = nil
+                    }
+                }
+
+                while !Task.isCancelled {
+                    try? await Task.sleep(
+                        nanoseconds: Self.keepAliveIntervalNanoseconds
+                    )
+                    if Task.isCancelled {
+                        return
+                    }
+
+                    let canPing = self.stateQueue.sync {
+                        self.isOpen && !self.isClosing && self.socketTask != nil
+                    }
+                    guard canPing else {
+                        continue
+                    }
+
+                    do {
+                        try await self.sendPing()
+                    } catch {
+                        self.debug(
+                            "keepalive ping failed error=\(error.localizedDescription)"
+                        )
+                        if self.shouldRetryAfterDisconnect(error) {
+                            self.scheduleReconnect(reason: "keepalive-ping")
+                        }
+                    }
+                }
+            }
+            return true
+        }
+
+        if shouldStart {
+            debug(
+                "keepalive started interval=\(Self.keepAliveIntervalNanoseconds / 1_000_000_000)s"
+            )
+        }
+    }
+
+    private func sendPing() async throws {
+        guard let task = stateQueue.sync(execute: { socketTask }) else {
+            throw SignalError.notConnected
+        }
+
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            task.sendPing { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
             }
         }
     }
@@ -214,17 +469,27 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
             }
 
             if method == "offer",
-               let offer = try? JSONDecoder().decode(SessionDescriptionPayload.self, from: paramsData)
+               let offer = try? JSONDecoder().decode(
+                   SessionDescriptionPayload.self,
+                   from: paramsData
+               )
             {
-                debug("offer notify type=\(offer.type) sdpBytes=\(offer.sdp.utf8.count)")
+                debug(
+                    "offer notify type=\(offer.type) sdpBytes=\(offer.sdp.utf8.count)"
+                )
                 onOffer?(offer)
                 return
             }
 
             if method == "trickle",
-               let trickle = try? JSONDecoder().decode(TricklePayload.self, from: paramsData)
+               let trickle = try? JSONDecoder().decode(
+                   TricklePayload.self,
+                   from: paramsData
+               )
             {
-                debug("trickle notify target=\(trickle.target) candidateBytes=\(trickle.candidate.candidate.utf8.count)")
+                debug(
+                    "trickle notify target=\(trickle.target) candidateBytes=\(trickle.candidate.candidate.utf8.count)"
+                )
                 onTrickle?(trickle)
                 return
             }
@@ -242,8 +507,11 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
             let text: String
             if let asString = errorObject as? String {
                 text = asString
-            } else if let encoded = try? JSONSerialization.data(withJSONObject: errorObject),
-                      let rendered = String(data: encoded, encoding: .utf8)
+            } else if
+                let encoded = try? JSONSerialization.data(
+                    withJSONObject: errorObject
+                ),
+                let rendered = String(data: encoded, encoding: .utf8)
             {
                 text = rendered
             } else {
@@ -256,7 +524,9 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
         }
 
         guard let resultObject = envelope["result"],
-              let resultData = try? JSONSerialization.data(withJSONObject: resultObject)
+              let resultData = try? JSONSerialization.data(
+                  withJSONObject: resultObject
+              )
         else {
             debug("response invalid id=\(id) payload=\(preview(data))")
             resolvePending(id: id, with: .failure(SignalError.invalidResponse))
@@ -278,20 +548,24 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
     }
 
     private func failAllPending(with error: Error) {
-        let allAndState: (callbacks: [(Result<Data, Error>) -> Void], shouldLog: Bool) = stateQueue.sync {
-            let callbacks = Array(pending.values)
-            pending.removeAll()
+        let allAndState:
+            (callbacks: [(Result<Data, Error>) -> Void], shouldLog: Bool) =
+            stateQueue.sync {
+                let callbacks = Array(pending.values)
+                pending.removeAll()
 
-            let waiter = openWaiter
-            openWaiter = nil
-            isOpen = false
-            waiter?.resume(throwing: error)
+                let waiter = openWaiter
+                openWaiter = nil
+                isOpen = false
+                waiter?.resume(throwing: error)
 
-            return (callbacks, !isClosing)
-        }
+                return (callbacks, !isClosing)
+            }
 
         if allAndState.shouldLog {
-            debug("fail all pending count=\(allAndState.callbacks.count) error=\(error.localizedDescription)")
+            debug(
+                "fail all pending count=\(allAndState.callbacks.count) error=\(error.localizedDescription)"
+            )
         }
         for callback in allAndState.callbacks {
             callback(.failure(error))
@@ -312,6 +586,7 @@ extension IonJsonRpcSignal: URLSessionWebSocketDelegate {
             openWaiter?.resume()
             openWaiter = nil
         }
+        startKeepAliveIfNeeded()
     }
 
     func urlSession(
@@ -323,11 +598,16 @@ extension IonJsonRpcSignal: URLSessionWebSocketDelegate {
         let shouldLog = stateQueue.sync { !isClosing }
         if shouldLog {
             if let closeReason {
-                debug("websocket closed code=\(closeCode.rawValue) reason=\(preview(closeReason))")
+                debug(
+                    "websocket closed code=\(closeCode.rawValue) reason=\(preview(closeReason))"
+                )
             } else {
                 debug("websocket closed code=\(closeCode.rawValue)")
             }
         }
         failAllPending(with: SignalError.closed)
+        if shouldLog {
+            scheduleReconnect(reason: "close-\(closeCode.rawValue)")
+        }
     }
 }

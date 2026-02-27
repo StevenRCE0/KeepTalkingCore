@@ -73,7 +73,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let config: KeepTalkingConfig
     let rtcClient: any KeepTalkingTransportClient
     let kvService: (any KeepTalkingKVService)?
-    let localStore: any KeepTalkingLocalStore
+    public let localStore: any KeepTalkingLocalStore
     let mcpManager: MCPManager
     let openAIConnector: OpenAIConnector?
 
@@ -142,19 +142,25 @@ public final class KeepTalkingClient: @unchecked Sendable {
     }
 
     public func connect() async throws {
+        let context = try await ensure(config.contextID, for: KeepTalkingContext.self)
+
         try await rtcClient.start()
         try await persistMyNode()
 
         do {
             try await registerLocalActionsInMCP()
         } catch {
-            onLog?(
+            debug(
                 "[client] failed to register local MCP actions: \(error.localizedDescription)"
             )
         }
 
         if kvService != nil {
-            try await registerCurrentNodeID()
+            do {
+                try await registerCurrentNodeID()
+            } catch {
+                debug("[kv] KV registration failed: \(error)")
+            }
         }
 
         await broadcastLocalNodeState(reason: "connect")
