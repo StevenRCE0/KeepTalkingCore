@@ -4,6 +4,7 @@ import Foundation
 public enum KeepTalkingClientError: LocalizedError {
     case kvServiceNotConfigured
     case missingNode
+    case missingAction
     case aiNotConfigured
     case unknownTool(String)
     case invalidToolArguments(String)
@@ -11,11 +12,14 @@ public enum KeepTalkingClientError: LocalizedError {
     case relationNotTrustedOrOwned(UUID)
     case actionCallNotAuthorized(action: UUID, caller: UUID, context: UUID)
     case actionCallTimeout(UUID)
+    case actionCatalogTimeout(UUID)
     case localIdentityPrivateKeyMissing
     case remoteIdentityPublicKeyMissing(UUID)
     case remoteIdentityPublicKeyInvalid(UUID)
     case malformedEncryptedActionCall
+    case malformedEncryptedActionCatalog
     case malformedEncryptedNodeStatus
+    case unsupportedActionPayload
 
     public var errorDescription: String? {
         switch self {
@@ -23,6 +27,8 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "KV service is not configured."
             case .missingNode:
                 return "KeepTalkingConfig.node is required for KV node registration."
+            case .missingAction:
+                return "Action is not found required for the operation."
             case .aiNotConfigured:
                 return "OpenAI is not configured. Set OPENAI_API_KEY to enable AI tool planning."
             case .unknownTool(let functionName):
@@ -37,6 +43,8 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Action call is not authorized. action=\(actionID) caller=\(caller) context=\(context)"
             case .actionCallTimeout(let requestID):
                 return "Timed out waiting for remote action call result: \(requestID)"
+            case .actionCatalogTimeout(let requestID):
+                return "Timed out waiting for remote action catalog result: \(requestID)"
             case .localIdentityPrivateKeyMissing:
                 return "Local private identity key is missing."
             case .remoteIdentityPublicKeyMissing(let nodeID):
@@ -45,8 +53,12 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Remote public key is invalid for node: \(nodeID)"
             case .malformedEncryptedActionCall:
                 return "Encrypted action-call envelope payload is malformed."
+            case .malformedEncryptedActionCatalog:
+                return "Encrypted action-catalog envelope payload is malformed."
             case .malformedEncryptedNodeStatus:
                 return "Encrypted node-status envelope payload is malformed."
+            case .unsupportedActionPayload:
+                return "Action payload is unsupported by local executors."
         }
     }
 }
@@ -75,12 +87,17 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let kvService: (any KeepTalkingKVService)?
     public let localStore: any KeepTalkingLocalStore
     let mcpManager: MCPManager
+    let skillManager: SkillManager
     let openAIConnector: OpenAIConnector?
 
     let actionCallQueue = DispatchQueue(
         label: "KeepTalking.client.action-call"
     )
     var pendingActionCallResults: [UUID: CheckedContinuation<KeepTalkingActionCallResult, Error>] = [:]
+    let actionCatalogQueue = DispatchQueue(
+        label: "KeepTalking.client.action-catalog"
+    )
+    var pendingActionCatalogResults: [UUID: CheckedContinuation<KeepTalkingActionCatalogResult, Error>] = [:]
     var nodeStateBroadcastDebounceTask: Task<Void, Never>?
 
     public init(
@@ -119,6 +136,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
         } else {
             self.openAIConnector = nil
         }
+        self.skillManager = SkillManager(
+            nodeConfig: config,
+            openAIConnector: self.openAIConnector
+        )
 
         rtcClient.onLog = { [weak self] line in
             self?.onLog?(line)
@@ -153,16 +174,16 @@ public final class KeepTalkingClient: @unchecked Sendable {
     }
 
     public func connect() async throws {
-        let context = try await ensure(config.contextID, for: KeepTalkingContext.self)
+        _ = try await ensure(config.contextID, for: KeepTalkingContext.self)
 
         try await rtcClient.start()
         try await persistMyNode()
 
         do {
-            try await registerLocalActionsInMCP()
+            try await registerLocalActionsInExecutors()
         } catch {
             debug(
-                "[client] failed to register local MCP actions: \(error.localizedDescription)"
+                "[client] failed to register local actions: \(error.localizedDescription)"
             )
         }
 
@@ -179,6 +200,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     public func disconnect() {
         failAllPendingActionCalls(error: SignalError.closed)
+        failAllPendingActionCatalogRequests(error: SignalError.closed)
         cancelDebouncedNodeStateBroadcast()
         rtcClient.stop()
     }

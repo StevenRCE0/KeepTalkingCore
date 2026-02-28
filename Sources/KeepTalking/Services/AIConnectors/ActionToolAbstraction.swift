@@ -2,9 +2,15 @@ import Foundation
 import OpenAI
 
 public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
+    public enum Source: String, Sendable, Hashable {
+        case mcp
+        case skill
+    }
+
     public let functionName: String
     public let actionID: UUID
     public let ownerNodeID: UUID
+    public let source: Source
     public let mcpToolName: String?
     public let description: String
     public let parameters: JSONSchema
@@ -13,6 +19,7 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         functionName: String,
         actionID: UUID,
         ownerNodeID: UUID,
+        source: Source,
         mcpToolName: String? = nil,
         description: String,
         parameters: JSONSchema
@@ -20,6 +27,7 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         self.functionName = functionName
         self.actionID = actionID
         self.ownerNodeID = ownerNodeID
+        self.source = source
         self.mcpToolName = mcpToolName
         self.description = description
         self.parameters = parameters

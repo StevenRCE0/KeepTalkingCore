@@ -60,6 +60,7 @@ public actor MCPManager {
     private var clientsByActionID: [UUID: Client] = [:]
     private var stdioProcessesByActionID: [UUID: StdioProcessHandle] = [:]
     private var virtualToolNamesByActionID: [UUID: [String]] = [:]
+    private var onActionToolsChanged: (@Sendable (UUID) async -> Void)?
 
     public init(
         nodeConfig: KeepTalkingConfig,
@@ -71,10 +72,10 @@ public actor MCPManager {
         self.toolCallTimeoutSeconds = toolCallTimeoutSeconds
     }
 
-    public func registerMCPActions(_ actions: [KeepTalkingAction]) async throws {
-        for action in actions {
-            try await registerMCPAction(action)
-        }
+    public func setActionToolsChangedHandler(
+        _ handler: (@Sendable (UUID) async -> Void)?
+    ) {
+        onActionToolsChanged = handler
     }
 
     public func registerMCPAction(_ action: KeepTalkingAction) async throws {
@@ -172,6 +173,21 @@ public actor MCPManager {
         }
         let listing = try await client.listTools()
         return listing.tools.map(\.name).sorted()
+    }
+
+    public func listActionTools(action: KeepTalkingAction) async throws -> [Tool] {
+        guard let actionID = action.id else {
+            throw MCPManagerError.missingActionID
+        }
+        try await registerIfNeeded(action)
+        if virtualToolNamesByActionID[actionID] != nil {
+            return []
+        }
+        guard let client = clientsByActionID[actionID] else {
+            throw MCPManagerError.unregisteredAction(actionID)
+        }
+        let listing = try await client.listTools()
+        return listing.tools.sorted { $0.name < $1.name }
     }
 
     private func resolveToolInvocation(
@@ -408,7 +424,31 @@ public actor MCPManager {
                 )
         }
 
+        await registerToolListChangeHandler(
+            actionID: actionID,
+            client: client
+        )
         clientsByActionID[actionID] = client
+    }
+
+    private func registerToolListChangeHandler(
+        actionID: UUID,
+        client: Client
+    ) async {
+        await client.onNotification(ToolListChangedNotification.self) {
+            [weak self] _ in
+            await self?.notifyActionToolsChanged(actionID: actionID)
+        }
+    }
+
+    private func notifyActionToolsChanged(actionID: UUID) async {
+        guard clientsByActionID[actionID] != nil else {
+            return
+        }
+        guard let onActionToolsChanged else {
+            return
+        }
+        await onActionToolsChanged(actionID)
     }
 
     private func terminateStdioProcess(for actionID: UUID) {

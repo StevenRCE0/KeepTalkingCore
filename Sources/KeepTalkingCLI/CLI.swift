@@ -3,7 +3,7 @@ import KeepTalkingSDK
 
 let keepTalkingUsage = """
     Usage:
-      KeepTalking [--signal-url <ws-url>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--openai-endpoint <url>] [--openai-api-key <key>] [--mcp <list|remove|add-http|add-stdio> ...] [--p2p-peer <peer-id>] [--p2p-timeout <seconds>] [--stun-url <stun-url>]
+      KeepTalking [--signal-url <ws-url>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--openai-endpoint <url>] [--openai-api-key <key>] [--mcp <list|remove|add-http|add-stdio> ...] [--skill <list|remove|add-directory> ...] [--p2p-peer <peer-id>] [--p2p-timeout <seconds>] [--stun-url <stun-url>]
 
     Environment fallbacks:
       KT_SIGNAL_URL (default: ws://127.0.0.1:17000/ws)
@@ -20,6 +20,7 @@ let keepTalkingUsage = """
       KeepTalking --context 11111111-2222-3333-4444-555555555555 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
       KeepTalking --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --message "hello from ion-sfu"
       KeepTalking --mcp add-stdio foo --env OPENAI_API_KEY=sk-... --env MODEL=gpt-4.1 -- npx -y @modelcontextprotocol/server-github
+      KeepTalking --skill add-directory doc-summarizer ~/.codex/skills/doc-summarizer "Local documentation summarizer"
 
     Interactive commands:
       /new         create and join a new context
@@ -39,6 +40,11 @@ let keepTalkingUsage = """
       /mcp list    list registered MCP actions
       /mcp remove <action-id>
                    remove a local MCP action
+      /skill add directory <name> <path> [description]
+                   register a local skill action from a directory containing SKILL.md
+      /skill list  list registered skill actions
+      /skill remove <action-id>
+                   remove a local skill action
       /ai <prompt> run AI tool planning and execution in active context
       /stats       print local send/receive counters
       /p2p         manually start a p2p upgrade trial
@@ -56,6 +62,12 @@ enum MCPManagementCommand {
     )
 }
 
+enum SkillManagementCommand {
+    case list
+    case remove(actionID: UUID)
+    case addDirectory(name: String, directory: URL, description: String?)
+}
+
 enum CliError: LocalizedError {
     case unknownFlag(String)
     case missingValue(String)
@@ -69,6 +81,9 @@ enum CliError: LocalizedError {
     case invalidActionID(String)
     case invalidMCPEnvironment(String)
     case invalidOpenAIEndpoint(String)
+    case invalidSkillCommand(String)
+    case invalidSkillDirectory(String)
+    case conflictingManagementCommands
 
     var errorDescription: String? {
         switch self {
@@ -96,6 +111,12 @@ enum CliError: LocalizedError {
                 return "Invalid MCP env assignment: \(raw). Expected KEY=VALUE."
             case .invalidOpenAIEndpoint(let raw):
                 return "Invalid OpenAI endpoint URL: \(raw)"
+            case .invalidSkillCommand(let raw):
+                return "Invalid --skill command: \(raw)"
+            case .invalidSkillDirectory(let raw):
+                return "Invalid skill directory: \(raw)"
+            case .conflictingManagementCommands:
+                return "Specify at most one management command: --mcp or --skill."
         }
     }
 }
@@ -107,6 +128,7 @@ struct CliConfig {
     let openAIAPIKey: String?
     let openAIEndpoint: String?
     let mcpCommand: MCPManagementCommand?
+    let skillCommand: SkillManagementCommand?
 
     static func parse() throws -> CliConfig {
         let env = ProcessInfo.processInfo.environment
@@ -126,6 +148,7 @@ struct CliConfig {
             ?? env["OPENAI_BASE_URL"]
         var singleMessage: String?
         var mcpCommand: MCPManagementCommand?
+        var skillCommand: SkillManagementCommand?
 
         let args = Array(CommandLine.arguments.dropFirst())
         var index = 0
@@ -238,10 +261,52 @@ struct CliConfig {
                         default:
                             throw CliError.invalidMCPCommand(command)
                     }
+                case "--skill":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue(arg) }
+                    let command = args[index]
+                    switch command {
+                        case "list":
+                            skillCommand = .list
+                        case "remove":
+                            index += 1
+                            guard index < args.count else { throw CliError.missingValue("--skill remove") }
+                            guard let actionID = UUID(uuidString: args[index]) else {
+                                throw CliError.invalidActionID(args[index])
+                            }
+                            skillCommand = .remove(actionID: actionID)
+                        case "add-directory", "add-dir":
+                            index += 1
+                            guard index < args.count else { throw CliError.missingValue("--skill add-directory <name>") }
+                            let name = args[index]
+                            index += 1
+                            guard index < args.count else { throw CliError.missingValue("--skill add-directory <path>") }
+                            let directory = try resolveSkillDirectoryURL(args[index])
+                            var descriptionParts: [String] = []
+                            while index + 1 < args.count, !args[index + 1].hasPrefix("--") {
+                                index += 1
+                                descriptionParts.append(args[index])
+                            }
+                            let description =
+                                descriptionParts.isEmpty
+                                ? nil
+                                : descriptionParts.joined(separator: " ")
+                            skillCommand = .addDirectory(
+                                name: name,
+                                directory: directory,
+                                description: description
+                            )
+                        default:
+                            throw CliError.invalidSkillCommand(command)
+                    }
                 default:
                     throw CliError.unknownFlag(arg)
             }
             index += 1
+        }
+
+        if mcpCommand != nil, skillCommand != nil {
+            throw CliError.conflictingManagementCommands
         }
 
         guard let signalURL = URL(string: signalURLRaw) else {
@@ -277,7 +342,8 @@ struct CliConfig {
                 ? normalizedOpenAIAPIKey
                 : nil,
             openAIEndpoint: openAIEndpoint,
-            mcpCommand: mcpCommand
+            mcpCommand: mcpCommand,
+            skillCommand: skillCommand
         )
     }
 
@@ -293,6 +359,37 @@ struct CliConfig {
         }
         let expanded = NSString(string: raw).expandingTildeInPath
         return URL(fileURLWithPath: expanded)
+    }
+
+    private static func resolveSkillDirectoryURL(_ raw: String) throws -> URL {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw CliError.invalidSkillDirectory(raw)
+        }
+
+        let resolved: URL
+        if trimmed.hasPrefix("file://") {
+            guard let parsed = URL(string: trimmed), parsed.isFileURL else {
+                throw CliError.invalidSkillDirectory(raw)
+            }
+            resolved = parsed
+        } else {
+            let expanded = NSString(string: trimmed).expandingTildeInPath
+            resolved = URL(fileURLWithPath: expanded)
+        }
+
+        var isDirectory: ObjCBool = false
+        guard
+            FileManager.default.fileExists(
+                atPath: resolved.path,
+                isDirectory: &isDirectory
+            ),
+            isDirectory.boolValue
+        else {
+            throw CliError.invalidSkillDirectory(raw)
+        }
+
+        return resolved
     }
 
     private static func parseStdioSpec(

@@ -131,41 +131,6 @@ public actor OpenAIConnector {
         )
     }
 
-    public func chat(prompt: String, model: String = "gpt-4o") async throws
-        -> String
-    {
-        let result = try await completeTurn(
-            messages: [
-                .user(.init(content: .string(prompt)))
-            ],
-            tools: [],
-            model: model
-        )
-        guard
-            let reply = result.assistantText?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-            !reply.isEmpty
-        else {
-            throw ConnectorError.emptyResponse
-        }
-
-        return reply
-    }
-
-    public func planTools(
-        prompt: String,
-        tools: [ChatQuery.ChatCompletionToolParam],
-        model: String = .gpt4
-    ) async throws -> ToolPlanningResult {
-        try await completeTurn(
-            messages: [
-                .user(.init(content: .string(prompt)))
-            ],
-            tools: tools,
-            model: model
-        )
-    }
-
     public func completeTurn(
         messages: [ChatQuery.ChatCompletionMessageParam],
         tools: [ChatQuery.ChatCompletionToolParam],

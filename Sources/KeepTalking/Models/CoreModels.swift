@@ -207,6 +207,10 @@ public enum KeepTalkingP2PEnvelope: Codable, Sendable {
     case actionCallResult(KeepTalkingActionCallResult)
     case encryptedActionCallRequest(KeepTalkingAsymmetricCipherEnvelope)
     case encryptedActionCallResult(KeepTalkingAsymmetricCipherEnvelope)
+    case actionCatalogRequest(KeepTalkingActionCatalogRequest)
+    case actionCatalogResult(KeepTalkingActionCatalogResult)
+    case encryptedActionCatalogRequest(KeepTalkingAsymmetricCipherEnvelope)
+    case encryptedActionCatalogResult(KeepTalkingAsymmetricCipherEnvelope)
     case p2pSignal(KeepTalkingP2PSignalPayload)
     case p2pPresence(KeepTalkingP2PPresencePayload)
 }

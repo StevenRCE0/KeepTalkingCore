@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import MCP
 
 extension KeepTalkingClient {
     func executeActionCallRequest(
@@ -29,9 +30,42 @@ extension KeepTalkingClient {
                 )
             }
 
-            let callResult = try await mcpManager.callAction(
-                action: action,
-                call: request.call
+            let callResult: (content: [Tool.Content], isError: Bool?)
+            switch action.payload {
+                case .mcpBundle:
+                    callResult = try await mcpManager.callAction(
+                        action: action,
+                        call: request.call
+                    )
+                case .skill:
+                    callResult = try await skillManager.callAction(
+                        action: action,
+                        call: request.call
+                    )
+                default:
+                    throw KeepTalkingClientError.unsupportedActionPayload
+            }
+
+            let actionID = request.call.action.uuidString.lowercased()
+            let source = {
+                switch action.payload {
+                    case .mcpBundle:
+                        return "mcp"
+                    case .skill:
+                        return "skill"
+                    default:
+                        return "unknown"
+                }
+            }()
+            let rendered = callResult.content.map {
+                renderToolContentForDebug($0)
+            }.joined(separator: " | ")
+            let loggedContent =
+                source == "skill"
+                ? "<skill-result-redacted>"
+                : truncatedActionCallDebug(rendered)
+            onLog?(
+                "[action-call/result] action=\(actionID) source=\(source) is_error=\(callResult.isError ?? false) content=\(loggedContent)"
             )
 
             return KeepTalkingActionCallResult(
@@ -307,6 +341,28 @@ extension KeepTalkingClient {
                 }
                 return contexts.contains(testContext)
         }
+    }
+
+    private func renderToolContentForDebug(_ content: Tool.Content) -> String {
+        switch content {
+            case .text(let text):
+                return text
+            default:
+                if let data = try? JSONEncoder().encode(content),
+                    let json = String(data: data, encoding: .utf8)
+                {
+                    return json
+                }
+                return "<non-text content>"
+        }
+    }
+
+    private func truncatedActionCallDebug(_ payload: String) -> String {
+        let maxCharacters = 2_000
+        guard payload.count > maxCharacters else {
+            return payload
+        }
+        return String(payload.prefix(maxCharacters)) + "...[truncated]"
     }
 
 }

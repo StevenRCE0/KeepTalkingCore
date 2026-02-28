@@ -36,7 +36,7 @@ extension KeepTalkingClient {
         blockingAuthorisation: Bool = false
     ) async throws -> KeepTalkingAction {
         let node = try await getCurrentNodeInstance()
-        return try await Self.registerMCPAction(
+        let action = try await Self.registerMCPAction(
             bundle: bundle,
             descriptor: descriptor,
             remoteAuthorisable: remoteAuthorisable,
@@ -47,6 +47,11 @@ extension KeepTalkingClient {
                 try await self.mcpManager.registerMCPAction($0)
             }
         )
+        await invalidateActionToolCatalog(
+            reason:
+                "register_mcp_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
+        )
+        return action
     }
 
     static public func registerMCPAction(
@@ -69,6 +74,54 @@ extension KeepTalkingClient {
 
         try await action.save(on: database)
         try await callbackForRegisteringMCPAction?(action)
+        return action
+    }
+
+    public func registerSkillAction(
+        bundle: KeepTalkingSkillBundle,
+        descriptor: KeepTalkingActionDescriptor? = nil,
+        remoteAuthorisable: Bool = true,
+        blockingAuthorisation: Bool = false
+    ) async throws -> KeepTalkingAction {
+        let node = try await getCurrentNodeInstance()
+        let action = try await Self.registerSkillAction(
+            bundle: bundle,
+            descriptor: descriptor,
+            remoteAuthorisable: remoteAuthorisable,
+            blockingAuthorisation: blockingAuthorisation,
+            node: node,
+            on: localStore.database,
+            callbackForRegisteringSkillAction: {
+                try await self.skillManager.registerSkillAction($0)
+            }
+        )
+        await invalidateActionToolCatalog(
+            reason:
+                "register_skill_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
+        )
+        return action
+    }
+
+    static public func registerSkillAction(
+        bundle: KeepTalkingSkillBundle,
+        descriptor: KeepTalkingActionDescriptor? = nil,
+        remoteAuthorisable: Bool = true,
+        blockingAuthorisation: Bool = false,
+        node: KeepTalkingNode,
+        on database: any Database,
+        callbackForRegisteringSkillAction: ((KeepTalkingAction) async throws -> Void)? = nil
+    ) async throws -> KeepTalkingAction {
+        let action = KeepTalkingAction(
+            payload: .skill(bundle),
+            remoteAuthorisable: remoteAuthorisable,
+            blockingAuthorisation: blockingAuthorisation
+        )
+        action.$node.id = try node.requireID()
+        action.descriptor =
+            descriptor ?? Self.defaultDescriptor(for: bundle)
+
+        try await action.save(on: database)
+        try await callbackForRegisteringSkillAction?(action)
         return action
     }
 
@@ -111,6 +164,55 @@ extension KeepTalkingClient {
 
         try await action.save(on: localStore.database)
         try await mcpManager.refreshMCPAction(action)
+        await invalidateActionToolCatalog(
+            reason: "modify_mcp_action action=\(actionID.uuidString.lowercased())"
+        )
+
+        return action
+    }
+
+    public func modifySkillAction(
+        actionID: UUID,
+        bundle: KeepTalkingSkillBundle? = nil,
+        descriptor: KeepTalkingActionDescriptor? = nil,
+        remoteAuthorisable: Bool? = nil,
+        blockingAuthorisation: Bool? = nil
+    ) async throws -> KeepTalkingAction {
+        guard
+            let action = try await KeepTalkingAction.query(
+                on: localStore.database
+            )
+            .filter(\.$id, .equal, actionID)
+            .filter(\.$node.$id, .equal, config.node)
+            .first()
+        else {
+            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
+        }
+
+        if let bundle {
+            action.payload = .skill(bundle)
+        }
+        if let descriptor {
+            action.descriptor = descriptor
+        } else if action.descriptor == nil,
+            case .skill(let existingBundle) = action.payload
+        {
+            action.descriptor = Self.defaultDescriptor(for: existingBundle)
+        }
+
+        if let remoteAuthorisable {
+            action.remoteAuthorisable = remoteAuthorisable
+        }
+
+        if let blockingAuthorisation {
+            action.blockingAuthorisation = blockingAuthorisation
+        }
+
+        try await action.save(on: localStore.database)
+        try await skillManager.refreshSkillAction(action)
+        await invalidateActionToolCatalog(
+            reason: "modify_skill_action action=\(actionID.uuidString.lowercased())"
+        )
 
         return action
     }
@@ -125,6 +227,24 @@ extension KeepTalkingClient {
                 await self.mcpManager.unregisterAction(actionID: $0)
             }
         )
+        await invalidateActionToolCatalog(
+            reason: "remove_mcp_action action=\(actionID.uuidString.lowercased())"
+        )
+    }
+
+    public func removeSkillAction(actionID: UUID) async throws {
+        let node = try await getCurrentNodeInstance()
+        try await Self.removeMCPAction(
+            actionID: actionID,
+            node: node,
+            on: localStore.database,
+            callbackForUnregisteringAction: {
+                await self.skillManager.unregisterAction(actionID: $0)
+            }
+        )
+        await invalidateActionToolCatalog(
+            reason: "remove_skill_action action=\(actionID.uuidString.lowercased())"
+        )
     }
 
     static public func removeMCPAction(
@@ -133,15 +253,17 @@ extension KeepTalkingClient {
         on database: any Database,
         callbackForUnregisteringAction: ((UUID) async -> Void)? = nil
     ) async throws {
-        guard
-            let action = try await KeepTalkingAction.query(
+        guard let action = try await KeepTalkingAction.query(
                 on: database
             )
             .filter(\.$id, .equal, actionID)
-            .filter(\.$node.$id, .equal, try node.requireID())
-            .first()
-        else {
-            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
+//            .filter(\.$node.$id, .equal, try node.requireID())
+            .first() else {
+                throw KeepTalkingClientError.missingAction
+            }
+
+        if action.id != node.id {
+            print(KeepTalkingClientError.actionNotHostedLocally(actionID))
         }
 
         let relations =
@@ -183,18 +305,29 @@ extension KeepTalkingClient {
                 }
 
             let isMCP: Bool
+            let isSkill: Bool
             let name: String
             let description: String
-            if case .mcpBundle(let bundle) = action.payload {
-                isMCP = true
-                name = bundle.name
-                description =
-                    action.descriptor?.action?.description
-                    ?? bundle.indexDescription
-            } else {
-                isMCP = false
-                name = "unknown"
-                description = action.descriptor?.action?.description ?? ""
+            switch action.payload {
+                case .mcpBundle(let bundle):
+                    isMCP = true
+                    isSkill = false
+                    name = bundle.name
+                    description =
+                        action.descriptor?.action?.description
+                        ?? bundle.indexDescription
+                case .skill(let bundle):
+                    isMCP = false
+                    isSkill = true
+                    name = bundle.name
+                    description =
+                        action.descriptor?.action?.description
+                        ?? bundle.indexDescription
+                default:
+                    isMCP = false
+                    isSkill = false
+                    name = "unknown"
+                    description = action.descriptor?.action?.description ?? ""
             }
 
             summaries.append(
@@ -202,6 +335,7 @@ extension KeepTalkingClient {
                     actionID: actionID,
                     ownerNodeID: action.$node.id,
                     isMCP: isMCP,
+                    isSkill: isSkill,
                     name: name,
                     description: description,
                     hostedLocally: action.$node.id == config.node,
@@ -401,8 +535,14 @@ extension KeepTalkingClient {
                 case .mcpBundle = persistedAction.payload
             {
                 try await mcpManager.refreshMCPAction(persistedAction)
+            } else if persistedAction.$node.id == config.node,
+                case .skill = persistedAction.payload
+            {
+                try await skillManager.refreshSkillAction(persistedAction)
             }
         }
+
+        await invalidateActionToolCatalog(reason: "merge_node_actions")
     }
 
     private func virtualRemoteMCPBundle(
@@ -429,6 +569,18 @@ extension KeepTalkingClient {
 
     private static func defaultDescriptor(
         for bundle: KeepTalkingMCPBundle
+    ) -> KeepTalkingActionDescriptor {
+        KeepTalkingActionDescriptor(
+            subject: nil,
+            action: KeepTalkingActionWithDescription(
+                description: bundle.indexDescription
+            ),
+            object: nil
+        )
+    }
+
+    private static func defaultDescriptor(
+        for bundle: KeepTalkingSkillBundle
     ) -> KeepTalkingActionDescriptor {
         KeepTalkingActionDescriptor(
             subject: nil,

@@ -20,6 +20,9 @@ enum InteractiveCommand {
         command: [String],
         environment: [String: String]
     )
+    case skillList
+    case skillRemove(String)
+    case skillAddDirectory(name: String, path: String, description: String)
 
     static func parse(_ rawLine: String) -> InteractiveCommand? {
         let text = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -113,6 +116,27 @@ enum InteractiveCommand {
                 return .mcpAddSTDIO(name: name, command: [], environment: [:])
             }
             return .mcpList
+        }
+
+        if text.hasPrefix("/skill") {
+            let parts = text.split(whereSeparator: \.isWhitespace).map(String.init)
+            if parts.count == 1 || parts[1] == "list" {
+                return .skillList
+            }
+            if parts.count >= 3, parts[1] == "remove" {
+                return .skillRemove(parts[2])
+            }
+            if parts.count >= 5, parts[1] == "add", parts[2] == "directory" {
+                let name = parts[3]
+                let path = parts[4]
+                let description = parts.count > 5 ? parts[5...].joined(separator: " ") : ""
+                return .skillAddDirectory(
+                    name: name,
+                    path: path,
+                    description: description
+                )
+            }
+            return .skillList
         }
 
         return .send(text)

@@ -1,5 +1,24 @@
 import Foundation
 
+public struct KeepTalkingMCPBundle: KeepTalkingActionBundle {
+    public var id: UUID
+    public var name: String
+    public var indexDescription: String
+    public var service: KeepTalkingMCPService
+
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        indexDescription: String,
+        service: KeepTalkingMCPService
+    ) {
+        self.id = id
+        self.name = name
+        self.indexDescription = indexDescription
+        self.service = service
+    }
+}
+
 public enum KeepTalkingMCPService: Codable, Sendable, Hashable {
     case stdio(arguments: [String], environment: [String: String])
     case http(url: URL, payload: Data, headers: [String: String])
@@ -82,24 +101,5 @@ public enum KeepTalkingMCPService: Codable, Sendable, Hashable {
                 try http.encode(payload, forKey: .payload)
                 try http.encode(headers, forKey: .headers)
         }
-    }
-}
-
-public struct KeepTalkingMCPBundle: Identifiable, Codable, Sendable, Hashable {
-    public var id: UUID
-    public var name: String
-    public var indexDescription: String
-    public var service: KeepTalkingMCPService
-
-    public init(
-        id: UUID = UUID(),
-        name: String,
-        indexDescription: String,
-        service: KeepTalkingMCPService
-    ) {
-        self.id = id
-        self.name = name
-        self.indexDescription = indexDescription
-        self.service = service
     }
 }

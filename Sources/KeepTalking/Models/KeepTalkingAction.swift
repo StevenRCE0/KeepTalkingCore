@@ -22,12 +22,19 @@ public struct KeepTalkingActionDescriptor: Codable, Sendable {
     public var object: KeepTalkingActionResourceWithDescription?
 }
 
+public protocol KeepTalkingActionBundle: Identifiable, Codable, Sendable, Hashable {
+    var id: UUID { get set }
+    var name: String { get set }
+    var indexDescription: String { get set }
+}
+
 public final class KeepTalkingAction: Model, @unchecked Sendable {
 
     public static let schema: String = "kt_actions"
 
     public enum Payload: Codable, Sendable {
         case mcpBundle(KeepTalkingMCPBundle)
+        case skill(KeepTalkingSkillBundle)
     }
 
     @ID(key: .id)

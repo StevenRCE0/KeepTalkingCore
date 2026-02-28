@@ -55,6 +55,10 @@ final class KeepTalkingCLIController {
             try await runMCPManagementCommand(mcpCommand)
             return
         }
+        if let skillCommand = cliConfig.skillCommand {
+            try await runSkillManagementCommand(skillCommand)
+            return
+        }
 
         printRuntimeConfig(currentConfig)
 
@@ -136,7 +140,7 @@ final class KeepTalkingCLIController {
 
     func printConnectedBanner() {
         print(
-            "Connected. Commands: /new, /join <context-id>, /trust <node-id> [all|context|<context-id>], /lure <node-id> <pubkey>, /actions list, /actions grant <node-id> <action-id> [context|all], /mcp add http <name> <url> [description], /mcp add stdio <name> [--env KEY=VALUE ...] -- <command> [args...], /mcp list, /mcp remove <action-id>, /p2p, /stats, /quit, /ai <message>."
+            "Connected. Commands: /new, /join <context-id>, /trust <node-id> [all|context|<context-id>], /lure <node-id> <pubkey>, /actions list, /actions grant <node-id> <action-id> [context|all], /mcp add http <name> <url> [description], /mcp add stdio <name> [--env KEY=VALUE ...] -- <command> [args...], /mcp list, /mcp remove <action-id>, /skill add directory <name> <path> [description], /skill list, /skill remove <action-id>, /p2p, /stats, /quit, /ai <message>."
         )
     }
 }

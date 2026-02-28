@@ -143,6 +143,34 @@ extension KeepTalkingClient {
                 }
                 let result = try await decryptActionCallResultEnvelope(envelope)
                 _ = resolvePendingActionCall(result)
+            case .actionCatalogRequest(let request):
+                if request.targetNodeID == config.node {
+                    Task { [weak self] in
+                        try await self?.handleIncomingActionCatalogRequest(
+                            request
+                        )
+                    }
+                }
+            case .actionCatalogResult(let result):
+                _ = resolvePendingActionCatalogResult(result)
+            case .encryptedActionCatalogRequest(let envelope):
+                guard envelope.recipientNodeID == config.node else {
+                    break
+                }
+                let request = try await decryptActionCatalogRequestEnvelope(
+                    envelope
+                )
+                Task { [weak self] in
+                    try await self?.handleIncomingActionCatalogRequest(request)
+                }
+            case .encryptedActionCatalogResult(let envelope):
+                guard envelope.recipientNodeID == config.node else {
+                    break
+                }
+                let result = try await decryptActionCatalogResultEnvelope(
+                    envelope
+                )
+                _ = resolvePendingActionCatalogResult(result)
             case .p2pPresence(let presence):
                 guard presence.node != config.node else {
                     break

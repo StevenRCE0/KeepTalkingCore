@@ -319,7 +319,11 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             case .actionCallRequest,
                 .actionCallResult,
                 .encryptedActionCallRequest,
-                .encryptedActionCallResult:
+                .encryptedActionCallResult,
+                .actionCatalogRequest,
+                .actionCatalogResult,
+                .encryptedActionCatalogRequest,
+                .encryptedActionCatalogResult:
                 return .actionCall
         }
     }
@@ -653,6 +657,18 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
                 reportPeerConnected(envelope.senderNodeID)
                 reportPeerConnected(envelope.recipientNodeID)
             case .encryptedActionCallResult(let envelope):
+                reportPeerConnected(envelope.senderNodeID)
+                reportPeerConnected(envelope.recipientNodeID)
+            case .actionCatalogRequest(let request):
+                reportPeerConnected(request.callerNodeID)
+                reportPeerConnected(request.targetNodeID)
+            case .actionCatalogResult(let result):
+                reportPeerConnected(result.callerNodeID)
+                reportPeerConnected(result.targetNodeID)
+            case .encryptedActionCatalogRequest(let envelope):
+                reportPeerConnected(envelope.senderNodeID)
+                reportPeerConnected(envelope.recipientNodeID)
+            case .encryptedActionCatalogResult(let envelope):
                 reportPeerConnected(envelope.senderNodeID)
                 reportPeerConnected(envelope.recipientNodeID)
             case .p2pSignal(let signal):

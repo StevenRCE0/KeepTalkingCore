@@ -231,6 +231,19 @@ extension KeepTalkingCLIController {
                     environment: environment
                 )
                 return true
+            case .skillList:
+                await listSkillActions()
+                return true
+            case .skillRemove(let actionIDRaw):
+                await removeSkillAction(actionIDRaw: actionIDRaw)
+                return true
+            case .skillAddDirectory(let name, let path, let description):
+                await registerDirectorySkillAction(
+                    name: name,
+                    directoryRaw: path,
+                    description: description
+                )
+                return true
         }
     }
 
@@ -335,7 +348,10 @@ extension KeepTalkingCLIController {
                 let hosted = action.hostedLocally ? "local" : "remote"
                 let remote =
                     action.remoteAuthorisable ? "remote-ok" : "local-only"
-                let kind = action.isMCP ? "mcp" : "unknown"
+                let kind =
+                    action.isMCP
+                    ? "mcp"
+                    : (action.isSkill ? "skill" : "unknown")
                 print(
                     "- id=\(action.actionID.uuidString.lowercased()) type=\(kind) owner=\(owner) host=\(hosted) mode=\(remote) name=\(action.name)"
                 )
@@ -463,13 +479,6 @@ extension KeepTalkingCLIController {
                     in: context
                 )
                 print(aiResponse)
-                try await client.send(
-                    aiResponse,
-                    in: context,
-                    sender: KeepTalkingContextMessage.Sender.autonomous(
-                        name: "ai"
-                    )
-                )
             } catch {
                 if let clientError = error as? KeepTalkingClientError,
                     case .aiNotConfigured = clientError

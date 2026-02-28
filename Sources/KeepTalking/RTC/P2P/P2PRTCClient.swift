@@ -408,7 +408,11 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             case .actionCallRequest,
                 .actionCallResult,
                 .encryptedActionCallRequest,
-                .encryptedActionCallResult:
+                .encryptedActionCallResult,
+                .actionCatalogRequest,
+                .actionCatalogResult,
+                .encryptedActionCatalogRequest,
+                .encryptedActionCatalogResult:
                 return .actionCall
         }
     }

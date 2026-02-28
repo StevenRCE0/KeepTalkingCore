@@ -21,6 +21,7 @@ public struct KeepTalkingActionSummary: Sendable {
     public let actionID: UUID
     public let ownerNodeID: UUID?
     public let isMCP: Bool
+    public let isSkill: Bool
     public let name: String
     public let description: String
     public let hostedLocally: Bool

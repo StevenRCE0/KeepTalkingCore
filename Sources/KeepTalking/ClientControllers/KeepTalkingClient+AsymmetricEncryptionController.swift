@@ -80,6 +80,70 @@ extension KeepTalkingClient {
         return result
     }
 
+    func encryptActionCatalogRequestEnvelope(
+        _ request: KeepTalkingActionCatalogRequest
+    ) async throws -> KeepTalkingAsymmetricCipherEnvelope {
+        let encoded = try JSONEncoder().encode(request)
+        return try await encryptAsymmetricPayload(
+            encoded,
+            recipientNodeID: request.targetNodeID,
+            purpose: "action-catalog-request"
+        )
+    }
+
+    func decryptActionCatalogRequestEnvelope(
+        _ envelope: KeepTalkingAsymmetricCipherEnvelope
+    ) async throws -> KeepTalkingActionCatalogRequest {
+        let payload = try await decryptAsymmetricPayload(
+            envelope,
+            expectedSenderNodeID: envelope.senderNodeID,
+            purpose: "action-catalog-request"
+        )
+        let request = try JSONDecoder().decode(
+            KeepTalkingActionCatalogRequest.self,
+            from: payload
+        )
+        guard
+            request.callerNodeID == envelope.senderNodeID,
+            request.targetNodeID == envelope.recipientNodeID
+        else {
+            throw KeepTalkingClientError.malformedEncryptedActionCatalog
+        }
+        return request
+    }
+
+    func encryptActionCatalogResultEnvelope(
+        _ result: KeepTalkingActionCatalogResult
+    ) async throws -> KeepTalkingAsymmetricCipherEnvelope {
+        let encoded = try JSONEncoder().encode(result)
+        return try await encryptAsymmetricPayload(
+            encoded,
+            recipientNodeID: result.callerNodeID,
+            purpose: "action-catalog-result"
+        )
+    }
+
+    func decryptActionCatalogResultEnvelope(
+        _ envelope: KeepTalkingAsymmetricCipherEnvelope
+    ) async throws -> KeepTalkingActionCatalogResult {
+        let payload = try await decryptAsymmetricPayload(
+            envelope,
+            expectedSenderNodeID: envelope.senderNodeID,
+            purpose: "action-catalog-result"
+        )
+        let result = try JSONDecoder().decode(
+            KeepTalkingActionCatalogResult.self,
+            from: payload
+        )
+        guard
+            result.callerNodeID == envelope.recipientNodeID,
+            result.targetNodeID == envelope.senderNodeID
+        else {
+            throw KeepTalkingClientError.malformedEncryptedActionCatalog
+        }
+        return result
+    }
+
     func asymmetricPublicKeysForRecipient(nodeID: UUID) async throws
         -> (localPublicKey: String, remotePublicKey: String, relationID: UUID)?
     {

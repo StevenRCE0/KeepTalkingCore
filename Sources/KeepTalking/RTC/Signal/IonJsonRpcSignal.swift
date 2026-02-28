@@ -626,17 +626,9 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
 extension IonJsonRpcSignal: URLSessionWebSocketDelegate {
     func urlSession(
         _: URLSession,
-        webSocketTask: URLSessionWebSocketTask,
+        webSocketTask _: URLSessionWebSocketTask,
         didOpenWithProtocol _: String?
     ) {
-        let isCurrentSocket = stateQueue.sync {
-            socketTask === webSocketTask
-        }
-        guard isCurrentSocket else {
-            debug("ignoring didOpen from stale websocket task")
-            return
-        }
-
         debug("websocket opened")
         stateQueue.sync {
             isOpen = true
@@ -653,18 +645,10 @@ extension IonJsonRpcSignal: URLSessionWebSocketDelegate {
 
     func urlSession(
         _: URLSession,
-        webSocketTask: URLSessionWebSocketTask,
+        webSocketTask _: URLSessionWebSocketTask,
         didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
         reason closeReason: Data?
     ) {
-        let shouldHandle = stateQueue.sync {
-            socketTask === webSocketTask
-        }
-        guard shouldHandle else {
-            debug("ignoring didClose from stale websocket task")
-            return
-        }
-
         let shouldLog = stateQueue.sync { !isClosing }
         if shouldLog {
             if let closeReason {
