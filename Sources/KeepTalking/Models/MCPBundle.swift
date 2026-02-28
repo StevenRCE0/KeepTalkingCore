@@ -64,23 +64,23 @@ public enum KeepTalkingMCPService: Codable, Sendable, Hashable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .stdio(let arguments, let environment):
-            var stdio = container.nestedContainer(
-                keyedBy: StdioCodingKeys.self,
-                forKey: .stdio
-            )
-            try stdio.encode(arguments, forKey: .arguments)
-            if !environment.isEmpty {
-                try stdio.encode(environment, forKey: .environment)
-            }
-        case .http(let url, let payload, let headers):
-            var http = container.nestedContainer(
-                keyedBy: HTTPCodingKeys.self,
-                forKey: .http
-            )
-            try http.encode(url, forKey: .url)
-            try http.encode(payload, forKey: .payload)
-            try http.encode(headers, forKey: .headers)
+            case .stdio(let arguments, let environment):
+                var stdio = container.nestedContainer(
+                    keyedBy: StdioCodingKeys.self,
+                    forKey: .stdio
+                )
+                try stdio.encode(arguments, forKey: .arguments)
+                if !environment.isEmpty {
+                    try stdio.encode(environment, forKey: .environment)
+                }
+            case .http(let url, let payload, let headers):
+                var http = container.nestedContainer(
+                    keyedBy: HTTPCodingKeys.self,
+                    forKey: .http
+                )
+                try http.encode(url, forKey: .url)
+                try http.encode(payload, forKey: .payload)
+                try http.encode(headers, forKey: .headers)
         }
     }
 }

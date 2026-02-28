@@ -10,16 +10,16 @@ enum RTCError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .peerConnectionCreateFailed:
-            return "Failed to create LKRTCPeerConnection."
-        case .invalidSdpType(let type):
-            return "Invalid SDP type '\(type)'."
-        case .missingSdp:
-            return "Missing SDP."
-        case .dataChannelCreateFailed(let label):
-            return "Failed to create data channel '\(label)'."
-        case .dataChannelNotOpen(let label):
-            return "Data channel '\(label)' is not open yet."
+            case .peerConnectionCreateFailed:
+                return "Failed to create LKRTCPeerConnection."
+            case .invalidSdpType(let type):
+                return "Invalid SDP type '\(type)'."
+            case .missingSdp:
+                return "Missing SDP."
+            case .dataChannelCreateFailed(let label):
+                return "Failed to create data channel '\(label)'."
+            case .dataChannelNotOpen(let label):
+                return "Data channel '\(label)' is not open yet."
         }
     }
 }
@@ -241,12 +241,12 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
         let sendChannel: LKRTCDataChannel?
         switch route {
-        case .signaling:
-            sendChannel = preferredSignalingChannel()
-        case .chat:
-            sendChannel = preferredChatChannel()
-        case .actionCall:
-            sendChannel = preferredActionCallChannel()
+            case .signaling:
+                sendChannel = preferredSignalingChannel()
+            case .chat:
+                sendChannel = preferredChatChannel()
+            case .actionCall:
+                sendChannel = preferredActionCallChannel()
         }
 
         guard let sendChannel else {
@@ -312,27 +312,26 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
     private func route(for envelope: KeepTalkingP2PEnvelope) -> EnvelopeRoute {
         switch envelope {
-        case .message, .node, .nodeStatus, .encryptedNodeStatus, .context:
-            return .chat
-        case .p2pSignal, .p2pPresence:
-            return .signaling
-        case
-            .actionCallRequest,
-            .actionCallResult,
-            .encryptedActionCallRequest,
-            .encryptedActionCallResult:
-            return .actionCall
+            case .message, .node, .nodeStatus, .encryptedNodeStatus, .context:
+                return .chat
+            case .p2pSignal, .p2pPresence:
+                return .signaling
+            case .actionCallRequest,
+                .actionCallResult,
+                .encryptedActionCallRequest,
+                .encryptedActionCallResult:
+                return .actionCall
         }
     }
 
     private func routeLabel(for route: EnvelopeRoute) -> String {
         switch route {
-        case .chat:
-            return config.chatChannelLabel
-        case .actionCall:
-            return config.actionCallChannelLabel
-        case .signaling:
-            return config.signalingChannelLabel
+            case .chat:
+                return config.chatChannelLabel
+            case .actionCall:
+                return config.actionCallChannelLabel
+            case .signaling:
+                return config.signalingChannelLabel
         }
     }
 
@@ -623,43 +622,43 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
     private func reportConnectedPeers(from envelope: KeepTalkingP2PEnvelope) {
         switch envelope {
-        case .message(let message):
-            if case .node(let nodeID) = message.sender {
-                reportPeerConnected(nodeID)
-            }
-        case .context(let context):
-            for message in context.messages {
+            case .message(let message):
                 if case .node(let nodeID) = message.sender {
                     reportPeerConnected(nodeID)
                 }
-            }
-        case .node(let node):
-            if let nodeID = node.id {
-                reportPeerConnected(nodeID)
-            }
-        case .nodeStatus(let status):
-            if let nodeID = status.node.id {
-                reportPeerConnected(nodeID)
-            }
-        case .encryptedNodeStatus(let envelope):
-            reportPeerConnected(envelope.senderNodeID)
-            reportPeerConnected(envelope.recipientNodeID)
-        case .actionCallRequest(let request):
-            reportPeerConnected(request.callerNodeID)
-            reportPeerConnected(request.targetNodeID)
-        case .actionCallResult(let result):
-            reportPeerConnected(result.callerNodeID)
-            reportPeerConnected(result.targetNodeID)
-        case .encryptedActionCallRequest(let envelope):
-            reportPeerConnected(envelope.senderNodeID)
-            reportPeerConnected(envelope.recipientNodeID)
-        case .encryptedActionCallResult(let envelope):
-            reportPeerConnected(envelope.senderNodeID)
-            reportPeerConnected(envelope.recipientNodeID)
-        case .p2pSignal(let signal):
-            reportPeerConnected(signal.from)
-        case .p2pPresence(let presence):
-            reportPeerConnected(presence.node)
+            case .context(let context):
+                for message in context.messages {
+                    if case .node(let nodeID) = message.sender {
+                        reportPeerConnected(nodeID)
+                    }
+                }
+            case .node(let node):
+                if let nodeID = node.id {
+                    reportPeerConnected(nodeID)
+                }
+            case .nodeStatus(let status):
+                if let nodeID = status.node.id {
+                    reportPeerConnected(nodeID)
+                }
+            case .encryptedNodeStatus(let envelope):
+                reportPeerConnected(envelope.senderNodeID)
+                reportPeerConnected(envelope.recipientNodeID)
+            case .actionCallRequest(let request):
+                reportPeerConnected(request.callerNodeID)
+                reportPeerConnected(request.targetNodeID)
+            case .actionCallResult(let result):
+                reportPeerConnected(result.callerNodeID)
+                reportPeerConnected(result.targetNodeID)
+            case .encryptedActionCallRequest(let envelope):
+                reportPeerConnected(envelope.senderNodeID)
+                reportPeerConnected(envelope.recipientNodeID)
+            case .encryptedActionCallResult(let envelope):
+                reportPeerConnected(envelope.senderNodeID)
+                reportPeerConnected(envelope.recipientNodeID)
+            case .p2pSignal(let signal):
+                reportPeerConnected(signal.from)
+            case .p2pPresence(let presence):
+                reportPeerConnected(presence.node)
         }
     }
 

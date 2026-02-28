@@ -78,10 +78,10 @@ final class KeepTalkingCLIController {
             message in
             let senderLabel: String
             switch message.sender {
-            case .node(let node):
-                senderLabel = node.uuidString.lowercased()
-            case .autonomous(let name):
-                senderLabel = name
+                case .node(let node):
+                    senderLabel = node.uuidString.lowercased()
+                case .autonomous(let name):
+                    senderLabel = name
             }
             return "[\(senderLabel)] \(message.content)"
         }
@@ -91,16 +91,16 @@ final class KeepTalkingCLIController {
         }
         targetClient.onEnvelope = { (envelope: KeepTalkingP2PEnvelope) in
             switch envelope {
-            case .message(let message):
-                print(renderMessage(message))
-            case .context(let context):
-                if let latestMessage = context.messages.max(by: {
-                    $0.timestamp < $1.timestamp
-                }) {
-                    print(renderMessage(latestMessage))
-                }
-            default:
-                break
+                case .message(let message):
+                    print(renderMessage(message))
+                case .context(let context):
+                    if let latestMessage = context.messages.max(by: {
+                        $0.timestamp < $1.timestamp
+                    }) {
+                        print(renderMessage(latestMessage))
+                    }
+                default:
+                    break
             }
         }
         targetClient.onRawMessage = { (raw: String) in

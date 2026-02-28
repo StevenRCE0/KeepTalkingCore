@@ -60,8 +60,8 @@ public final class FluentModelBinding<ModelType: FluentKit.Model>:
 }
 
 @MainActor
-public extension FluentKit.Model {
-    func swiftUIBinding(on database: any Database) -> FluentModelBinding<Self> {
+extension FluentKit.Model {
+    public func swiftUIBinding(on database: any Database) -> FluentModelBinding<Self> {
         FluentModelBinding(model: self, database: database)
     }
 }

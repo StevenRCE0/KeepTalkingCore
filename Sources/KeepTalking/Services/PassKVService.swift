@@ -244,8 +244,7 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
         "\(KVDocumentKey.Prefix.node.rawValue)\(nodeID)"
     }
 
-    private func pairPublicKey(nodeID: String, trustedNodeID: String) -> String
-    {
+    private func pairPublicKey(nodeID: String, trustedNodeID: String) -> String {
         "\(KVDocumentKey.Prefix.pair.rawValue)\(nodeID):\(trustedNodeID)"
     }
 
@@ -402,8 +401,7 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
     }
 
     private func decodeUpsertResponse(_ data: Data) throws -> KVUpsertResponse {
-        if let response = try? decoder.decode(KVUpsertResponse.self, from: data)
-        {
+        if let response = try? decoder.decode(KVUpsertResponse.self, from: data) {
             return response
         }
         throw KeepTalkingKVServiceError.invalidResponsePayload

@@ -84,9 +84,11 @@ extension KeepTalkingClient {
         -> (localPublicKey: String, remotePublicKey: String, relationID: UUID)?
     {
         let localKeyMaterial = try await localKeyAgreementMaterial()
-        guard let remoteCandidate = try await remoteKeyAgreementPublicKeys(
-            nodeID: nodeID
-        ).first else {
+        guard
+            let remoteCandidate = try await remoteKeyAgreementPublicKeys(
+                nodeID: nodeID
+            ).first
+        else {
             return nil
         }
         return (

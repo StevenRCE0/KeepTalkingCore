@@ -253,7 +253,8 @@ extension KeepTalkingClient {
         }
 
         let actionID = try action.requireID()
-        let approvals = try await KeepTalkingNodeRelationActionRelation
+        let approvals =
+            try await KeepTalkingNodeRelationActionRelation
             .query(on: localStore.database)
             .filter(\.$relation.$id ~~ eligibleRelationIDs)
             .filter(\.$action.$id == actionID)
@@ -297,13 +298,13 @@ extension KeepTalkingClient {
         context testContext: KeepTalkingContext?
     ) -> Bool {
         switch approvingContext {
-        case .none, .all:
-            return true
-        case .contexts(let contexts):
-            guard let testContext else {
-                return false
-            }
-            return contexts.contains(testContext)
+            case .none, .all:
+                return true
+            case .contexts(let contexts):
+                guard let testContext else {
+                    return false
+                }
+                return contexts.contains(testContext)
         }
     }
 

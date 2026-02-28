@@ -14,8 +14,7 @@ public enum KeepTalkingNodeTrustScope: Sendable {
 
 public struct KeepTalkingActionGrantSummary: Sendable {
     public let toNodeID: UUID
-    public let approvingContext:
-        KeepTalkingNodeRelationActionRelation.ApprovingContext?
+    public let approvingContext: KeepTalkingNodeRelationActionRelation.ApprovingContext?
 }
 
 public struct KeepTalkingActionSummary: Sendable {
@@ -89,10 +88,10 @@ extension KeepTalkingClient {
 
         let newRelationship: KeepTalkingRelationship =
             switch scope {
-            case .allContexts:
-                .trustedInAllContext
-            case .context(let context):
-                .trusted([context])
+                case .allContexts:
+                    .trustedInAllContext
+                case .context(let context):
+                    .trusted([context])
             }
         let relation = try KeepTalkingNodeRelation(
             from: localNode,
@@ -335,8 +334,7 @@ extension KeepTalkingClient {
         )
     }
 
-    func mergeDiscoveredNodeStatus(_ status: KeepTalkingNodeStatus) async throws
-    {
+    func mergeDiscoveredNodeStatus(_ status: KeepTalkingNodeStatus) async throws {
         rtcClient.debug(
             "[mergeDiscoveredNodeStatus] "
                 + String(
@@ -414,10 +412,10 @@ extension KeepTalkingClient {
         let requestedTrustScope: KeepTalkingNodeTrustScope =
             grantsForLocal.contains {
                 switch $0.relationship {
-                case .owner, .trustedInAllContext:
-                    return true
-                case .trusted(_), .pending:
-                    return false
+                    case .owner, .trustedInAllContext:
+                        return true
+                    case .trusted(_), .pending:
+                        return false
                 }
             } ? .allContexts : .context(status.context)
 
@@ -489,14 +487,14 @@ extension KeepTalkingClient {
         -> Int
     {
         switch relationship {
-        case .owner:
-            return 3
-        case .trustedInAllContext:
-            return 2
-        case .trusted:
-            return 1
-        case .pending:
-            return 0
+            case .owner:
+                return 3
+            case .trustedInAllContext:
+                return 2
+            case .trusted:
+                return 1
+            case .pending:
+                return 0
         }
     }
 
@@ -745,22 +743,22 @@ extension KeepTalkingClient {
         requestedScope: KeepTalkingNodeTrustScope
     ) -> KeepTalkingRelationship {
         switch requestedScope {
-        case .allContexts:
-            return .trustedInAllContext
-        case .context(let context):
-            switch current {
-            case .owner, .trustedInAllContext:
-                return current
-            case .trusted(let existingContexts):
-                var merged = Set(existingContexts)
-                merged.insert(context)
+            case .allContexts:
+                return .trustedInAllContext
+            case .context(let context):
+                switch current {
+                    case .owner, .trustedInAllContext:
+                        return current
+                    case .trusted(let existingContexts):
+                        var merged = Set(existingContexts)
+                        merged.insert(context)
 
-                let mergedArray = Array(merged)
+                        let mergedArray = Array(merged)
 
-                return .trusted(mergedArray)
-            case .pending:
-                return .trusted([context])
-            }
+                        return .trusted(mergedArray)
+                    case .pending:
+                        return .trusted([context])
+                }
         }
     }
 

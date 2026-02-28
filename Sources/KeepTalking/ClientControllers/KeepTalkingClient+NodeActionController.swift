@@ -224,36 +224,36 @@ extension KeepTalkingClient {
 
         if targetActionRelation == nil {
             switch scope {
-            case .all:
-                targetActionRelation = try .init(
-                    relation: relation,
-                    action: action,
-                    approvingContext: .all
-                )
-            case .context(let approvingContext):
-                targetActionRelation = try .init(
-                    relation: relation,
-                    action: action,
-                    approvingContext: .contexts([approvingContext])
-                )
+                case .all:
+                    targetActionRelation = try .init(
+                        relation: relation,
+                        action: action,
+                        approvingContext: .all
+                    )
+                case .context(let approvingContext):
+                    targetActionRelation = try .init(
+                        relation: relation,
+                        action: action,
+                        approvingContext: .contexts([approvingContext])
+                    )
             }
 
             try await targetActionRelation!.create(on: localStore.database)
         } else {
             switch scope {
-            case .all:
-                targetActionRelation!.approvingContext = .all
-            case .context(let approvingContext):
-                switch targetActionRelation!.approvingContext {
                 case .all:
                     targetActionRelation!.approvingContext = .all
-                case .contexts(let originalContexts):
-                    targetActionRelation!.approvingContext = .contexts(
-                        originalContexts + [approvingContext]
-                    )
-                default:
-                    break
-                }
+                case .context(let approvingContext):
+                    switch targetActionRelation!.approvingContext {
+                        case .all:
+                            targetActionRelation!.approvingContext = .all
+                        case .contexts(let originalContexts):
+                            targetActionRelation!.approvingContext = .contexts(
+                                originalContexts + [approvingContext]
+                            )
+                        default:
+                            break
+                    }
             }
 
             try await targetActionRelation!.update(on: localStore.database)

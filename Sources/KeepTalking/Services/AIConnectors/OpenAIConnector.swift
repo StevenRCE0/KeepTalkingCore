@@ -21,10 +21,10 @@ public actor OpenAIConnector {
 
         public var errorDescription: String? {
             switch self {
-            case .missingAPIKey:
-                return "OPENAI_API_KEY environment variable is not set."
-            case .emptyResponse:
-                return "No response choices received."
+                case .missingAPIKey:
+                    return "OPENAI_API_KEY environment variable is not set."
+                case .emptyResponse:
+                    return "No response choices received."
             }
         }
     }

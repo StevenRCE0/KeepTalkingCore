@@ -106,60 +106,60 @@ extension KeepTalkingClient {
         async throws
     {
         switch envelope {
-        case .message(let message):
-            try await handleIncomingMessage(message)
-            rtcClient.debug("Message cast to envelope")
-        case .node(let node):
-            try await mergeDiscoveredNode(node)
-        case .nodeStatus(let status):
-            try await mergeDiscoveredNodeStatus(status)
-        case .encryptedNodeStatus(let envelope):
-            guard envelope.recipientNodeID == config.node else {
-                break
-            }
-            let status = try await decryptNodeStatusEnvelope(envelope)
-            try await mergeDiscoveredNodeStatus(status)
-        case .context(let context):
-            mergeContext(context)
-        case .actionCallRequest(let request):
-            if request.targetNodeID == config.node {
+            case .message(let message):
+                try await handleIncomingMessage(message)
+                rtcClient.debug("Message cast to envelope")
+            case .node(let node):
+                try await mergeDiscoveredNode(node)
+            case .nodeStatus(let status):
+                try await mergeDiscoveredNodeStatus(status)
+            case .encryptedNodeStatus(let envelope):
+                guard envelope.recipientNodeID == config.node else {
+                    break
+                }
+                let status = try await decryptNodeStatusEnvelope(envelope)
+                try await mergeDiscoveredNodeStatus(status)
+            case .context(let context):
+                mergeContext(context)
+            case .actionCallRequest(let request):
+                if request.targetNodeID == config.node {
+                    Task { [weak self] in
+                        try await self?.handleIncomingActionCallRequest(request)
+                    }
+                }
+            case .actionCallResult(let result):
+                _ = resolvePendingActionCall(result)
+            case .encryptedActionCallRequest(let envelope):
+                guard envelope.recipientNodeID == config.node else {
+                    break
+                }
+                let request = try await decryptActionCallRequestEnvelope(envelope)
                 Task { [weak self] in
                     try await self?.handleIncomingActionCallRequest(request)
                 }
-            }
-        case .actionCallResult(let result):
-            _ = resolvePendingActionCall(result)
-        case .encryptedActionCallRequest(let envelope):
-            guard envelope.recipientNodeID == config.node else {
-                break
-            }
-            let request = try await decryptActionCallRequestEnvelope(envelope)
-            Task { [weak self] in
-                try await self?.handleIncomingActionCallRequest(request)
-            }
-        case .encryptedActionCallResult(let envelope):
-            guard envelope.recipientNodeID == config.node else {
-                break
-            }
-            let result = try await decryptActionCallResultEnvelope(envelope)
-            _ = resolvePendingActionCall(result)
-        case .p2pPresence(let presence):
-            guard presence.node != config.node else {
-                break
-            }
-            let nodeIDText = presence.node.uuidString.lowercased()
-            do {
-                try await markNodeDiscovered(presence.node)
-            } catch {
-                rtcClient.debug(
-                    "mark node discovered failed node=\(nodeIDText) error=\(error.localizedDescription)"
+            case .encryptedActionCallResult(let envelope):
+                guard envelope.recipientNodeID == config.node else {
+                    break
+                }
+                let result = try await decryptActionCallResultEnvelope(envelope)
+                _ = resolvePendingActionCall(result)
+            case .p2pPresence(let presence):
+                guard presence.node != config.node else {
+                    break
+                }
+                let nodeIDText = presence.node.uuidString.lowercased()
+                do {
+                    try await markNodeDiscovered(presence.node)
+                } catch {
+                    rtcClient.debug(
+                        "mark node discovered failed node=\(nodeIDText) error=\(error.localizedDescription)"
+                    )
+                }
+                scheduleDebouncedNodeStateBroadcast(
+                    reason: "p2pPresence node=\(nodeIDText)"
                 )
-            }
-            scheduleDebouncedNodeStateBroadcast(
-                reason: "p2pPresence node=\(nodeIDText)"
-            )
-        default:
-            break
+            default:
+                break
         }
 
         onEnvelope?(envelope)
@@ -201,8 +201,7 @@ extension KeepTalkingClient {
         return context
     }
 
-    public func ensureGroupChatSecret(for contextID: UUID) async throws -> Data
-    {
+    public func ensureGroupChatSecret(for contextID: UUID) async throws -> Data {
         if let existing = try await KeepTalkingContextGroupSecret.query(
             on: localStore.database
         )
@@ -319,8 +318,7 @@ extension KeepTalkingClient {
         }
     }
 
-    private func loadGroupChatSecret(for contextID: UUID) async throws -> Data?
-    {
+    private func loadGroupChatSecret(for contextID: UUID) async throws -> Data? {
         try await KeepTalkingContextGroupSecret.query(on: localStore.database)
             .filter(\.$id, .equal, contextID)
             .first()?

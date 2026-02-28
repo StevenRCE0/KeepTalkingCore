@@ -40,11 +40,13 @@ public final class FluentManager: Sendable {
 
     /// Resolves a database connection by identifier.
     public func db(_ id: DatabaseID? = nil, logger: Logger = .init(label: "Fluent")) -> any Database {
-        guard let db = self.databases.database(
-            id,
-            logger: logger,
-            on: self.eventLoopGroup.any(),
-        ) else {
+        guard
+            let db = self.databases.database(
+                id,
+                logger: logger,
+                on: self.eventLoopGroup.any(),
+            )
+        else {
             fatalError("No database configured for \(id?.string ?? "default")")
         }
         return db

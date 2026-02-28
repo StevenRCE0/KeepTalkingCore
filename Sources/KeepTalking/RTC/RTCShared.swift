@@ -157,16 +157,16 @@ enum RTCShared {
         invalidSdpTypeError: (String) -> Error
     ) throws -> LKRTCSdpType {
         switch raw.lowercased() {
-        case "offer":
-            return .offer
-        case "answer":
-            return .answer
-        case "pranswer":
-            return .prAnswer
-        case "rollback":
-            return .rollback
-        default:
-            throw invalidSdpTypeError(raw)
+            case "offer":
+                return .offer
+            case "answer":
+                return .answer
+            case "pranswer":
+                return .prAnswer
+            case "rollback":
+                return .rollback
+            default:
+                throw invalidSdpTypeError(raw)
         }
     }
 
@@ -175,16 +175,16 @@ enum RTCShared {
     {
         let type: String
         switch description.type {
-        case .offer:
-            type = "offer"
-        case .answer:
-            type = "answer"
-        case .prAnswer:
-            type = "pranswer"
-        case .rollback:
-            type = "rollback"
-        @unknown default:
-            type = "offer"
+            case .offer:
+                type = "offer"
+            case .answer:
+                type = "answer"
+            case .prAnswer:
+                type = "pranswer"
+            case .rollback:
+                type = "rollback"
+            @unknown default:
+                type = "offer"
         }
         return SessionDescriptionPayload(type: type, sdp: description.sdp)
     }

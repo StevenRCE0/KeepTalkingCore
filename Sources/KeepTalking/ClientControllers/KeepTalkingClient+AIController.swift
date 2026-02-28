@@ -204,9 +204,8 @@ extension KeepTalkingClient {
     ) -> ChatQuery.ChatCompletionMessageParam? {
         let text = turn.assistantText?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let content:
-            ChatQuery.ChatCompletionMessageParam.TextOrRefusalContent? =
-                (text?.isEmpty == false) ? .textContent(text!) : nil
+        let content: ChatQuery.ChatCompletionMessageParam.TextOrRefusalContent? =
+            (text?.isEmpty == false) ? .textContent(text!) : nil
         let toolCalls = turn.toolCalls.isEmpty ? nil : turn.toolCalls
         if content == nil, toolCalls == nil {
             return nil
@@ -240,8 +239,7 @@ extension KeepTalkingClient {
                     catalog,
                     contextID: try context.requireID()
                 )
-            } else if let tool = catalog.definition(functionName: functionName)
-            {
+            } else if let tool = catalog.definition(functionName: functionName) {
                 var arguments = try decodeToolArguments(
                     toolCall.function.arguments
                 )
@@ -317,15 +315,15 @@ extension KeepTalkingClient {
     ) -> String {
         let renderedContent = result.content.map { content -> String in
             switch content {
-            case .text(let text):
-                return text
-            default:
-                if let data = try? JSONEncoder().encode(content),
-                    let json = String(data: data, encoding: .utf8)
-                {
-                    return json
-                }
-                return "<non-text content>"
+                case .text(let text):
+                    return text
+                default:
+                    if let data = try? JSONEncoder().encode(content),
+                        let json = String(data: data, encoding: .utf8)
+                    {
+                        return json
+                    }
+                    return "<non-text content>"
             }
         }
         return jsonString([
@@ -363,10 +361,10 @@ extension KeepTalkingClient {
         return recentMessages.map { message in
             let sender: String =
                 switch message.sender {
-                case .node(let nodeID):
-                    "node:\(nodeID.uuidString.lowercased())"
-                case .autonomous(let name):
-                    "agent:\(name)"
+                    case .node(let nodeID):
+                        "node:\(nodeID.uuidString.lowercased())"
+                    case .autonomous(let name):
+                        "agent:\(name)"
                 }
             return "[\(sender)] \(message.content)"
         }.joined(separator: "\n")
@@ -462,15 +460,15 @@ extension KeepTalkingClient {
 
         let parts = result.content.map { content -> String in
             switch content {
-            case .text(let text):
-                return text
-            default:
-                if let data = try? JSONEncoder().encode(content),
-                    let json = String(data: data, encoding: .utf8)
-                {
-                    return json
-                }
-                return "<non-text content>"
+                case .text(let text):
+                    return text
+                default:
+                    if let data = try? JSONEncoder().encode(content),
+                        let json = String(data: data, encoding: .utf8)
+                    {
+                        return json
+                    }
+                    return "<non-text content>"
             }
         }
         return "[tool:\(functionName)] " + parts.joined(separator: "\n")

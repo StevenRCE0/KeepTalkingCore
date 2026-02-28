@@ -8,14 +8,14 @@ enum SignalError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .notConnected:
-            return "Signaling socket is not connected."
-        case .invalidResponse:
-            return "Signaling response was invalid."
-        case let .remoteError(reason):
-            return "Signaling error: \(reason)"
-        case .closed:
-            return "Signaling socket closed."
+            case .notConnected:
+                return "Signaling socket is not connected."
+            case .invalidResponse:
+                return "Signaling response was invalid."
+            case .remoteError(let reason):
+                return "Signaling error: \(reason)"
+            case .closed:
+                return "Signaling socket closed."
         }
     }
 }
@@ -188,27 +188,27 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
             stateQueue.sync {
                 pending[id] = { result in
                     switch result {
-                    case let .failure(error):
-                        self.debug(
-                            "response failed method=\(method) id=\(id) error=\(error.localizedDescription)"
-                        )
-                        continuation.resume(throwing: error)
-                    case let .success(data):
-                        do {
-                            let response = try JSONDecoder().decode(
-                                Response.self,
-                                from: data
-                            )
+                        case .failure(let error):
                             self.debug(
-                                "response ok method=\(method) id=\(id) bytes=\(data.count)"
-                            )
-                            continuation.resume(returning: response)
-                        } catch {
-                            self.debug(
-                                "response decode failed method=\(method) id=\(id) error=\(error.localizedDescription) payload=\(self.preview(data))"
+                                "response failed method=\(method) id=\(id) error=\(error.localizedDescription)"
                             )
                             continuation.resume(throwing: error)
-                        }
+                        case .success(let data):
+                            do {
+                                let response = try JSONDecoder().decode(
+                                    Response.self,
+                                    from: data
+                                )
+                                self.debug(
+                                    "response ok method=\(method) id=\(id) bytes=\(data.count)"
+                                )
+                                continuation.resume(returning: response)
+                            } catch {
+                                self.debug(
+                                    "response decode failed method=\(method) id=\(id) error=\(error.localizedDescription) payload=\(self.preview(data))"
+                                )
+                                continuation.resume(throwing: error)
+                            }
                     }
                 }
             }
@@ -255,31 +255,31 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
             }
 
             switch result {
-            case let .failure(error):
-                let isIntentionalClose = self.stateQueue.sync { self.isClosing }
-                if isIntentionalClose {
-                    return
-                } else {
-                    self.debug("receive failed error=\(error.localizedDescription)")
-                }
-                self.failAllPending(with: error)
-                if self.shouldRetryAfterDisconnect(error) {
-                    self.scheduleReconnect(reason: "receive-failed")
-                }
-            case let .success(message):
-                switch message {
-                case let .string(text):
-                    self.debug("recv text bytes=\(text.utf8.count)")
-                    self.handleMessageData(Data(text.utf8))
-                case let .data(data):
-                    self.debug("recv data bytes=\(data.count)")
-                    self.handleMessageData(data)
-                @unknown default:
-                    self.debug("recv unknown websocket message")
-                    break
-                }
+                case .failure(let error):
+                    let isIntentionalClose = self.stateQueue.sync { self.isClosing }
+                    if isIntentionalClose {
+                        return
+                    } else {
+                        self.debug("receive failed error=\(error.localizedDescription)")
+                    }
+                    self.failAllPending(with: error)
+                    if self.shouldRetryAfterDisconnect(error) {
+                        self.scheduleReconnect(reason: "receive-failed")
+                    }
+                case .success(let message):
+                    switch message {
+                        case .string(let text):
+                            self.debug("recv text bytes=\(text.utf8.count)")
+                            self.handleMessageData(Data(text.utf8))
+                        case .data(let data):
+                            self.debug("recv data bytes=\(data.count)")
+                            self.handleMessageData(data)
+                        @unknown default:
+                            self.debug("recv unknown websocket message")
+                            break
+                    }
 
-                self.receiveNextMessage(on: task)
+                    self.receiveNextMessage(on: task)
             }
         }
     }
@@ -287,10 +287,10 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
     private func shouldRetryAfterDisconnect(_ error: Error) -> Bool {
         if let signalError = error as? SignalError {
             switch signalError {
-            case .notConnected, .closed:
-                return true
-            case .invalidResponse, .remoteError:
-                return false
+                case .notConnected, .closed:
+                    return true
+                case .invalidResponse, .remoteError:
+                    return false
             }
         }
 
@@ -469,10 +469,10 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
             }
 
             if method == "offer",
-               let offer = try? JSONDecoder().decode(
-                   SessionDescriptionPayload.self,
-                   from: paramsData
-               )
+                let offer = try? JSONDecoder().decode(
+                    SessionDescriptionPayload.self,
+                    from: paramsData
+                )
             {
                 debug(
                     "offer notify type=\(offer.type) sdpBytes=\(offer.sdp.utf8.count)"
@@ -482,10 +482,10 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
             }
 
             if method == "trickle",
-               let trickle = try? JSONDecoder().decode(
-                   TricklePayload.self,
-                   from: paramsData
-               )
+                let trickle = try? JSONDecoder().decode(
+                    TricklePayload.self,
+                    from: paramsData
+                )
             {
                 debug(
                     "trickle notify target=\(trickle.target) candidateBytes=\(trickle.candidate.candidate.utf8.count)"
@@ -507,10 +507,9 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
             let text: String
             if let asString = errorObject as? String {
                 text = asString
-            } else if
-                let encoded = try? JSONSerialization.data(
-                    withJSONObject: errorObject
-                ),
+            } else if let encoded = try? JSONSerialization.data(
+                withJSONObject: errorObject
+            ),
                 let rendered = String(data: encoded, encoding: .utf8)
             {
                 text = rendered
@@ -524,9 +523,9 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
         }
 
         guard let resultObject = envelope["result"],
-              let resultData = try? JSONSerialization.data(
-                  withJSONObject: resultObject
-              )
+            let resultData = try? JSONSerialization.data(
+                withJSONObject: resultObject
+            )
         else {
             debug("response invalid id=\(id) payload=\(preview(data))")
             resolvePending(id: id, with: .failure(SignalError.invalidResponse))
@@ -548,8 +547,7 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
     }
 
     private func failAllPending(with error: Error) {
-        let allAndState:
-            (callbacks: [(Result<Data, Error>) -> Void], shouldLog: Bool) =
+        let allAndState: (callbacks: [(Result<Data, Error>) -> Void], shouldLog: Bool) =
             stateQueue.sync {
                 let callbacks = Array(pending.values)
                 pending.removeAll()

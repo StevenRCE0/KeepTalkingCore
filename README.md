@@ -31,6 +31,24 @@ cd /Users/steven/Developer/Example/KeepTalking
 swift build
 ```
 
+## Formatting And Linting
+
+This repo uses `.swift-format` as the shared Swift style baseline.
+
+Format all Swift sources:
+
+```bash
+cd /Users/steven/Developer/Example/KeepTalking
+swift-format format --in-place --recursive Sources
+```
+
+Lint all Swift sources:
+
+```bash
+cd /Users/steven/Developer/Example/KeepTalking
+swift-format lint --recursive Sources
+```
+
 ## Package For Distribution (macOS)
 
 Create a runnable distribution folder containing `KeepTalking` and `LiveKitWebRTC.framework`:

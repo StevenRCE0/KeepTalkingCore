@@ -50,15 +50,16 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         var normalized = "kt_\(owner.prefix(24))_\(action.prefix(24))"
 
         if let mcpToolName {
-            let cleaned = mcpToolName
+            let cleaned =
+                mcpToolName
                 .lowercased()
                 .map { $0.isLetter || $0.isNumber ? $0 : "_" }
             let prefix = String(cleaned.prefix(6))
                 .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
             let checksum = String(
                 format: "%04x",
-                mcpToolName.utf8.reduce(UInt32(2166136261)) { partial, byte in
-                    (partial ^ UInt32(byte)) &* 16777619
+                mcpToolName.utf8.reduce(UInt32(2_166_136_261)) { partial, byte in
+                    (partial ^ UInt32(byte)) &* 16_777_619
                 } & 0xffff
             )
             let token = prefix.isEmpty ? checksum : "\(prefix)_\(checksum)"
@@ -88,7 +89,7 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
                     ),
                     .properties([:]),
                     .additionalProperties(.boolean(true))
-                )
+                ),
             ]),
             .additionalProperties(.boolean(true))
         )

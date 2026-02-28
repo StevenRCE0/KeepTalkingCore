@@ -19,34 +19,34 @@ public enum KeepTalkingClientError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .kvServiceNotConfigured:
-            return "KV service is not configured."
-        case .missingNode:
-            return "KeepTalkingConfig.node is required for KV node registration."
-        case .aiNotConfigured:
-            return "OpenAI is not configured. Set OPENAI_API_KEY to enable AI tool planning."
-        case .unknownTool(let functionName):
-            return "Tool is not in the normalized action catalog: \(functionName)"
-        case .invalidToolArguments(let raw):
-            return "Tool arguments are not valid JSON object: \(raw)"
-        case .actionNotHostedLocally(let actionID):
-            return "Action is not hosted by this node: \(actionID)"
-        case .relationNotTrustedOrOwned(let nodeID):
-            return "No trusted/owned relation exists to node: \(nodeID)"
-        case .actionCallNotAuthorized(let actionID, let caller, let context):
-            return "Action call is not authorized. action=\(actionID) caller=\(caller) context=\(context)"
-        case .actionCallTimeout(let requestID):
-            return "Timed out waiting for remote action call result: \(requestID)"
-        case .localIdentityPrivateKeyMissing:
-            return "Local private identity key is missing."
-        case .remoteIdentityPublicKeyMissing(let nodeID):
-            return "No remote public key is known for node: \(nodeID)"
-        case .remoteIdentityPublicKeyInvalid(let nodeID):
-            return "Remote public key is invalid for node: \(nodeID)"
-        case .malformedEncryptedActionCall:
-            return "Encrypted action-call envelope payload is malformed."
-        case .malformedEncryptedNodeStatus:
-            return "Encrypted node-status envelope payload is malformed."
+            case .kvServiceNotConfigured:
+                return "KV service is not configured."
+            case .missingNode:
+                return "KeepTalkingConfig.node is required for KV node registration."
+            case .aiNotConfigured:
+                return "OpenAI is not configured. Set OPENAI_API_KEY to enable AI tool planning."
+            case .unknownTool(let functionName):
+                return "Tool is not in the normalized action catalog: \(functionName)"
+            case .invalidToolArguments(let raw):
+                return "Tool arguments are not valid JSON object: \(raw)"
+            case .actionNotHostedLocally(let actionID):
+                return "Action is not hosted by this node: \(actionID)"
+            case .relationNotTrustedOrOwned(let nodeID):
+                return "No trusted/owned relation exists to node: \(nodeID)"
+            case .actionCallNotAuthorized(let actionID, let caller, let context):
+                return "Action call is not authorized. action=\(actionID) caller=\(caller) context=\(context)"
+            case .actionCallTimeout(let requestID):
+                return "Timed out waiting for remote action call result: \(requestID)"
+            case .localIdentityPrivateKeyMissing:
+                return "Local private identity key is missing."
+            case .remoteIdentityPublicKeyMissing(let nodeID):
+                return "No remote public key is known for node: \(nodeID)"
+            case .remoteIdentityPublicKeyInvalid(let nodeID):
+                return "Remote public key is invalid for node: \(nodeID)"
+            case .malformedEncryptedActionCall:
+                return "Encrypted action-call envelope payload is malformed."
+            case .malformedEncryptedNodeStatus:
+                return "Encrypted node-status envelope payload is malformed."
         }
     }
 }
@@ -80,8 +80,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let actionCallQueue = DispatchQueue(
         label: "KeepTalking.client.action-call"
     )
-    var pendingActionCallResults:
-        [UUID: CheckedContinuation<KeepTalkingActionCallResult, Error>] = [:]
+    var pendingActionCallResults: [UUID: CheckedContinuation<KeepTalkingActionCallResult, Error>] = [:]
     var nodeStateBroadcastDebounceTask: Task<Void, Never>?
 
     public init(

@@ -216,8 +216,8 @@ enum KeepTalkingInternalError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unsupportedEnvelope:
-            return "Unsupported P2P envelope payload."
+            case .unsupportedEnvelope:
+                return "Unsupported P2P envelope payload."
         }
     }
 }

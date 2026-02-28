@@ -16,22 +16,22 @@ public enum KeepTalkingRelationship: Codable, Sendable, Equatable {
 
     public var isTrustedOrOwner: Bool {
         switch self {
-        case .owner, .trusted, .trustedInAllContext:
-            return true
-        case .pending:
-            return false
+            case .owner, .trusted, .trustedInAllContext:
+                return true
+            case .pending:
+                return false
         }
     }
 
     public func allows(context: KeepTalkingContext?) -> Bool {
         switch self {
-        case .owner, .trustedInAllContext:
-            return true
-        case .trusted(let contexts):
-            guard let context else { return false }
-            return contexts.contains(context)
-        case .pending:
-            return false
+            case .owner, .trustedInAllContext:
+                return true
+            case .trusted(let contexts):
+                guard let context else { return false }
+                return contexts.contains(context)
+            case .pending:
+                return false
         }
     }
 }

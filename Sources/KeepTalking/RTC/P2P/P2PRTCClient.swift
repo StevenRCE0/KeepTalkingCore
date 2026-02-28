@@ -13,23 +13,23 @@ enum P2PError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .peerConnectionCreateFailed:
-            return "Failed to create P2P peer connection."
-        case .noRemotePeerFound:
-            return
-                "No remote peer available for direct P2P. Ensure each client uses a unique --node UUID."
-        case .missingSDP:
-            return "Missing SDP in signaling payload."
-        case .invalidSdpType(let raw):
-            return "Invalid SDP type '\(raw)'."
-        case .dataChannelCreateFailed(let label):
-            return "Failed to create data channel '\(label)'."
-        case .dataChannelNotOpen(let label):
-            return "Data channel '\(label)' is not open yet."
-        case .handshakeTimeout:
-            return "P2P handshake timed out."
-        case .signalingInP2P:
-            return "Cannot perform this operation while in P2P mode."
+            case .peerConnectionCreateFailed:
+                return "Failed to create P2P peer connection."
+            case .noRemotePeerFound:
+                return
+                    "No remote peer available for direct P2P. Ensure each client uses a unique --node UUID."
+            case .missingSDP:
+                return "Missing SDP in signaling payload."
+            case .invalidSdpType(let raw):
+                return "Invalid SDP type '\(raw)'."
+            case .dataChannelCreateFailed(let label):
+                return "Failed to create data channel '\(label)'."
+            case .dataChannelNotOpen(let label):
+                return "Data channel '\(label)' is not open yet."
+            case .handshakeTimeout:
+                return "P2P handshake timed out."
+            case .signalingInP2P:
+                return "Cannot perform this operation while in P2P mode."
         }
     }
 }
@@ -50,8 +50,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
 
     private let config: KeepTalkingConfig
     private let localNodeID: UUID
-    private let sendSignal:
-        @Sendable (_ to: UUID, _ data: KeepTalkingP2PSignalData) -> Void
+    private let sendSignal: @Sendable (_ to: UUID, _ data: KeepTalkingP2PSignalData) -> Void
     private let announcePresence: @Sendable () -> Void
     private let peersSnapshot: @Sendable () -> [UUID]
     private let peerFactory = LKRTCPeerConnectionFactory()
@@ -143,7 +142,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             pendingRemoteCandidates.removeAll()
             notifiedConnectedPeers.removeAll()
         }
-        
+
         peerConnection = nil
         outboundChatChannel = nil
         outboundActionCallChannel = nil
@@ -160,10 +159,10 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         let route = try route(for: envelope)
         let dataChannel: LKRTCDataChannel?
         switch route {
-        case .chat:
-            dataChannel = preferredChatChannel()
-        case .actionCall:
-            dataChannel = preferredActionCallChannel()
+            case .chat:
+                dataChannel = preferredChatChannel()
+            case .actionCall:
+                dataChannel = preferredActionCallChannel()
         }
 
         guard let dataChannel else {
@@ -402,24 +401,24 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         -> EnvelopeRoute
     {
         switch envelope {
-        case .message, .node, .nodeStatus, .encryptedNodeStatus, .context:
-            return .chat
-        case .p2pSignal, .p2pPresence:
-            throw P2PError.signalingInP2P
-        case .actionCallRequest,
-            .actionCallResult,
-            .encryptedActionCallRequest,
-            .encryptedActionCallResult:
-            return .actionCall
+            case .message, .node, .nodeStatus, .encryptedNodeStatus, .context:
+                return .chat
+            case .p2pSignal, .p2pPresence:
+                throw P2PError.signalingInP2P
+            case .actionCallRequest,
+                .actionCallResult,
+                .encryptedActionCallRequest,
+                .encryptedActionCallResult:
+                return .actionCall
         }
     }
 
     private func routeLabel(for route: EnvelopeRoute) -> String {
         switch route {
-        case .chat:
-            return config.chatChannelLabel
-        case .actionCall:
-            return config.actionCallChannelLabel
+            case .chat:
+                return config.chatChannelLabel
+            case .actionCall:
+                return config.actionCallChannelLabel
         }
     }
 
@@ -438,85 +437,85 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         }
 
         switch data.kind {
-        case "offer":
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    let payload = SessionDescriptionPayload(
-                        type: data.type ?? "offer",
-                        sdp: try sdp(from: data)
-                    )
-                    try await RTCShared.setRemoteDescription(
-                        payload,
-                        on: peerConnection,
-                        invalidSdpTypeError: P2PError.invalidSdpType
-                    )
-                    flushPendingRemoteCandidates()
-                    let answer = try await RTCShared.createAnswer(
-                        on: peerConnection,
-                        missingSdpError: P2PError.missingSDP
-                    )
-                    try await RTCShared.setLocalDescription(
-                        answer,
-                        on: peerConnection,
-                        invalidSdpTypeError: P2PError.invalidSdpType
-                    )
-                    sendSignal(
-                        from,
-                        Self.signalData(kind: "answer", description: answer)
-                    )
-                    debug("answer sent peer=\(from.uuidString.lowercased())")
-                } catch {
-                    debug(
-                        "failed processing offer error=\(error.localizedDescription)"
-                    )
+            case "offer":
+                Task { [weak self] in
+                    guard let self else { return }
+                    do {
+                        let payload = SessionDescriptionPayload(
+                            type: data.type ?? "offer",
+                            sdp: try sdp(from: data)
+                        )
+                        try await RTCShared.setRemoteDescription(
+                            payload,
+                            on: peerConnection,
+                            invalidSdpTypeError: P2PError.invalidSdpType
+                        )
+                        flushPendingRemoteCandidates()
+                        let answer = try await RTCShared.createAnswer(
+                            on: peerConnection,
+                            missingSdpError: P2PError.missingSDP
+                        )
+                        try await RTCShared.setLocalDescription(
+                            answer,
+                            on: peerConnection,
+                            invalidSdpTypeError: P2PError.invalidSdpType
+                        )
+                        sendSignal(
+                            from,
+                            Self.signalData(kind: "answer", description: answer)
+                        )
+                        debug("answer sent peer=\(from.uuidString.lowercased())")
+                    } catch {
+                        debug(
+                            "failed processing offer error=\(error.localizedDescription)"
+                        )
+                    }
                 }
-            }
-        case "answer":
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    let payload = SessionDescriptionPayload(
-                        type: data.type ?? "answer",
-                        sdp: try sdp(from: data)
-                    )
-                    try await RTCShared.setRemoteDescription(
-                        payload,
-                        on: peerConnection,
-                        invalidSdpTypeError: P2PError.invalidSdpType
-                    )
-                    flushPendingRemoteCandidates()
-                    debug("answer applied")
-                } catch {
-                    debug(
-                        "failed processing answer error=\(error.localizedDescription)"
-                    )
+            case "answer":
+                Task { [weak self] in
+                    guard let self else { return }
+                    do {
+                        let payload = SessionDescriptionPayload(
+                            type: data.type ?? "answer",
+                            sdp: try sdp(from: data)
+                        )
+                        try await RTCShared.setRemoteDescription(
+                            payload,
+                            on: peerConnection,
+                            invalidSdpTypeError: P2PError.invalidSdpType
+                        )
+                        flushPendingRemoteCandidates()
+                        debug("answer applied")
+                    } catch {
+                        debug(
+                            "failed processing answer error=\(error.localizedDescription)"
+                        )
+                    }
                 }
-            }
-        case "ice":
-            guard let candidateString = data.candidate else {
-                debug("ice signal missing candidate")
-                return
-            }
-            let candidate = LKRTCIceCandidate(
-                sdp: candidateString,
-                sdpMLineIndex: data.sdpMLineIndex ?? 0,
-                sdpMid: data.sdpMid
-            )
-            let applied = RTCShared.applyOrBufferCandidate(
-                candidate,
-                on: peerConnection,
-                buffer: &pendingRemoteCandidates
-            )
-            if applied {
-                debug("applied remote candidate")
-            } else {
-                debug(
-                    "buffered remote candidate count=\(pendingRemoteCandidates.count)"
+            case "ice":
+                guard let candidateString = data.candidate else {
+                    debug("ice signal missing candidate")
+                    return
+                }
+                let candidate = LKRTCIceCandidate(
+                    sdp: candidateString,
+                    sdpMLineIndex: data.sdpMLineIndex ?? 0,
+                    sdpMid: data.sdpMid
                 )
-            }
-        default:
-            debug("unhandled signal kind=\(data.kind)")
+                let applied = RTCShared.applyOrBufferCandidate(
+                    candidate,
+                    on: peerConnection,
+                    buffer: &pendingRemoteCandidates
+                )
+                if applied {
+                    debug("applied remote candidate")
+                } else {
+                    debug(
+                        "buffered remote candidate count=\(pendingRemoteCandidates.count)"
+                    )
+                }
+            default:
+                debug("unhandled signal kind=\(data.kind)")
         }
     }
 
@@ -575,12 +574,12 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     ) {
         debug("ice connection state=\(newState.rawValue)")
         switch newState {
-        case .failed:
-            reportTransportDegraded("ice failed")
-        case .closed:
-            reportTransportDegraded("ice closed")
-        default:
-            break
+            case .failed:
+                reportTransportDegraded("ice failed")
+            case .closed:
+                reportTransportDegraded("ice closed")
+            default:
+                break
         }
     }
 
@@ -649,12 +648,12 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             return
         }
         switch dataChannel.readyState {
-        case .closing:
-            reportTransportDegraded("data channel closing")
-        case .closed:
-            reportTransportDegraded("data channel closed")
-        default:
-            break
+            case .closing:
+                reportTransportDegraded("data channel closing")
+            case .closed:
+                reportTransportDegraded("data channel closed")
+            default:
+                break
         }
     }
 

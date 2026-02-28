@@ -4,23 +4,23 @@ import KeepTalkingSDK
 extension KeepTalkingCLIController {
     func runMCPManagementCommand(_ command: MCPManagementCommand) async throws {
         switch command {
-        case .list:
-            await listMCPActions()
-        case .remove(let actionID):
-            try await client.removeMCPAction(actionID: actionID)
-            print("[mcp] removed action=\(actionID.uuidString.lowercased())")
-        case .addHTTP(let name, let url, let description):
-            try await registerHTTPMCPAction(
-                name: name,
-                url: url,
-                description: description ?? ""
-            )
-        case .addSTDIO(let name, let command, let environment):
-            try await registerStdioMCPActionInternal(
-                name: name,
-                command: command,
-                environment: environment
-            )
+            case .list:
+                await listMCPActions()
+            case .remove(let actionID):
+                try await client.removeMCPAction(actionID: actionID)
+                print("[mcp] removed action=\(actionID.uuidString.lowercased())")
+            case .addHTTP(let name, let url, let description):
+                try await registerHTTPMCPAction(
+                    name: name,
+                    url: url,
+                    description: description ?? ""
+                )
+            case .addSTDIO(let name, let command, let environment):
+                try await registerStdioMCPActionInternal(
+                    name: name,
+                    command: command,
+                    environment: environment
+                )
         }
     }
 
@@ -103,7 +103,8 @@ extension KeepTalkingCLIController {
 
     private func registerHTTPMCPAction(name: String, url: URL, description: String) async throws {
         let trimmedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
-        let indexDescription = trimmedDescription.isEmpty
+        let indexDescription =
+            trimmedDescription.isEmpty
             ? "MCP server: \(name)"
             : trimmedDescription
 
@@ -143,7 +144,8 @@ extension KeepTalkingCLIController {
         if environment.isEmpty {
             envLabel = "none"
         } else {
-            envLabel = environment
+            envLabel =
+                environment
                 .sorted { $0.key < $1.key }
                 .map { "\($0.key)=\($0.value)" }
                 .joined(separator: ",")

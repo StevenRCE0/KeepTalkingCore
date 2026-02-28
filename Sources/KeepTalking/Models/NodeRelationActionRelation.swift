@@ -46,12 +46,12 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
 
     public func applicable(in context: KeepTalkingContext?) -> Bool {
         switch approvingContext {
-        case .all:
-            return true
-        case .contexts(let contexts):
-            return context == nil ? false : contexts.contains(context!)
-        case nil:
-            return false
+            case .all:
+                return true
+            case .contexts(let contexts):
+                return context == nil ? false : contexts.contains(context!)
+            case nil:
+                return false
         }
     }
 }

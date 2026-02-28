@@ -290,65 +290,65 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         async throws
     {
         switch envelope {
-        case .p2pPresence(let presence):
-            let relations =
-                try await KeepTalkingNodeRelation
-                .query(on: localStore.database)
-                .filter(\.$from.$id == config.node)
-                .filter(\.$to.$id == presence.node)
-                .all()
+            case .p2pPresence(let presence):
+                let relations =
+                    try await KeepTalkingNodeRelation
+                    .query(on: localStore.database)
+                    .filter(\.$from.$id == config.node)
+                    .filter(\.$to.$id == presence.node)
+                    .all()
 
-            guard
-                let currentContext = try await KeepTalkingContext.query(
-                    on: localStore
-                        .database
-                ).filter(\.$id == config.contextID).first()
-            else {
-                throw KeepTalkingClientError.missingNode  // TODO: Actually missing context.
-            }
-
-            let shouldConnect = relations.contains { relation in
-                switch relation.relationship {
-                case .pending, .owner, .trustedInAllContext:
-                    return true
-                case .trusted(_):
-                    return relation.allows(context: currentContext)
+                guard
+                    let currentContext = try await KeepTalkingContext.query(
+                        on: localStore
+                            .database
+                    ).filter(\.$id == config.contextID).first()
+                else {
+                    throw KeepTalkingClientError.missingNode  // TODO: Actually missing context.
                 }
-            }
 
-            debug(
-                "presence node=\(presence.node.uuidString.lowercased()) connect=\(shouldConnect)"
-            )
+                let shouldConnect = relations.contains { relation in
+                    switch relation.relationship {
+                        case .pending, .owner, .trustedInAllContext:
+                            return true
+                        case .trusted(_):
+                            return relation.allows(context: currentContext)
+                    }
+                }
 
-            if presence.node == config.node {
                 debug(
-                    "received presence for local node id=\(config.node.uuidString.lowercased()); check that each client uses a unique --node UUID"
+                    "presence node=\(presence.node.uuidString.lowercased()) connect=\(shouldConnect)"
                 )
-            } else if shouldConnect {
-                beginP2PTrial(
-                    trigger:
-                        "presence:\(presence.node.uuidString.lowercased())",
-                    expectedPeerID: presence.node
-                )
-            } else {
-                debug(
-                    "presence ignored for p2p trial: relation policy does not allow node=\(presence.node.uuidString.lowercased())"
-                )
-            }
-            rememberPeer(presence.node)
-            p2pClient?.receivePresence(from: presence.node)
-            onEnvelope?(envelope)
-        case .p2pSignal(let signalPayload):
-            if signalPayload.from == config.node {
-                debug(
-                    "received signaling envelope from local node id=\(config.node.uuidString.lowercased()); check duplicate --node UUID usage"
-                )
-            }
-            rememberPeer(signalPayload.from)
-            p2pClient?.receiveSignal(signalPayload)
-            onEnvelope?(envelope)
-        default:
-            onEnvelope?(envelope)
+
+                if presence.node == config.node {
+                    debug(
+                        "received presence for local node id=\(config.node.uuidString.lowercased()); check that each client uses a unique --node UUID"
+                    )
+                } else if shouldConnect {
+                    beginP2PTrial(
+                        trigger:
+                            "presence:\(presence.node.uuidString.lowercased())",
+                        expectedPeerID: presence.node
+                    )
+                } else {
+                    debug(
+                        "presence ignored for p2p trial: relation policy does not allow node=\(presence.node.uuidString.lowercased())"
+                    )
+                }
+                rememberPeer(presence.node)
+                p2pClient?.receivePresence(from: presence.node)
+                onEnvelope?(envelope)
+            case .p2pSignal(let signalPayload):
+                if signalPayload.from == config.node {
+                    debug(
+                        "received signaling envelope from local node id=\(config.node.uuidString.lowercased()); check duplicate --node UUID usage"
+                    )
+                }
+                rememberPeer(signalPayload.from)
+                p2pClient?.receiveSignal(signalPayload)
+                onEnvelope?(envelope)
+            default:
+                onEnvelope?(envelope)
         }
     }
 

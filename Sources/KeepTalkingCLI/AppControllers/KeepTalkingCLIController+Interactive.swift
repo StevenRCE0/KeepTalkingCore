@@ -19,218 +19,218 @@ extension KeepTalkingCLIController {
         -> Bool
     {
         switch command {
-        case .quit:
-            return false
-        case .stats:
-            let stats = client.runtimeStats()
-            print(
-                "Stats: route=\(stats.route ?? "unknown") sent=\(stats.sent) recv=\(stats.received) outbound=\(stats.outboundLabel ?? "nil") state=\(stats.outboundState.map(String.init) ?? "nil") inbound=\(stats.inboundLabel ?? "nil") inboundState=\(stats.inboundState.map(String.init) ?? "nil") retained=\(stats.retainedChannels)"
-            )
-            return true
-        case .p2pTrial:
-            client.requestP2PTrial()
-            print("[local] requested p2p trial")
-            return true
-        case .newContext:
-            let nextContextID = UUID()
-            let switched = await switchContext(
-                to: nextContextID,
-                verb: "created and joined",
-                createGroupSecret: true
-            )
-            guard switched else { return false }
-            do {
-                let secret = try await client.ensureGroupChatSecret(
-                    for: nextContextID
-                )
+            case .quit:
+                return false
+            case .stats:
+                let stats = client.runtimeStats()
                 print(
-                    "[local] invite command: /join \(nextContextID.uuidString.lowercased())"
+                    "Stats: route=\(stats.route ?? "unknown") sent=\(stats.sent) recv=\(stats.received) outbound=\(stats.outboundLabel ?? "nil") state=\(stats.outboundState.map(String.init) ?? "nil") inbound=\(stats.inboundLabel ?? "nil") inboundState=\(stats.inboundState.map(String.init) ?? "nil") retained=\(stats.retainedChannels)"
                 )
-                print(
-                    "[local] invite key (base64): \(secret.base64EncodedString())"
-                )
-            } catch {
-                fputs(
-                    "Failed to read new context key: \(error.localizedDescription)\n",
-                    stderr
-                )
-            }
-            return true
-        case .join(let contextIDRaw):
-            let trimmedContextID = contextIDRaw.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            )
-            guard !trimmedContextID.isEmpty else {
-                print("Usage: /join <context-uuid>")
                 return true
-            }
-            guard let nextContextID = UUID(uuidString: trimmedContextID) else {
-                print("Invalid context UUID: \(trimmedContextID)")
+            case .p2pTrial:
+                client.requestP2PTrial()
+                print("[local] requested p2p trial")
                 return true
-            }
-            let joinSecret = promptJoinSecret()
-            let switched = await switchContext(
-                to: nextContextID,
-                verb: "joined"
-            )
-            guard switched else { return false }
-
-            if let joinSecret {
+            case .newContext:
+                let nextContextID = UUID()
+                let switched = await switchContext(
+                    to: nextContextID,
+                    verb: "created and joined",
+                    createGroupSecret: true
+                )
+                guard switched else { return false }
                 do {
-                    try await client.setGroupChatSecret(
-                        joinSecret,
+                    let secret = try await client.ensureGroupChatSecret(
                         for: nextContextID
                     )
                     print(
-                        "[local] encryption key saved for context=\(nextContextID.uuidString.lowercased())"
+                        "[local] invite command: /join \(nextContextID.uuidString.lowercased())"
+                    )
+                    print(
+                        "[local] invite key (base64): \(secret.base64EncodedString())"
                     )
                 } catch {
                     fputs(
-                        "Failed to save encryption key: \(error.localizedDescription)\n",
+                        "Failed to read new context key: \(error.localizedDescription)\n",
                         stderr
                     )
                 }
-            } else {
-                print(
-                    "[local] joined without key. you can still share history, but encrypted messages may not decrypt."
-                )
-            }
-            return true
-        case .send(let text):
-            do {
-                try await client.send(text, in: activeContext)
-                print("[you] \(text)")
-            } catch {
-                fputs("Send failed: \(error.localizedDescription)\n", stderr)
-            }
-            return true
-        case .trust(let nodeIDRaw, let scopeRaw):
-            guard
-                let currentContext = try? await KeepTalkingContext.find(
-                    currentConfig.contextID,
-                    on: localStore.database
-                )
-            else {
-                print("No active context")
                 return true
-            }
+            case .join(let contextIDRaw):
+                let trimmedContextID = contextIDRaw.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                guard !trimmedContextID.isEmpty else {
+                    print("Usage: /join <context-uuid>")
+                    return true
+                }
+                guard let nextContextID = UUID(uuidString: trimmedContextID) else {
+                    print("Invalid context UUID: \(trimmedContextID)")
+                    return true
+                }
+                let joinSecret = promptJoinSecret()
+                let switched = await switchContext(
+                    to: nextContextID,
+                    verb: "joined"
+                )
+                guard switched else { return false }
 
-            let trimmedNodeID = nodeIDRaw.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            )
-            guard !trimmedNodeID.isEmpty else {
-                print("Usage: /trust <node-uuid> [all|context|<context-uuid>]")
-                return true
-            }
-            guard let trustedNodeID = UUID(uuidString: trimmedNodeID) else {
-                print("Invalid node UUID: \(trimmedNodeID)")
-                return true
-            }
-
-            let normalizedScope = scopeRaw.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            ).lowercased()
-
-            let trustScope: KeepTalkingNodeTrustScope
-            if normalizedScope.isEmpty || normalizedScope == "all" {
-                trustScope = .allContexts
-            } else if normalizedScope == "context"
-                || normalizedScope == "current"
-            {
-                trustScope = .context(currentContext)
-            } else if UUID(uuidString: normalizedScope) != nil {
-                trustScope = .context(currentContext)
-            } else {
-                print(
-                    "Invalid trust scope: \(scopeRaw). Use `all`, `context`, or a context UUID."
-                )
-                return true
-            }
-            do {
-                let localPublicKey = try await client.trust(
-                    node: trustedNodeID,
-                    scope: trustScope
-                )
-                let scopeLabel: String =
-                    switch trustScope {
-                    case .allContexts:
-                        "all"
-                    case .context(let context):
-                        "context=\(context.id?.uuidString.lowercased() ?? "missing")"
+                if let joinSecret {
+                    do {
+                        try await client.setGroupChatSecret(
+                            joinSecret,
+                            for: nextContextID
+                        )
+                        print(
+                            "[local] encryption key saved for context=\(nextContextID.uuidString.lowercased())"
+                        )
+                    } catch {
+                        fputs(
+                            "Failed to save encryption key: \(error.localizedDescription)\n",
+                            stderr
+                        )
                     }
-                print(
-                    "[local] trusted node=\(trustedNodeID.uuidString.lowercased()) scope=\(scopeLabel)"
-                )
-                print(
-                    "[local] share this public key: \(localPublicKey)"
-                )
-                print(
-                    "[local] cast this lure on peer: /lure \(currentConfig.node.uuidString.lowercased()) \(localPublicKey)"
-                )
-            } catch {
-                fputs("Trust failed: \(error.localizedDescription)\n", stderr)
-            }
-            return true
-        case .lure(let nodeIDRaw, let publicKeyRaw):
-            let trimmedNodeID = nodeIDRaw.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            )
-            let trimmedPublicKey = publicKeyRaw.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            )
-            guard !trimmedNodeID.isEmpty, !trimmedPublicKey.isEmpty else {
-                print("Usage: /lure <node-uuid> <pubkey>")
+                } else {
+                    print(
+                        "[local] joined without key. you can still share history, but encrypted messages may not decrypt."
+                    )
+                }
                 return true
-            }
-            guard let sourceNodeID = UUID(uuidString: trimmedNodeID) else {
-                print("Invalid node UUID: \(trimmedNodeID)")
+            case .send(let text):
+                do {
+                    try await client.send(text, in: activeContext)
+                    print("[you] \(text)")
+                } catch {
+                    fputs("Send failed: \(error.localizedDescription)\n", stderr)
+                }
                 return true
-            }
-            do {
-                try await client.lure(
-                    node: sourceNodeID,
-                    publicKey: trimmedPublicKey
+            case .trust(let nodeIDRaw, let scopeRaw):
+                guard
+                    let currentContext = try? await KeepTalkingContext.find(
+                        currentConfig.contextID,
+                        on: localStore.database
+                    )
+                else {
+                    print("No active context")
+                    return true
+                }
+
+                let trimmedNodeID = nodeIDRaw.trimmingCharacters(
+                    in: .whitespacesAndNewlines
                 )
-                print(
-                    "[lure] hooked node=\(sourceNodeID.uuidString.lowercased()) pubkey saved for trusted=\(currentConfig.node.uuidString.lowercased())"
+                guard !trimmedNodeID.isEmpty else {
+                    print("Usage: /trust <node-uuid> [all|context|<context-uuid>]")
+                    return true
+                }
+                guard let trustedNodeID = UUID(uuidString: trimmedNodeID) else {
+                    print("Invalid node UUID: \(trimmedNodeID)")
+                    return true
+                }
+
+                let normalizedScope = scopeRaw.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                ).lowercased()
+
+                let trustScope: KeepTalkingNodeTrustScope
+                if normalizedScope.isEmpty || normalizedScope == "all" {
+                    trustScope = .allContexts
+                } else if normalizedScope == "context"
+                    || normalizedScope == "current"
+                {
+                    trustScope = .context(currentContext)
+                } else if UUID(uuidString: normalizedScope) != nil {
+                    trustScope = .context(currentContext)
+                } else {
+                    print(
+                        "Invalid trust scope: \(scopeRaw). Use `all`, `context`, or a context UUID."
+                    )
+                    return true
+                }
+                do {
+                    let localPublicKey = try await client.trust(
+                        node: trustedNodeID,
+                        scope: trustScope
+                    )
+                    let scopeLabel: String =
+                        switch trustScope {
+                            case .allContexts:
+                                "all"
+                            case .context(let context):
+                                "context=\(context.id?.uuidString.lowercased() ?? "missing")"
+                        }
+                    print(
+                        "[local] trusted node=\(trustedNodeID.uuidString.lowercased()) scope=\(scopeLabel)"
+                    )
+                    print(
+                        "[local] share this public key: \(localPublicKey)"
+                    )
+                    print(
+                        "[local] cast this lure on peer: /lure \(currentConfig.node.uuidString.lowercased()) \(localPublicKey)"
+                    )
+                } catch {
+                    fputs("Trust failed: \(error.localizedDescription)\n", stderr)
+                }
+                return true
+            case .lure(let nodeIDRaw, let publicKeyRaw):
+                let trimmedNodeID = nodeIDRaw.trimmingCharacters(
+                    in: .whitespacesAndNewlines
                 )
-            } catch {
-                fputs("Lure failed: \(error.localizedDescription)\n", stderr)
-            }
-            return true
-        case .actionsList:
-            await listActions()
-            return true
-        case .actionsGrant(let nodeIDRaw, let actionIDRaw, let scopeRaw):
-            await grantAction(
-                nodeIDRaw: nodeIDRaw,
-                actionIDRaw: actionIDRaw,
-                scopeRaw: scopeRaw
-            )
-            return true
-        case .ai(let prompt):
-            runAI(prompt: prompt)
-            return true
-        case .mcpList:
-            await listMCPActions()
-            return true
-        case .mcpRemove(let actionIDRaw):
-            await removeMCPAction(actionIDRaw: actionIDRaw)
-            return true
-        case .mcpAddHTTP(let name, let urlRaw, let description):
-            await registerHTTPMCPAction(
-                name: name,
-                urlRaw: urlRaw,
-                description: description
-            )
-            return true
-        case .mcpAddSTDIO(let name, let command, let environment):
-            await registerStdioMCPAction(
-                name: name,
-                command: command,
-                environment: environment
-            )
-            return true
+                let trimmedPublicKey = publicKeyRaw.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                guard !trimmedNodeID.isEmpty, !trimmedPublicKey.isEmpty else {
+                    print("Usage: /lure <node-uuid> <pubkey>")
+                    return true
+                }
+                guard let sourceNodeID = UUID(uuidString: trimmedNodeID) else {
+                    print("Invalid node UUID: \(trimmedNodeID)")
+                    return true
+                }
+                do {
+                    try await client.lure(
+                        node: sourceNodeID,
+                        publicKey: trimmedPublicKey
+                    )
+                    print(
+                        "[lure] hooked node=\(sourceNodeID.uuidString.lowercased()) pubkey saved for trusted=\(currentConfig.node.uuidString.lowercased())"
+                    )
+                } catch {
+                    fputs("Lure failed: \(error.localizedDescription)\n", stderr)
+                }
+                return true
+            case .actionsList:
+                await listActions()
+                return true
+            case .actionsGrant(let nodeIDRaw, let actionIDRaw, let scopeRaw):
+                await grantAction(
+                    nodeIDRaw: nodeIDRaw,
+                    actionIDRaw: actionIDRaw,
+                    scopeRaw: scopeRaw
+                )
+                return true
+            case .ai(let prompt):
+                runAI(prompt: prompt)
+                return true
+            case .mcpList:
+                await listMCPActions()
+                return true
+            case .mcpRemove(let actionIDRaw):
+                await removeMCPAction(actionIDRaw: actionIDRaw)
+                return true
+            case .mcpAddHTTP(let name, let urlRaw, let description):
+                await registerHTTPMCPAction(
+                    name: name,
+                    urlRaw: urlRaw,
+                    description: description
+                )
+                return true
+            case .mcpAddSTDIO(let name, let command, let environment):
+                await registerStdioMCPAction(
+                    name: name,
+                    command: command,
+                    environment: environment
+                )
+                return true
         }
     }
 
@@ -348,11 +348,11 @@ extension KeepTalkingCLIController {
                     for grant in action.grants {
                         let scope: String
                         switch grant.approvingContext {
-                        case .none, .all:
-                            scope = "all"
-                        case .contexts(let contexts):
-                            scope =
-                                "context=\(contexts)"
+                            case .none, .all:
+                                scope = "all"
+                            case .contexts(let contexts):
+                                scope =
+                                    "context=\(contexts)"
                         }
                         print(
                             "  grant to=\(grant.toNodeID.uuidString.lowercased()) scope=\(scope)"
@@ -416,10 +416,10 @@ extension KeepTalkingCLIController {
             )
             let scopeLabel: String =
                 switch scope {
-                case .all:
-                    "all"
-                case .context(let context):
-                    "context=\(context.id?.uuidString.lowercased() ?? "nil")"
+                    case .all:
+                        "all"
+                    case .context(let context):
+                        "context=\(context.id?.uuidString.lowercased() ?? "nil")"
                 }
             print(
                 "[local] granted action=\(actionID.uuidString.lowercased()) to=\(nodeID.uuidString.lowercased()) scope=\(scopeLabel)"

@@ -1,9 +1,10 @@
 import Foundation
 import MCP
+
 #if canImport(System)
-import System
+    import System
 #else
-@preconcurrency import SystemPackage
+    @preconcurrency import SystemPackage
 #endif
 
 public enum MCPManagerError: LocalizedError {
@@ -18,23 +19,24 @@ public enum MCPManagerError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .invalidAction:
-            return "Action payload is not an MCP bundle."
-        case .missingActionID:
-            return "Action must have an ID before registration."
-        case .invalidStdioCommand:
-            return "Stdio MCP command must include an executable."
-        case .connectionTimedOut(let timeout):
-            return "Timed out while connecting to MCP server after \(Int(timeout))s."
-        case .toolCallTimedOut(let actionID, let timeout):
-            return "Timed out waiting for MCP tool call action=\(actionID) after \(Int(timeout))s."
-        case .stdioProcessExitedEarly(let command, let status):
-            return "Stdio MCP process exited early (status=\(status)) for command: \(command.joined(separator: " "))"
-        case .unknownMCPTool(let requested, let available):
-            let options = available.joined(separator: ", ")
-            return "Unknown MCP tool '\(requested)'. Available tools: [\(options)]"
-        case .unregisteredAction(let actionID):
-            return "Action is not registered in MCPManager: \(actionID)"
+            case .invalidAction:
+                return "Action payload is not an MCP bundle."
+            case .missingActionID:
+                return "Action must have an ID before registration."
+            case .invalidStdioCommand:
+                return "Stdio MCP command must include an executable."
+            case .connectionTimedOut(let timeout):
+                return "Timed out while connecting to MCP server after \(Int(timeout))s."
+            case .toolCallTimedOut(let actionID, let timeout):
+                return "Timed out waiting for MCP tool call action=\(actionID) after \(Int(timeout))s."
+            case .stdioProcessExitedEarly(let command, let status):
+                return
+                    "Stdio MCP process exited early (status=\(status)) for command: \(command.joined(separator: " "))"
+            case .unknownMCPTool(let requested, let available):
+                let options = available.joined(separator: ", ")
+                return "Unknown MCP tool '\(requested)'. Available tools: [\(options)]"
+            case .unregisteredAction(let actionID):
+                return "Action is not registered in MCPManager: \(actionID)"
         }
     }
 }
@@ -383,27 +385,27 @@ public actor MCPManager {
         )
 
         switch mcpBundle.service {
-        case .stdio(let command, let environment):
-            try await connectStdioAction(
-                actionID: actionID,
-                client: client,
-                command: command,
-                environment: environment
-            )
-        case .http(let url, _, let headers):
-            let transportConfiguration = URLSessionConfiguration.default
-            transportConfiguration.httpAdditionalHeaders = headers
+            case .stdio(let command, let environment):
+                try await connectStdioAction(
+                    actionID: actionID,
+                    client: client,
+                    command: command,
+                    environment: environment
+                )
+            case .http(let url, _, let headers):
+                let transportConfiguration = URLSessionConfiguration.default
+                transportConfiguration.httpAdditionalHeaders = headers
 
-            let transport = HTTPClientTransport(
-                endpoint: url,
-                configuration: transportConfiguration,
-                streaming: true
-            )
-            try await Self.connectClient(
-                client,
-                transport: transport,
-                timeoutSeconds: connectTimeoutSeconds
-            )
+                let transport = HTTPClientTransport(
+                    endpoint: url,
+                    configuration: transportConfiguration,
+                    streaming: true
+                )
+                try await Self.connectClient(
+                    client,
+                    transport: transport,
+                    timeoutSeconds: connectTimeoutSeconds
+                )
         }
 
         clientsByActionID[actionID] = client
