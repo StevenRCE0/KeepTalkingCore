@@ -86,6 +86,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public init(
         config: KeepTalkingConfig,
         kvService: (any KeepTalkingKVService)? = nil,
+        openAIAPIKey: String? = nil,
+        openAIEndpoint: String? = nil,
         logon: UUID = UUID(),
         localStore: any KeepTalkingLocalStore =
             KeepTalkingClient.makeDefaultLocalStore()
@@ -100,10 +102,20 @@ public final class KeepTalkingClient: @unchecked Sendable {
         )
         self.mcpManager = MCPManager(nodeConfig: config)
 
-        let apiKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?
+        let apiKey =
+            openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let endpoint =
+            openAIEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? ProcessInfo.processInfo.environment["OPENAI_ENDPOINT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
         if let apiKey, !apiKey.isEmpty {
-            self.openAIConnector = OpenAIConnector(apiKey: apiKey)
+            self.openAIConnector =
+                try? OpenAIConnector(apiKey: apiKey, endpoint: endpoint)
         } else {
             self.openAIConnector = nil
         }

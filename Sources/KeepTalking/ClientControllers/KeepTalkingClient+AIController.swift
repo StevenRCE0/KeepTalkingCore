@@ -12,7 +12,7 @@ extension KeepTalkingClient {
         model: OpenAIModel = .gpt4_o
     ) async throws -> String {
 
-        guard let openAIConnector else {
+        guard let openAIConnector = try await resolveOpenAIConnector() else {
             throw KeepTalkingClientError.aiNotConfigured
         }
 
@@ -20,59 +20,26 @@ extension KeepTalkingClient {
         onLog?("[ai] catalog has \(catalog.definitions.count) virtual tool(s)")
 
         let listingTool = makeListingTool()
-        let allTools = [listingTool] + catalog.openAITools
+        let allTools: [ChatQuery.ChatCompletionToolParam] =
+            catalog.definitions.isEmpty ? [] : [listingTool] + catalog.openAITools
         let contextTranscript = try await agentContextTranscript(context)
 
         var messages: [ChatQuery.ChatCompletionMessageParam] = [
             .developer(
                 .init(
                     content: .textContent(
-                        """
-                        You are a KeepTalking agent. You must call \(Self.listingToolFunctionName) first before any other tool call, then use tool outputs to answer the user.
-                        Use the provided conversation context when deciding tool calls and in your final response.
-
-                        Conversation context:
-                        \(contextTranscript)
-                        """
+                        OpenAIConnector.keepTalkingSystemPrompt(
+                            listingToolFunctionName:
+                                Self.listingToolFunctionName,
+                            contextTranscript: contextTranscript
+                        )
                     )
                 )
             ),
             .user(.init(content: .string(prompt))),
         ]
 
-        // Force the first step to be a listing call.
-        let listingTurn = try await openAIConnector.completeTurn(
-            messages: messages,
-            tools: [listingTool],
-            model: model,
-            toolChoice: .function(Self.listingToolFunctionName)
-        )
-        if let assistantMessage = assistantMessage(from: listingTurn) {
-            messages.append(assistantMessage)
-        }
-
-        var listingToolCalls = listingTurn.toolCalls
-        if listingToolCalls.isEmpty {
-            let syntheticID = UUID().uuidString.lowercased()
-            listingToolCalls = [
-                .init(
-                    id: syntheticID,
-                    function: .init(
-                        arguments: "{}",
-                        name: Self.listingToolFunctionName
-                    )
-                )
-            ]
-        }
-        messages.append(
-            contentsOf: try await executeAgentToolCalls(
-                listingToolCalls,
-                catalog: catalog,
-                context: context
-            )
-        )
-
-        var latestAssistantText = listingTurn.assistantText
+        var latestAssistantText: String?
         for _ in 0..<8 {
             let turn = try await openAIConnector.completeTurn(
                 messages: messages,
@@ -105,6 +72,10 @@ extension KeepTalkingClient {
 
         return latestAssistantText?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private func resolveOpenAIConnector() async throws -> OpenAIConnector? {
+        openAIConnector
     }
 
     public func discoverActionToolCatalog(in context: KeepTalkingContext)

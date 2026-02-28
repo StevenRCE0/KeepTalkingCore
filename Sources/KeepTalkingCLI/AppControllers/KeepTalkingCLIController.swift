@@ -15,6 +15,8 @@ final class KeepTalkingCLIController {
         self.currentConfig = cliConfig.sdkConfig
         self.client = KeepTalkingClient(
             config: cliConfig.sdkConfig,
+            openAIAPIKey: cliConfig.openAIAPIKey,
+            openAIEndpoint: cliConfig.openAIEndpoint,
             localStore: localStore
         )
         self.activeContext = KeepTalkingContext(id: cliConfig.sdkConfig.contextID)
@@ -67,7 +69,9 @@ final class KeepTalkingCLIController {
 
         printConnectedBanner()
         if !client.aiEnabled {
-            print("[ai] disabled: set OPENAI_API_KEY to enable /ai.")
+            print(
+                "[ai] no immediate env/flag key configured; /ai can still work with node-local AI settings."
+            )
         }
 
         try await runInteractiveLoop()
@@ -124,6 +128,9 @@ final class KeepTalkingCLIController {
         }
         if let databaseURL = cliConfig.databaseURL {
             print("DB=\(databaseURL.path)")
+        }
+        if let openAIEndpoint = cliConfig.openAIEndpoint {
+            print("OpenAI endpoint=\(openAIEndpoint)")
         }
     }
 

@@ -3,7 +3,7 @@ import KeepTalkingSDK
 
 let keepTalkingUsage = """
     Usage:
-      KeepTalking [--signal-url <ws-url>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--mcp <list|remove|add-http|add-stdio> ...] [--p2p-peer <peer-id>] [--p2p-timeout <seconds>] [--stun-url <stun-url>]
+      KeepTalking [--signal-url <ws-url>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--openai-endpoint <url>] [--openai-api-key <key>] [--mcp <list|remove|add-http|add-stdio> ...] [--p2p-peer <peer-id>] [--p2p-timeout <seconds>] [--stun-url <stun-url>]
 
     Environment fallbacks:
       KT_SIGNAL_URL (default: ws://127.0.0.1:17000/ws)
@@ -13,6 +13,8 @@ let keepTalkingUsage = """
       KT_P2P_PEER_ID    (optional, preferred remote peer ID)
       KT_P2P_TIMEOUT    (default: 5)
       KT_STUN_URL       (default: stun:stun.l.google.com:19302)
+      OPENAI_API_KEY    (optional, enables /ai)
+      KT_OPENAI_ENDPOINT / OPENAI_ENDPOINT / OPENAI_BASE_URL (optional, OpenAI-compatible API endpoint)
 
     Examples:
       KeepTalking --context 11111111-2222-3333-4444-555555555555 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
@@ -66,6 +68,7 @@ enum CliError: LocalizedError {
     case invalidMCPURL(String)
     case invalidActionID(String)
     case invalidMCPEnvironment(String)
+    case invalidOpenAIEndpoint(String)
 
     var errorDescription: String? {
         switch self {
@@ -91,6 +94,8 @@ enum CliError: LocalizedError {
                 return "Invalid action UUID: \(raw)"
             case .invalidMCPEnvironment(let raw):
                 return "Invalid MCP env assignment: \(raw). Expected KEY=VALUE."
+            case .invalidOpenAIEndpoint(let raw):
+                return "Invalid OpenAI endpoint URL: \(raw)"
         }
     }
 }
@@ -99,6 +104,8 @@ struct CliConfig {
     let sdkConfig: KeepTalkingConfig
     let databaseURL: URL?
     let singleMessage: String?
+    let openAIAPIKey: String?
+    let openAIEndpoint: String?
     let mcpCommand: MCPManagementCommand?
 
     static func parse() throws -> CliConfig {
@@ -112,6 +119,11 @@ struct CliConfig {
         var p2pPeerID = env["KT_P2P_PEER_ID"]
         var p2pTimeoutRaw = env["KT_P2P_TIMEOUT"] ?? "5"
         var stunURLs = [env["KT_STUN_URL"] ?? "stun:stun.l.google.com:19302"]
+        var openAIAPIKey = env["OPENAI_API_KEY"]
+        var openAIEndpointRaw =
+            env["KT_OPENAI_ENDPOINT"]
+            ?? env["OPENAI_ENDPOINT"]
+            ?? env["OPENAI_BASE_URL"]
         var singleMessage: String?
         var mcpCommand: MCPManagementCommand?
 
@@ -155,6 +167,14 @@ struct CliConfig {
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
                     singleMessage = args[index]
+                case "--openai-api-key":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue(arg) }
+                    openAIAPIKey = args[index]
+                case "--openai-endpoint":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue(arg) }
+                    openAIEndpointRaw = args[index]
                 case "--mcp":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
@@ -238,6 +258,9 @@ struct CliConfig {
         }
         let databaseURL = try resolveDatabaseURL(databasePathRaw)
         stunURLs = Array(Set(stunURLs.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })).sorted()
+        let openAIEndpoint = try normalizeOpenAIEndpoint(openAIEndpointRaw)
+        let normalizedOpenAIAPIKey =
+            openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return CliConfig(
             sdkConfig: KeepTalkingConfig(
@@ -250,6 +273,10 @@ struct CliConfig {
             ),
             databaseURL: databaseURL,
             singleMessage: singleMessage,
+            openAIAPIKey: (normalizedOpenAIAPIKey?.isEmpty == false)
+                ? normalizedOpenAIAPIKey
+                : nil,
+            openAIEndpoint: openAIEndpoint,
             mcpCommand: mcpCommand
         )
     }
@@ -308,5 +335,26 @@ struct CliConfig {
         }
 
         return (command, environment)
+    }
+
+    private static func normalizeOpenAIEndpoint(_ raw: String?) throws -> String? {
+        guard
+            let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !raw.isEmpty
+        else {
+            return nil
+        }
+
+        guard
+            let components = URLComponents(string: raw),
+            let scheme = components.scheme?.lowercased(),
+            (scheme == "http" || scheme == "https"),
+            let host = components.host,
+            !host.isEmpty
+        else {
+            throw CliError.invalidOpenAIEndpoint(raw)
+        }
+
+        return raw
     }
 }

@@ -456,11 +456,6 @@ extension KeepTalkingCLIController {
                 )
             }
 
-            guard client.aiEnabled else {
-                print("[ai] disabled: set OPENAI_API_KEY to enable /ai.")
-                return
-            }
-
             do {
                 print("[ai] querying...")
                 let aiResponse = try await client.runAI(
@@ -476,6 +471,14 @@ extension KeepTalkingCLIController {
                     )
                 )
             } catch {
+                if let clientError = error as? KeepTalkingClientError,
+                    case .aiNotConfigured = clientError
+                {
+                    print(
+                        "[ai] disabled: provide OPENAI_API_KEY/--openai-api-key and optionally --openai-endpoint."
+                    )
+                    return
+                }
                 fputs(
                     "AI query failed: \(error.localizedDescription)\n",
                     stderr

@@ -2,6 +2,23 @@ import Foundation
 import OpenAI
 
 public actor OpenAIConnector {
+    public static func keepTalkingSystemPrompt(
+        listingToolFunctionName: String,
+        contextTranscript: String
+    ) -> String {
+        """
+        You are a KeepTalking participant in a group chat.
+        Use the provided conversation context when deciding whether to call tools and when writing your response.
+        Use tools only when they are relevant to the user's request.
+        If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
+        Do not fabricate tool outputs.
+        If you need a tool inventory before acting, call \(listingToolFunctionName).
+
+        Conversation context:
+        \(contextTranscript)
+        """
+    }
+
     public struct ToolPlanningResult: Sendable {
         public let assistantText: String?
         public let toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]
@@ -17,12 +34,15 @@ public actor OpenAIConnector {
 
     public enum ConnectorError: Error, LocalizedError {
         case missingAPIKey
+        case invalidEndpoint(String)
         case emptyResponse
 
         public var errorDescription: String? {
             switch self {
                 case .missingAPIKey:
                     return "OPENAI_API_KEY environment variable is not set."
+                case .invalidEndpoint(let raw):
+                    return "Invalid OpenAI endpoint URL: \(raw)"
                 case .emptyResponse:
                     return "No response choices received."
             }
@@ -31,7 +51,11 @@ public actor OpenAIConnector {
 
     private let client: OpenAI
 
-    public init(apiKey: String? = nil, organizationID: String? = nil) {
+    public init(
+        apiKey: String? = nil,
+        organizationID: String? = nil,
+        endpoint: String? = nil
+    ) throws {
         guard
             let key = apiKey
                 ?? ProcessInfo.processInfo.environment["OPENAI_API_KEY"],
@@ -40,12 +64,71 @@ public actor OpenAIConnector {
             fatalError(ConnectorError.missingAPIKey.localizedDescription)
         }
 
+        let endpointConfig = try Self.endpointConfiguration(
+            from: endpoint
+                ?? ProcessInfo.processInfo.environment["OPENAI_ENDPOINT"]
+                ?? ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]
+        )
+
         let configuration = OpenAI.Configuration(
             token: key,
             organizationIdentifier: organizationID,
+            host: endpointConfig?.host ?? "api.openai.com",
+            port: endpointConfig?.port ?? 443,
+            scheme: endpointConfig?.scheme ?? "https",
+            basePath: endpointConfig?.basePath ?? "/v1",
             timeoutInterval: 30
         )
         self.client = OpenAI(configuration: configuration)
+    }
+
+    private struct EndpointConfiguration {
+        let host: String
+        let port: Int
+        let scheme: String
+        let basePath: String
+    }
+
+    private static func endpointConfiguration(from raw: String?) throws
+        -> EndpointConfiguration?
+    {
+        guard
+            let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !raw.isEmpty
+        else {
+            return nil
+        }
+
+        guard
+            let components = URLComponents(string: raw),
+            let scheme = components.scheme?.lowercased(),
+            let host = components.host?.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ),
+            !host.isEmpty
+        else {
+            throw ConnectorError.invalidEndpoint(raw)
+        }
+
+        let port =
+            components.port
+            ?? (scheme == "http" ? 80 : 443)
+
+        let trimmedPath = components.path.trimmingCharacters(
+            in: CharacterSet(
+                charactersIn: "/"
+            ))
+        let basePath =
+            trimmedPath.isEmpty
+            ? "/v1"
+            : "/" + trimmedPath
+
+        return EndpointConfiguration(
+            host: host,
+            port: port,
+            scheme: scheme,
+            basePath: basePath
+        )
     }
 
     public func chat(prompt: String, model: String = "gpt-4o") async throws

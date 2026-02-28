@@ -34,3 +34,40 @@ public final class KeepTalkingNode: Model, @unchecked Sendable {
         self.discoveredDuringLogon = discoveredDuringLogon
     }
 }
+
+extension KeepTalkingNode: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case lastSeenAt
+        case discoveredDuringLogon
+    }
+
+    public convenience init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let lastSeenAt =
+            try container.decodeIfPresent(
+                Date.self,
+                forKey: .lastSeenAt
+            ) ?? Date()
+        let discoveredDuringLogon = try container.decodeIfPresent(
+            UUID.self,
+            forKey: .discoveredDuringLogon
+        )
+        self.init(
+            id: id,
+            lastSeenAt: lastSeenAt,
+            discoveredDuringLogon: discoveredDuringLogon
+        )
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(id, forKey: .id)
+        try container.encode(lastSeenAt, forKey: .lastSeenAt)
+        try container.encodeIfPresent(
+            discoveredDuringLogon,
+            forKey: .discoveredDuringLogon
+        )
+    }
+}
