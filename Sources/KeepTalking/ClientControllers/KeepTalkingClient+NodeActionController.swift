@@ -36,18 +36,39 @@ extension KeepTalkingClient {
         blockingAuthorisation: Bool = false
     ) async throws -> KeepTalkingAction {
         let node = try await getCurrentNodeInstance()
+        return try await Self.registerMCPAction(
+            bundle: bundle,
+            descriptor: descriptor,
+            remoteAuthorisable: remoteAuthorisable,
+            blockingAuthorisation: blockingAuthorisation,
+            node: node,
+            on: localStore.database,
+            callbackForRegisteringMCPAction: {
+                try await self.mcpManager.registerMCPAction($0)
+            }
+        )
+    }
 
+    static public func registerMCPAction(
+        bundle: KeepTalkingMCPBundle,
+        descriptor: KeepTalkingActionDescriptor? = nil,
+        remoteAuthorisable: Bool = true,
+        blockingAuthorisation: Bool = false,
+        node: KeepTalkingNode,
+        on database: any Database,
+        callbackForRegisteringMCPAction: ((KeepTalkingAction) async throws -> Void)? = nil
+    ) async throws -> KeepTalkingAction {
         let action = KeepTalkingAction(
             payload: .mcpBundle(bundle),
             remoteAuthorisable: remoteAuthorisable,
             blockingAuthorisation: blockingAuthorisation
         )
-
         action.$node.id = try node.requireID()
-        action.descriptor = descriptor ?? defaultDescriptor(for: bundle)
+        action.descriptor =
+            descriptor ?? Self.defaultDescriptor(for: bundle)
 
-        try await action.save(on: localStore.database)
-        try await mcpManager.registerMCPAction(action)
+        try await action.save(on: database)
+        try await callbackForRegisteringMCPAction?(action)
         return action
     }
 
@@ -95,12 +116,29 @@ extension KeepTalkingClient {
     }
 
     public func removeMCPAction(actionID: UUID) async throws {
+        let node = try await getCurrentNodeInstance()
+        try await Self.removeMCPAction(
+            actionID: actionID,
+            node: node,
+            on: localStore.database,
+            callbackForUnregisteringAction: {
+                await self.mcpManager.unregisterAction(actionID: $0)
+            }
+        )
+    }
+
+    static public func removeMCPAction(
+        actionID: UUID,
+        node: KeepTalkingNode,
+        on database: any Database,
+        callbackForUnregisteringAction: ((UUID) async -> Void)? = nil
+    ) async throws {
         guard
             let action = try await KeepTalkingAction.query(
-                on: localStore.database
+                on: database
             )
             .filter(\.$id, .equal, actionID)
-            .filter(\.$node.$id, .equal, config.node)
+            .filter(\.$node.$id, .equal, try node.requireID())
             .first()
         else {
             throw KeepTalkingClientError.actionNotHostedLocally(actionID)
@@ -108,15 +146,15 @@ extension KeepTalkingClient {
 
         let relations =
             try await KeepTalkingNodeRelationActionRelation
-            .query(on: localStore.database)
+            .query(on: database)
             .filter(\.$action.$id, .equal, actionID)
             .all()
         for relation in relations {
-            try await relation.delete(on: localStore.database)
+            try await relation.delete(on: database)
         }
 
-        try await action.delete(on: localStore.database)
-        await mcpManager.unregisterAction(actionID: actionID)
+        try await action.delete(on: database)
+        await callbackForUnregisteringAction?(actionID)
     }
 
     public func listAvailableActions() async throws
@@ -184,32 +222,27 @@ extension KeepTalkingClient {
         }
     }
 
-    public func grantActionPermission(
+    static public func grantActionPermission(
         actionID: UUID,
         toNodeID: UUID,
-        scope: KeepTalkingActionPermissionScope
+        scope: KeepTalkingActionPermissionScope,
+        node: KeepTalkingNode,
+        on database: any Database,
+        callbackForBroadcasting: ((String) async -> Void)? = nil
     ) async throws {
-
         guard
             let action = try await KeepTalkingAction.find(
                 actionID,
-                on: localStore
-                    .database
+                on: database
             ),
-            action.$node.id == config.node
+            action.$node.id == node.id
         else {
             throw KeepTalkingClientError.actionNotHostedLocally(actionID)
         }
 
-        let selfNode = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
-
         guard
-            let relation = try await selfNode.$outgoingNodeRelations
-                .query(on: localStore.database)
+            let relation = try await node.$outgoingNodeRelations
+                .query(on: database)
                 .filter(\.$to.$id == toNodeID)
                 .first()
         else {
@@ -218,8 +251,7 @@ extension KeepTalkingClient {
         }
 
         var targetActionRelation = try await relation.$actionRelations.query(
-            on: localStore
-                .database
+            on: database
         ).filter(\.$action.$id == actionID).first()
 
         if targetActionRelation == nil {
@@ -238,7 +270,7 @@ extension KeepTalkingClient {
                     )
             }
 
-            try await targetActionRelation!.create(on: localStore.database)
+            try await targetActionRelation!.create(on: database)
         } else {
             switch scope {
                 case .all:
@@ -256,12 +288,35 @@ extension KeepTalkingClient {
                     }
             }
 
-            try await targetActionRelation!.update(on: localStore.database)
+            try await targetActionRelation!.update(on: database)
         }
 
-        await broadcastLocalNodeState(
-            reason:
-                "grant action=\(actionID.uuidString.lowercased()) to=\(toNodeID.uuidString.lowercased())"
+        await callbackForBroadcasting?(
+            "grant action=\(actionID.uuidString.lowercased()) to=\(toNodeID.uuidString.lowercased())"
+        )
+    }
+
+    public func grantActionPermission(
+        actionID: UUID,
+        toNodeID: UUID,
+        scope: KeepTalkingActionPermissionScope
+    ) async throws {
+
+        let selfNode = try await ensure(
+            config.node,
+            for: KeepTalkingNode.self,
+            strict: true
+        )
+
+        try await Self.grantActionPermission(
+            actionID: actionID,
+            toNodeID: toNodeID,
+            scope: scope,
+            node: selfNode,
+            on: localStore.database,
+            callbackForBroadcasting: {
+                await self.broadcastLocalNodeState(reason: $0)
+            }
         )
     }
 
@@ -369,6 +424,18 @@ extension KeepTalkingClient {
                 ],
                 environment: [:]
             )
+        )
+    }
+
+    private static func defaultDescriptor(
+        for bundle: KeepTalkingMCPBundle
+    ) -> KeepTalkingActionDescriptor {
+        KeepTalkingActionDescriptor(
+            subject: nil,
+            action: KeepTalkingActionWithDescription(
+                description: bundle.indexDescription
+            ),
+            object: nil
         )
     }
 }

@@ -21,15 +21,31 @@ enum SignalError: LocalizedError {
 }
 
 final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
+    private final class PingResumeGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isResumed = false
+
+        func claimResume() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if isResumed {
+                return false
+            }
+            isResumed = true
+            return true
+        }
+    }
+
     private static let keepAliveIntervalNanoseconds: UInt64 = 20_000_000_000
     private static let reconnectBaseDelayNanoseconds: UInt64 = 500_000_000
     private static let maxReconnectAttempts = 3
 
     private let url: URL
     private let stateQueue = DispatchQueue(label: "KeepTalking.signal.state")
-    private var openWaiter: CheckedContinuation<Void, Error>?
+    private var openWaiters: [CheckedContinuation<Void, Error>] = []
     private var pending = [String: (Result<Data, Error>) -> Void]()
     private var isOpen = false
+    private var isConnecting = false
     private var isClosing = false
 
     var onOffer: ((SessionDescriptionPayload) -> Void)?
@@ -65,35 +81,57 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
     }
 
     func connect() async throws {
-        let alreadyOpen = stateQueue.sync { isOpen }
-        if alreadyOpen {
-            debug("connect called while already open")
-            return
-        }
-
-        let task: URLSessionWebSocketTask = stateQueue.sync {
-            isClosing = false
-            socketTask?.cancel(with: .goingAway, reason: nil)
-            let nextTask = session.webSocketTask(with: url)
-            socketTask = nextTask
-            return nextTask
-        }
-
-        debug("opening websocket \(url.absoluteString)")
-        task.resume()
-        receiveNextMessage(on: task)
-
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, Error>) in
-            stateQueue.sync {
-                self.openWaiter = continuation
+            var taskToStart: URLSessionWebSocketTask?
+            var resumeImmediately = false
+            var waitForExistingConnect = false
+
+            self.stateQueue.sync {
+                if self.isOpen {
+                    resumeImmediately = true
+                    return
+                }
+
+                self.isClosing = false
+                self.openWaiters.append(continuation)
+
+                if self.isConnecting {
+                    waitForExistingConnect = true
+                    return
+                }
+
+                self.isConnecting = true
+                self.socketTask?.cancel(with: .goingAway, reason: nil)
+                let nextTask = self.session.webSocketTask(with: self.url)
+                self.socketTask = nextTask
+                taskToStart = nextTask
             }
+
+            if resumeImmediately {
+                continuation.resume()
+                return
+            }
+
+            if waitForExistingConnect {
+                self.debug("connect called while opening; waiting existing socket")
+                return
+            }
+
+            guard let taskToStart else {
+                continuation.resume(throwing: SignalError.notConnected)
+                return
+            }
+            self.debug("opening websocket \(self.url.absoluteString)")
+            taskToStart.resume()
+            self.receiveNextMessage(on: taskToStart)
         }
     }
 
     func close() {
         stateQueue.sync {
             isClosing = true
+            isConnecting = false
             keepAliveTask?.cancel()
             keepAliveTask = nil
             reconnectTask?.cancel()
@@ -296,7 +334,11 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
 
         let nsError = error as NSError
         if nsError.domain == NSPOSIXErrorDomain {
-            if nsError.code == 57 || nsError.code == 54 || nsError.code == 32 {
+            if nsError.code == 57
+                || nsError.code == 54
+                || nsError.code == 53
+                || nsError.code == 32
+            {
                 return true
             }
         }
@@ -437,7 +479,14 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
 
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, Error>) in
+            let gate = PingResumeGate()
+
             task.sendPing { error in
+                guard gate.claimResume() else {
+                    self.debug("ping callback invoked more than once; ignoring duplicate")
+                    return
+                }
+
                 if let error {
                     continuation.resume(throwing: error)
                 } else {
@@ -552,10 +601,13 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
                 let callbacks = Array(pending.values)
                 pending.removeAll()
 
-                let waiter = openWaiter
-                openWaiter = nil
+                let waiters = openWaiters
+                openWaiters.removeAll(keepingCapacity: true)
                 isOpen = false
-                waiter?.resume(throwing: error)
+                isConnecting = false
+                for waiter in waiters {
+                    waiter.resume(throwing: error)
+                }
 
                 return (callbacks, !isClosing)
             }
@@ -574,25 +626,45 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
 extension IonJsonRpcSignal: URLSessionWebSocketDelegate {
     func urlSession(
         _: URLSession,
-        webSocketTask _: URLSessionWebSocketTask,
+        webSocketTask: URLSessionWebSocketTask,
         didOpenWithProtocol _: String?
     ) {
+        let isCurrentSocket = stateQueue.sync {
+            socketTask === webSocketTask
+        }
+        guard isCurrentSocket else {
+            debug("ignoring didOpen from stale websocket task")
+            return
+        }
+
         debug("websocket opened")
         stateQueue.sync {
             isOpen = true
+            isConnecting = false
             isClosing = false
-            openWaiter?.resume()
-            openWaiter = nil
+            let waiters = openWaiters
+            openWaiters.removeAll(keepingCapacity: true)
+            for waiter in waiters {
+                waiter.resume()
+            }
         }
         startKeepAliveIfNeeded()
     }
 
     func urlSession(
         _: URLSession,
-        webSocketTask _: URLSessionWebSocketTask,
+        webSocketTask: URLSessionWebSocketTask,
         didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
         reason closeReason: Data?
     ) {
+        let shouldHandle = stateQueue.sync {
+            socketTask === webSocketTask
+        }
+        guard shouldHandle else {
+            debug("ignoring didClose from stale websocket task")
+            return
+        }
+
         let shouldLog = stateQueue.sync { !isClosing }
         if shouldLog {
             if let closeReason {

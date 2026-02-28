@@ -143,6 +143,7 @@ extension KeepTalkingClient {
             guard let first else {
                 throw KeepTalkingClientError.actionCallTimeout(requestID)
             }
+
             return first
         }
     }
