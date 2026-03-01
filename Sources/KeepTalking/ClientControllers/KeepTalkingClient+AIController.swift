@@ -93,13 +93,25 @@ extension KeepTalkingClient {
     func registerLocalActionsInExecutors() async throws {
         await ensureMCPToolChangeObserverInstalled()
 
-        let localActions = try await KeepTalkingAction.query(
-            on: localStore.database
+        let selfNode = try await ensure(
+            config.node,
+            for: KeepTalkingNode.self,
+            strict: true
         )
-        .filter(\.$node.$id, .equal, config.node)
-        .all()
+        let context = try await ensure(
+            config.contextID,
+            for: KeepTalkingContext.self
+        )
+        let localActions = try await selfNode.$actions.query(
+            on: localStore.database
+        ).all()
+        let authorizedLocalActions = try await authorizedActions(
+            localActions,
+            for: selfNode,
+            context: context
+        )
 
-        for action in localActions {
+        for action in authorizedLocalActions {
             switch action.payload {
                 case .mcpBundle:
                     try await mcpManager.registerIfNeeded(action)

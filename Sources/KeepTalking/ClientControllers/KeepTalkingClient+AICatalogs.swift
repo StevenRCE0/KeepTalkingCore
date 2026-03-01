@@ -124,6 +124,11 @@ extension KeepTalkingClient {
         let localActions = try await selfNode.$actions.query(
             on: localStore.database
         ).all()
+        let authorizedLocalActions = try await authorizedActions(
+            localActions,
+            for: selfNode,
+            context: context
+        )
 
         let onlineOutgoingRelations = try await selfNode.$outgoingNodeRelations
             .query(on: localStore.database).filter(
@@ -156,7 +161,9 @@ extension KeepTalkingClient {
             return result
         }
 
-        let allActions = deduplicatedAndSortedActions(localActions + remoteActions)
+        let allActions = deduplicatedAndSortedActions(
+            authorizedLocalActions + remoteActions
+        )
         let remoteCatalogLookup = await fetchRemoteCatalogLookup(
             for: allActions,
             context: context
