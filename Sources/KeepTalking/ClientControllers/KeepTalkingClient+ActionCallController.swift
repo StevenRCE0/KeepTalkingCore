@@ -3,6 +3,8 @@ import Foundation
 import MCP
 
 extension KeepTalkingClient {
+    private static let actionCallResultTimeoutSeconds: TimeInterval = 45
+
     func executeActionCallRequest(
         _ request: KeepTalkingActionCallRequest,
         context: KeepTalkingContext?
@@ -142,7 +144,7 @@ extension KeepTalkingClient {
 
         return try await waitForActionCallResult(
             requestID: request.id,
-            timeoutSeconds: 15
+            timeoutSeconds: Self.actionCallResultTimeoutSeconds
         )
     }
 
