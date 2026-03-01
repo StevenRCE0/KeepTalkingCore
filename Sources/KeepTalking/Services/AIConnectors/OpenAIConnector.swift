@@ -12,7 +12,14 @@ public actor OpenAIConnector {
         Use tools only when they are relevant to the user's request.
         If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
         Do not fabricate tool outputs.
-        If you need a tool inventory before acting, call \(listingToolFunctionName).
+        Call \(listingToolFunctionName) before deciding any tool plan.
+
+        Skill execution policy (mandatory):
+        1) If you will use any tool where listing output shows source=skill and route_kind=action_proxy, first call the matching source=skill route_kind=skill_metadata tool for that same action_id.
+        2) Then call the matching source=skill route_kind=skill_file tool at least once for that same action_id to inspect concrete file content.
+        3) Only after a successful skill_file read may you call the skill action_proxy tool for that action_id.
+        4) Never skip the skill_file step for skill actions, even if metadata looks sufficient.
+        5) If skill_file fails, explain the failure and do not continue with that skill action_proxy call.
 
         Conversation context:
         \(contextTranscript)

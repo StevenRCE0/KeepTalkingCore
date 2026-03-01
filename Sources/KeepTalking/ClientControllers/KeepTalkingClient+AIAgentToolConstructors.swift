@@ -222,7 +222,7 @@ extension KeepTalkingClient {
             function: .init(
                 name: Self.listingToolFunctionName,
                 description:
-                    "List KeepTalking action proxies available in the current context.",
+                    "List KeepTalking action proxies available in the current context. Always call this first. Use route_kind and action_id to match skill_metadata/skill_file with skill action_proxy calls.",
                 parameters: JSONSchema(
                     .type(.object),
                     .properties([:]),

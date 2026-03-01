@@ -37,6 +37,12 @@ extension KeepTalkingClient {
             persistedContext,
             skillSummaries: runtimeCatalog.skillSummaries
         )
+        logInjectedAITools(
+            runtimeCatalog: runtimeCatalog,
+            allTools: allTools,
+            context: persistedContext,
+            model: model
+        )
 
         let messages: [ChatQuery.ChatCompletionMessageParam] = [
             .developer(
@@ -132,5 +138,46 @@ extension KeepTalkingClient {
                     "mcp_tools_list_changed action=\(actionID.uuidString.lowercased())"
             )
         }
+    }
+
+    private func logInjectedAITools(
+        runtimeCatalog: KeepTalkingActionRuntimeCatalog,
+        allTools: [ChatQuery.ChatCompletionToolParam],
+        context: KeepTalkingContext,
+        model: OpenAIModel
+    ) {
+        let contextID = context.id ?? config.contextID
+        onLog?(
+            "[ai/tools] request context=\(contextID.uuidString.lowercased()) model=\(model) total_tools=\(allTools.count) proxy_tools=\(runtimeCatalog.catalog.definitions.count)"
+        )
+
+        if !runtimeCatalog.catalog.definitions.isEmpty {
+            let skillNameByActionID = skillNamesByActionID(
+                routesByFunctionName: runtimeCatalog.routesByFunctionName
+            )
+            for definition in runtimeCatalog.catalog.definitions.sorted(by: {
+                $0.functionName < $1.functionName
+            }) {
+                let route = runtimeCatalog.routesByFunctionName[
+                    definition.functionName
+                ]
+                let actionName = actionDisplayName(
+                    for: definition,
+                    route: route,
+                    skillNameByActionID: skillNameByActionID
+                )
+                let schemaText =
+                    (try? JSONEncoder().encode(definition.parameters))
+                    .flatMap { String(data: $0, encoding: .utf8) }
+                    ?? "<schema-encode-failed>"
+                onLog?(
+                    "[ai/tools] name=\(definition.functionName) action_name=\(actionName) source=\(definition.source.rawValue) route=\(routeKind(route)) action=\(definition.actionID.uuidString.lowercased()) owner=\(definition.ownerNodeID.uuidString.lowercased()) mcp_tool=\(definition.mcpToolName ?? "") schema=\(schemaText)"
+                )
+            }
+        }
+
+        onLog?(
+            "[ai/tools] listing_tool_name=\(Self.listingToolFunctionName) injected=\(!runtimeCatalog.catalog.definitions.isEmpty)"
+        )
     }
 }

@@ -63,8 +63,11 @@ extension KeepTalkingClient {
                                 context: skillContext
                             )
                         case .skillFileLocal(let skillContext):
-                            let arguments = try decodeToolArguments(
+                            let rawArguments = try decodeToolArguments(
                                 toolCall.function.arguments
+                            )
+                            let arguments = normalizedSkillFileArguments(
+                                rawArguments
                             )
                             payload = renderSkillFilePayload(
                                 functionName: functionName,
@@ -76,8 +79,11 @@ extension KeepTalkingClient {
                             let ownerNodeID,
                             let skillName
                         ):
-                            let arguments = try decodeToolArguments(
+                            let rawArguments = try decodeToolArguments(
                                 toolCall.function.arguments
+                            )
+                            let arguments = normalizedSkillFileArguments(
+                                rawArguments
                             )
                             payload = try await renderRemoteSkillFilePayload(
                                 functionName: functionName,
@@ -155,13 +161,22 @@ extension KeepTalkingClient {
         routesByFunctionName: [String: KeepTalkingAgentToolRoute],
         contextID: UUID
     ) -> String {
+        let skillNameByActionID = skillNamesByActionID(
+            routesByFunctionName: routesByFunctionName
+        )
         let rows = catalog.definitions.sorted {
             $0.functionName < $1.functionName
         }.map { definition in
-            [
+            let route = routesByFunctionName[definition.functionName]
+            return [
                 "function_name": definition.functionName,
                 "route_kind": routeKind(
-                    routesByFunctionName[definition.functionName]
+                    route
+                ),
+                "action_name": actionDisplayName(
+                    for: definition,
+                    route: route,
+                    skillNameByActionID: skillNameByActionID
                 ),
                 "source": definition.source.rawValue,
                 "action_id": definition.actionID.uuidString.lowercased(),
@@ -191,6 +206,54 @@ extension KeepTalkingClient {
             case .skillFileLocal, .skillFileRemote:
                 return "skill_file"
         }
+    }
+
+    func actionDisplayName(
+        for definition: KeepTalkingActionToolDefinition,
+        route: KeepTalkingAgentToolRoute?,
+        skillNameByActionID: [UUID: String]
+    ) -> String {
+        if let mcpToolName = definition.mcpToolName?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !mcpToolName.isEmpty
+        {
+            return mcpToolName
+        }
+
+        switch route {
+            case .skillMetadata(let context):
+                return context.bundle.name
+            case .skillFileLocal(let context):
+                return context.bundle.name
+            case .skillFileRemote(_, _, let skillName):
+                return skillName
+            case .actionProxy:
+                if let skillName = skillNameByActionID[definition.actionID] {
+                    return skillName
+                }
+                return "action_\(definition.actionID.uuidString.lowercased().prefix(8))"
+            case .none:
+                return "action_\(definition.actionID.uuidString.lowercased().prefix(8))"
+        }
+    }
+
+    func skillNamesByActionID(
+        routesByFunctionName: [String: KeepTalkingAgentToolRoute]
+    ) -> [UUID: String] {
+        var names: [UUID: String] = [:]
+        for route in routesByFunctionName.values {
+            switch route {
+                case .skillMetadata(let context):
+                    names[context.actionID] = context.bundle.name
+                case .skillFileLocal(let context):
+                    names[context.actionID] = context.bundle.name
+                case .skillFileRemote(let actionID, _, let skillName):
+                    names[actionID] = skillName
+                default:
+                    continue
+            }
+        }
+        return names
     }
 
     func renderAgentToolPayload(
@@ -424,5 +487,17 @@ extension KeepTalkingClient {
         } catch {
             throw KeepTalkingClientError.invalidToolArguments(raw)
         }
+    }
+
+    func normalizedSkillFileArguments(_ arguments: [String: Value])
+        -> [String: Value]
+    {
+        if let nested = arguments["arguments"]?.objectValue {
+            return nested
+        }
+        if let nested = arguments["params"]?.objectValue {
+            return nested
+        }
+        return arguments
     }
 }

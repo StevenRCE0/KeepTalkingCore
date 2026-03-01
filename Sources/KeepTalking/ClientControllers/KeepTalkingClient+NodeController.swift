@@ -692,13 +692,57 @@ extension KeepTalkingClient {
         redacted.id = action.id
         redacted.$node.id = action.$node.id
         redacted.descriptor = action.descriptor
-        redacted.payload = nil
+        redacted.payload = redactedBroadcastPayload(
+            action.payload,
+            actionID: action.id
+        )
         redacted.remoteAuthorisable = action.remoteAuthorisable
         redacted.blockingAuthorisation = action.blockingAuthorisation
         redacted.createdAt = action.createdAt
         redacted.lastUsed = action.lastUsed
 
         return redacted
+    }
+
+    private func redactedBroadcastPayload(
+        _ payload: KeepTalkingAction.Payload?,
+        actionID: UUID?
+    ) -> KeepTalkingAction.Payload? {
+        guard let payload else {
+            return nil
+        }
+
+        switch payload {
+            case .mcpBundle(let bundle):
+                let token = actionID?.uuidString.lowercased() ?? "unknown"
+                return .mcpBundle(
+                    KeepTalkingMCPBundle(
+                        id: bundle.id,
+                        name: bundle.name,
+                        indexDescription: bundle.indexDescription,
+                        service: .stdio(
+                            arguments: [
+                                "__kt_redacted_mcp_action__",
+                                token,
+                            ],
+                            environment: [:]
+                        )
+                    )
+                )
+            case .skill(let bundle):
+                let token = actionID?.uuidString.lowercased() ?? "unknown"
+                return .skill(
+                    KeepTalkingSkillBundle(
+                        id: bundle.id,
+                        name: bundle.name,
+                        indexDescription: bundle.indexDescription,
+                        directory: URL(
+                            fileURLWithPath:
+                                "/__kt_remote_skill__/\(token)"
+                        )
+                    )
+                )
+        }
     }
 
     func broadcastLocalNodeState(reason: String) async {

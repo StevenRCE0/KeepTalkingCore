@@ -189,9 +189,12 @@ extension KeepTalkingClient {
 
         for query in queries {
             let argumentsKey: String
+            let normalizedArguments = normalizedSkillFileQueryArguments(
+                query.arguments
+            )
             if query.kind == .skillFile,
-                let arguments = query.arguments,
-                let data = try? JSONEncoder().encode(arguments),
+                !normalizedArguments.isEmpty,
+                let data = try? JSONEncoder().encode(normalizedArguments),
                 let json = String(data: data, encoding: .utf8)
             {
                 argumentsKey = json
@@ -344,10 +347,13 @@ extension KeepTalkingClient {
         arguments: [String: Value]?
     ) throws -> KeepTalkingActionCatalogSkillFile {
         try validateSkillDirectoryForCatalog(bundle.directory)
+        let normalizedArguments = normalizedSkillFileQueryArguments(arguments)
 
         let requestedPath =
-            arguments?["path"]?.stringValue
-            ?? arguments?["file"]?.stringValue
+            normalizedArguments["path"]?.stringValue
+            ?? normalizedArguments["file"]?.stringValue
+            ?? normalizedArguments["file_path"]?.stringValue
+            ?? normalizedArguments["relative_path"]?.stringValue
             ?? ""
         let trimmedPath = requestedPath.trimmingCharacters(
             in: .whitespacesAndNewlines
@@ -360,9 +366,9 @@ extension KeepTalkingClient {
 
         let maxCharacters = min(
             max(
-                arguments?["max_characters"]?.intValue
-                    ?? arguments?["limit"]?.intValue
-                    ?? arguments?["max_characters"]?.doubleValue.map { Int($0) }
+                normalizedArguments["max_characters"]?.intValue
+                    ?? normalizedArguments["limit"]?.intValue
+                    ?? normalizedArguments["max_characters"]?.doubleValue.map { Int($0) }
                     ?? Self.actionCatalogSkillFileMaxCharacters,
                 128
             ),
@@ -397,6 +403,21 @@ extension KeepTalkingClient {
             maxCharacters: maxCharacters,
             truncated: fileText.count > maxCharacters
         )
+    }
+
+    private func normalizedSkillFileQueryArguments(
+        _ arguments: [String: Value]?
+    ) -> [String: Value] {
+        guard let arguments else {
+            return [:]
+        }
+        if let nested = arguments["arguments"]?.objectValue {
+            return nested
+        }
+        if let nested = arguments["params"]?.objectValue {
+            return nested
+        }
+        return arguments
     }
 
     private func validateSkillDirectoryForCatalog(_ directory: URL) throws {
