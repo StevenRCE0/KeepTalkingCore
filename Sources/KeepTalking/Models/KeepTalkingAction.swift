@@ -35,6 +35,7 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
     public enum Payload: Codable, Sendable {
         case mcpBundle(KeepTalkingMCPBundle)
         case skill(KeepTalkingSkillBundle)
+        case primitive(KeepTalkingPrimitiveBundle)
     }
 
     @ID(key: .id)

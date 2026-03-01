@@ -5,6 +5,7 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
     public enum Source: String, Sendable, Hashable {
         case mcp
         case skill
+        case primitive
     }
 
     public let functionName: String

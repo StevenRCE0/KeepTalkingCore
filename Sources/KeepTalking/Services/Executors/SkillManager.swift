@@ -168,7 +168,7 @@ public actor SkillManager {
             let turn = try await openAIConnector.completeTurn(
                 messages: messages,
                 tools: tools,
-                model: OpenAIModel.gpt4_o
+                model: "gpt-5-codex"
             )
 
             if let assistantMessage = assistantMessage(from: turn) {
@@ -195,8 +195,7 @@ public actor SkillManager {
         }
 
         let finalText =
-            latestAssistantText?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            latestAssistantText
             ?? "Skill execution completed."
 
         return (
@@ -379,7 +378,8 @@ public actor SkillManager {
             skillDirectory: skillDirectory
         )
         let data = try Data(contentsOf: fileURL)
-        let decoded = String(data: data, encoding: .utf8)
+        let decoded =
+            String(data: data, encoding: .utf8)
             ?? String(decoding: data, as: UTF8.self)
         let maxCharacters =
             arguments["max_characters"]?.intValue
@@ -542,9 +542,11 @@ public actor SkillManager {
         let stderrData =
             try stderrPipe.fileHandleForReading.readToEnd()
             ?? Data()
-        let stdoutText = String(data: stdoutData, encoding: .utf8)
+        let stdoutText =
+            String(data: stdoutData, encoding: .utf8)
             ?? String(decoding: stdoutData, as: UTF8.self)
-        let stderrText = String(data: stderrData, encoding: .utf8)
+        let stderrText =
+            String(data: stderrData, encoding: .utf8)
             ?? String(decoding: stderrData, as: UTF8.self)
 
         return ScriptExecutionResult(

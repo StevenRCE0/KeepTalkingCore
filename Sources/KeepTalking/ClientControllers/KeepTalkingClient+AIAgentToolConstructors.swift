@@ -154,6 +154,30 @@ extension KeepTalkingClient {
         )
     }
 
+    func makePrimitiveActionProxyDefinition(
+        actionID: UUID,
+        ownerNodeID: UUID,
+        bundle: KeepTalkingPrimitiveBundle,
+        descriptor: KeepTalkingActionDescriptor?
+    ) -> KeepTalkingActionToolDefinition {
+        let description =
+            descriptor?.action?.description
+            ?? bundle.indexDescription
+        return KeepTalkingActionToolDefinition(
+            functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
+                ownerNodeID: ownerNodeID,
+                actionID: actionID,
+                mcpToolName: nil
+            ),
+            actionID: actionID,
+            ownerNodeID: ownerNodeID,
+            source: .primitive,
+            mcpToolName: nil,
+            description: description,
+            parameters: primitiveActionParameters(for: bundle.action)
+        )
+    }
+
     func makeSkillMetadataDefinition(
         actionID: UUID,
         ownerNodeID: UUID,
@@ -231,6 +255,24 @@ extension KeepTalkingClient {
                 strict: false
             )
         )
+    }
+
+    func primitiveActionParameters(for action: KeepTalkingPrimitiveActionKind)
+        -> JSONSchema
+    {
+        switch action {
+            case .openURLInBrowser:
+                return JSONSchema(
+                    .type(.object),
+                    .properties([
+                        "url": JSONSchema(
+                            .type(.string),
+                            .description("URL to open in the system browser.")
+                        )
+                    ]),
+                    .additionalProperties(.boolean(false))
+                )
+        }
     }
 
     func openAIParameters(from inputSchema: Value?) -> JSONSchema {

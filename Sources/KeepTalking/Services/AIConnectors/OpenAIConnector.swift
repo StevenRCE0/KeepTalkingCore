@@ -141,26 +141,237 @@ public actor OpenAIConnector {
     public func completeTurn(
         messages: [ChatQuery.ChatCompletionMessageParam],
         tools: [ChatQuery.ChatCompletionToolParam],
-        model: String = .gpt4,
+        model: OpenAIModel,
         toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam? = nil
     ) async throws -> ToolPlanningResult {
-        let resolvedTools = tools.isEmpty ? nil : tools
-        let resolvedToolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam? =
-            resolvedTools == nil ? nil : (toolChoice ?? .auto)
-
-        let query = ChatQuery(
-            messages: messages,
-            model: model,
-            toolChoice: resolvedToolChoice,
-            tools: resolvedTools
+        let responseInput = toResponseInput(messages: messages)
+        let responseTools = toResponseTools(tools: tools)
+        let resolvedToolChoice = toResponseToolChoice(
+            toolChoice ?? (responseTools.isEmpty ? .none : .auto)
         )
 
-        let result = try await client.chats(query: query)
-        let assistantText = result.choices.first?.message.content
-        let toolCalls = result.choices.first?.message.toolCalls ?? []
+        let query = CreateModelResponseQuery(
+            input: .inputItemList(responseInput),
+            model: model,
+            toolChoice: resolvedToolChoice,
+            tools: responseTools.isEmpty ? nil : responseTools
+        )
+
+        let result = try await client.responses.createResponse(query: query)
+        let assistantText = extractAssistantText(from: result)
+        let toolCalls = extractToolCalls(from: result)
+
+        if assistantText == nil, toolCalls.isEmpty {
+            throw ConnectorError.emptyResponse
+        }
+
         return ToolPlanningResult(
             assistantText: assistantText,
             toolCalls: toolCalls
         )
+    }
+
+    private func toResponseInput(
+        messages: [ChatQuery.ChatCompletionMessageParam]
+    ) -> [InputItem] {
+        var input: [InputItem] = []
+        input.reserveCapacity(messages.count)
+
+        for message in messages {
+            switch message {
+                case .developer(let payload):
+                    if let text = text(from: payload.content) {
+                        input.append(
+                            .inputMessage(
+                                .init(role: .developer, content: .textInput(text))
+                            )
+                        )
+                    }
+                case .system(let payload):
+                    if let text = text(from: payload.content) {
+                        input.append(
+                            .inputMessage(
+                                .init(role: .system, content: .textInput(text))
+                            )
+                        )
+                    }
+                case .user(let payload):
+                    if let text = text(from: payload.content) {
+                        input.append(
+                            .inputMessage(
+                                .init(role: .user, content: .textInput(text))
+                            )
+                        )
+                    }
+                case .assistant(let payload):
+                    if let content = payload.content,
+                        let text = text(from: content)
+                    {
+                        input.append(
+                            .inputMessage(
+                                .init(role: .assistant, content: .textInput(text))
+                            )
+                        )
+                    }
+                    for toolCall in payload.toolCalls ?? [] {
+                        input.append(
+                            .item(
+                                .functionToolCall(
+                                    .init(
+                                        id: nil,
+                                        _type: .functionCall,
+                                        callId: toolCall.id,
+                                        name: toolCall.function.name,
+                                        arguments: toolCall.function.arguments,
+                                        status: nil
+                                    )
+                                )
+                            )
+                        )
+                    }
+                case .tool(let payload):
+                    if let output = text(from: payload.content) {
+                        input.append(
+                            .item(
+                                .functionCallOutputItemParam(
+                                    .init(
+                                        callId: payload.toolCallId,
+                                        _type: .functionCallOutput,
+                                        output: output
+                                    )
+                                )
+                            )
+                        )
+                    }
+            }
+        }
+
+        return input
+    }
+
+    private func toResponseTools(
+        tools: [ChatQuery.ChatCompletionToolParam]
+    ) -> [Tool] {
+        tools.map { tool in
+            .functionTool(
+                .init(
+                    name: tool.function.name,
+                    description: tool.function.description,
+                    parameters: tool.function.parameters
+                        ?? JSONSchema(
+                            .type(.object),
+                            .properties([:]),
+                            .additionalProperties(.boolean(true))
+                        ),
+                    strict: tool.function.strict ?? false
+                )
+            )
+        }
+    }
+
+    private func toResponseToolChoice(
+        _ choice: ChatQuery.ChatCompletionFunctionCallOptionParam
+    ) -> CreateModelResponseQuery.ResponseProperties.ToolChoicePayload {
+        switch choice {
+            case .none:
+                return .ToolChoiceOptions(.none)
+            case .auto:
+                return .ToolChoiceOptions(.auto)
+            case .required:
+                return .ToolChoiceOptions(.required)
+            case .function(let name):
+                return .ToolChoiceFunction(
+                    .init(_type: .function, name: name)
+                )
+        }
+    }
+
+    private func extractAssistantText(from response: ResponseObject) -> String? {
+        let chunks = response.output.compactMap { output -> String? in
+            guard case .outputMessage(let message) = output else {
+                return nil
+            }
+            let textParts = message.content.compactMap { content -> String? in
+                if case .OutputTextContent(let textContent) = content {
+                    return textContent.text
+                }
+                return nil
+            }
+            guard !textParts.isEmpty else {
+                return nil
+            }
+            return textParts.joined()
+        }
+
+        guard !chunks.isEmpty else {
+            return nil
+        }
+        return chunks.joined(separator: "\n")
+    }
+
+    private func extractToolCalls(from response: ResponseObject) -> [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam] {
+        response.output.compactMap { output -> ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam? in
+            guard case .functionToolCall(let call) = output else {
+                return nil
+            }
+            // Responses tool outputs must reference function call `call_id`.
+            // `id` is the output-item identifier and is not accepted as toolCallId.
+            let identifier = call.callId
+            return .init(
+                id: identifier,
+                function: .init(
+                    arguments: call.arguments,
+                    name: call.name
+                )
+            )
+        }
+    }
+
+    private func text(
+        from content: ChatQuery.ChatCompletionMessageParam.TextContent
+    ) -> String? {
+        switch content {
+            case .textContent(let text):
+                return text
+            case .contentParts(let parts):
+                let joined = parts.map(\.text).joined()
+                return joined.isEmpty ? nil : joined
+        }
+    }
+
+    private func text(
+        from content: ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content
+    ) -> String? {
+        switch content {
+            case .string(let text):
+                return text
+            case .contentParts(let parts):
+                let joined = parts.compactMap { part -> String? in
+                    if case .text(let textPart) = part {
+                        return textPart.text
+                    }
+                    return nil
+                }.joined()
+                return joined.isEmpty ? nil : joined
+        }
+    }
+
+    private func text(
+        from content: ChatQuery.ChatCompletionMessageParam.TextOrRefusalContent
+    ) -> String? {
+        switch content {
+            case .textContent(let text):
+                return text
+            case .contentParts(let parts):
+                let joined = parts.compactMap { part -> String? in
+                    switch part {
+                        case .text(let textPart):
+                            return textPart.text
+                        case .refusal(let refusal):
+                            return refusal.refusal
+                    }
+                }.joined()
+                return joined.isEmpty ? nil : joined
+        }
     }
 }

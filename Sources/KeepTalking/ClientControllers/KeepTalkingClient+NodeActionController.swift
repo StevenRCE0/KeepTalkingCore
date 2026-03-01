@@ -125,6 +125,56 @@ extension KeepTalkingClient {
         return action
     }
 
+    public func registerPrimitiveAction(
+        bundle: KeepTalkingPrimitiveBundle,
+        descriptor: KeepTalkingActionDescriptor? = nil,
+        remoteAuthorisable: Bool = true,
+        blockingAuthorisation: Bool = false
+    ) async throws -> KeepTalkingAction {
+        let node = try await getCurrentNodeInstance()
+        let action = try await Self.registerPrimitiveAction(
+            bundle: bundle,
+            descriptor: descriptor,
+            remoteAuthorisable: remoteAuthorisable,
+            blockingAuthorisation: blockingAuthorisation,
+            node: node,
+            on: localStore.database,
+            callbackForRegisteringPrimitiveAction: {
+                try await self.primitiveActionManager.registerPrimitiveAction($0)
+            }
+        )
+        await invalidateActionToolCatalog(
+            reason:
+                "register_primitive_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
+        )
+        return action
+    }
+
+    static public func registerPrimitiveAction(
+        bundle: KeepTalkingPrimitiveBundle,
+        descriptor: KeepTalkingActionDescriptor? = nil,
+        remoteAuthorisable: Bool = true,
+        blockingAuthorisation: Bool = false,
+        node: KeepTalkingNode,
+        on database: any Database,
+        callbackForRegisteringPrimitiveAction:
+            ((KeepTalkingAction) async throws -> Void)? = nil
+    ) async throws -> KeepTalkingAction {
+        let persistedBundle = bundle.assigningNewID()
+        let action = KeepTalkingAction(
+            payload: .primitive(persistedBundle),
+            remoteAuthorisable: remoteAuthorisable,
+            blockingAuthorisation: blockingAuthorisation
+        )
+        action.$node.id = try node.requireID()
+        action.descriptor =
+            descriptor ?? Self.defaultDescriptor(for: bundle)
+
+        try await action.save(on: database)
+        try await callbackForRegisteringPrimitiveAction?(action)
+        return action
+    }
+
     public func modifyMCPAction(
         actionID: UUID,
         bundle: KeepTalkingMCPBundle? = nil,
@@ -217,6 +267,53 @@ extension KeepTalkingClient {
         return action
     }
 
+    public func modifyPrimitiveAction(
+        actionID: UUID,
+        bundle: KeepTalkingPrimitiveBundle? = nil,
+        descriptor: KeepTalkingActionDescriptor? = nil,
+        remoteAuthorisable: Bool? = nil,
+        blockingAuthorisation: Bool? = nil
+    ) async throws -> KeepTalkingAction {
+        guard
+            let action = try await KeepTalkingAction.query(
+                on: localStore.database
+            )
+            .filter(\.$id, .equal, actionID)
+            .filter(\.$node.$id, .equal, config.node)
+            .first()
+        else {
+            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
+        }
+
+        if let bundle {
+            action.payload = .primitive(bundle)
+        }
+        if let descriptor {
+            action.descriptor = descriptor
+        } else if action.descriptor == nil,
+            case .primitive(let existingBundle) = action.payload
+        {
+            action.descriptor = Self.defaultDescriptor(for: existingBundle)
+        }
+
+        if let remoteAuthorisable {
+            action.remoteAuthorisable = remoteAuthorisable
+        }
+
+        if let blockingAuthorisation {
+            action.blockingAuthorisation = blockingAuthorisation
+        }
+
+        try await action.save(on: localStore.database)
+        try await primitiveActionManager.refreshPrimitiveAction(action)
+        await invalidateActionToolCatalog(
+            reason:
+                "modify_primitive_action action=\(actionID.uuidString.lowercased())"
+        )
+
+        return action
+    }
+
     public func removeMCPAction(actionID: UUID) async throws {
         let node = try await getCurrentNodeInstance()
         try await Self.removeMCPAction(
@@ -247,20 +344,38 @@ extension KeepTalkingClient {
         )
     }
 
+    public func removePrimitiveAction(actionID: UUID) async throws {
+        let node = try await getCurrentNodeInstance()
+        try await Self.removeMCPAction(
+            actionID: actionID,
+            node: node,
+            on: localStore.database,
+            callbackForUnregisteringAction: {
+                await self.primitiveActionManager.unregisterAction(actionID: $0)
+            }
+        )
+        await invalidateActionToolCatalog(
+            reason:
+                "remove_primitive_action action=\(actionID.uuidString.lowercased())"
+        )
+    }
+
     static public func removeMCPAction(
         actionID: UUID,
         node: KeepTalkingNode,
         on database: any Database,
         callbackForUnregisteringAction: ((UUID) async -> Void)? = nil
     ) async throws {
-        guard let action = try await KeepTalkingAction.query(
+        guard
+            let action = try await KeepTalkingAction.query(
                 on: database
             )
             .filter(\.$id, .equal, actionID)
-//            .filter(\.$node.$id, .equal, try node.requireID())
-            .first() else {
-                throw KeepTalkingClientError.missingAction
-            }
+            //            .filter(\.$node.$id, .equal, try node.requireID())
+            .first()
+        else {
+            throw KeepTalkingClientError.missingAction
+        }
 
         if action.id != node.id {
             print(KeepTalkingClientError.actionNotHostedLocally(actionID))
@@ -306,12 +421,14 @@ extension KeepTalkingClient {
 
             let isMCP: Bool
             let isSkill: Bool
+            let isPrimitive: Bool
             let name: String
             let description: String
             switch action.payload {
                 case .mcpBundle(let bundle):
                     isMCP = true
                     isSkill = false
+                    isPrimitive = false
                     name = bundle.name
                     description =
                         action.descriptor?.action?.description
@@ -319,6 +436,15 @@ extension KeepTalkingClient {
                 case .skill(let bundle):
                     isMCP = false
                     isSkill = true
+                    isPrimitive = false
+                    name = bundle.name
+                    description =
+                        action.descriptor?.action?.description
+                        ?? bundle.indexDescription
+                case .primitive(let bundle):
+                    isMCP = false
+                    isSkill = false
+                    isPrimitive = true
                     name = bundle.name
                     description =
                         action.descriptor?.action?.description
@@ -326,6 +452,7 @@ extension KeepTalkingClient {
                 default:
                     isMCP = false
                     isSkill = false
+                    isPrimitive = false
                     name = "unknown"
                     description = action.descriptor?.action?.description ?? ""
             }
@@ -336,6 +463,7 @@ extension KeepTalkingClient {
                     ownerNodeID: action.$node.id,
                     isMCP: isMCP,
                     isSkill: isSkill,
+                    isPrimitive: isPrimitive,
                     name: name,
                     description: description,
                     hostedLocally: action.$node.id == config.node,
@@ -555,6 +683,12 @@ extension KeepTalkingClient {
                 case .skill = persistedAction.payload
             {
                 try await skillManager.refreshSkillAction(persistedAction)
+            } else if persistedAction.$node.id == config.node,
+                case .primitive = persistedAction.payload
+            {
+                try await primitiveActionManager.refreshPrimitiveAction(
+                    persistedAction
+                )
             }
         }
 
@@ -597,6 +731,18 @@ extension KeepTalkingClient {
 
     private static func defaultDescriptor(
         for bundle: KeepTalkingSkillBundle
+    ) -> KeepTalkingActionDescriptor {
+        KeepTalkingActionDescriptor(
+            subject: nil,
+            action: KeepTalkingActionWithDescription(
+                description: bundle.indexDescription
+            ),
+            object: nil
+        )
+    }
+
+    private static func defaultDescriptor(
+        for bundle: KeepTalkingPrimitiveBundle
     ) -> KeepTalkingActionDescriptor {
         KeepTalkingActionDescriptor(
             subject: nil,

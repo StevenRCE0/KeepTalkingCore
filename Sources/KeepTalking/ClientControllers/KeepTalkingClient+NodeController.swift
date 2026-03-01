@@ -22,6 +22,7 @@ public struct KeepTalkingActionSummary: Sendable {
     public let ownerNodeID: UUID?
     public let isMCP: Bool
     public let isSkill: Bool
+    public let isPrimitive: Bool
     public let name: String
     public let description: String
     public let hostedLocally: Bool
@@ -729,6 +730,8 @@ extension KeepTalkingClient {
                         )
                     )
                 )
+            case .primitive(let bundle):
+                return .primitive(bundle)
             case .skill(let bundle):
                 let token = actionID?.uuidString.lowercased() ?? "unknown"
                 return .skill(

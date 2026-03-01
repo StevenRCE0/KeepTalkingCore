@@ -12,7 +12,7 @@ extension KeepTalkingClient {
     public func runAI(
         prompt: String,
         in context: KeepTalkingContext,
-        model: OpenAIModel = .gpt4_o
+        model: OpenAIModel = "gpt-5-codex"
     ) async throws -> String {
         guard let openAIConnector = try await resolveOpenAIConnector() else {
             throw KeepTalkingClientError.aiNotConfigured
@@ -117,6 +117,8 @@ extension KeepTalkingClient {
                     try await mcpManager.registerIfNeeded(action)
                 case .skill:
                     try await skillManager.registerIfNeeded(action)
+                case .primitive:
+                    try await primitiveActionManager.registerIfNeeded(action)
                 default:
                     continue
             }

@@ -351,7 +351,9 @@ extension KeepTalkingCLIController {
                 let kind =
                     action.isMCP
                     ? "mcp"
-                    : (action.isSkill ? "skill" : "unknown")
+                    : (action.isSkill
+                        ? "skill"
+                        : (action.isPrimitive ? "primitive" : "unknown"))
                 print(
                     "- id=\(action.actionID.uuidString.lowercased()) type=\(kind) owner=\(owner) host=\(hosted) mode=\(remote) name=\(action.name)"
                 )

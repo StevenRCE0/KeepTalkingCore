@@ -64,6 +64,9 @@ public enum KeepTalkingClientError: LocalizedError {
 }
 
 public final class KeepTalkingClient: @unchecked Sendable {
+    public static let availablePrimitiveActions =
+        KeepTalkingPrimitiveBundle.availablePrimitiveActions
+
     public typealias EnvelopeHandler = @Sendable (KeepTalkingP2PEnvelope) -> Void
     public typealias RawMessageHandler = @Sendable (String) -> Void
     public typealias PeerConnectHandler = @Sendable (UUID) -> Void
@@ -88,6 +91,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public let localStore: any KeepTalkingLocalStore
     let mcpManager: MCPManager
     let skillManager: SkillManager
+    let primitiveActionManager: PrimitiveActionManager
     let openAIConnector: OpenAIConnector?
 
     let actionCallQueue = DispatchQueue(
@@ -105,6 +109,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         kvService: (any KeepTalkingKVService)? = nil,
         openAIAPIKey: String? = nil,
         openAIEndpoint: String? = nil,
+        primitiveActionCallback: KeepTalkingPrimitiveActionCallback? = nil,
         logon: UUID = UUID(),
         localStore: any KeepTalkingLocalStore =
             KeepTalkingClient.makeDefaultLocalStore()
@@ -139,6 +144,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.skillManager = SkillManager(
             nodeConfig: config,
             openAIConnector: self.openAIConnector
+        )
+        self.primitiveActionManager = PrimitiveActionManager(
+            callback: primitiveActionCallback
         )
 
         rtcClient.onLog = { [weak self] line in

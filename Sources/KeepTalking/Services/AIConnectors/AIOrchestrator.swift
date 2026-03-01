@@ -51,7 +51,7 @@ public struct AIOrchestrator {
     public func run(
         messages: [Message],
         tools: [ChatQuery.ChatCompletionToolParam],
-        model: OpenAIModel = .gpt4_o
+        model: OpenAIModel
     ) async throws -> String {
         var transcript = messages
         var latestAssistantText = ""
@@ -70,8 +70,7 @@ public struct AIOrchestrator {
                 transcript.append(assistantMessage)
             }
 
-            if let assistantText = turn.assistantText?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
+            if let assistantText = turn.assistantText,
                 !assistantText.isEmpty
             {
                 latestAssistantText = assistantText

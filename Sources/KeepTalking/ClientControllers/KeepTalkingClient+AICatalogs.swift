@@ -285,6 +285,19 @@ extension KeepTalkingClient {
                     routesByFunctionName[fileToolDefinition.functionName] =
                         .skillFileLocal(skillContext)
 
+                case .primitive(let bundle):
+                    let primitiveActionDefinition =
+                        makePrimitiveActionProxyDefinition(
+                            actionID: actionID,
+                            ownerNodeID: ownerNodeID,
+                            bundle: bundle,
+                            descriptor: action.descriptor
+                        )
+                    definitionsByName[primitiveActionDefinition.functionName] =
+                        primitiveActionDefinition
+                    routesByFunctionName[primitiveActionDefinition.functionName] =
+                        .actionProxy(primitiveActionDefinition)
+
                 default:
                     continue
             }
@@ -324,6 +337,8 @@ extension KeepTalkingClient {
                     queryKind = .mcpTools
                 case .skill:
                     queryKind = .skillMetadata
+                case .primitive:
+                    queryKind = nil
                 default:
                     queryKind = nil
             }

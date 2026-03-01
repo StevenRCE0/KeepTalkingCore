@@ -42,6 +42,11 @@ extension KeepTalkingClient {
                         action: action,
                         call: request.call
                     )
+                case .primitive:
+                    callResult = try await primitiveActionManager.callAction(
+                        action: action,
+                        call: request.call
+                    )
                 default:
                     throw KeepTalkingClientError.unsupportedActionPayload
             }
@@ -53,6 +58,8 @@ extension KeepTalkingClient {
                         return "mcp"
                     case .skill:
                         return "skill"
+                    case .primitive:
+                        return "primitive"
                     default:
                         return "unknown"
                 }
