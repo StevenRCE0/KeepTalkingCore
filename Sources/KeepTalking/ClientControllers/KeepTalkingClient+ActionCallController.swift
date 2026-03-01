@@ -237,69 +237,54 @@ extension KeepTalkingClient {
         return action
     }
 
+    public static func isNodeAuthorizedForAction(
+        node: KeepTalkingNode,
+        action: KeepTalkingAction,
+        context: KeepTalkingContext?,
+        on database: any Database
+    ) async throws -> Bool {
+        let actionID = try action.requireID()
+        let approvals =
+            try await KeepTalkingNodeRelationActionRelation
+            .query(on: database)
+            .filter(\.$action.$id == actionID)
+            .all()
+
+        return approvals.contains { approval in
+            approval.applicable(in: context)
+        }
+    }
+
     public func isNodeAuthorizedForAction(
         node: KeepTalkingNode,
         action: KeepTalkingAction,
         context: KeepTalkingContext?
     ) async throws -> Bool {
+        try await Self.isNodeAuthorizedForAction(
+            node: node,
+            action: action,
+            context: context,
+            on: localStore.database
+        )
+    }
+
+    public func isNodeAuthorizedToAuthorizeAction(
+        node: KeepTalkingNode,
+        context: KeepTalkingContext?
+    ) async throws -> Bool {
         let nodeID = try node.requireID()
-        guard let actionOwnerID = action.$node.id else {
-            return false
-        }
-
-        guard actionOwnerID == config.node || actionOwnerID == nodeID else {
-            return false
-        }
-
         if nodeID == config.node {
-            return actionOwnerID == config.node
-        }
-
-        guard action.remoteAuthorisable ?? false else {
-            return false
-        }
-
-        let selfNode = try await getCurrentNodeInstance()
-
-        let eligibleRelations = try await selfNode.$outgoingNodeRelations
-            .query(
-                on: localStore.database
-            ).filter(\.$to.$id == nodeID).all()
-            .filter { relation in
-                relation.allows(context: context)
-            }
-
-        guard !eligibleRelations.isEmpty else {
-            return false
-        }
-
-        if eligibleRelations.contains(where: { relation in
-            if case .owner = relation.relationship {
-                return true
-            }
-            return false
-        }) {
             return true
         }
 
-        let eligibleRelationIDs = eligibleRelations.compactMap(\.id)
-        guard !eligibleRelationIDs.isEmpty else {
-            return false
-        }
-
-        let actionID = try action.requireID()
-        let approvals =
-            try await KeepTalkingNodeRelationActionRelation
+        let selfNode = try await getCurrentNodeInstance()
+        let relations = try await selfNode.$outgoingNodeRelations
             .query(on: localStore.database)
-            .filter(\.$relation.$id ~~ eligibleRelationIDs)
-            .filter(\.$action.$id == actionID)
+            .filter(\.$to.$id == nodeID)
             .all()
 
-        return approvals.contains { approval in
-            approvingContextAllows(
-                approval.approvingContext,
-                context: context
-            )
+        return relations.contains { relation in
+            relation.allows(context: context)
         }
     }
 
@@ -325,22 +310,6 @@ extension KeepTalkingClient {
         }
 
         return allowed
-    }
-
-    func approvingContextAllows(
-        _ approvingContext: KeepTalkingNodeRelationActionRelation
-            .ApprovingContext?,
-        context testContext: KeepTalkingContext?
-    ) -> Bool {
-        switch approvingContext {
-            case .none, .all:
-                return true
-            case .contexts(let contexts):
-                guard let testContext else {
-                    return false
-                }
-                return contexts.contains(testContext)
-        }
     }
 
     private func renderToolContentForDebug(_ content: Tool.Content) -> String {

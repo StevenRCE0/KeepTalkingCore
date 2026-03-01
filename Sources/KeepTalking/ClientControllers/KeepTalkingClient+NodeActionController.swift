@@ -435,6 +435,22 @@ extension KeepTalkingClient {
         toNodeID: UUID,
         scope: KeepTalkingActionPermissionScope
     ) async throws {
+        let authorizationContext: KeepTalkingContext?
+        switch scope {
+            case .all:
+                authorizationContext = nil
+            case .context(let context):
+                authorizationContext = context
+        }
+
+        guard
+            try await isNodeAuthorizedToAuthorizeAction(
+                node: KeepTalkingNode(id: toNodeID),
+                context: authorizationContext
+            )
+        else {
+            throw KeepTalkingClientError.relationNotTrustedOrOwned(toNodeID)
+        }
 
         let selfNode = try await ensure(
             config.node,
