@@ -15,10 +15,11 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
 
     public init(
         databaseURL: URL? = nil,
+        databaseFileName: String? = nil,
         databaseID: DatabaseID = .sqlite,
         logger: Logger = .init(label: "KeepTalking.ModelStore")
     ) throws {
-        self.databaseURL = databaseURL ?? Self.defaultDatabaseURL()
+        self.databaseURL = databaseURL ?? Self.defaultDatabaseURL(for: databaseFileName)
         self.databaseID = databaseID
         self.logger = logger
         self.manager = FluentManager(
@@ -46,7 +47,7 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
         self.manager.db(self.databaseID, logger: self.logger)
     }
 
-    private static func defaultDatabaseURL() -> URL {
+    private static func defaultDatabaseURL(for fileName: String? = nil) -> URL {
         let fm = FileManager.default
         let baseDir =
             fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
@@ -55,7 +56,7 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
         return
             baseDir
             .appendingPathComponent("KeepTalking", isDirectory: true)
-            .appendingPathComponent("state.sqlite", isDirectory: false)
+            .appendingPathComponent("\(fileName ?? "state").sqlite", isDirectory: false)
     }
 
     private static func prepareDatabaseDirectory(at databaseURL: URL) throws {
