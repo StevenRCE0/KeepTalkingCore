@@ -476,15 +476,22 @@ public actor MCPManager {
     }
 
     private func virtualToolNames(for action: KeepTalkingAction) -> [String] {
+        guard let actionID = action.id else {
+            return []
+        }
         guard case .mcpBundle(let bundle) = action.payload else {
             return []
         }
         let trimmed = bundle.name.trimmingCharacters(
             in: .whitespacesAndNewlines
         )
-        if trimmed.isEmpty {
-            return ["remote_action"]
-        }
-        return [trimmed]
+        let baseName = trimmed.isEmpty ? "remote_action" : trimmed
+        let suffix = String(
+            actionID.uuidString
+                .replacingOccurrences(of: "-", with: "")
+                .lowercased()
+                .prefix(8)
+        )
+        return ["\(baseName)__\(suffix)"]
     }
 }

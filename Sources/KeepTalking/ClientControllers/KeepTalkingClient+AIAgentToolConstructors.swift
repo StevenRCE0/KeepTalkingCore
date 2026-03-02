@@ -27,6 +27,9 @@ extension KeepTalkingClient {
             $0.name < $1.name
         }
         guard !tools.isEmpty else {
+            let fallbackDescription =
+                action.descriptor?.action?.description
+                ?? bundle.indexDescription
             return [
                 KeepTalkingActionToolDefinition(
                     functionName:
@@ -39,9 +42,11 @@ extension KeepTalkingClient {
                     ownerNodeID: ownerNodeID,
                     source: .mcp,
                     mcpToolName: bundle.name,
-                    description:
-                        action.descriptor?.action?.description
-                        ?? bundle.indexDescription,
+                    description: mcpProxyToolDescription(
+                        originalToolName: bundle.name,
+                        originalToolDescription: fallbackDescription,
+                        fallbackDescription: fallbackDescription
+                    ),
                     parameters: KeepTalkingActionToolDefinition
                         .permissiveObjectParameters
                 )
@@ -69,7 +74,13 @@ extension KeepTalkingClient {
                 ownerNodeID: ownerNodeID,
                 source: .mcp,
                 mcpToolName: selectedToolName.isEmpty ? nil : selectedToolName,
-                description: tool.description ?? fallbackDescription,
+                description: mcpProxyToolDescription(
+                    originalToolName: selectedToolName.isEmpty
+                        ? bundle.name
+                        : selectedToolName,
+                    originalToolDescription: tool.description,
+                    fallbackDescription: fallbackDescription
+                ),
                 parameters: openAIParameters(from: tool.inputSchema)
             )
         }
@@ -100,7 +111,11 @@ extension KeepTalkingClient {
                     ownerNodeID: ownerNodeID,
                     source: .mcp,
                     mcpToolName: bundle.name,
-                    description: fallbackDescription,
+                    description: mcpProxyToolDescription(
+                        originalToolName: bundle.name,
+                        originalToolDescription: fallbackDescription,
+                        fallbackDescription: fallbackDescription
+                    ),
                     parameters: KeepTalkingActionToolDefinition
                         .permissiveObjectParameters
                 )
@@ -124,10 +139,42 @@ extension KeepTalkingClient {
                 ownerNodeID: ownerNodeID,
                 source: .mcp,
                 mcpToolName: selectedToolName.isEmpty ? nil : selectedToolName,
-                description: tool.description ?? fallbackDescription,
+                description: mcpProxyToolDescription(
+                    originalToolName: selectedToolName.isEmpty
+                        ? bundle.name
+                        : selectedToolName,
+                    originalToolDescription: tool.description,
+                    fallbackDescription: fallbackDescription
+                ),
                 parameters: openAIParameters(from: tool.inputSchema)
             )
         }
+    }
+
+    func mcpProxyToolDescription(
+        originalToolName: String,
+        originalToolDescription: String?,
+        fallbackDescription: String
+    ) -> String {
+        let name = originalToolName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let trimmedOriginalDescription = originalToolDescription?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let description: String
+        if let trimmedOriginalDescription, !trimmedOriginalDescription.isEmpty {
+            description = trimmedOriginalDescription
+        } else {
+            description = fallbackDescription
+        }
+
+        if name.isEmpty {
+            return description
+        }
+        return """
+            Functional tool name: \(name)
+            Functional tool description: \(description)
+            """
     }
 
     func makeSkillActionProxyDefinition(
