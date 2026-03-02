@@ -147,7 +147,9 @@ extension KeepTalkingClient {
     func asymmetricPublicKeysForRecipient(nodeID: UUID) async throws
         -> (localPublicKey: String, remotePublicKey: String, relationID: UUID)?
     {
-        let localKeyMaterial = try await localKeyAgreementMaterial()
+        let node = try await ensure(nodeID, for: KeepTalkingNode.self)
+
+        let localKeyMaterial = try await localKeyAgreementMaterial(to: node)
         guard
             let remoteCandidate = try await remoteKeyAgreementPublicKeys(
                 nodeID: nodeID
@@ -167,7 +169,9 @@ extension KeepTalkingClient {
         recipientNodeID: UUID,
         purpose: String
     ) async throws -> KeepTalkingAsymmetricCipherEnvelope {
-        let localKeyMaterial = try await localKeyAgreementMaterial()
+        let node = try await ensure(recipientNodeID, for: KeepTalkingNode.self)
+
+        let localKeyMaterial = try await localKeyAgreementMaterial(to: node)
         let recipientCandidate = try await remoteKeyAgreementPublicKeys(
             nodeID: recipientNodeID
         ).first
@@ -208,7 +212,9 @@ extension KeepTalkingClient {
             throw KeepTalkingClientError.malformedEncryptedActionCall
         }
 
-        let localKeyMaterial = try await localKeyAgreementMaterial()
+        let localKeyMaterial = try await localKeyAgreementMaterial(
+            to: ensure(envelope.senderNodeID, for: KeepTalkingNode.self)
+        )
         let senderPublicKeys = try await remoteKeyAgreementPublicKeys(
             nodeID: envelope.senderNodeID
         )
@@ -248,10 +254,10 @@ extension KeepTalkingClient {
         )
     }
 
-    private func localKeyAgreementMaterial() async throws
+    private func localKeyAgreementMaterial(to node: KeepTalkingNode) async throws
         -> LocalKeyAgreementMaterial
     {
-        let localIdentity = try await ensureLocalNodeSigningKeypair()
+        let localIdentity = try await ensureLocalNodeSigningKeypair(to: node)
         guard
             let privateKeyData = localIdentity.privateKey,
             !privateKeyData.isEmpty
@@ -277,8 +283,8 @@ extension KeepTalkingClient {
         let relations = try await KeepTalkingNodeRelation.query(
             on: localStore.database
         )
-        .filter(\.$from.$id, .equal, config.node)
-        .filter(\.$to.$id, .equal, nodeID)
+        .filter(\.$from.$id, .equal, nodeID)
+        .filter(\.$to.$id, .equal, config.node)
         .all()
         let relationIDs = relations.compactMap(\.id)
         guard !relationIDs.isEmpty else {

@@ -20,6 +20,7 @@ public enum KeepTalkingClientError: LocalizedError {
     case malformedEncryptedActionCatalog
     case malformedEncryptedNodeStatus
     case unsupportedActionPayload
+    case missingRelation
 
     public var errorDescription: String? {
         switch self {
@@ -59,6 +60,8 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Encrypted node-status envelope payload is malformed."
             case .unsupportedActionPayload:
                 return "Action payload is unsupported by local executors."
+            case .missingRelation:
+                return "Missing relation."
         }
     }
 }

@@ -55,9 +55,6 @@ extension KeepTalkingClient {
         node targetNodeID: UUID,
         scope: KeepTalkingNodeTrustScope = .allContexts
     ) async throws -> String {
-        let localPublicKey = try await ensureLocalNodeSigningKeypair().publicKey
-        guard targetNodeID != config.node else { return localPublicKey }
-
         let localNode = try await getCurrentNodeInstance()
         let localNodeID = try localNode.requireID()
 
@@ -73,36 +70,41 @@ extension KeepTalkingClient {
             try await remoteNode.save(on: localStore.database)
         }
 
-        if let relation =
+        let relation: KeepTalkingNodeRelation
+
+        if let existingRelation =
             try await KeepTalkingNodeRelation
             .query(on: localStore.database)
             .filter(\.$from.$id, .equal, localNodeID)
             .filter(\.$to.$id, .equal, targetNodeID)
             .first()
         {
-            relation.relationship = mergedTrustRelationship(
-                current: relation.relationship,
+            existingRelation.relationship = mergedTrustRelationship(
+                current: existingRelation.relationship,
                 requestedScope: scope
             )
+            try await existingRelation.save(on: localStore.database)
+
+            relation = existingRelation
+        } else {
+
+            let newRelationship: KeepTalkingRelationship =
+                switch scope {
+                    case .allContexts:
+                        .trustedInAllContext
+                    case .context(let context):
+                        .trusted([context])
+                }
+            relation = try KeepTalkingNodeRelation(
+                from: localNode,
+                to: remoteNode,
+                relationship: newRelationship
+            )
+
             try await relation.save(on: localStore.database)
-            return localPublicKey
         }
 
-        let newRelationship: KeepTalkingRelationship =
-            switch scope {
-                case .allContexts:
-                    .trustedInAllContext
-                case .context(let context):
-                    .trusted([context])
-            }
-        let relation = try KeepTalkingNodeRelation(
-            from: localNode,
-            to: remoteNode,
-            relationship: newRelationship
-        )
-
-        try await relation.save(on: localStore.database)
-        return localPublicKey
+        return try await ensureOutgoingIdentityKeypair(for: relation).publicKey
     }
 
     public func lure(node sourceNodeID: UUID, publicKey: String) async throws {
@@ -147,14 +149,14 @@ extension KeepTalkingClient {
         if let existingRelation = try await KeepTalkingNodeRelation.query(
             on: localStore.database
         )
-        .filter(\.$from.$id, .equal, localNodeID)
-        .filter(\.$to.$id, .equal, sourceNodeID)
+        .filter(\.$from.$id, .equal, sourceNodeID)
+        .filter(\.$to.$id, .equal, localNodeID)
         .first() {
             relation = existingRelation
         } else {
             relation = try KeepTalkingNodeRelation(
-                from: localNode,
-                to: remoteNode,
+                from: remoteNode,
+                to: localNode,
                 relationship: .pending
             )
             try await relation.save(on: localStore.database)
@@ -164,12 +166,10 @@ extension KeepTalkingClient {
             return
         }
 
-        let existingKeys = try await KeepTalkingNodeIdentityKey.query(
+        let existingKeys = try await relation.$identityKeys.get(
             on: localStore.database
         )
-        .filter(\.$relation.$id, .equal, relationID)
-        .filter(\.$publicKey, .equal, trimmedPublicKey)
-        .all()
+
         if existingKeys.contains(where: {
             guard let privateKey = $0.privateKey else { return true }
             return privateKey.isEmpty
@@ -623,6 +623,7 @@ extension KeepTalkingClient {
         node.discoveredDuringLogon = logon
 
         try await node.save(on: localStore.database)
+        _ = try await ensureLocalIdentityRelation()
     }
 
     func mergeDiscoveredNode(_ incoming: KeepTalkingNode) async throws {
@@ -810,60 +811,22 @@ extension KeepTalkingClient {
         }
     }
 
-    func ensureLocalNodeSigningKeypair() async throws
+    func ensureLocalNodeSigningKeypair(
+        to node: KeepTalkingNode
+    ) async throws
         -> KeepTalkingNodeIdentityKey
     {
-        let localIdentityRelation = try await ensureLocalIdentityRelation()
-        guard let relationID = localIdentityRelation.id else {
+        guard let toNodeID = node.id else {
             throw KeepTalkingClientError.missingNode
         }
 
-        let existingKeys = try await KeepTalkingNodeIdentityKey.query(
+        guard let relation = try await getCurrentNodeInstance().$outgoingNodeRelations.query(
             on: localStore.database
-        )
-        .filter(\.$relation.$id, .equal, relationID)
-        .sort(\.$createdAt, .descending)
-        .all()
-        if let existing = existingKeys.first(where: {
-            guard let privateKeyData = $0.privateKey, !privateKeyData.isEmpty
-            else {
-                return false
-            }
-            return
-                (try? Curve25519.KeyAgreement.PrivateKey(
-                    rawRepresentation: privateKeyData
-                )) != nil
-        }) {
-            // Keep stored public key aligned with the private key that will be used
-            // for X25519 key agreement, so /trust output matches encryption behavior.
-            if let privateKeyData = existing.privateKey,
-                let privateKey = try? Curve25519.KeyAgreement.PrivateKey(
-                    rawRepresentation: privateKeyData
-                )
-            {
-                let derivedPublicKey = Data(
-                    privateKey.publicKey.rawRepresentation
-                )
-                .base64EncodedString()
-                if existing.publicKey != derivedPublicKey {
-                    existing.publicKey = derivedPublicKey
-                    try await existing.save(on: localStore.database)
-                }
-            }
-            return existing
+        ).filter(\.$to.$id == toNodeID).first() else {
+            throw KeepTalkingClientError.missingRelation
         }
 
-        let privateKey = Curve25519.KeyAgreement.PrivateKey()
-        let publicKey = Data(privateKey.publicKey.rawRepresentation)
-            .base64EncodedString()
-        let keypair = try KeepTalkingNodeIdentityKey(
-            relation: localIdentityRelation,
-            publicKey: publicKey,
-            privateKey: Data(privateKey.rawRepresentation)
-        )
-
-        try await keypair.save(on: localStore.database)
-        return keypair
+        return try await ensureOutgoingIdentityKeypair(for: relation)
     }
 
     private func ensureLocalIdentityRelation() async throws
@@ -892,5 +855,33 @@ extension KeepTalkingClient {
 
         try await relation.save(on: localStore.database)
         return relation
+    }
+
+    private func ensureOutgoingIdentityKeypair(for relation: KeepTalkingNodeRelation) async throws
+        -> KeepTalkingNodeIdentityKey
+    {
+        guard let relationID = relation.id else {
+            throw KeepTalkingClientError.missingRelation
+        }
+
+        if let existingKeypair = try await KeepTalkingNodeIdentityKey.query(
+            on: localStore.database
+        )
+        .filter(\.$relation.$id, .equal, relationID)
+        .first() {
+            return existingKeypair
+        }
+
+        let privateKey = Curve25519.KeyAgreement.PrivateKey()
+        let publicKey = Data(privateKey.publicKey.rawRepresentation)
+            .base64EncodedString()
+        let keypair = try KeepTalkingNodeIdentityKey(
+            relation: relation,
+            publicKey: publicKey,
+            privateKey: Data(privateKey.rawRepresentation)
+        )
+
+        try await keypair.save(on: localStore.database)
+        return keypair
     }
 }

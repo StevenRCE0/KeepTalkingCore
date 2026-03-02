@@ -327,9 +327,13 @@ extension KeepTalkingClient {
             return KeepTalkingActionToolDefinition.permissiveObjectParameters
         }
 
-        let repaired = repairedSchemaNode(inputSchema, forceObjectAtRoot: true)
+        let normalized = normalizedSchemaNode(
+            inputSchema,
+            expectation: .schema,
+            forceRootObject: true
+        )
         guard
-            let data = try? JSONEncoder().encode(repaired),
+            let data = try? JSONEncoder().encode(normalized),
             let schema = try? JSONDecoder().decode(JSONSchema.self, from: data)
         else {
             return KeepTalkingActionToolDefinition.permissiveObjectParameters
@@ -337,107 +341,158 @@ extension KeepTalkingClient {
         return schema
     }
 
-    func repairedSchemaNode(
+    private enum SchemaExpectation {
+        case any
+        case schema
+        case schemaOrBoolean
+        case schemaArray
+        case schemaMap
+    }
+
+    private func normalizedSchemaNode(
         _ node: Value,
-        forceObjectAtRoot: Bool = false
+        expectation: SchemaExpectation,
+        forceRootObject: Bool = false
     ) -> Value {
-        switch node {
-            case .object(let object):
+        switch expectation {
+            case .schema:
+                guard case .object(let object) = node else {
+                    return .object([:])
+                }
                 return .object(
-                    repairedSchemaDictionary(
+                    normalizedSchemaObject(
                         object,
-                        forceObjectSemantics: forceObjectAtRoot
+                        forceRootObject: forceRootObject
                     )
                 )
-            case .array(let array):
-                return .array(
-                    array.map { repairedSchemaNode($0, forceObjectAtRoot: false) }
-                )
-            default:
-                if forceObjectAtRoot {
-                    return .object([
-                        "type": .string("object"),
-                        "properties": .object([:]),
-                        "additionalProperties": .bool(true),
-                    ])
+
+            case .schemaOrBoolean:
+                switch node {
+                    case .bool:
+                        return node
+                    case .object(let object):
+                        return .object(normalizedSchemaObject(object))
+                    case .string(let value):
+                        if value.lowercased() == "false" {
+                            return .bool(false)
+                        }
+                        return .bool(true)
+                    default:
+                        return .bool(true)
                 }
-                return node
+
+            case .schemaArray:
+                guard case .array(let array) = node else {
+                    return .array([])
+                }
+                return .array(
+                    array.map {
+                        normalizedSchemaNode(
+                            $0,
+                            expectation: .schemaOrBoolean
+                        )
+                    }
+                )
+
+            case .schemaMap:
+                guard case .object(let object) = node else {
+                    return .object([:])
+                }
+                return .object(
+                    object.mapValues {
+                        normalizedSchemaNode(
+                            $0,
+                            expectation: .schemaOrBoolean
+                        )
+                    }
+                )
+
+            case .any:
+                switch node {
+                    case .object(let object):
+                        return .object(normalizedSchemaObject(object))
+                    case .array(let array):
+                        return .array(
+                            array.map {
+                                normalizedSchemaNode(
+                                    $0,
+                                    expectation: .any
+                                )
+                            }
+                        )
+                    default:
+                        return node
+                }
         }
     }
 
-    func repairedSchemaDictionary(
+    private func normalizedSchemaObject(
         _ object: [String: Value],
-        forceObjectSemantics: Bool = false
+        forceRootObject: Bool = false
     ) -> [String: Value] {
-        var repaired: [String: Value] = [:]
-        repaired.reserveCapacity(object.count)
+        var normalized: [String: Value] = [:]
+        normalized.reserveCapacity(object.count)
 
         for (key, value) in object {
-            switch value {
-                case .object, .array:
-                    repaired[key] = repairedSchemaNode(value)
-                default:
-                    repaired[key] = value
+            if key == "$schema" || key == "$id" {
+                continue
             }
+            normalized[key] = normalizedSchemaNode(
+                value,
+                expectation: schemaExpectation(for: key)
+            )
         }
 
-        let hasObjectKeywords =
-            repaired["properties"] != nil
-            || repaired["additionalProperties"] != nil
-            || repaired["patternProperties"] != nil
-            || repaired["required"] != nil
-            || repaired["dependentRequired"] != nil
-            || repaired["dependentSchemas"] != nil
-            || repaired["propertyNames"] != nil
-
-        let typeIsObject: Bool = {
-            guard let type = repaired["type"] else {
-                return false
-            }
-            switch type {
-                case .string(let value):
-                    return value == "object"
-                case .array(let values):
-                    return values.contains {
-                        if case .string(let value) = $0 {
-                            return value == "object"
-                        }
-                        return false
+        if let required = normalized["required"] {
+            if case .array(let requiredValues) = required {
+                let names = requiredValues.compactMap { value -> Value? in
+                    guard case .string(let key) = value else {
+                        return nil
                     }
-                default:
-                    return false
-            }
-        }()
-
-        let shouldTreatAsObject =
-            forceObjectSemantics || hasObjectKeywords || typeIsObject
-        guard shouldTreatAsObject else {
-            return repaired
-        }
-
-        if repaired["type"] == nil {
-            repaired["type"] = .string("object")
-        }
-
-        if repaired["properties"]?.objectValue == nil {
-            repaired["properties"] = .object([:])
-        }
-
-        if let additionalProperties = repaired["additionalProperties"] {
-            switch additionalProperties {
-                case .bool:
-                    break
-                case .object:
-                    repaired["additionalProperties"] = repairedSchemaNode(
-                        additionalProperties
+                    let trimmed = key.trimmingCharacters(
+                        in: .whitespacesAndNewlines
                     )
-                default:
-                    repaired["additionalProperties"] = .bool(true)
+                    guard !trimmed.isEmpty else {
+                        return nil
+                    }
+                    return .string(trimmed)
+                }
+                normalized["required"] = .array(names)
+            } else {
+                normalized.removeValue(forKey: "required")
             }
-        } else {
-            repaired["additionalProperties"] = .bool(true)
         }
 
-        return repaired
+        if forceRootObject {
+            if normalized["type"] == nil {
+                normalized["type"] = .string("object")
+            }
+            if normalized["properties"]?.objectValue == nil {
+                normalized["properties"] = .object([:])
+            }
+            if normalized["additionalProperties"] == nil {
+                normalized["additionalProperties"] = .bool(true)
+            }
+        }
+
+        return normalized
+    }
+
+    private func schemaExpectation(for key: String) -> SchemaExpectation {
+        switch key {
+            case "items", "contains", "not", "if", "then", "else",
+                "propertyNames":
+                return .schema
+            case "additionalProperties", "unevaluatedItems",
+                "unevaluatedProperties":
+                return .schemaOrBoolean
+            case "allOf", "anyOf", "oneOf", "prefixItems":
+                return .schemaArray
+            case "properties", "patternProperties", "dependentSchemas",
+                "$defs", "definitions":
+                return .schemaMap
+            default:
+                return .any
+        }
     }
 }
