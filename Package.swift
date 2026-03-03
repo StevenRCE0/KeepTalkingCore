@@ -58,5 +58,12 @@ let package = Package(
             ],
             path: "Sources/KeepTalkingCLI"
         ),
+        .testTarget(
+            name: "KeepTalkingSDKTests",
+            dependencies: [
+                "KeepTalkingSDK"
+            ],
+            path: "Tests/KeepTalkingSDKTests"
+        ),
     ]
 )

@@ -50,16 +50,19 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         actionID: UUID,
         mcpToolName: String? = nil
     ) -> String {
-        let owner = compactIdentifier(ownerNodeID, prefixLength: 24)
-        let action = compactIdentifier(actionID, prefixLength: 24)
-        var normalized = "kt_\(owner.prefix(24))_\(action.prefix(24))"
+        // Keep deterministic and compact while still carrying an explicit
+        // action tag so names remain consistent across catalog rebuilds.
+        let owner = compactIdentifier(ownerNodeID, prefixLength: 20)
+        let action = compactIdentifier(actionID, prefixLength: 20)
+        let shortAction = shortActionID(actionID)
+        var normalized = "kt_\(owner.prefix(20))_\(action.prefix(20))_\(shortAction)"
 
         if let mcpToolName {
             let cleaned =
                 mcpToolName
                 .lowercased()
                 .map { $0.isLetter || $0.isNumber ? $0 : "_" }
-            let prefix = String(cleaned.prefix(6))
+            let prefix = String(cleaned.prefix(5))
                 .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
             let checksum = String(
                 format: "%04x",
@@ -100,6 +103,20 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
             return trimmed
         }
         return "\(trimmed)\(suffix)"
+    }
+
+    public static func unroutedActionName(
+        _ routedName: String,
+        actionID: UUID
+    ) -> String {
+        let trimmed = routedName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let suffix = "__\(shortActionID(actionID))"
+        guard trimmed.hasSuffix(suffix) else {
+            return trimmed
+        }
+        return String(trimmed.dropLast(suffix.count))
     }
 
     public static func routedUserNodeName(
