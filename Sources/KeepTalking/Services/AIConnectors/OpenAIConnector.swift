@@ -12,7 +12,8 @@ public actor OpenAIConnector {
         Use tools only when they are relevant to the user's request.
         If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
         Do not fabricate tool outputs.
-        Call \(listingToolFunctionName) before deciding any tool plan.
+        Call \(listingToolFunctionName) before deciding any tool plan, but notice that you might have native tools
+        like web search outside of the listed tool
 
         Skill execution policy (mandatory):
         1) If you will use any tool where listing output shows source=skill and route_kind=action_proxy, first call the matching source=skill route_kind=skill_metadata tool for that same action_id.
@@ -84,7 +85,7 @@ public actor OpenAIConnector {
             port: endpointConfig?.port ?? 443,
             scheme: endpointConfig?.scheme ?? "https",
             basePath: endpointConfig?.basePath ?? "/v1",
-            timeoutInterval: 30
+            timeoutInterval: 60
         )
         self.client = OpenAI(configuration: configuration)
     }
@@ -140,21 +141,20 @@ public actor OpenAIConnector {
 
     public func completeTurn(
         messages: [ChatQuery.ChatCompletionMessageParam],
-        tools: [ChatQuery.ChatCompletionToolParam],
+        tools: [OpenAITool],
         model: OpenAIModel,
         toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam? = nil
     ) async throws -> ToolPlanningResult {
         let responseInput = toResponseInput(messages: messages)
-        let responseTools = toResponseTools(tools: tools)
         let resolvedToolChoice = toResponseToolChoice(
-            toolChoice ?? (responseTools.isEmpty ? .none : .auto)
+            toolChoice ?? (tools.isEmpty ? .none : .auto)
         )
 
         let query = CreateModelResponseQuery(
             input: .inputItemList(responseInput),
             model: model,
             toolChoice: resolvedToolChoice,
-            tools: responseTools.isEmpty ? nil : responseTools
+            tools: tools.isEmpty ? nil : tools
         )
 
         let result = try await client.responses.createResponse(query: query)
@@ -249,24 +249,28 @@ public actor OpenAIConnector {
         return input
     }
 
-    private func toResponseTools(
+    static func toResponseTool(
+        tool: ChatQuery.ChatCompletionToolParam
+    ) -> Tool {
+        .functionTool(
+            .init(
+                name: tool.function.name,
+                description: tool.function.description,
+                parameters: tool.function.parameters
+                    ?? JSONSchema(
+                        .type(.object),
+                        .properties([:]),
+                        .additionalProperties(.boolean(true))
+                    ),
+                strict: tool.function.strict ?? false
+            )
+        )
+    }
+
+    static func toResponseTools(
         tools: [ChatQuery.ChatCompletionToolParam]
     ) -> [Tool] {
-        tools.map { tool in
-            .functionTool(
-                .init(
-                    name: tool.function.name,
-                    description: tool.function.description,
-                    parameters: tool.function.parameters
-                        ?? JSONSchema(
-                            .type(.object),
-                            .properties([:]),
-                            .additionalProperties(.boolean(true))
-                        ),
-                    strict: tool.function.strict ?? false
-                )
-            )
-        }
+        tools.map(toResponseTool)
     }
 
     private func toResponseToolChoice(
@@ -309,8 +313,11 @@ public actor OpenAIConnector {
         return chunks.joined(separator: "\n")
     }
 
-    private func extractToolCalls(from response: ResponseObject) -> [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam] {
-        response.output.compactMap { output -> ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam? in
+    private func extractToolCalls(from response: ResponseObject) -> [ChatQuery.ChatCompletionMessageParam
+        .AssistantMessageParam.ToolCallParam]
+    {
+        response.output.compactMap {
+            output -> ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam? in
             guard case .functionToolCall(let call) = output else {
                 return nil
             }

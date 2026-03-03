@@ -167,7 +167,7 @@ public actor SkillManager {
         for _ in 0..<8 {
             let turn = try await openAIConnector.completeTurn(
                 messages: messages,
-                tools: tools,
+                tools: OpenAIConnector.toResponseTools(tools: tools),
                 model: "gpt-5-codex"
             )
 

@@ -8,3 +8,4 @@
 import OpenAI
 
 public typealias OpenAIModel = Model
+public typealias OpenAITool = Tool

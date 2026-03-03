@@ -288,20 +288,31 @@ extension KeepTalkingClient {
         )
     }
 
-    func makeListingTool() -> ChatQuery.ChatCompletionToolParam {
-        ChatQuery.ChatCompletionToolParam(
-            function: .init(
-                name: Self.listingToolFunctionName,
-                description:
-                    "List KeepTalking action proxies available in the current context. Always call this first. Use route_kind and action_id to match skill_metadata/skill_file with skill action_proxy calls.",
-                parameters: JSONSchema(
-                    .type(.object),
-                    .properties([:]),
-                    .additionalProperties(.boolean(false))
-                ),
-                strict: false
+    func makeListingTool() -> OpenAITool {
+        OpenAITool
+            .functionTool(
+                .init(
+                    name: Self.listingToolFunctionName,
+                    description:
+                        "List KeepTalking action proxies available in the current context. Always call this first. Use route_kind and action_id to match skill_metadata/skill_file with skill action_proxy calls.",
+                    parameters: JSONSchema(
+                        .type(.object),
+                        .properties([:]),
+                        .additionalProperties(.boolean(false))
+                    ),
+                    strict: false
+                )
             )
-        )
+    }
+
+    func makeWebSearchTool() -> OpenAITool {
+        OpenAITool
+            .webSearchTool(
+                .init(
+                    _type: .webSearchPreview,
+                    searchContextSize: .medium
+                )
+            )
     }
 
     func primitiveActionParameters(for action: KeepTalkingPrimitiveActionKind)

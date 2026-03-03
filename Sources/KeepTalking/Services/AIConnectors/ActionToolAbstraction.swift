@@ -34,9 +34,9 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         self.parameters = parameters
     }
 
-    public var openAITool: ChatQuery.ChatCompletionToolParam {
-        .init(
-            function: .init(
+    public var openAITool: OpenAITool {
+        .functionTool(
+            .init(
                 name: functionName,
                 description: description,
                 parameters: parameters,
@@ -112,7 +112,7 @@ public struct KeepTalkingActionToolCatalog: Sendable {
         self.definitions = definitions
     }
 
-    public var openAITools: [ChatQuery.ChatCompletionToolParam] {
+    public var openAITools: [OpenAITool] {
         definitions.map(\.openAITool)
     }
 

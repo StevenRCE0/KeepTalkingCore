@@ -28,24 +28,30 @@ extension KeepTalkingClient {
             "[ai] catalog has \(runtimeCatalog.catalog.definitions.count) tool proxy definition(s)"
         )
 
+        // TODO: be able to switch off in the configurations
+        let webSearchTool = makeWebSearchTool()
         let listingTool = makeListingTool()
-        let allTools: [ChatQuery.ChatCompletionToolParam] =
+
+        let allTools: [OpenAITool] =
             runtimeCatalog.catalog.definitions.isEmpty
             ? []
-            : [listingTool] + runtimeCatalog.catalog.openAITools
+            : [
+                listingTool, webSearchTool,
+            ] + runtimeCatalog.catalog.openAITools
         let contextTranscript = try await agentContextTranscript(
             persistedContext,
             skillSummaries: runtimeCatalog.skillSummaries
         )
+
         logInjectedAITools(
             runtimeCatalog: runtimeCatalog,
-            allTools: allTools,
+            allCompletionTools: allTools,
             context: persistedContext,
             model: model
         )
 
         let messages: [ChatQuery.ChatCompletionMessageParam] = [
-            .developer(
+            .system(
                 .init(
                     content: .textContent(
                         OpenAIConnector.keepTalkingSystemPrompt(
@@ -156,13 +162,13 @@ extension KeepTalkingClient {
 
     private func logInjectedAITools(
         runtimeCatalog: KeepTalkingActionRuntimeCatalog,
-        allTools: [ChatQuery.ChatCompletionToolParam],
+        allCompletionTools: [OpenAITool],
         context: KeepTalkingContext,
         model: OpenAIModel
     ) {
         let contextID = context.id ?? config.contextID
         onLog?(
-            "[ai/tools] request context=\(contextID.uuidString.lowercased()) model=\(model) total_tools=\(allTools.count) proxy_tools=\(runtimeCatalog.catalog.definitions.count)"
+            "[ai/tools] request context=\(contextID.uuidString.lowercased()) model=\(model) total_tools=\(allCompletionTools.count) proxy_tools=\(runtimeCatalog.catalog.definitions.count)"
         )
 
         if !runtimeCatalog.catalog.definitions.isEmpty {

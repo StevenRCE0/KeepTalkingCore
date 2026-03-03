@@ -50,7 +50,7 @@ public struct AIOrchestrator {
 
     public func run(
         messages: [Message],
-        tools: [ChatQuery.ChatCompletionToolParam],
+        tools: [OpenAITool],
         model: OpenAIModel
     ) async throws -> String {
         var transcript = messages
