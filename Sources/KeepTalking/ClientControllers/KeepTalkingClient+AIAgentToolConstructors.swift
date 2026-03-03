@@ -207,19 +207,9 @@ extension KeepTalkingClient {
         bundle: KeepTalkingPrimitiveBundle,
         descriptor: KeepTalkingActionDescriptor?
     ) -> KeepTalkingActionToolDefinition {
-        let primitiveName = KeepTalkingActionToolDefinition.routedActionName(
-            bundle.name,
-            actionID: actionID,
-            fallbackPrefix: "primitive"
-        )
         let description =
             descriptor?.action?.description
             ?? bundle.indexDescription
-        let routedDescription = """
-            Primitive action name: \(primitiveName)
-            Action host node id: \(ownerNodeID.uuidString.lowercased())
-            Primitive action description: \(description)
-            """
         return KeepTalkingActionToolDefinition(
             functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
                 ownerNodeID: ownerNodeID,
@@ -229,8 +219,8 @@ extension KeepTalkingClient {
             actionID: actionID,
             ownerNodeID: ownerNodeID,
             source: .primitive,
-            mcpToolName: primitiveName,
-            description: routedDescription,
+            mcpToolName: bundle.name,
+            description: description,
             parameters: primitiveActionParameters(for: bundle.action)
         )
     }

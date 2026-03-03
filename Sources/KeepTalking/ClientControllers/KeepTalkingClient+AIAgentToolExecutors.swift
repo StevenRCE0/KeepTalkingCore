@@ -168,20 +168,20 @@ extension KeepTalkingClient {
             $0.functionName < $1.functionName
         }.map { definition in
             let route = routesByFunctionName[definition.functionName]
+            let taggedToolName = actionDisplayName(
+                for: definition,
+                route: route,
+                skillNameByActionID: skillNameByActionID
+            )
             return [
                 "function_name": definition.functionName,
                 "route_kind": routeKind(
                     route
                 ),
-                "action_name": actionDisplayName(
-                    for: definition,
-                    route: route,
-                    skillNameByActionID: skillNameByActionID
-                ),
                 "source": definition.source.rawValue,
                 "action_id": definition.actionID.uuidString.lowercased(),
                 "owner_node_id": definition.ownerNodeID.uuidString.lowercased(),
-                "mcp_tool_name": definition.mcpToolName ?? "",
+                "tool_name": taggedToolName,
                 "description": definition.description,
             ]
         }
