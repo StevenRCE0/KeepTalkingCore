@@ -3,6 +3,28 @@ import Foundation
 import MCP
 import OpenAI
 
+private struct LocalExecutorRegistrationTimeoutError: LocalizedError {
+    let actionID: UUID
+    let source: String
+    let actionName: String
+    let timeoutSeconds: TimeInterval
+
+    var errorDescription: String? {
+        "Timed out registering \(source) executor '\(actionName)' (\(actionID.uuidString.lowercased())) after \(Int(timeoutSeconds))s."
+    }
+}
+
+private struct LocalExecutorRegistrationFailedError: LocalizedError {
+    let actionID: UUID
+    let source: String
+    let actionName: String
+    let underlying: Error
+
+    var errorDescription: String? {
+        "Failed registering \(source) executor '\(actionName)' (\(actionID.uuidString.lowercased())): \(underlying.localizedDescription)"
+    }
+}
+
 extension KeepTalkingClient {
     static let listingToolFunctionName = "kt_list_available_actions"
     static let maxAgentTurns = 8
@@ -118,21 +140,85 @@ extension KeepTalkingClient {
         )
 
         for action in authorizedLocalActions {
-            switch action.payload {
-                case .mcpBundle:
-                    try await mcpManager.registerIfNeeded(action)
-                case .skill:
-                    try await skillManager.registerIfNeeded(action)
-                case .primitive:
-                    try await primitiveActionManager.registerIfNeeded(action)
-                default:
-                    continue
-            }
+            try await registerLocalExecutor(action)
         }
 
         await invalidateActionToolCatalog(
             reason: "register_local_actions_in_executors"
         )
+    }
+
+    private func registerLocalExecutor(_ action: KeepTalkingAction) async throws {
+        guard let actionID = action.id else {
+            throw KeepTalkingClientError.missingAction
+        }
+
+        let (source, actionName): (String, String) = {
+            switch action.payload {
+                case .mcpBundle(let bundle):
+                    return ("mcp", bundle.name)
+                case .skill(let bundle):
+                    return ("skill", bundle.name)
+                case .primitive(let bundle):
+                    return ("primitive", bundle.name)
+                case .none:
+                    return ("unknown", "unknown")
+            }
+        }()
+
+        let timeoutSeconds: TimeInterval = 10
+        let timeoutNanos = UInt64(max(timeoutSeconds, 1) * 1_000_000_000)
+
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { [self] in
+                    switch action.payload {
+                        case .mcpBundle:
+                            let actionID = action.id?.uuidString.lowercased()
+                                ?? "unknown"
+                            onLog?("[mcp] registering local action=\(actionID)")
+                            try await mcpManager.registerIfNeeded(action)
+                            onLog?("[mcp] registered local action=\(actionID)")
+                        case .skill:
+                            try await skillManager.registerIfNeeded(action)
+                        case .primitive:
+                            try await primitiveActionManager.registerIfNeeded(
+                                action
+                            )
+                        case .none:
+                            return
+                    }
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: timeoutNanos)
+                    throw LocalExecutorRegistrationTimeoutError(
+                        actionID: actionID,
+                        source: source,
+                        actionName: actionName,
+                        timeoutSeconds: timeoutSeconds
+                    )
+                }
+
+                guard try await group.next() != nil else {
+                    throw LocalExecutorRegistrationTimeoutError(
+                        actionID: actionID,
+                        source: source,
+                        actionName: actionName,
+                        timeoutSeconds: timeoutSeconds
+                    )
+                }
+                group.cancelAll()
+            }
+        } catch let error as LocalExecutorRegistrationTimeoutError {
+            throw error
+        } catch {
+            throw LocalExecutorRegistrationFailedError(
+                actionID: actionID,
+                source: source,
+                actionName: actionName,
+                underlying: error
+            )
+        }
     }
 
     func invalidateActionToolCatalog(reason: String) async {

@@ -190,13 +190,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         try await rtcClient.start()
         try await persistMyNode()
 
-        do {
-            try await registerLocalActionsInExecutors()
-        } catch {
-            debug(
-                "[client] failed to register local actions: \(error.localizedDescription)"
-            )
-        }
+        try await registerLocalActionsInExecutors()
 
         if kvService != nil {
             do {
