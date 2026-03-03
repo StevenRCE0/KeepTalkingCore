@@ -207,9 +207,19 @@ extension KeepTalkingClient {
         bundle: KeepTalkingPrimitiveBundle,
         descriptor: KeepTalkingActionDescriptor?
     ) -> KeepTalkingActionToolDefinition {
+        let primitiveName = KeepTalkingActionToolDefinition.routedActionName(
+            bundle.name,
+            actionID: actionID,
+            fallbackPrefix: "primitive"
+        )
         let description =
             descriptor?.action?.description
             ?? bundle.indexDescription
+        let routedDescription = """
+            Primitive action name: \(primitiveName)
+            Action host node id: \(ownerNodeID.uuidString.lowercased())
+            Primitive action description: \(description)
+            """
         return KeepTalkingActionToolDefinition(
             functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
                 ownerNodeID: ownerNodeID,
@@ -219,8 +229,8 @@ extension KeepTalkingClient {
             actionID: actionID,
             ownerNodeID: ownerNodeID,
             source: .primitive,
-            mcpToolName: nil,
-            description: description,
+            mcpToolName: primitiveName,
+            description: routedDescription,
             parameters: primitiveActionParameters(for: bundle.action)
         )
     }
@@ -230,7 +240,7 @@ extension KeepTalkingClient {
         ownerNodeID: UUID,
         bundle: KeepTalkingSkillBundle
     ) -> KeepTalkingActionToolDefinition {
-        KeepTalkingActionToolDefinition(
+        return KeepTalkingActionToolDefinition(
             functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
                 ownerNodeID: ownerNodeID,
                 actionID: actionID,
@@ -255,7 +265,7 @@ extension KeepTalkingClient {
         ownerNodeID: UUID,
         bundle: KeepTalkingSkillBundle
     ) -> KeepTalkingActionToolDefinition {
-        KeepTalkingActionToolDefinition(
+        return KeepTalkingActionToolDefinition(
             functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
                 ownerNodeID: ownerNodeID,
                 actionID: actionID,

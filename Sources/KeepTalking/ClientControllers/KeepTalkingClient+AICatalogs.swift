@@ -655,13 +655,8 @@ extension KeepTalkingClient {
             conversationTranscript = "No prior messages in this context."
         } else {
             conversationTranscript = recentMessages.map { message in
-                let sender: String =
-                    switch message.sender {
-                        case .node(let nodeID):
-                            "node:\(nodeID.uuidString.lowercased())"
-                        case .autonomous(let name):
-                            "agent:\(name)"
-                    }
+                let sender = KeepTalkingActionToolDefinition
+                    .conversationSenderTag(message.sender)
                 return "[\(sender)] \(message.content)"
             }.joined(separator: "\n")
         }

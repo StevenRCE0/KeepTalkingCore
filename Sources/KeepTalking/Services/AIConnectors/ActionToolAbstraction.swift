@@ -50,12 +50,8 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         actionID: UUID,
         mcpToolName: String? = nil
     ) -> String {
-        let owner = ownerNodeID.uuidString
-            .replacingOccurrences(of: "-", with: "")
-            .lowercased()
-        let action = actionID.uuidString
-            .replacingOccurrences(of: "-", with: "")
-            .lowercased()
+        let owner = compactIdentifier(ownerNodeID, prefixLength: 24)
+        let action = compactIdentifier(actionID, prefixLength: 24)
         var normalized = "kt_\(owner.prefix(24))_\(action.prefix(24))"
 
         if let mcpToolName {
@@ -79,6 +75,71 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         }
 
         return normalized
+    }
+
+    public static func shortActionID(_ actionID: UUID) -> String {
+        compactIdentifier(actionID, prefixLength: 8)
+    }
+
+    public static func shortNodeID(_ nodeID: UUID) -> String {
+        compactIdentifier(nodeID, prefixLength: 8)
+    }
+
+    public static func routedActionName(
+        _ rawName: String,
+        actionID: UUID,
+        fallbackPrefix: String = "action"
+    ) -> String {
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shortID = shortActionID(actionID)
+        let suffix = "__\(shortID)"
+        if trimmed.isEmpty {
+            return "\(fallbackPrefix)_\(shortID)"
+        }
+        if trimmed.hasSuffix(suffix) {
+            return trimmed
+        }
+        return "\(trimmed)\(suffix)"
+    }
+
+    public static func routedUserNodeName(
+        _ nodeID: UUID,
+        alias: String? = nil
+    ) -> String {
+        let trimmedAlias = alias?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shortID = shortNodeID(nodeID)
+        if let trimmedAlias, !trimmedAlias.isEmpty {
+            let suffix = "__\(shortID)"
+            if trimmedAlias.hasSuffix(suffix) {
+                return trimmedAlias
+            }
+            return "\(trimmedAlias)\(suffix)"
+        }
+        return "node_\(shortID)"
+    }
+
+    public static func conversationSenderTag(
+        _ sender: KeepTalkingContextMessage.Sender,
+        nodeAliasResolver: ((UUID) -> String?)? = nil
+    ) -> String {
+        switch sender {
+            case .node(let nodeID):
+                return "user:\(routedUserNodeName(nodeID, alias: nodeAliasResolver?(nodeID)))"
+            case .autonomous(let name):
+                return "agent:\(name)"
+        }
+    }
+
+    private static func compactIdentifier(
+        _ id: UUID,
+        prefixLength: Int
+    ) -> String {
+        String(
+            id.uuidString
+                .replacingOccurrences(of: "-", with: "")
+                .lowercased()
+                .prefix(prefixLength)
+        )
     }
 
     public static var permissiveObjectParameters: JSONSchema {

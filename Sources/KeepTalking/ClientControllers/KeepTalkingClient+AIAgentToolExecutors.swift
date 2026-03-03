@@ -217,23 +217,46 @@ extension KeepTalkingClient {
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !mcpToolName.isEmpty
         {
-            return mcpToolName
+            return KeepTalkingActionToolDefinition.routedActionName(
+                mcpToolName,
+                actionID: definition.actionID
+            )
         }
 
         switch route {
             case .skillMetadata(let context):
-                return context.bundle.name
+                return KeepTalkingActionToolDefinition.routedActionName(
+                    context.bundle.name,
+                    actionID: definition.actionID
+                )
             case .skillFileLocal(let context):
-                return context.bundle.name
+                return KeepTalkingActionToolDefinition.routedActionName(
+                    context.bundle.name,
+                    actionID: definition.actionID
+                )
             case .skillFileRemote(_, _, let skillName):
-                return skillName
+                return KeepTalkingActionToolDefinition.routedActionName(
+                    skillName,
+                    actionID: definition.actionID
+                )
             case .actionProxy:
                 if let skillName = skillNameByActionID[definition.actionID] {
-                    return skillName
+                    return KeepTalkingActionToolDefinition.routedActionName(
+                        skillName,
+                        actionID: definition.actionID
+                    )
                 }
-                return "action_\(definition.actionID.uuidString.lowercased().prefix(8))"
+                return KeepTalkingActionToolDefinition.routedActionName(
+                    "",
+                    actionID: definition.actionID,
+                    fallbackPrefix: "action"
+                )
             case .none:
-                return "action_\(definition.actionID.uuidString.lowercased().prefix(8))"
+                return KeepTalkingActionToolDefinition.routedActionName(
+                    "",
+                    actionID: definition.actionID,
+                    fallbackPrefix: "action"
+                )
         }
     }
 
