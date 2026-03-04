@@ -180,10 +180,22 @@ extension KeepTalkingClient {
                             try await mcpManager.registerIfNeeded(action)
                             onLog?("[mcp] registered local action=\(actionID)")
                         case .skill:
+                            let actionID = action.id?.uuidString.lowercased()
+                                ?? "unknown"
+                            onLog?("[skill] registering local action=\(actionID)")
                             try await skillManager.registerIfNeeded(action)
+                            onLog?("[skill] registered local action=\(actionID)")
                         case .primitive:
+                            let actionID = action.id?.uuidString.lowercased()
+                                ?? "unknown"
+                            onLog?(
+                                "[primitive] registering local action=\(actionID)"
+                            )
                             try await primitiveActionManager.registerIfNeeded(
                                 action
+                            )
+                            onLog?(
+                                "[primitive] registered local action=\(actionID)"
                             )
                         case .none:
                             return
