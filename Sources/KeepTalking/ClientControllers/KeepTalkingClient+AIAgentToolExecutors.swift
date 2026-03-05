@@ -129,16 +129,10 @@ extension KeepTalkingClient {
         rawArguments: String,
         context: KeepTalkingContext
     ) async throws -> String {
-        var arguments = try decodeToolArguments(rawArguments)
-        if definition.source == .mcp,
-            let mcpToolName = definition.mcpToolName,
-            arguments["tool"] == nil
-        {
-            arguments = [
-                "tool": .string(mcpToolName),
-                "arguments": .object(arguments),
-            ]
-        }
+        let arguments = try parsedActionCallArguments(
+            definition: definition,
+            rawArguments: rawArguments
+        )
 
         let actionCall = KeepTalkingActionCall(
             action: definition.actionID,
@@ -154,6 +148,134 @@ extension KeepTalkingClient {
             functionName: functionName,
             result: result
         )
+    }
+
+    func parsedActionCallArguments(
+        definition: KeepTalkingActionToolDefinition,
+        rawArguments: String
+    ) throws -> [String: Value] {
+        var arguments = try decodeToolArguments(rawArguments)
+        if definition.source == .mcp,
+            let mcpToolName = definition.mcpToolName,
+            arguments["tool"] == nil
+        {
+            arguments = [
+                "tool": .string(mcpToolName),
+                "arguments": .object(arguments),
+            ]
+        }
+        return arguments
+    }
+
+    func toolNameForChatText(
+        _ toolCall: ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
+            .ToolCallParam,
+        routesByFunctionName: [String: KeepTalkingAgentToolRoute],
+        skillNameByActionID: [UUID: String]
+    ) -> String {
+        let functionName = toolCall.function.name
+        guard functionName != Self.listingToolFunctionName else {
+            return "list available actions"
+        }
+        guard let route = routesByFunctionName[functionName] else {
+            return friendlyToolCallPhrase(
+                toolName: functionName,
+                ownerNodeID: nil,
+                actionID: nil
+            )
+        }
+
+        switch route {
+            case .actionProxy(let definition):
+                let routedToolName: String
+                if definition.source == .mcp,
+                    let arguments = try? parsedActionCallArguments(
+                        definition: definition,
+                        rawArguments: toolCall.function.arguments
+                    ),
+                    let selectedTool = arguments["tool"]?.stringValue?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                    !selectedTool.isEmpty
+                {
+                    routedToolName = KeepTalkingActionToolDefinition
+                        .routedActionName(
+                        selectedTool,
+                        actionID: definition.actionID
+                    )
+                } else {
+                    routedToolName = actionDisplayName(
+                        for: definition,
+                        route: route,
+                        skillNameByActionID: skillNameByActionID
+                    )
+                }
+
+                return friendlyToolCallPhrase(
+                    toolName: routedToolName,
+                    ownerNodeID: definition.ownerNodeID,
+                    actionID: definition.actionID
+                )
+            case .skillMetadata(let context):
+                return friendlyToolCallPhrase(
+                    toolName: "skill metadata \(context.bundle.name)",
+                    ownerNodeID: context.ownerNodeID,
+                    actionID: context.actionID
+                )
+            case .skillFileLocal(let context):
+                return friendlyToolCallPhrase(
+                    toolName: "skill file \(context.bundle.name)",
+                    ownerNodeID: context.ownerNodeID,
+                    actionID: context.actionID
+                )
+            case .skillFileRemote(let actionID, _, let skillName):
+                return friendlyToolCallPhrase(
+                    toolName: "skill file \(skillName)",
+                    ownerNodeID: nil,
+                    actionID: actionID
+                )
+        }
+    }
+
+    func friendlyToolCallPhrase(
+        toolName: String,
+        ownerNodeID: UUID?,
+        actionID: UUID?
+    ) -> String {
+        let unroutedName: String
+        if let actionID {
+            unroutedName = KeepTalkingActionToolDefinition.unroutedActionName(
+                toolName,
+                actionID: actionID
+            )
+        } else {
+            unroutedName = toolName
+        }
+
+        let collapsed = unroutedName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(
+                of: "[_\\-]+",
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: "\\s+",
+                with: " ",
+                options: .regularExpression
+            )
+
+        guard !collapsed.isEmpty else {
+            return "using tool"
+        }
+        guard let ownerNodeID else {
+            return collapsed
+        }
+
+        if ownerNodeID == config.node {
+            return "\(collapsed) on local node"
+        }
+        return
+            "\(collapsed) on node \(KeepTalkingActionToolDefinition.shortNodeID(ownerNodeID))"
     }
 
     func renderCatalogListing(

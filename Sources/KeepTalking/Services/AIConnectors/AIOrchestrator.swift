@@ -8,7 +8,8 @@ public struct AIOrchestrator {
     public typealias AssistantMessageBuilder =
         (OpenAIConnector.ToolPlanningResult) -> Message?
     public typealias ToolExecutor = ([ToolCall]) async throws -> [Message]
-    public typealias AssistantPublisher = (String) async throws -> Void
+    public typealias AssistantPublisher = ((String, KeepTalkingContextMessage.MessageType)) async throws -> Void
+    public typealias ToolNameResolver = (ToolCall) -> String
 
     public struct Configuration: Sendable {
         public let maxTurns: Int
@@ -23,17 +24,20 @@ public struct AIOrchestrator {
         public let assistantMessageBuilder: AssistantMessageBuilder
         public let toolExecutor: ToolExecutor
         public let assistantPublisher: AssistantPublisher
+        public let toolNameResolver: ToolNameResolver
 
         public init(
             openAIConnector: OpenAIConnector,
             assistantMessageBuilder: @escaping AssistantMessageBuilder,
             toolExecutor: @escaping ToolExecutor,
-            assistantPublisher: @escaping AssistantPublisher
+            assistantPublisher: @escaping AssistantPublisher,
+            toolNameResolver: @escaping ToolNameResolver = { $0.function.name }
         ) {
             self.openAIConnector = openAIConnector
             self.assistantMessageBuilder = assistantMessageBuilder
             self.toolExecutor = toolExecutor
             self.assistantPublisher = assistantPublisher
+            self.toolNameResolver = toolNameResolver
         }
     }
 
@@ -76,11 +80,15 @@ public struct AIOrchestrator {
                 latestAssistantText = assistantText
             }
 
-            if let chatText = Self.chatText(for: turn) {
+            if let chatText = Self.chatText(
+                for: turn,
+                toolNameResolver: dependencies.toolNameResolver
+            ) {
                 if latestAssistantText.isEmpty {
-                    latestAssistantText = chatText
+                    latestAssistantText = chatText.0
                 }
-                try await dependencies.assistantPublisher(chatText)
+                try await dependencies
+                    .assistantPublisher(chatText)
             }
 
             guard !turn.toolCalls.isEmpty else {
@@ -96,21 +104,55 @@ public struct AIOrchestrator {
     }
 
     private static func chatText(
-        for turn: OpenAIConnector.ToolPlanningResult
-    ) -> String? {
+        for turn: OpenAIConnector.ToolPlanningResult,
+        toolNameResolver: ToolNameResolver
+    ) -> (String, KeepTalkingContextMessage.MessageType)? {
         if let assistantText = turn.assistantText?
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !assistantText.isEmpty
         {
-            return assistantText
+            return (assistantText, .message)
         }
         guard !turn.toolCalls.isEmpty else {
             return nil
         }
-        let toolNames = turn.toolCalls.map(\.function.name)
+        let toolNames = orderedUniqueToolNames(
+            turn.toolCalls.map(toolNameResolver)
+        )
         if toolNames.count == 1, let name = toolNames.first {
-            return "[tool] calling \(name)"
+            return (
+                name,
+                .intermediate(
+                    hint: IntermediateMessageHints.toolUse.rawValue
+                )
+            )
         }
-        return "[tool] calling \(toolNames.joined(separator: ", "))"
+        return (
+            toolNames.joined(separator: ", "),
+            .intermediate(hint: IntermediateMessageHints.toolUse.rawValue)
+        )
+    }
+
+    private static func orderedUniqueToolNames(_ rawNames: [String]) -> [String] {
+        var seen: Set<String> = []
+        var names: [String] = []
+        names.reserveCapacity(rawNames.count)
+
+        for rawName in rawNames {
+            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty, seen.insert(name).inserted else {
+                continue
+            }
+            names.append(name)
+        }
+
+        return names.isEmpty ? rawNames : names
+    }
+}
+
+extension AIOrchestrator {
+    public enum IntermediateMessageHints: String {
+        case toolUse = "Using tool"
+        case reasoning = "Reasoning"
     }
 }

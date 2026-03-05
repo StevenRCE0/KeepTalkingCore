@@ -19,6 +19,9 @@ public final class KeepTalkingContextMessage: Model, @unchecked Sendable {
     @Field(key: "timestamp")
     public var timestamp: Date
 
+    @Field(key: "message_type")
+    public var type: MessageType
+
     public init() {}
 
     public init(
@@ -26,13 +29,15 @@ public final class KeepTalkingContextMessage: Model, @unchecked Sendable {
         context: KeepTalkingContext,
         sender: Sender,
         content: String,
-        timestamp: Date = Date()
+        timestamp: Date = Date(),
+        type: MessageType = .message
     ) {
         self.id = id
         self.$context.id = context.id!
         self.sender = sender
         self.content = content
         self.timestamp = timestamp
+        self.type = type
     }
 }
 
@@ -40,6 +45,11 @@ extension KeepTalkingContextMessage {
     public enum Sender: Codable, Sendable, Hashable {
         case node(node: UUID)
         case autonomous(name: String)
+    }
+
+    public enum MessageType: Codable, Sendable, Hashable {
+        case message
+        case intermediate(hint: String)
     }
 }
 

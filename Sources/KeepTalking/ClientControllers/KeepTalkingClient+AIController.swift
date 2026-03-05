@@ -34,7 +34,8 @@ extension KeepTalkingClient {
     public func runAI(
         prompt: String,
         in context: KeepTalkingContext,
-        model: OpenAIModel = "gpt-5-codex"
+        model: OpenAIModel = "gpt-5-codex",
+        roleName: String = "ai"
     ) async throws -> String {
         guard let openAIConnector = try await resolveOpenAIConnector() else {
             throw KeepTalkingClientError.aiNotConfigured
@@ -60,6 +61,9 @@ extension KeepTalkingClient {
             : [
                 listingTool, webSearchTool,
             ] + runtimeCatalog.catalog.openAITools
+        let skillNameByActionID = skillNamesByActionID(
+            routesByFunctionName: runtimeCatalog.routesByFunctionName
+        )
         let contextTranscript = try await agentContextTranscript(
             persistedContext,
             skillSummaries: runtimeCatalog.skillSummaries
@@ -100,12 +104,21 @@ extension KeepTalkingClient {
                         context: persistedContext
                     )
                 },
-                assistantPublisher: { [self] assistantText in
+                assistantPublisher: { [self] (assistantText, messageType) in
                     try await send(
                         assistantText,
                         in: persistedContext,
-                        sender: .autonomous(name: "ai"),
+                        sender: .autonomous(name: roleName),
+                        type: messageType,
                         emitLocalEnvelope: true
+                    )
+                },
+                toolNameResolver: { [self] toolCall in
+                    toolNameForChatText(
+                        toolCall,
+                        routesByFunctionName: runtimeCatalog
+                            .routesByFunctionName,
+                        skillNameByActionID: skillNameByActionID
                     )
                 }
             ),

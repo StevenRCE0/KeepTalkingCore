@@ -8,6 +8,7 @@ struct CreateKeepTalkingContextMessagesMigration: Migration {
             .field("sender", .json, .required)
             .field("content", .string, .required)
             .field("timestamp", .datetime, .required)
+            .field("message_type", .json, .required)
             .create()
     }
 

@@ -9,6 +9,7 @@ extension KeepTalkingClient {
         _ text: String,
         in context: KeepTalkingContext,
         sender: KeepTalkingContextMessage.Sender? = nil,
+        type: KeepTalkingContextMessage.MessageType = .message,
         emitLocalEnvelope: Bool = false
     ) async throws {
         let node = try await getCurrentNodeInstance()
@@ -17,7 +18,8 @@ extension KeepTalkingClient {
         let message = KeepTalkingContextMessage(
             context: persistedContext,
             sender: try sender ?? .node(node: node.requireID()),
-            content: text
+            content: text,
+            type: type
         )
         persistedContext.updatedAt = message.timestamp
         _ = try await persistedContext.$messages.get(on: localStore.database)
@@ -36,6 +38,7 @@ extension KeepTalkingClient {
         _ text: String,
         in context: UUID,
         sender: KeepTalkingContextMessage.Sender? = nil,
+        type: KeepTalkingContextMessage.MessageType = .message,
         emitLocalEnvelope: Bool = false
     ) async throws {
         let targetContext = try await ensure(
@@ -47,6 +50,7 @@ extension KeepTalkingClient {
             text,
             in: targetContext,
             sender: sender,
+            type: type,
             emitLocalEnvelope: emitLocalEnvelope
         )
     }
