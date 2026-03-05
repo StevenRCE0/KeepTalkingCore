@@ -104,7 +104,8 @@ extension KeepTalkingClient {
                     try await send(
                         assistantText,
                         in: persistedContext,
-                        sender: .autonomous(name: "ai")
+                        sender: .autonomous(name: "ai"),
+                        emitLocalEnvelope: true
                     )
                 }
             ),
@@ -166,8 +167,9 @@ extension KeepTalkingClient {
             }
         }()
 
-        let timeoutSeconds: TimeInterval = 10
+        let timeoutSeconds: TimeInterval = source == "mcp" ? 30 : 10
         let timeoutNanos = UInt64(max(timeoutSeconds, 1) * 1_000_000_000)
+        let actionIDLabel = actionID.uuidString.lowercased()
 
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
@@ -201,8 +203,11 @@ extension KeepTalkingClient {
                             return
                     }
                 }
-                group.addTask {
+                group.addTask { [self] in
                     try await Task.sleep(nanoseconds: timeoutNanos)
+                    self.onLog?(
+                        "[\(source)] registration timeout action=\(actionIDLabel) after=\(Int(timeoutSeconds))s"
+                    )
                     throw LocalExecutorRegistrationTimeoutError(
                         actionID: actionID,
                         source: source,

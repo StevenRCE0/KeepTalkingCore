@@ -79,7 +79,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public var onRawMessage: RawMessageHandler?
     public var onPeerConnect: PeerConnectHandler?
     public var onLog: LogHandler? {
-        didSet { rtcClient.onLog = onLog }
+        didSet {
+            rtcClient.onLog = onLog
+            Task { [weak self] in
+                guard let self else { return }
+                await self.mcpManager.setLogHandler(self.onLog)
+            }
+        }
     }
 
     public var aiEnabled: Bool {

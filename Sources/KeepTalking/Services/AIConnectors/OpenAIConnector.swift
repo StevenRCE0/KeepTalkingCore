@@ -22,6 +22,11 @@ public actor OpenAIConnector {
         4) Never skip the skill_file step for skill actions, even if metadata looks sufficient.
         5) If skill_file fails, explain the failure and do not continue with that skill action_proxy call.
 
+        Tool-result response policy:
+        1) When tool output contains user-relevant findings, include a concise assistant text summary after processing the tool output.
+        2) If the tool output has nothing meaningful for the user, keep the assistant text brief and explicit about that.
+        3) Do not just stop at tool calls when the user would benefit from a short natural-language update.
+
         Conversation context:
         \(contextTranscript)
         """

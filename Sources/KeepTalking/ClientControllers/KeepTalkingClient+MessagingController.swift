@@ -8,7 +8,8 @@ extension KeepTalkingClient {
     public func send(
         _ text: String,
         in context: KeepTalkingContext,
-        sender: KeepTalkingContextMessage.Sender? = nil
+        sender: KeepTalkingContextMessage.Sender? = nil,
+        emitLocalEnvelope: Bool = false
     ) async throws {
         let node = try await getCurrentNodeInstance()
         let persistedContext = try await upsertContext(context)
@@ -23,6 +24,9 @@ extension KeepTalkingClient {
 
         try await message.save(on: localStore.database)
         try await persistedContext.save(on: localStore.database)
+        if emitLocalEnvelope {
+            onEnvelope?(.message(message))
+        }
 
         let encryptedMessage = try await encryptedOutboundMessage(message)
         try rtcClient.sendEnvelope(.message(encryptedMessage))
@@ -31,14 +35,20 @@ extension KeepTalkingClient {
     public func send(
         _ text: String,
         in context: UUID,
-        sender: KeepTalkingContextMessage.Sender? = nil
+        sender: KeepTalkingContextMessage.Sender? = nil,
+        emitLocalEnvelope: Bool = false
     ) async throws {
         let targetContext = try await ensure(
             context,
             for: KeepTalkingContext.self
         )
 
-        try await send(text, in: targetContext, sender: sender)
+        try await send(
+            text,
+            in: targetContext,
+            sender: sender,
+            emitLocalEnvelope: emitLocalEnvelope
+        )
     }
 
     public func sendConversationContext(

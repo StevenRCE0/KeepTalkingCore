@@ -74,7 +74,13 @@ public struct AIOrchestrator {
                 !assistantText.isEmpty
             {
                 latestAssistantText = assistantText
-                try await dependencies.assistantPublisher(assistantText)
+            }
+
+            if let chatText = Self.chatText(for: turn) {
+                if latestAssistantText.isEmpty {
+                    latestAssistantText = chatText
+                }
+                try await dependencies.assistantPublisher(chatText)
             }
 
             guard !turn.toolCalls.isEmpty else {
@@ -87,5 +93,24 @@ public struct AIOrchestrator {
         }
 
         return latestAssistantText
+    }
+
+    private static func chatText(
+        for turn: OpenAIConnector.ToolPlanningResult
+    ) -> String? {
+        if let assistantText = turn.assistantText?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !assistantText.isEmpty
+        {
+            return assistantText
+        }
+        guard !turn.toolCalls.isEmpty else {
+            return nil
+        }
+        let toolNames = turn.toolCalls.map(\.function.name)
+        if toolNames.count == 1, let name = toolNames.first {
+            return "[tool] calling \(name)"
+        }
+        return "[tool] calling \(toolNames.joined(separator: ", "))"
     }
 }
