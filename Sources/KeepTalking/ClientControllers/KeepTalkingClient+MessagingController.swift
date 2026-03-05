@@ -301,7 +301,8 @@ extension KeepTalkingClient {
             context: KeepTalkingContext(id: contextID),
             sender: message.sender,
             content: encryptedContent,
-            timestamp: message.timestamp
+            timestamp: message.timestamp,
+            type: message.type
         )
         return outbound
     }

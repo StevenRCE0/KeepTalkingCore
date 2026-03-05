@@ -5,6 +5,18 @@ public enum KeepTalkingKVServiceError: Error {
     case invalidStoredValue
 }
 
+public struct KeepTalkingPairPublicKeyRecord: Sendable {
+    public let sourceNodeID: UUID
+    public let trustedNodeID: UUID
+    public let publicKey: String
+
+    public init(sourceNodeID: UUID, trustedNodeID: UUID, publicKey: String) {
+        self.sourceNodeID = sourceNodeID
+        self.trustedNodeID = trustedNodeID
+        self.publicKey = publicKey
+    }
+}
+
 public final class KeepTalkingPassKVService: KeepTalkingKVService,
     @unchecked Sendable
 {
@@ -108,6 +120,43 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
     public func loadNodeIDs() async throws -> [UUID] {
         let document = try await fetchDocument()
         return document.ktOwnedNodes.compactMap { UUID(uuidString: $0) }
+    }
+
+    public func loadPairPublicKeys(
+        trustedNodeID: UUID? = nil
+    ) async throws -> [KeepTalkingPairPublicKeyRecord] {
+        let document = try await fetchDocument()
+        let normalizedTrustedNodeID = trustedNodeID?
+            .uuidString
+            .lowercased()
+
+        return document.pairPublicKeys.compactMap { key, publicKey in
+            guard
+                let pair = parsePairPublicKey(key),
+                let sourceNodeID = UUID(uuidString: pair.nodeID),
+                let pairTrustedNodeID = UUID(uuidString: pair.trustedNodeID)
+            else {
+                return nil
+            }
+
+            if let normalizedTrustedNodeID,
+                pair.trustedNodeID != normalizedTrustedNodeID
+            {
+                return nil
+            }
+
+            return KeepTalkingPairPublicKeyRecord(
+                sourceNodeID: sourceNodeID,
+                trustedNodeID: pairTrustedNodeID,
+                publicKey: publicKey
+            )
+        }
+        .sorted {
+            if $0.sourceNodeID == $1.sourceNodeID {
+                return $0.trustedNodeID.uuidString < $1.trustedNodeID.uuidString
+            }
+            return $0.sourceNodeID.uuidString < $1.sourceNodeID.uuidString
+        }
     }
 
     public func storeNodeMetadata(
