@@ -53,7 +53,8 @@ extension KeepTalkingClient {
     @discardableResult
     public func trust(
         node targetNodeID: UUID,
-        scope: KeepTalkingNodeTrustScope = .allContexts
+        scope: KeepTalkingNodeTrustScope = .allContexts,
+        own: Bool = false
     ) async throws -> String {
         let localNode = try await getCurrentNodeInstance()
         let localNodeID = try localNode.requireID()
@@ -79,22 +80,29 @@ extension KeepTalkingClient {
             .filter(\.$to.$id, .equal, targetNodeID)
             .first()
         {
-            existingRelation.relationship = mergedTrustRelationship(
-                current: existingRelation.relationship,
-                requestedScope: scope
-            )
+            existingRelation.relationship =
+                own
+                ? .owner
+                : mergedTrustRelationship(
+                    current: existingRelation.relationship,
+                    requestedScope: scope
+                )
             try await existingRelation.save(on: localStore.database)
 
             relation = existingRelation
         } else {
-
-            let newRelationship: KeepTalkingRelationship =
+            let newRelationship: KeepTalkingRelationship
+            if own {
+                newRelationship = .owner
+            } else {
                 switch scope {
                     case .allContexts:
-                        .trustedInAllContext
+                        newRelationship = .trustedInAllContext
                     case .context(let context):
-                        .trusted([context])
+                        newRelationship = .trusted([context])
                 }
+            }
+
             relation = try KeepTalkingNodeRelation(
                 from: localNode,
                 to: remoteNode,
@@ -793,7 +801,12 @@ extension KeepTalkingClient {
     ) -> KeepTalkingRelationship {
         switch requestedScope {
             case .allContexts:
-                return .trustedInAllContext
+                switch current {
+                    case .owner:
+                        return .owner
+                    case .trustedInAllContext, .trusted, .pending:
+                        return .trustedInAllContext
+                }
             case .context(let context):
                 switch current {
                     case .owner, .trustedInAllContext:
@@ -820,9 +833,11 @@ extension KeepTalkingClient {
             throw KeepTalkingClientError.missingNode
         }
 
-        guard let relation = try await getCurrentNodeInstance().$outgoingNodeRelations.query(
-            on: localStore.database
-        ).filter(\.$to.$id == toNodeID).first() else {
+        guard
+            let relation = try await getCurrentNodeInstance().$outgoingNodeRelations.query(
+                on: localStore.database
+            ).filter(\.$to.$id == toNodeID).first()
+        else {
             throw KeepTalkingClientError.missingRelation
         }
 
