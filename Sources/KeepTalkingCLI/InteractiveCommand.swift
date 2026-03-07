@@ -14,7 +14,12 @@ enum InteractiveCommand {
     case ai(String)
     case mcpList
     case mcpRemove(String)
-    case mcpAddHTTP(name: String, url: String, description: String)
+    case mcpAddHTTP(
+        name: String,
+        url: String,
+        description: String,
+        headers: [String: String]
+    )
     case mcpAddSTDIO(
         name: String,
         command: [String],
@@ -100,8 +105,14 @@ enum InteractiveCommand {
             if parts.count >= 5, parts[1] == "add", parts[2] == "http" {
                 let name = parts[3]
                 let url = parts[4]
-                let description = parts.count > 5 ? parts[5...].joined(separator: " ") : ""
-                return .mcpAddHTTP(name: name, url: url, description: description)
+                let tail = parts.count > 5 ? Array(parts[5...]) : []
+                let parsed = parseHTTPOptions(tail)
+                return .mcpAddHTTP(
+                    name: name,
+                    url: url,
+                    description: parsed.description,
+                    headers: parsed.headers
+                )
             }
             if parts.count >= 5, parts[1] == "add", parts[2] == "stdio" {
                 let name = parts[3]
@@ -185,5 +196,39 @@ enum InteractiveCommand {
             return nil
         }
         return (command, environment)
+    }
+
+    private static func parseHTTPOptions(
+        _ tokens: [String]
+    ) -> (description: String, headers: [String: String]) {
+        var descriptionParts: [String] = []
+        var headers: [String: String] = [:]
+        var index = 0
+
+        while index < tokens.count {
+            let token = tokens[index]
+            if token == "--header", index + 1 < tokens.count {
+                let assignment = tokens[index + 1]
+                if let eq = assignment.firstIndex(of: "="),
+                    eq != assignment.startIndex
+                {
+                    let key = String(assignment[..<eq]).trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                    if !key.isEmpty {
+                        let value = String(
+                            assignment[assignment.index(after: eq)...]
+                        )
+                        headers[key] = value
+                    }
+                }
+                index += 2
+                continue
+            }
+            descriptionParts.append(token)
+            index += 1
+        }
+
+        return (descriptionParts.joined(separator: " "), headers)
     }
 }

@@ -19,6 +19,7 @@ let keepTalkingUsage = """
     Examples:
       KeepTalking --context 11111111-2222-3333-4444-555555555555 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
       KeepTalking --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --message "hello from ion-sfu"
+      KeepTalking --mcp add-http linear https://mcp.linear.app --header Authorization=Bearer_token
       KeepTalking --mcp add-stdio foo --env OPENAI_API_KEY=sk-... --env MODEL=gpt-4.1 -- npx -y @modelcontextprotocol/server-github
       KeepTalking --skill add-directory doc-summarizer ~/.codex/skills/doc-summarizer "Local documentation summarizer"
 
@@ -33,7 +34,7 @@ let keepTalkingUsage = """
                    list known actions and current grants
       /actions grant <node-id> <action-id> [context|all]
                    grant action permission to a trusted/owned node
-      /mcp add-http <name> <url> [description]
+      /mcp add-http <name> <url> [--header KEY=VALUE ...] [description]
                    register a local MCP HTTP action
       /mcp add-stdio <name> [--env KEY=VALUE ...] -- <command> [args...]
                    register a local MCP stdio action
@@ -54,7 +55,12 @@ let keepTalkingUsage = """
 enum MCPManagementCommand {
     case list
     case remove(actionID: UUID)
-    case addHTTP(name: String, url: URL, description: String?)
+    case addHTTP(
+        name: String,
+        url: URL,
+        description: String?,
+        headers: [String: String]
+    )
     case addSTDIO(
         name: String,
         command: [String],
@@ -80,6 +86,7 @@ enum CliError: LocalizedError {
     case invalidMCPURL(String)
     case invalidActionID(String)
     case invalidMCPEnvironment(String)
+    case invalidMCPHeader(String)
     case invalidOpenAIEndpoint(String)
     case invalidSkillCommand(String)
     case invalidSkillDirectory(String)
@@ -109,6 +116,8 @@ enum CliError: LocalizedError {
                 return "Invalid action UUID: \(raw)"
             case .invalidMCPEnvironment(let raw):
                 return "Invalid MCP env assignment: \(raw). Expected KEY=VALUE."
+            case .invalidMCPHeader(let raw):
+                return "Invalid MCP header assignment: \(raw). Expected KEY=VALUE."
             case .invalidOpenAIEndpoint(let raw):
                 return "Invalid OpenAI endpoint URL: \(raw)"
             case .invalidSkillCommand(let raw):
@@ -222,8 +231,26 @@ struct CliConfig {
                             guard let url = URL(string: urlRaw) else {
                                 throw CliError.invalidMCPURL(urlRaw)
                             }
+                            var headers: [String: String] = [:]
                             var descriptionParts: [String] = []
-                            while index + 1 < args.count, !args[index + 1].hasPrefix("--") {
+                            while index + 1 < args.count {
+                                let nextToken = args[index + 1]
+                                if nextToken == "--header" {
+                                    index += 2
+                                    guard index < args.count else {
+                                        throw CliError.missingValue(
+                                            "--header KEY=VALUE"
+                                        )
+                                    }
+                                    let parsed = try parseHTTPHeader(
+                                        args[index]
+                                    )
+                                    headers[parsed.key] = parsed.value
+                                    continue
+                                }
+                                if nextToken.hasPrefix("--") {
+                                    break
+                                }
                                 index += 1
                                 descriptionParts.append(args[index])
                             }
@@ -234,7 +261,8 @@ struct CliConfig {
                             mcpCommand = .addHTTP(
                                 name: name,
                                 url: url,
-                                description: description
+                                description: description,
+                                headers: headers
                             )
                         case "add-stdio":
                             index += 1
@@ -432,6 +460,24 @@ struct CliConfig {
         }
 
         return (command, environment)
+    }
+
+    private static func parseHTTPHeader(
+        _ assignment: String
+    ) throws -> (key: String, value: String) {
+        guard let eq = assignment.firstIndex(of: "="),
+            eq != assignment.startIndex
+        else {
+            throw CliError.invalidMCPHeader(assignment)
+        }
+        let key = String(assignment[..<eq]).trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !key.isEmpty else {
+            throw CliError.invalidMCPHeader(assignment)
+        }
+        let value = String(assignment[assignment.index(after: eq)...])
+        return (key, value)
     }
 
     private static func normalizeOpenAIEndpoint(_ raw: String?) throws -> String? {

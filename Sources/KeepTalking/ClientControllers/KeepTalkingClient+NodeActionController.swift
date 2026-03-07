@@ -9,6 +9,11 @@ import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
+    private static func loadedDescriptor(
+        from action: KeepTalkingAction
+    ) -> KeepTalkingActionDescriptor? {
+        action.$descriptor.value ?? nil
+    }
 
     func deduplicatedAndSortedActions(
         _ actions: [KeepTalkingAction]
@@ -52,6 +57,87 @@ extension KeepTalkingClient {
                 "register_mcp_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
         )
         return action
+    }
+
+    public func preflightHTTPMCPAuthentication(actionID: UUID) async throws {
+        guard
+            let action = try await KeepTalkingAction.query(
+                on: localStore.database
+            )
+            .filter(\.$id, .equal, actionID)
+            .filter(\.$node.$id, .equal, config.node)
+            .first()
+        else {
+            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
+        }
+
+        guard case .mcpBundle(let bundle) = action.payload else {
+            return
+        }
+        guard case .http = bundle.service else {
+            return
+        }
+
+        try await preflightHTTPMCPAuthentication(action: action)
+    }
+
+    public func preflightHTTPMCPAuthentication(
+        action: KeepTalkingAction
+    ) async throws {
+        guard case .mcpBundle(let bundle) = action.payload else {
+            return
+        }
+        guard case .http = bundle.service else {
+            return
+        }
+
+        try await mcpManager.preflightHTTPAuthentication(action: action)
+    }
+
+    public func saveConstructedAction(
+        _ action: KeepTalkingAction
+    ) async throws -> KeepTalkingAction {
+        guard let payload = action.payload else {
+            throw KeepTalkingClientError.unsupportedActionPayload
+        }
+
+        if action.id == nil {
+            action.id = UUID()
+        }
+        if action.$node.id == nil {
+            let node = try await getCurrentNodeInstance()
+            action.$node.id = try node.requireID()
+        }
+        if Self.loadedDescriptor(from: action) == nil {
+            switch payload {
+                case .mcpBundle(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
+                case .skill(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
+                case .primitive(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
+            }
+        }
+
+        try await action.save(on: localStore.database)
+        switch payload {
+            case .mcpBundle:
+                try await mcpManager.registerMCPAction(action)
+            case .skill:
+                try await skillManager.registerSkillAction(action)
+            case .primitive:
+                try await primitiveActionManager.registerPrimitiveAction(action)
+        }
+        await invalidateActionToolCatalog(
+            reason: "register_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
+        )
+        return action
+    }
+
+    public func saveConstructedMCPAction(
+        _ action: KeepTalkingAction
+    ) async throws -> KeepTalkingAction {
+        try await saveConstructedAction(action)
     }
 
     static public func registerMCPAction(
@@ -198,7 +284,7 @@ extension KeepTalkingClient {
         }
         if let descriptor {
             action.descriptor = descriptor
-        } else if action.descriptor == nil,
+        } else if Self.loadedDescriptor(from: action) == nil,
             case .mcpBundle(let existingBundle) = action.payload
         {
             action.descriptor = defaultDescriptor(for: existingBundle)
@@ -244,7 +330,7 @@ extension KeepTalkingClient {
         }
         if let descriptor {
             action.descriptor = descriptor
-        } else if action.descriptor == nil,
+        } else if Self.loadedDescriptor(from: action) == nil,
             case .skill(let existingBundle) = action.payload
         {
             action.descriptor = Self.defaultDescriptor(for: existingBundle)
@@ -290,7 +376,7 @@ extension KeepTalkingClient {
         }
         if let descriptor {
             action.descriptor = descriptor
-        } else if action.descriptor == nil,
+        } else if Self.loadedDescriptor(from: action) == nil,
             case .primitive(let existingBundle) = action.payload
         {
             action.descriptor = Self.defaultDescriptor(for: existingBundle)

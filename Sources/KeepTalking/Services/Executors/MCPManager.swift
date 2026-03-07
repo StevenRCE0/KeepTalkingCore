@@ -11,6 +11,9 @@ public enum MCPManagerError: LocalizedError {
     case invalidAction
     case missingActionID
     case invalidStdioCommand
+    case missingHTTPAuthURLHandler(UUID)
+    case httpAuthCancelled(UUID)
+    case httpAuthDeclined(UUID)
     case connectionTimedOut(TimeInterval)
     case toolCallTimedOut(UUID, TimeInterval)
     case stdioProcessExitedEarly(command: [String], status: Int32)
@@ -25,6 +28,12 @@ public enum MCPManagerError: LocalizedError {
                 return "Action must have an ID before registration."
             case .invalidStdioCommand:
                 return "Stdio MCP command must include an executable."
+            case .missingHTTPAuthURLHandler(let actionID):
+                return "HTTP MCP action requires auth flow, but no auth handler is registered. action=\(actionID)"
+            case .httpAuthCancelled(let actionID):
+                return "HTTP MCP auth flow was cancelled. action=\(actionID)"
+            case .httpAuthDeclined(let actionID):
+                return "HTTP MCP auth flow was declined. action=\(actionID)"
             case .connectionTimedOut(let timeout):
                 return "Timed out while connecting to MCP server after \(Int(timeout))s."
             case .toolCallTimedOut(let actionID, let timeout):
@@ -39,6 +48,12 @@ public enum MCPManagerError: LocalizedError {
                 return "Action is not registered in MCPManager: \(actionID)"
         }
     }
+}
+
+public enum KeepTalkingMCPHTTPAuthResult: Sendable {
+    case completed(callbackURL: URL)
+    case cancelled
+    case declined
 }
 
 public actor MCPManager {
@@ -89,6 +104,8 @@ public actor MCPManager {
     private var virtualToolNamesByActionID: [UUID: [String]] = [:]
     private var onActionToolsChanged: (@Sendable (UUID) async -> Void)?
     private var onLog: (@Sendable (String) -> Void)?
+    private var onHTTPAuthURL:
+        (@Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult)?
 
     public init(
         nodeConfig: KeepTalkingConfig,
@@ -108,6 +125,12 @@ public actor MCPManager {
 
     public func setLogHandler(_ handler: (@Sendable (String) -> Void)?) {
         onLog = handler
+    }
+
+    public func setHTTPAuthURLHandler(
+        _ handler: (@Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult)?
+    ) {
+        onHTTPAuthURL = handler
     }
 
     public func registerMCPAction(_ action: KeepTalkingAction) async throws {
@@ -524,6 +547,9 @@ public actor MCPManager {
             name: "KeepTalking:\(nodeConfig.node.uuidString):\(actionID.uuidString)",
             version: "1.0.0",
             title: "KeepTalking",
+            capabilities: .init(
+                elicitation: .init(form: nil, url: .init())
+            ),
             configuration: .default
         )
 
@@ -537,12 +563,22 @@ public actor MCPManager {
                 )
             case .http(let url, _, let headers):
                 let transportConfiguration = URLSessionConfiguration.default
-                transportConfiguration.httpAdditionalHeaders = headers
+                let sanitizedHeaders = Self.sanitizedHTTPHeaders(headers)
 
                 let transport = HTTPClientTransport(
                     endpoint: url,
                     configuration: transportConfiguration,
-                    streaming: true
+                    streaming: true,
+                    requestModifier: { request in
+                        var modifiedRequest = request
+                        for (key, value) in sanitizedHeaders {
+                            modifiedRequest.setValue(
+                                value,
+                                forHTTPHeaderField: key
+                            )
+                        }
+                        return modifiedRequest
+                    }
                 )
                 try await Self.connectClient(
                     client,
@@ -578,6 +614,26 @@ public actor MCPManager {
         await onActionToolsChanged(actionID)
     }
 
+    public func preflightHTTPAuthentication(action: KeepTalkingAction) async throws {
+        guard let actionID = action.id else {
+            throw MCPManagerError.missingActionID
+        }
+        guard case .mcpBundle(let bundle) = action.payload else {
+            throw MCPManagerError.invalidAction
+        }
+        guard case .http(let endpoint, _, let headers) = bundle.service else {
+            return
+        }
+
+        try await registerMCPAction(action)
+
+        try await preflightHTTPAuthenticationViaMCP(
+            actionID: actionID,
+            endpoint: endpoint,
+            headers: Self.sanitizedHTTPHeaders(headers)
+        )
+    }
+
     private func terminateStdioProcess(for actionID: UUID) {
         guard let handle = stdioProcessesByActionID.removeValue(forKey: actionID) else {
             return
@@ -609,6 +665,48 @@ public actor MCPManager {
         let actionIDLabel = actionID.uuidString.lowercased()
         for line in text.split(whereSeparator: \.isNewline) where !line.isEmpty {
             log("[mcp][stdio][stderr] action=\(actionIDLabel) \(line)")
+        }
+    }
+
+    private func preflightHTTPAuthenticationViaMCP(
+        actionID: UUID,
+        endpoint: URL,
+        headers: [String: String]
+    ) async throws {
+        let client = Client(
+            name: "KeepTalking:preflight:\(nodeConfig.node.uuidString):\(actionID.uuidString)",
+            version: "1.0.0",
+            title: "KeepTalking",
+            capabilities: .init(
+                elicitation: .init(form: nil, url: .init())
+            ),
+            configuration: .default
+        )
+
+        let transport = HTTPClientTransport(
+            endpoint: endpoint,
+            configuration: .default,
+            streaming: true,
+            requestModifier: { request in
+                var modifiedRequest = request
+                for (key, value) in headers {
+                    modifiedRequest.setValue(value, forHTTPHeaderField: key)
+                }
+                return modifiedRequest
+            }
+        )
+
+        do {
+            try await Self.connectClient(
+                client,
+                transport: transport,
+                timeoutSeconds: connectTimeoutSeconds
+            )
+            _ = try await client.listTools()
+            await client.disconnect()
+        } catch {
+            await client.disconnect()
+            throw error
         }
     }
 
@@ -709,5 +807,22 @@ public actor MCPManager {
             return defaults.joined(separator: ":")
         }
         return components.joined(separator: ":")
+    }
+
+    private static func sanitizedHTTPHeaders(
+        _ rawHeaders: [String: String]
+    ) -> [String: String] {
+        var headers: [String: String] = [:]
+        headers.reserveCapacity(rawHeaders.count)
+        for (rawKey, rawValue) in rawHeaders {
+            let key = rawKey.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard !key.isEmpty else {
+                continue
+            }
+            headers[key] = rawValue
+        }
+        return headers
     }
 }

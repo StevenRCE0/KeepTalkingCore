@@ -69,6 +69,8 @@ public enum KeepTalkingClientError: LocalizedError {
 public final class KeepTalkingClient: @unchecked Sendable {
     public static let availablePrimitiveActions =
         KeepTalkingPrimitiveBundle.availablePrimitiveActions
+    public typealias MCPHTTPAuthURLHandler =
+        @Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult
 
     public typealias EnvelopeHandler = @Sendable (KeepTalkingP2PEnvelope) -> Void
     public typealias RawMessageHandler = @Sendable (String) -> Void
@@ -102,6 +104,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let skillManager: SkillManager
     let primitiveActionManager: PrimitiveActionManager
     let openAIConnector: OpenAIConnector?
+    private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
 
     let actionCallQueue = DispatchQueue(
         label: "KeepTalking.client.action-call"
@@ -191,6 +194,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     }
 
     public func connect() async throws {
+        await mcpManager.setHTTPAuthURLHandler(mcpHTTPAuthURLHandler)
         _ = try await ensure(config.contextID, for: KeepTalkingContext.self)
 
         try await rtcClient.start()
@@ -214,6 +218,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
         failAllPendingActionCatalogRequests(error: SignalError.closed)
         cancelDebouncedNodeStateBroadcast()
         rtcClient.stop()
+    }
+
+    public func setMCPHTTPAuthURLHandler(_ handler: MCPHTTPAuthURLHandler?) {
+        mcpHTTPAuthURLHandler = handler
+        Task { [weak self] in
+            await self?.mcpManager.setHTTPAuthURLHandler(handler)
+        }
     }
 
     public func runtimeStats() -> KeepTalkingRuntimeStats {

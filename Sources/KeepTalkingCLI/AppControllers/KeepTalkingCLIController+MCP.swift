@@ -9,11 +9,12 @@ extension KeepTalkingCLIController {
             case .remove(let actionID):
                 try await client.removeMCPAction(actionID: actionID)
                 print("[mcp] removed action=\(actionID.uuidString.lowercased())")
-            case .addHTTP(let name, let url, let description):
+            case .addHTTP(let name, let url, let description, let headers):
                 try await registerHTTPMCPAction(
                     name: name,
                     url: url,
-                    description: description ?? ""
+                    description: description ?? "",
+                    headers: headers
                 )
             case .addSTDIO(let name, let command, let environment):
                 try await registerStdioMCPActionInternal(
@@ -58,11 +59,16 @@ extension KeepTalkingCLIController {
         }
     }
 
-    func registerHTTPMCPAction(name: String, urlRaw: String, description: String) async {
+    func registerHTTPMCPAction(
+        name: String,
+        urlRaw: String,
+        description: String,
+        headers: [String: String]
+    ) async {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedURL = urlRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty, !trimmedURL.isEmpty else {
-            print("Usage: /mcp add http <name> <url> [description]")
+            print("Usage: /mcp add http <name> <url> [--header KEY=VALUE ...] [description]")
             return
         }
         guard let url = URL(string: trimmedURL) else {
@@ -70,7 +76,12 @@ extension KeepTalkingCLIController {
             return
         }
         do {
-            try await registerHTTPMCPAction(name: trimmedName, url: url, description: description)
+            try await registerHTTPMCPAction(
+                name: trimmedName,
+                url: url,
+                description: description,
+                headers: headers
+            )
         } catch {
             fputs("MCP registration failed: \(error.localizedDescription)\n", stderr)
         }
@@ -101,7 +112,12 @@ extension KeepTalkingCLIController {
         }
     }
 
-    private func registerHTTPMCPAction(name: String, url: URL, description: String) async throws {
+    private func registerHTTPMCPAction(
+        name: String,
+        url: URL,
+        description: String,
+        headers: [String: String]
+    ) async throws {
         let trimmedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
         let indexDescription =
             trimmedDescription.isEmpty
@@ -115,12 +131,67 @@ extension KeepTalkingCLIController {
                 service: .http(
                     url: url,
                     payload: Data(),
-                    headers: [:]
+                    headers: headers
                 )
             )
         )
         let actionID = action.id?.uuidString.lowercased() ?? "unknown"
-        print("[mcp] registered action=\(actionID) type=http name=\(name) url=\(url.absoluteString)")
+        let headerLabel = headers.isEmpty
+            ? "none"
+            : headers.sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }
+                .joined(separator: ",")
+        print("[mcp] registered action=\(actionID) type=http name=\(name) url=\(url.absoluteString) headers=\(headerLabel)")
+    }
+
+    func installMCPHTTPAuthHandler(on targetClient: KeepTalkingClient) {
+        targetClient.setMCPHTTPAuthURLHandler {
+            actionID, url, message in
+            return await Self.handleMCPHTTPAuthURL(
+                actionID: actionID,
+                url: url,
+                message: message
+            )
+        }
+    }
+
+    private static func handleMCPHTTPAuthURL(
+        actionID: UUID,
+        url: URL,
+        message: String
+    ) async -> KeepTalkingMCPHTTPAuthResult {
+        let actionLabel = actionID.uuidString.lowercased()
+        print("[mcp][http][auth] action=\(actionLabel) \(message)")
+        print("[mcp][http][auth] open this URL to authenticate: \(url.absoluteString)")
+        openURLInDefaultBrowser(url)
+
+        print(
+            "Paste callback URL (or press Enter to cancel): ",
+            terminator: ""
+        )
+        guard let raw = readLine(strippingNewline: true) else {
+            return .cancelled
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .cancelled
+        }
+        guard let callbackURL = URL(string: trimmed), callbackURL.scheme != nil else {
+            fputs("Invalid callback URL.\n", stderr)
+            return .declined
+        }
+        return .completed(callbackURL: callbackURL)
+    }
+
+    private static func openURLInDefaultBrowser(_ url: URL) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [url.absoluteString]
+        do {
+            try process.run()
+        } catch {
+            // Best-effort only. URL is still printed for manual open.
+        }
     }
 
     private func registerStdioMCPActionInternal(

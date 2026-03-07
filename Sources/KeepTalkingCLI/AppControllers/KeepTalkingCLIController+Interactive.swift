@@ -217,11 +217,12 @@ extension KeepTalkingCLIController {
             case .mcpRemove(let actionIDRaw):
                 await removeMCPAction(actionIDRaw: actionIDRaw)
                 return true
-            case .mcpAddHTTP(let name, let urlRaw, let description):
+            case .mcpAddHTTP(let name, let urlRaw, let description, let headers):
                 await registerHTTPMCPAction(
                     name: name,
                     urlRaw: urlRaw,
-                    description: description
+                    description: description,
+                    headers: headers
                 )
                 return true
             case .mcpAddSTDIO(let name, let command, let environment):
