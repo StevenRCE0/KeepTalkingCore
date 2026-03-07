@@ -131,7 +131,8 @@ extension KeepTalkingCLIController {
                 service: .http(
                     url: url,
                     payload: Data(),
-                    headers: headers
+                    headers: headers,
+                    scope: nil
                 )
             )
         )

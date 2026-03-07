@@ -561,7 +561,7 @@ public actor MCPManager {
                     command: command,
                     environment: environment
                 )
-            case .http(let url, _, let headers):
+            case .http(let url, _, let headers, _):
                 let transportConfiguration = URLSessionConfiguration.default
                 let sanitizedHeaders = Self.sanitizedHTTPHeaders(headers)
 
@@ -621,7 +621,7 @@ public actor MCPManager {
         guard case .mcpBundle(let bundle) = action.payload else {
             throw MCPManagerError.invalidAction
         }
-        guard case .http(let endpoint, _, let headers) = bundle.service else {
+        guard case .http(let endpoint, _, let headers, _) = bundle.service else {
             return
         }
 

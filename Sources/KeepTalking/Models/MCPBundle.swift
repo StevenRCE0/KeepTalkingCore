@@ -21,7 +21,7 @@ public struct KeepTalkingMCPBundle: KeepTalkingActionBundle {
 
 public enum KeepTalkingMCPService: Codable, Sendable, Hashable {
     case stdio(arguments: [String], environment: [String: String])
-    case http(url: URL, payload: Data, headers: [String: String])
+    case http(url: URL, payload: Data, headers: [String: String], scope: String?)
 
     private enum CodingKeys: String, CodingKey {
         case stdio
@@ -37,6 +37,7 @@ public enum KeepTalkingMCPService: Codable, Sendable, Hashable {
         case url
         case payload
         case headers
+        case scope
     }
 
     public init(from decoder: Decoder) throws {
@@ -68,7 +69,13 @@ public enum KeepTalkingMCPService: Codable, Sendable, Hashable {
                 [String: String].self,
                 forKey: .headers
             )
-            self = .http(url: url, payload: payload, headers: headers)
+            let scope = try http.decodeIfPresent(String.self, forKey: .scope)
+            self = .http(
+                url: url,
+                payload: payload,
+                headers: headers,
+                scope: scope
+            )
             return
         }
 
@@ -92,7 +99,7 @@ public enum KeepTalkingMCPService: Codable, Sendable, Hashable {
                 if !environment.isEmpty {
                     try stdio.encode(environment, forKey: .environment)
                 }
-            case .http(let url, let payload, let headers):
+            case .http(let url, let payload, let headers, let scope):
                 var http = container.nestedContainer(
                     keyedBy: HTTPCodingKeys.self,
                     forKey: .http
@@ -100,6 +107,9 @@ public enum KeepTalkingMCPService: Codable, Sendable, Hashable {
                 try http.encode(url, forKey: .url)
                 try http.encode(payload, forKey: .payload)
                 try http.encode(headers, forKey: .headers)
+                if let scope, !scope.isEmpty {
+                    try http.encode(scope, forKey: .scope)
+                }
         }
     }
 }

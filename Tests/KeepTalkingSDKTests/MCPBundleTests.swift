@@ -16,7 +16,8 @@ struct MCPBundleTests {
                 headers: [
                     "Authorization": "Bearer token",
                     "X-Workspace": "keep-talking",
-                ]
+                ],
+                scope: "repo"
             )
         )
 
@@ -34,7 +35,8 @@ struct MCPBundleTests {
             service: .http(
                 url: url,
                 payload: Data(),
-                headers: [:]
+                headers: [:],
+                scope: nil
             )
         )
 
