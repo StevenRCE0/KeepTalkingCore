@@ -43,6 +43,7 @@ public enum SkillManagerError: LocalizedError {
     }
 }
 
+/// Executes skill-backed actions by exposing skill files and scripts as AI tools.
 public actor SkillManager {
     private struct ScriptExecutionResult: Sendable {
         let command: [String]
@@ -72,6 +73,7 @@ public actor SkillManager {
 
     private var skillBundlesByActionID: [UUID: KeepTalkingSkillBundle] = [:]
 
+    /// Creates a skill manager for a node runtime.
     public init(
         nodeConfig: KeepTalkingConfig,
         openAIConnector: OpenAIConnector?,
@@ -82,6 +84,7 @@ public actor SkillManager {
         self.scriptTimeoutSeconds = scriptTimeoutSeconds
     }
 
+    /// Registers a skill action so it can be resolved and executed later.
     public func registerSkillAction(_ action: KeepTalkingAction) async throws {
         guard case .skill(let skillBundle) = action.payload else {
             throw SkillManagerError.invalidAction
@@ -93,6 +96,7 @@ public actor SkillManager {
         skillBundlesByActionID[actionID] = skillBundle
     }
 
+    /// Re-registers a skill action after its bundle metadata changes.
     public func refreshSkillAction(_ action: KeepTalkingAction) async throws {
         guard let actionID = action.id else {
             throw SkillManagerError.missingActionID
@@ -101,10 +105,12 @@ public actor SkillManager {
         try await registerSkillAction(action)
     }
 
+    /// Removes the runtime state associated with a skill action.
     public func unregisterAction(actionID: UUID) async {
         skillBundlesByActionID.removeValue(forKey: actionID)
     }
 
+    /// Ensures a skill action is registered before use.
     public func registerIfNeeded(_ action: KeepTalkingAction) async throws {
         guard let actionID = action.id else {
             throw SkillManagerError.missingActionID
@@ -114,6 +120,7 @@ public actor SkillManager {
         }
     }
 
+    /// Executes a skill action by planning tool usage with the configured AI connector.
     public func callAction(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall
@@ -204,6 +211,7 @@ public actor SkillManager {
         )
     }
 
+    /// Returns the external tool names exposed by a skill action.
     public func listActionToolNames(action: KeepTalkingAction) async throws
         -> [String]
     {

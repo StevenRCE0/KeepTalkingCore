@@ -66,6 +66,7 @@ public enum KeepTalkingClientError: LocalizedError {
     }
 }
 
+/// High-level entry point for messaging, node coordination, and action execution.
 public final class KeepTalkingClient: @unchecked Sendable {
     public static let availablePrimitiveActions =
         KeepTalkingPrimitiveBundle.availablePrimitiveActions
@@ -116,6 +117,16 @@ public final class KeepTalkingClient: @unchecked Sendable {
     var pendingActionCatalogResults: [UUID: CheckedContinuation<KeepTalkingActionCatalogResult, Error>] = [:]
     var nodeStateBroadcastDebounceTask: Task<Void, Never>?
 
+    /// Creates a client with its transport, storage, and optional AI integrations.
+    ///
+    /// - Parameters:
+    ///   - config: Session configuration for the local node.
+    ///   - kvService: Optional KV backend used for node discovery and metadata.
+    ///   - openAIAPIKey: Explicit OpenAI API key override.
+    ///   - openAIEndpoint: Optional OpenAI-compatible endpoint override.
+    ///   - primitiveActionCallback: Callback used by primitive actions.
+    ///   - logon: Correlation identifier for the current client runtime.
+    ///   - localStore: Local persistence backend for models and state.
     public init(
         config: KeepTalkingConfig,
         kvService: (any KeepTalkingKVService)? = nil,
@@ -185,6 +196,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         }
     }
 
+    /// Creates the default local store, preferring SQLite and falling back to memory.
     public static func makeDefaultLocalStore() -> any KeepTalkingLocalStore {
         do {
             return try KeepTalkingModelStore()
@@ -193,6 +205,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         }
     }
 
+    /// Starts transports, persists local node state, and registers local actions.
     public func connect() async throws {
         await mcpManager.setHTTPAuthURLHandler(mcpHTTPAuthURLHandler)
         _ = try await ensure(config.contextID, for: KeepTalkingContext.self)
@@ -213,6 +226,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         await broadcastLocalNodeState(reason: "connect")
     }
 
+    /// Stops transports and fails any pending remote requests.
     public func disconnect() {
         failAllPendingActionCalls(error: SignalError.closed)
         failAllPendingActionCatalogRequests(error: SignalError.closed)
@@ -220,6 +234,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         rtcClient.stop()
     }
 
+    /// Installs a callback for HTTP-based MCP authorization flows.
     public func setMCPHTTPAuthURLHandler(_ handler: MCPHTTPAuthURLHandler?) {
         mcpHTTPAuthURLHandler = handler
         Task { [weak self] in
@@ -227,10 +242,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
         }
     }
 
+    /// Returns the current transport statistics for diagnostics and UI.
     public func runtimeStats() -> KeepTalkingRuntimeStats {
         rtcClient.runtimeStats()
     }
 
+    /// Asks the transport to attempt a direct P2P connection.
     public func requestP2PTrial() {
         rtcClient.requestP2PTrial()
     }

@@ -1,6 +1,7 @@
 import FluentKit
 import Foundation
 
+/// Runtime configuration shared by the client, transports, and executors.
 public struct KeepTalkingConfig: Sendable {
     public static let signalingChannel = "keep-talking.signaling"
     public static let chatChannelPrefix = "keep-talking.chat"
@@ -13,6 +14,15 @@ public struct KeepTalkingConfig: Sendable {
     public let p2pAttemptTimeoutSeconds: TimeInterval
     public let p2pStunServers: [String]
 
+    /// Creates a configuration for a single KeepTalking node session.
+    ///
+    /// - Parameters:
+    ///   - signalURL: Signaling server endpoint.
+    ///   - contextID: Active context identifier used to scope channels.
+    ///   - node: Local node identifier.
+    ///   - p2pPreferredRemoteID: Preferred peer identifier for direct P2P attempts.
+    ///   - p2pAttemptTimeoutSeconds: Maximum duration to wait for a P2P attempt.
+    ///   - p2pStunServers: STUN servers used during ICE negotiation.
     public init(
         signalURL: URL,
         contextID: UUID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!,
@@ -45,6 +55,7 @@ public struct KeepTalkingConfig: Sendable {
         contextID.uuidString.lowercased()
     }
 
+    /// Returns a copy of the configuration scoped to a different context.
     public func withContextID(_ contextID: UUID) -> KeepTalkingConfig {
         KeepTalkingConfig(
             signalURL: signalURL,
@@ -57,6 +68,7 @@ public struct KeepTalkingConfig: Sendable {
     }
 }
 
+/// Snapshot of transport-level counters and channel state.
 public struct KeepTalkingRuntimeStats: Sendable {
     public let sent: Int
     public let received: Int

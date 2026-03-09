@@ -34,6 +34,7 @@ extension KeepTalkingClient {
     private static let nodeBroadcastDebounceNanoseconds: UInt64 =
         1_000_000_000
 
+    /// Publishes the current node identifier to the configured KV service.
     public func registerCurrentNodeID() async throws {
         guard let kvService else {
             throw KeepTalkingClientError.kvServiceNotConfigured
@@ -42,6 +43,7 @@ extension KeepTalkingClient {
         try await kvService.storeNodeID(config.node)
     }
 
+    /// Loads known node identifiers from the configured KV service.
     public func fetchNodeIDs(for userID: String? = nil) async throws -> [UUID] {
         guard let kvService else {
             throw KeepTalkingClientError.kvServiceNotConfigured
@@ -50,6 +52,13 @@ extension KeepTalkingClient {
         return try await kvService.loadNodeIDs()
     }
 
+    /// Marks a remote node as trusted or owned and returns the local public key for that relation.
+    ///
+    /// - Parameters:
+    ///   - targetNodeID: Remote node to update.
+    ///   - scope: Trust scope to grant.
+    ///   - own: Whether the relationship should become ownership.
+    /// - Returns: The public key shared with the remote node.
     @discardableResult
     public func trust(
         node targetNodeID: UUID,
@@ -115,6 +124,7 @@ extension KeepTalkingClient {
         return try await ensureOutgoingIdentityKeypair(for: relation).publicKey
     }
 
+    /// Records a remote node's public key so it can complete a pending trust handshake.
     public func lure(node sourceNodeID: UUID, publicKey: String) async throws {
         let trimmedPublicKey = publicKey.trimmingCharacters(
             in: .whitespacesAndNewlines
@@ -275,6 +285,7 @@ extension KeepTalkingClient {
         )
     }
 
+    /// Broadcasts the current node record to connected peers.
     public func announceCurrentNode() async throws {
         let node = try await getCurrentNodeInstance()
         try blocking {
@@ -284,6 +295,7 @@ extension KeepTalkingClient {
     }
 
     // TODO: Add online filter
+    /// Broadcasts a redacted node-status snapshot to the selected peers.
     public func broadcastCurrentNodeStatus(
         in context: KeepTalkingContext,
         to nodes: [KeepTalkingNode]? = nil,

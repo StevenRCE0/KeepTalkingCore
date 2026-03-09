@@ -5,6 +5,14 @@ import Foundation
 extension KeepTalkingClient {
     private static let encryptedMessagePrefix = "ktenc:v1:"
 
+    /// Persists and broadcasts a message within a conversation context.
+    ///
+    /// - Parameters:
+    ///   - text: Message body to send.
+    ///   - context: Target conversation context.
+    ///   - sender: Optional explicit sender override.
+    ///   - type: Message classification used by the UI.
+    ///   - emitLocalEnvelope: Whether to emit the envelope locally before transport delivery.
     public func send(
         _ text: String,
         in context: KeepTalkingContext,
@@ -34,6 +42,7 @@ extension KeepTalkingClient {
         try rtcClient.sendEnvelope(.message(encryptedMessage))
     }
 
+    /// Convenience overload that resolves the target context from its identifier.
     public func send(
         _ text: String,
         in context: UUID,
@@ -55,6 +64,7 @@ extension KeepTalkingClient {
         )
     }
 
+    /// Shares the full conversation context with connected peers.
     public func sendConversationContext(
         _ context: KeepTalkingConversationContext
     ) async throws {
@@ -243,6 +253,7 @@ extension KeepTalkingClient {
         return context
     }
 
+    /// Returns the symmetric key for a context, creating one if needed.
     public func ensureGroupChatSecret(for contextID: UUID) async throws -> Data {
         if let existing = try await KeepTalkingContextGroupSecret.query(
             on: localStore.database
@@ -263,6 +274,7 @@ extension KeepTalkingClient {
         return secret
     }
 
+    /// Replaces the stored symmetric key for a conversation context.
     public func setGroupChatSecret(_ secret: Data, for contextID: UUID)
         async throws
     {

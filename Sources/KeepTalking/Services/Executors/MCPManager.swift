@@ -56,6 +56,7 @@ public enum KeepTalkingMCPHTTPAuthResult: Sendable {
     case declined
 }
 
+/// Manages MCP action registration, transport connections, and tool invocation.
 public actor MCPManager {
     private final class StdioProcessHandle: @unchecked Sendable {
         let process: Process
@@ -107,6 +108,7 @@ public actor MCPManager {
     private var onHTTPAuthURL:
         (@Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult)?
 
+    /// Creates an MCP manager for a node runtime.
     public init(
         nodeConfig: KeepTalkingConfig,
         connectTimeoutSeconds: TimeInterval = 10,
@@ -117,22 +119,26 @@ public actor MCPManager {
         self.toolCallTimeoutSeconds = toolCallTimeoutSeconds
     }
 
+    /// Sets a callback invoked when a registered action's tool list changes.
     public func setActionToolsChangedHandler(
         _ handler: (@Sendable (UUID) async -> Void)?
     ) {
         onActionToolsChanged = handler
     }
 
+    /// Sets a log sink for MCP lifecycle events.
     public func setLogHandler(_ handler: (@Sendable (String) -> Void)?) {
         onLog = handler
     }
 
+    /// Sets the callback used to drive HTTP authentication flows for MCP actions.
     public func setHTTPAuthURLHandler(
         _ handler: (@Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult)?
     ) {
         onHTTPAuthURL = handler
     }
 
+    /// Registers an MCP-backed action with the runtime manager.
     public func registerMCPAction(_ action: KeepTalkingAction) async throws {
         guard case .mcpBundle = action.payload else {
             throw MCPManagerError.invalidAction
@@ -151,6 +157,7 @@ public actor MCPManager {
         // track runtime client/process state here.
     }
 
+    /// Reconnects an MCP action after its configuration changes.
     public func refreshMCPAction(_ action: KeepTalkingAction) async throws {
         guard let actionID = action.id else {
             throw MCPManagerError.missingActionID
@@ -163,6 +170,7 @@ public actor MCPManager {
         try await registerMCPAction(action)
     }
 
+    /// Removes an MCP action and tears down any live client state.
     public func unregisterAction(actionID: UUID) async {
         if let client = clientsByActionID[actionID] {
             await client.disconnect()
@@ -172,6 +180,7 @@ public actor MCPManager {
         virtualToolNamesByActionID.removeValue(forKey: actionID)
     }
 
+    /// Ensures an MCP action is registered and connected before use.
     public func registerIfNeeded(_ action: KeepTalkingAction) async throws {
         guard let actionID = action.id else {
             throw MCPManagerError.missingActionID
@@ -185,6 +194,7 @@ public actor MCPManager {
         }
     }
 
+    /// Invokes an MCP tool for the supplied action call.
     public func callAction(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall
@@ -215,6 +225,7 @@ public actor MCPManager {
         )
     }
 
+    /// Returns the sorted tool names currently exposed by an MCP action.
     public func listActionToolNames(action: KeepTalkingAction) async throws -> [String] {
         guard let actionID = action.id else {
             throw MCPManagerError.missingActionID
@@ -230,6 +241,7 @@ public actor MCPManager {
         return listing.tools.map(\.name).sorted()
     }
 
+    /// Returns the full tool metadata currently exposed by an MCP action.
     public func listActionTools(action: KeepTalkingAction) async throws -> [Tool] {
         guard let actionID = action.id else {
             throw MCPManagerError.missingActionID
@@ -614,6 +626,7 @@ public actor MCPManager {
         await onActionToolsChanged(actionID)
     }
 
+    /// Performs any required HTTP authentication flow ahead of tool invocation.
     public func preflightHTTPAuthentication(action: KeepTalkingAction) async throws {
         guard let actionID = action.id else {
             throw MCPManagerError.missingActionID

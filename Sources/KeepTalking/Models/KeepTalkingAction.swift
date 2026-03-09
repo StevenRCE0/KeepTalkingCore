@@ -1,21 +1,25 @@
 import FluentKit
 import Foundation
 
+/// Describes the concrete resource an action can operate on.
 public enum KeepTalkingActionResource: Codable, Sendable {
     case urls([URL])
     case filePaths([URL])
     case command([[String]])
 }
 
+/// Wraps an action resource with human-readable context for catalog displays.
 public struct KeepTalkingActionResourceWithDescription: Codable, Sendable {
     var description: String
     var resource: KeepTalkingActionResource
 }
 
+/// Describes the verb portion of an action descriptor.
 public struct KeepTalkingActionWithDescription: Codable, Sendable {
     var description: String
 }
 
+/// Provides subject-action-object metadata used to explain an action to users and AI planners.
 public struct KeepTalkingActionDescriptor: Codable, Sendable {
     public var subject: KeepTalkingActionResourceWithDescription?
     public var action: KeepTalkingActionWithDescription?
@@ -28,6 +32,7 @@ public protocol KeepTalkingActionBundle: Identifiable, Codable, Sendable, Hashab
     var indexDescription: String { get set }
 }
 
+/// Persisted action model that binds an executable payload to a node.
 public final class KeepTalkingAction: Model, @unchecked Sendable {
 
     public static let schema: String = "kt_actions"
@@ -62,8 +67,16 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
     @Timestamp(key: "last_used", on: .none)
     public var lastUsed: Date?
 
+    /// Creates an empty model instance for Fluent.
     public init() {}
 
+    /// Creates a persisted action with its runtime payload and authorization settings.
+    ///
+    /// - Parameters:
+    ///   - id: Stable action identifier.
+    ///   - payload: Executable action payload.
+    ///   - remoteAuthorisable: Whether a remote node may authorize this action.
+    ///   - blockingAuthorisation: Whether execution waits for authorization to complete.
     public init(
         id: UUID = UUID(),
         payload: Payload,
