@@ -84,6 +84,7 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             CreateNodeIdentityKeysMigration(),
             CreateNodeRelationsActionsRelationsMigration(),
             CreateKeepTalkingContextsMigration(),
+            CreateKeepTalkingMappingsMigration(),
             CreateKeepTalkingOperatorContextsMigration(),
             CreateContextGroupSecretsMigration(),
             CreateKeepTalkingContextMessagesMigration(),
@@ -115,6 +116,10 @@ public final class KeepTalkingInMemoryStore: KeepTalkingLocalStore,
                 "Failed to initialize in-memory store: \(error.localizedDescription)"
             )
         }
+    }
+
+    deinit {
+        self.manager.shutdown()
     }
 
     public var database: any Database {
