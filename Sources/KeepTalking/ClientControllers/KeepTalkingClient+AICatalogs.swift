@@ -654,7 +654,9 @@ extension KeepTalkingClient {
         if recentMessages.isEmpty {
             conversationTranscript = "No prior messages in this context."
         } else {
-            conversationTranscript = recentMessages.map { message in
+            conversationTranscript = recentMessages
+                .reversed()
+                .map { message in
                 let sender = KeepTalkingActionToolDefinition
                     .conversationSenderTag(message.sender)
                 return "[\(sender)] \(message.content)"
