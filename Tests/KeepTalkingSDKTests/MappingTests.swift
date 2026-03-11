@@ -75,4 +75,41 @@ struct MappingTests {
             ).isEmpty
         )
     }
+
+    @Test("tag color is generated once and reused across targets")
+    func tagColorReuse() async throws {
+        let localStore = KeepTalkingInMemoryStore()
+        let context = KeepTalkingContext(id: UUID())
+        let node = KeepTalkingNode(id: UUID())
+        try await context.save(on: localStore.database)
+        try await node.save(on: localStore.database)
+
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(
+                signalURL: try #require(URL(string: "ws://127.0.0.1")),
+                contextID: UUID(),
+                node: UUID()
+            ),
+            localStore: localStore
+        )
+
+        let contextTarget = KeepTalkingMappingTarget.context(
+            try #require(context.id)
+        )
+        let nodeTarget = KeepTalkingMappingTarget.node(try #require(node.id))
+
+        try await client.addTag("shared", to: contextTarget)
+        try await client.addTag("shared", to: nodeTarget)
+
+        let contextColor = try #require(
+            try await client.tags(for: contextTarget).first?.colorHex
+        )
+        let nodeColor = try #require(
+            try await client.tags(for: nodeTarget).first?.colorHex
+        )
+
+        #expect(contextColor == nodeColor)
+        #expect(contextColor.hasPrefix("#"))
+        #expect(contextColor.count == 7)
+    }
 }

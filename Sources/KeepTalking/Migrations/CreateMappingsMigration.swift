@@ -18,6 +18,7 @@ struct CreateKeepTalkingMappingsMigration: AsyncMigration {
             .field("namespace", .string)
             .field("value", .string, .required)
             .field("normalized_value", .string, .required)
+            .field("color_hex", .string)
             .field("created_at", .datetime, .required)
             .field("updated_at", .datetime)
             .field("deleted_at", .datetime)

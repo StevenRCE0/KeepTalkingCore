@@ -74,18 +74,26 @@ extension KeepTalkingClient {
             .filter(\.$namespace == normalizedNamespace)
             .filter(\.$normalizedValue == normalizedValue)
             .first()
+        let colorHex = try await tagColorHex(
+            namespace: normalizedNamespace,
+            normalizedValue: normalizedValue
+        )
 
         let mapping = existing ?? KeepTalkingMapping(
             target: target,
             kind: .tag,
             namespace: normalizedNamespace,
-            value: storedValue
+            value: storedValue,
+            colorHex: colorHex
         )
         mapping.namespace = normalizedNamespace
         if existing == nil || mapping.deletedAt != nil {
             mapping.value = storedValue
             mapping.normalizedValue = normalizedValue
         }
+        mapping.colorHex = KeepTalkingMapping.normalizeOptional(
+            mapping.colorHex ?? colorHex
+        )
         mapping.deletedAt = nil
         try await mapping.save(on: localStore.database)
     }
@@ -144,5 +152,19 @@ extension KeepTalkingClient {
             mapping.deletedAt = deletedAt
             try await mapping.save(on: localStore.database)
         }
+    }
+
+    private func tagColorHex(
+        namespace: String?,
+        normalizedValue: String
+    ) async throws -> String {
+        try await KeepTalkingMapping.query(on: localStore.database)
+            .filter(\.$kind, .equal, .tag)
+            .filter(\.$namespace == namespace)
+            .filter(\.$normalizedValue == normalizedValue)
+            .sort(\.$createdAt, .ascending)
+            .first()?
+            .colorHex
+            ?? KeepTalkingMapping.randomColorHex()
     }
 }
