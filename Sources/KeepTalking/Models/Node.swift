@@ -10,9 +10,6 @@ public final class KeepTalkingNode: Model, @unchecked Sendable {
     @Field(key: "last_seen_at")
     public var lastSeenAt: Date
 
-    @OptionalField(key: "discovered_during_logon")
-    public var discoveredDuringLogon: UUID?
-
     @Children(for: \.$node)
     public var actions: [KeepTalkingAction]
 
@@ -26,12 +23,10 @@ public final class KeepTalkingNode: Model, @unchecked Sendable {
 
     public init(
         id: UUID = UUID(),
-        lastSeenAt: Date = Date(),
-        discoveredDuringLogon: UUID? = nil
+        lastSeenAt: Date = Date()
     ) {
         self.id = id
         self.lastSeenAt = lastSeenAt
-        self.discoveredDuringLogon = discoveredDuringLogon
     }
 }
 
@@ -39,7 +34,6 @@ extension KeepTalkingNode: Codable {
     private enum CodingKeys: String, CodingKey {
         case id
         case lastSeenAt
-        case discoveredDuringLogon
     }
 
     public convenience init(from decoder: any Decoder) throws {
@@ -50,14 +44,9 @@ extension KeepTalkingNode: Codable {
                 Date.self,
                 forKey: .lastSeenAt
             ) ?? Date()
-        let discoveredDuringLogon = try container.decodeIfPresent(
-            UUID.self,
-            forKey: .discoveredDuringLogon
-        )
         self.init(
             id: id,
-            lastSeenAt: lastSeenAt,
-            discoveredDuringLogon: discoveredDuringLogon
+            lastSeenAt: lastSeenAt
         )
     }
 
@@ -65,9 +54,5 @@ extension KeepTalkingNode: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(id, forKey: .id)
         try container.encode(lastSeenAt, forKey: .lastSeenAt)
-        try container.encodeIfPresent(
-            discoveredDuringLogon,
-            forKey: .discoveredDuringLogon
-        )
     }
 }

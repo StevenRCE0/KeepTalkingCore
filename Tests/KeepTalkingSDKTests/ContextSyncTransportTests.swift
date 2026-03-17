@@ -4,6 +4,27 @@ import Testing
 @testable import KeepTalkingSDK
 
 struct ContextSyncTransportTests {
+    @Test("context sync callback is emitted after a sync completes")
+    func contextSyncCallbackEmission() async throws {
+        let localStore = KeepTalkingInMemoryStore()
+        let contextID = UUID(uuidString: "30000000-0000-0000-0000-000000000000")!
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(
+                signalURL: try #require(URL(string: "ws://127.0.0.1")),
+                contextID: contextID,
+                node: UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000000")!
+            ),
+            localStore: localStore
+        )
+
+        let observed = LockedValue<UUID?>(nil)
+        client.onContextSync = { observed.set($0) }
+
+        client.notifyContextDidSync(contextID)
+
+        #expect(observed.get() == contextID)
+    }
+
     @Test("summary dispatch returns locally maintained context sync metadata")
     func summaryDispatchReturnsMetadata() async throws {
         let localStore = KeepTalkingInMemoryStore()
@@ -310,6 +331,43 @@ struct ContextSyncTransportTests {
         #expect(metadata.messageCount == 2)
     }
 
+    @Test("summary wait resolves when the reply arrives immediately during send")
+    func immediateSummaryReplyDoesNotRaceThePendingWait() async throws {
+        let localStore = KeepTalkingInMemoryStore()
+        let config = KeepTalkingConfig(
+            signalURL: try #require(URL(string: "ws://127.0.0.1")),
+            contextID: UUID(uuidString: "90000000-0000-0000-0000-000000000000")!,
+            node: UUID(uuidString: "CCCCCCCC-9999-9999-9999-999999999999")!
+        )
+        let client = KeepTalkingClient(
+            config: config,
+            localStore: localStore
+        )
+        let request = UUID(uuidString: "00000000-0000-0000-0000-000000000999")!
+        let expected = KeepTalkingContextSyncSummaryResult(
+            request: request,
+            context: config.contextID,
+            requester: config.node,
+            responder: UUID(uuidString: "DDDDDDDD-EEEE-EEEE-EEEE-EEEEEEEEEEEE")!,
+            summary: KeepTalkingContextSyncMetadata(
+                chunkSize: 64,
+                messageCount: 0,
+                senders: [],
+                chunks: []
+            )
+        )
+
+        let result = try await client.waitForContextSyncSummary(
+            request: request,
+            timeoutSeconds: 0.2,
+            send: {
+                #expect(client.resolvePendingContextSyncSummary(expected))
+            }
+        )
+
+        #expect(result == expected)
+    }
+
     private func seededContext(
         on localStore: KeepTalkingInMemoryStore,
         id: UUID,
@@ -346,5 +404,24 @@ struct ContextSyncTransportTests {
             content: content,
             timestamp: Date(timeIntervalSince1970: second)
         )
+    }
+}
+
+private final class LockedValue<Value>: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "KeepTalking.tests.locked-value")
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func set(_ newValue: Value) {
+        queue.sync {
+            value = newValue
+        }
+    }
+
+    func get() -> Value {
+        queue.sync { value }
     }
 }

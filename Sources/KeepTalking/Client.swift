@@ -105,11 +105,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public typealias EnvelopeHandler = @Sendable (KeepTalkingP2PEnvelope) -> Void
     public typealias RawMessageHandler = @Sendable (String) -> Void
     public typealias PeerConnectHandler = @Sendable (UUID) -> Void
+    public typealias ContextSyncHandler = @Sendable (UUID) -> Void
     public typealias LogHandler = @Sendable (String) -> Void
 
     public var onEnvelope: EnvelopeHandler?
     public var onRawMessage: RawMessageHandler?
     public var onPeerConnect: PeerConnectHandler?
+    public var onContextSync: ContextSyncHandler?
     public var onLog: LogHandler? {
         didSet {
             rtcClient.onLog = onLog
@@ -125,11 +127,11 @@ public final class KeepTalkingClient: @unchecked Sendable {
     }
 
     public let logon: UUID
-
     let config: KeepTalkingConfig
     let rtcClient: any KeepTalkingTransportClient
     let kvService: (any KeepTalkingKVService)?
     public let localStore: any KeepTalkingLocalStore
+    let livenessState: KeepTalkingContextLivenessState
     let mcpManager: MCPManager
     let skillManager: SkillManager
     let primitiveActionManager: PrimitiveActionManager
@@ -173,11 +175,15 @@ public final class KeepTalkingClient: @unchecked Sendable {
     ) {
         self.config = config
         self.kvService = kvService
-        self.logon = logon
         self.localStore = localStore
+        self.logon = logon
+        livenessState = KeepTalkingContextLivenessState(
+            localNode: config.node
+        )
         self.rtcClient = KeepTalkingHybridRTCClient(
             config: config,
-            localStore: localStore
+            localStore: localStore,
+            livenessState: livenessState
         )
         self.mcpManager = MCPManager(nodeConfig: config)
 
@@ -228,6 +234,18 @@ public final class KeepTalkingClient: @unchecked Sendable {
                 await self?.handlePeerConnect(nodeID: nodeID)
             }
         }
+    }
+
+    public func isNodeOnline(_ node: UUID) -> Bool {
+        livenessState.isNodeOnline(node)
+    }
+
+    public func onlineNodeIDs() -> Set<UUID> {
+        livenessState.onlineNodeIDs()
+    }
+
+    func notifyContextDidSync(_ context: UUID) {
+        onContextSync?(context)
     }
 
     /// Creates the default local store, preferring SQLite and falling back to memory.

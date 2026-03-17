@@ -180,7 +180,7 @@ extension KeepTalkingClient {
             try await relation.save(on: localStore.database)
         }
 
-        guard let relationID = relation.id else {
+        guard relation.id != nil else {
             return
         }
 
@@ -641,7 +641,6 @@ extension KeepTalkingClient {
         }
 
         node.lastSeenAt = Date()
-        node.discoveredDuringLogon = logon
 
         try await node.save(on: localStore.database)
         _ = try await ensureLocalIdentityRelation()
@@ -661,15 +660,13 @@ extension KeepTalkingClient {
         .filter(\.$id, .equal, incomingNodeID)
         .first() {
             existing.lastSeenAt = max(existing.lastSeenAt, incoming.lastSeenAt)
-            existing.discoveredDuringLogon = logon
             try await existing.save(on: localStore.database)
             return
         }
 
         let node = KeepTalkingNode(
             id: incomingNodeID,
-            lastSeenAt: incoming.lastSeenAt,
-            discoveredDuringLogon: logon
+            lastSeenAt: incoming.lastSeenAt
         )
 
         try await node.save(on: localStore.database)
@@ -691,7 +688,6 @@ extension KeepTalkingClient {
             node = KeepTalkingNode(id: nodeID)
         }
         node.lastSeenAt = Date()
-        node.discoveredDuringLogon = logon
 
         try await node.save(on: localStore.database)
     }

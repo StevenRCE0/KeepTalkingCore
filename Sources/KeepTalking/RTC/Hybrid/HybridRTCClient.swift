@@ -4,6 +4,9 @@ import Foundation
 final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     @unchecked Sendable
 {
+    private static let heartbeatIntervalSeconds: TimeInterval = 59
+    private static let presenceEchoCooldownSeconds: TimeInterval = 1
+
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)? {
         didSet { bindCallbacks() }
     }
@@ -19,20 +22,26 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
 
     private let config: KeepTalkingConfig
     private let localStore: KeepTalkingLocalStore
+    private let livenessState: KeepTalkingContextLivenessState
     private let sfuClient: KeepTalkingRTCClient
     private var p2pClient: KeepTalkingP2PRTCClient?
     private var p2pUpgradeTask: Task<Void, Never>?
+    private var heartbeatTask: Task<Void, Never>?
 
     private let stateQueue = DispatchQueue(label: "KeepTalking.hybrid.state")
     private var discoveredPeers = Set<UUID>()
-    private var notifiedConnectedPeers = Set<UUID>()
     private var activeTransport: KeepTalkingTransportClient
     private var activeRoute = "sfu"
     private var isP2PTrialRunning = false
 
-    init(config: KeepTalkingConfig, localStore: any KeepTalkingLocalStore) {
+    init(
+        config: KeepTalkingConfig,
+        localStore: any KeepTalkingLocalStore,
+        livenessState: KeepTalkingContextLivenessState
+    ) {
         self.config = config
         self.localStore = localStore
+        self.livenessState = livenessState
 
         sfuClient = KeepTalkingRTCClient(config: config)
         activeTransport = sfuClient
@@ -52,12 +61,13 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     func start() async throws {
         stateQueue.sync {
             discoveredPeers.removeAll()
-            notifiedConnectedPeers.removeAll()
         }
+        livenessState.reset()
         try await sfuClient.start()
         setActiveTransport(sfuClient, route: "sfu")
         rememberPeer(config.node)
-        sendPresence()
+        sendPresence(advancingHeartbeat: true)
+        startHeartbeatLoop()
         debug("sfu route selected")
         beginP2PTrial(trigger: "startup")
     }
@@ -65,9 +75,11 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     func stop() {
         p2pUpgradeTask?.cancel()
         p2pUpgradeTask = nil
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        livenessState.reset()
         stateQueue.sync {
             isP2PTrialRunning = false
-            notifiedConnectedPeers.removeAll()
         }
         p2pClient?.stop()
         sfuClient.stop()
@@ -135,8 +147,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
 
     private func beginP2PTrial(
         trigger: String,
-        allowWhileOnP2P: Bool = false,
-        expectedPeerID: UUID? = nil
+        allowWhileOnP2P: Bool = false
     ) {
         guard config.p2pAttemptTimeoutSeconds > 0 else {
             debug(
@@ -194,20 +205,6 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                 debug(
                     "p2p trial failed trigger=\(trigger) error=\(error.localizedDescription)"
                 )
-                let reconnectPeerID =
-                    expectedPeerID
-                    ?? self.stateQueue.sync {
-                        self.discoveredPeers.first(where: {
-                            $0 != self.config.node
-                        })
-                    }
-                if let reconnectPeerID {
-                    self.reportPeerConnected(
-                        reconnectPeerID,
-                        source: "p2p-failed",
-                        force: true
-                    )
-                }
             }
         }
     }
@@ -243,7 +240,12 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         }
     }
 
-    private func sendPresence() {
+    private func sendPresence(advancingHeartbeat: Bool = false) {
+        if advancingHeartbeat {
+            _ = livenessState.beginHeartbeatWave(
+                minimumInterval: Self.heartbeatIntervalSeconds
+            )
+        }
         do {
             try sfuClient.sendEnvelope(
                 .p2pPresence(KeepTalkingP2PPresencePayload(node: config.node))
@@ -259,23 +261,30 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         }
     }
 
-    private func reportPeerConnected(
-        _ nodeID: UUID,
-        source: String,
-        force: Bool = false
-    ) {
+    private func reportPeerConnected(_ nodeID: UUID, source: String) {
         guard nodeID != config.node else { return }
-        let shouldNotify = stateQueue.sync { () -> Bool in
-            discoveredPeers.insert(nodeID)
-            if force {
-                notifiedConnectedPeers.insert(nodeID)
-                return true
-            }
-            return notifiedConnectedPeers.insert(nodeID).inserted
+        rememberPeer(nodeID)
+
+        let livenessSource: KeepTalkingContextLivenessState.Source?
+        switch source {
+            case "presence":
+                livenessSource = .presence
+            case "p2p":
+                livenessSource = .p2p
+            default:
+                livenessSource = nil
         }
+
+        guard let livenessSource else {
+            return
+        }
+        let shouldNotify = livenessState.shouldNotifyPeerConnect(
+            nodeID,
+            source: livenessSource
+        )
         guard shouldNotify else { return }
         debug(
-            "peer reachable source=\(source) forced=\(force) node=\(nodeID.uuidString.lowercased())"
+            "peer reachable source=\(source) node=\(nodeID.uuidString.lowercased())"
         )
         onPeerConnect?(nodeID)
     }
@@ -327,8 +336,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                 } else if shouldConnect {
                     beginP2PTrial(
                         trigger:
-                            "presence:\(presence.node.uuidString.lowercased())",
-                        expectedPeerID: presence.node
+                            "presence:\(presence.node.uuidString.lowercased())"
                     )
                 } else {
                     debug(
@@ -336,7 +344,16 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                     )
                 }
                 rememberPeer(presence.node)
-                reportPeerConnected(presence.node, source: "presence")
+                let observation = livenessState.observePresence(
+                    from: presence.node,
+                    echoCooldown: Self.presenceEchoCooldownSeconds
+                )
+                if observation.shouldEcho {
+                    sendPresence()
+                }
+                if observation.confirmedCurrentWave {
+                    reportPeerConnected(presence.node, source: "presence")
+                }
                 p2pClient?.receivePresence(from: presence.node)
                 onEnvelope?(envelope)
             case .p2pSignal(let signalPayload):
@@ -372,9 +389,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             }
         }
         sfuClient.onRawMessage = forwardRaw
-        sfuClient.onPeerConnect = { [weak self] nodeID in
-            self?.reportPeerConnected(nodeID, source: "sfu")
-        }
+        sfuClient.onPeerConnect = nil
         sfuClient.onLog = logger
 
         p2pClient?.onEnvelope = { [weak self] envelope in
@@ -388,5 +403,20 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             self?.fallbackToSFU(reason: reason)
         }
         p2pClient?.onLog = logger
+    }
+
+    private func startHeartbeatLoop() {
+        heartbeatTask?.cancel()
+        heartbeatTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task
+                    .sleep(for: .seconds(Self.heartbeatIntervalSeconds))
+                if Task.isCancelled {
+                    break
+                }
+                self.sendPresence(advancingHeartbeat: true)
+            }
+        }
     }
 }

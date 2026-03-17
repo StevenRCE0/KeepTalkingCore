@@ -115,12 +115,7 @@ extension KeepTalkingClient {
         var routesByFunctionName: [String: KeepTalkingAgentToolRoute] = [:]
         var skillSummaryByActionID: [UUID: KeepTalkingSkillSummaryEntry] = [:]
 
-        let onlineNodeIDs = Set(
-            try await KeepTalkingNode.query(on: localStore.database)
-                .filter(\.$discoveredDuringLogon, .equal, logon)
-                .all()
-                .compactMap(\.id)
-        )
+        let onlineNodeIDs = onlineNodeIDs()
 
         let selfNode = try await ensure(
             config.node,

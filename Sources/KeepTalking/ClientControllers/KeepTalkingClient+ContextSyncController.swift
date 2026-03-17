@@ -61,6 +61,7 @@ extension KeepTalkingClient {
             rtcClient.debug(
                 "context sync complete peer=\(node.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"
             )
+            notifyContextDidSync(contextID)
         } catch {
             rtcClient.debug(
                 "context sync failed peer=\(node.uuidString.lowercased()) error=\(error.localizedDescription)"
@@ -125,10 +126,14 @@ extension KeepTalkingClient {
             return try await executeContextSyncSummaryRequest(request)
         }
 
-        try rtcClient.sendEnvelope(.contextSync(.summaryRequest(request)))
         return try await waitForContextSyncSummary(
             request: request.request,
-            timeoutSeconds: Self.contextSyncResultTimeoutSeconds
+            timeoutSeconds: Self.contextSyncResultTimeoutSeconds,
+            send: { [weak self] in
+                try self?.rtcClient.sendEnvelope(
+                    .contextSync(.summaryRequest(request))
+                )
+            }
         )
     }
 
@@ -139,10 +144,12 @@ extension KeepTalkingClient {
             return try await executeContextSyncTailRequest(request)
         }
 
-        try rtcClient.sendEnvelope(.contextSync(.tailRequest(request)))
         return try await waitForContextSyncMessages(
             request: request.request,
-            timeoutSeconds: Self.contextSyncResultTimeoutSeconds
+            timeoutSeconds: Self.contextSyncResultTimeoutSeconds,
+            send: { [weak self] in
+                try self?.rtcClient.sendEnvelope(.contextSync(.tailRequest(request)))
+            }
         )
     }
 
@@ -153,16 +160,21 @@ extension KeepTalkingClient {
             return try await executeContextSyncChunkRequest(request)
         }
 
-        try rtcClient.sendEnvelope(.contextSync(.chunkRequest(request)))
         return try await waitForContextSyncMessages(
             request: request.request,
-            timeoutSeconds: Self.contextSyncResultTimeoutSeconds
+            timeoutSeconds: Self.contextSyncResultTimeoutSeconds,
+            send: { [weak self] in
+                try self?.rtcClient.sendEnvelope(
+                    .contextSync(.chunkRequest(request))
+                )
+            }
         )
     }
 
     func waitForContextSyncSummary(
         request: UUID,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        send: @escaping @Sendable () throws -> Void = {}
     ) async throws -> KeepTalkingContextSyncSummaryResult {
         try await withThrowingTaskGroup(
             of: KeepTalkingContextSyncSummaryResult.self
@@ -177,9 +189,17 @@ extension KeepTalkingClient {
                             KeepTalkingContextSyncSummaryResult, Error
                         >
                     ) in
-                    self.contextSyncQueue.sync {
-                        self.pendingContextSyncSummaries[request] =
-                            continuation
+                    do {
+                        self.contextSyncQueue.sync {
+                            self.pendingContextSyncSummaries[request] =
+                                continuation
+                        }
+                        try send()
+                    } catch {
+                        self.failPendingContextSyncSummary(
+                            request: request,
+                            error: error
+                        )
                     }
                 }
             }
@@ -206,7 +226,8 @@ extension KeepTalkingClient {
 
     func waitForContextSyncMessages(
         request: UUID,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        send: @escaping @Sendable () throws -> Void = {}
     ) async throws -> KeepTalkingContextSyncMessagesResult {
         try await withThrowingTaskGroup(
             of: KeepTalkingContextSyncMessagesResult.self
@@ -221,8 +242,17 @@ extension KeepTalkingClient {
                             KeepTalkingContextSyncMessagesResult, Error
                         >
                     ) in
-                    self.contextSyncQueue.sync {
-                        self.pendingContextSyncMessages[request] = continuation
+                    do {
+                        self.contextSyncQueue.sync {
+                            self.pendingContextSyncMessages[request] =
+                                continuation
+                        }
+                        try send()
+                    } catch {
+                        self.failPendingContextSyncMessages(
+                            request: request,
+                            error: error
+                        )
                     }
                 }
             }
