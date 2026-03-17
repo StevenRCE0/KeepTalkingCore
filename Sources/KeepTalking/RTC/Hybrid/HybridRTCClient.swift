@@ -336,6 +336,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                     )
                 }
                 rememberPeer(presence.node)
+                reportPeerConnected(presence.node, source: "presence")
                 p2pClient?.receivePresence(from: presence.node)
                 onEnvelope?(envelope)
             case .p2pSignal(let signalPayload):

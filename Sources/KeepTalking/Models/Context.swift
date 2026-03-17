@@ -53,6 +53,9 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     @Timestamp(key: "updated_at", on: .update)
     public var updatedAt: Date?
 
+    @OptionalField(key: "sync_metadata")
+    public var syncMetadata: KeepTalkingContextSyncMetadata?
+
     @Children(for: \.$context)
     public var messages: [KeepTalkingContextMessage]
 
@@ -64,11 +67,45 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     ) {
         self.id = id
         self.updatedAt = updatedAt
+        self.syncMetadata = nil
     }
 
     /// The Hasher protocol is merely satisfied by the ID, no message comparison logic.
     public func hash(into hasher: inout Hasher) {
         hasher.combine(id)
+    }
+}
+
+extension KeepTalkingContext: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case updatedAt
+        case messages
+    }
+
+    public convenience init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let updatedAt =
+            try container.decodeIfPresent(
+                Date.self,
+                forKey: .updatedAt
+            ) ?? Date()
+        self.init(
+            id: id,
+            updatedAt: updatedAt
+        )
+        self.$messages.value = try container.decodeIfPresent(
+            [KeepTalkingContextMessage].self,
+            forKey: .messages
+        ) ?? []
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(id, forKey: .id)
+        try container.encodeIfPresent(updatedAt, forKey: .updatedAt)
+        try container.encode($messages.value ?? [], forKey: .messages)
     }
 }
 

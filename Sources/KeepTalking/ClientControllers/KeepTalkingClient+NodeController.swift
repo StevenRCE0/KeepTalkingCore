@@ -354,6 +354,7 @@ extension KeepTalkingClient {
         await broadcastLocalNodeState(
             reason: "peer-connect node=\(nodeIDText)"
         )
+        await syncCurrentContext(with: nodeID)
     }
 
     func mergeDiscoveredNodeStatus(_ status: KeepTalkingNodeStatus) async throws {

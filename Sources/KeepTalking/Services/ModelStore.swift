@@ -88,6 +88,7 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             CreateKeepTalkingOperatorContextsMigration(),
             CreateContextGroupSecretsMigration(),
             CreateKeepTalkingContextMessagesMigration(),
+            AddContextSyncMetadataMigration(),
             to: databaseID
         )
         try blocking {

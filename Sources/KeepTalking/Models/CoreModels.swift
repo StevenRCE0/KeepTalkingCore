@@ -215,6 +215,7 @@ public enum KeepTalkingP2PEnvelope: Codable, Sendable {
     case node(KeepTalkingNode)
     case nodeStatus(KeepTalkingNodeStatus)
     case encryptedNodeStatus(KeepTalkingAsymmetricCipherEnvelope)
+    case contextSync(KeepTalkingContextSyncEnvelope)
     case actionCallRequest(KeepTalkingActionCallRequest)
     case actionCallResult(KeepTalkingActionCallResult)
     case encryptedActionCallRequest(KeepTalkingAsymmetricCipherEnvelope)
@@ -225,6 +226,37 @@ public enum KeepTalkingP2PEnvelope: Codable, Sendable {
     case encryptedActionCatalogResult(KeepTalkingAsymmetricCipherEnvelope)
     case p2pSignal(KeepTalkingP2PSignalPayload)
     case p2pPresence(KeepTalkingP2PPresencePayload)
+}
+
+enum KeepTalkingEnvelopeChannel: Sendable {
+    case chat
+    case actionCall
+    case signaling
+}
+
+extension KeepTalkingP2PEnvelope {
+    var channel: KeepTalkingEnvelopeChannel {
+        switch self {
+            case .message,
+                .context,
+                .node,
+                .nodeStatus,
+                .encryptedNodeStatus,
+                .contextSync:
+                return .chat
+            case .actionCallRequest,
+                .actionCallResult,
+                .encryptedActionCallRequest,
+                .encryptedActionCallResult,
+                .actionCatalogRequest,
+                .actionCatalogResult,
+                .encryptedActionCatalogRequest,
+                .encryptedActionCatalogResult:
+                return .actionCall
+            case .p2pSignal, .p2pPresence:
+                return .signaling
+        }
+    }
 }
 
 enum KeepTalkingInternalError: LocalizedError {

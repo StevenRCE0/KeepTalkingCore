@@ -1,21 +1,74 @@
 import Foundation
 
+public struct KeepTalkingMCPOAuthRegistration: Codable, Sendable, Hashable {
+    public enum Flow: String, Codable, Sendable, Hashable {
+        case authorizationCode
+        case deviceCode
+    }
+
+    public var flow: Flow
+    public var authorizationEndpoint: URL
+    public var tokenEndpoint: URL
+    public var registrationEndpoint: URL?
+    public var resource: URL?
+    public var clientID: String?
+    public var scope: String?
+    public var providerID: String?
+    public var discoveredAt: Date
+    public var lastAuthenticatedAt: Date?
+
+    public init(
+        flow: Flow,
+        authorizationEndpoint: URL,
+        tokenEndpoint: URL,
+        registrationEndpoint: URL? = nil,
+        resource: URL? = nil,
+        clientID: String? = nil,
+        scope: String? = nil,
+        providerID: String? = nil,
+        discoveredAt: Date = .now,
+        lastAuthenticatedAt: Date? = nil
+    ) {
+        self.flow = flow
+        self.authorizationEndpoint = authorizationEndpoint
+        self.tokenEndpoint = tokenEndpoint
+        self.registrationEndpoint = registrationEndpoint
+        self.resource = resource
+        self.clientID = clientID
+        self.scope = scope
+        self.providerID = providerID
+        self.discoveredAt = discoveredAt
+        self.lastAuthenticatedAt = lastAuthenticatedAt
+    }
+
+    public func markingAuthenticated(at date: Date = .now)
+        -> KeepTalkingMCPOAuthRegistration
+    {
+        var updated = self
+        updated.lastAuthenticatedAt = date
+        return updated
+    }
+}
+
 public struct KeepTalkingMCPBundle: KeepTalkingActionBundle {
     public var id: UUID
     public var name: String
     public var indexDescription: String
     public var service: KeepTalkingMCPService
+    public var oauthRegistration: KeepTalkingMCPOAuthRegistration?
 
     public init(
         id: UUID = UUID(),
         name: String,
         indexDescription: String,
-        service: KeepTalkingMCPService
+        service: KeepTalkingMCPService,
+        oauthRegistration: KeepTalkingMCPOAuthRegistration? = nil
     ) {
         self.id = id
         self.name = name
         self.indexDescription = indexDescription
         self.service = service
+        self.oauthRegistration = oauthRegistration
     }
 }
 

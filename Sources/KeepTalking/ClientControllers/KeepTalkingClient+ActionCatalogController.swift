@@ -7,6 +7,14 @@ extension KeepTalkingClient {
     private static let actionCatalogSkillManifestMaxCharacters = 20_000
     private static let actionCatalogSkillFileMaxCharacters = 30_000
 
+    private var skillCatalogLoader: KeepTalkingSkillCatalogLoader {
+        KeepTalkingSkillCatalogLoader(
+            manifestPreviewMaxCharacters: Self
+                .actionCatalogSkillManifestMaxCharacters,
+            filePreviewMaxCharacters: Self.actionCatalogSkillFileMaxCharacters
+        )
+    }
+
     func executeActionCatalogRequest(
         _ request: KeepTalkingActionCatalogRequest,
         context: KeepTalkingContext?
@@ -189,9 +197,8 @@ extension KeepTalkingClient {
 
         for query in queries {
             let argumentsKey: String
-            let normalizedArguments = normalizedSkillFileQueryArguments(
-                query.arguments
-            )
+            let normalizedArguments = KeepTalkingSkillCatalogLoader
+                .normalizedFileArguments(query.arguments)
             if query.kind == .skillFile,
                 !normalizedArguments.isEmpty,
                 let data = try? JSONEncoder().encode(normalizedArguments),
@@ -299,235 +306,16 @@ extension KeepTalkingClient {
     private func buildSkillCatalogMetadata(
         _ bundle: KeepTalkingSkillBundle
     ) throws -> KeepTalkingActionCatalogSkillMetadata {
-        try validateSkillDirectoryForCatalog(bundle.directory)
-        let manifestURL = SkillDirectoryDefinitions.entryURL(
-            .manifest,
-            in: bundle.directory
-        )
-        let manifestText = try String(
-            contentsOf: manifestURL,
-            encoding: .utf8
-        )
-
-        return KeepTalkingActionCatalogSkillMetadata(
-            name: bundle.name,
-            directoryPath: bundle.directory.path,
-            manifestPath: manifestURL.path,
-            manifestMetadata: parseSkillManifestMetadata(manifestText),
-            referencesFiles: listSkillRelativeFiles(
-                in: SkillDirectoryDefinitions.entryURL(
-                    .references,
-                    in: bundle.directory
-                ),
-                root: bundle.directory
-            ),
-            scripts: listSkillRelativeFiles(
-                in: SkillDirectoryDefinitions.entryURL(
-                    .scripts,
-                    in: bundle.directory
-                ),
-                root: bundle.directory
-            ),
-            assets: listSkillRelativeFiles(
-                in: SkillDirectoryDefinitions.entryURL(
-                    .assets,
-                    in: bundle.directory
-                ),
-                root: bundle.directory
-            ),
-            manifestPreview: clippedSkillManifest(
-                manifestText,
-                maxCharacters: Self.actionCatalogSkillManifestMaxCharacters
-            )
-        )
+        try skillCatalogLoader.loadMetadata(bundle: bundle)
     }
 
     private func buildSkillFileCatalogPayload(
         _ bundle: KeepTalkingSkillBundle,
         arguments: [String: Value]?
     ) throws -> KeepTalkingActionCatalogSkillFile {
-        try validateSkillDirectoryForCatalog(bundle.directory)
-        let normalizedArguments = normalizedSkillFileQueryArguments(arguments)
-
-        let requestedPath =
-            normalizedArguments["path"]?.stringValue
-            ?? normalizedArguments["file"]?.stringValue
-            ?? normalizedArguments["file_path"]?.stringValue
-            ?? normalizedArguments["relative_path"]?.stringValue
-            ?? ""
-        let trimmedPath = requestedPath.trimmingCharacters(
-            in: .whitespacesAndNewlines
+        try skillCatalogLoader.loadFilePayload(
+            bundle: bundle,
+            arguments: arguments
         )
-        guard !trimmedPath.isEmpty else {
-            throw SkillManagerError.invalidToolArguments(
-                "Missing required `path` for skill file query."
-            )
-        }
-
-        let maxCharacters = min(
-            max(
-                normalizedArguments["max_characters"]?.intValue
-                    ?? normalizedArguments["limit"]?.intValue
-                    ?? normalizedArguments["max_characters"]?.doubleValue.map { Int($0) }
-                    ?? Self.actionCatalogSkillFileMaxCharacters,
-                128
-            ),
-            Self.actionCatalogSkillFileMaxCharacters
-        )
-
-        let fileURL = try resolveSkillFileURL(
-            trimmedPath,
-            skillDirectory: bundle.directory
-        )
-        let rawData = try Data(contentsOf: fileURL)
-        let fileText =
-            String(data: rawData, encoding: .utf8)
-            ?? String(decoding: rawData, as: UTF8.self)
-        let content = clippedSkillManifest(
-            fileText,
-            maxCharacters: maxCharacters
-        )
-
-        let rootPath = bundle.directory.standardizedFileURL.path
-        let path = fileURL.standardizedFileURL.path
-        let relativePath: String
-        if path.hasPrefix(rootPath + "/") {
-            relativePath = String(path.dropFirst(rootPath.count + 1))
-        } else {
-            relativePath = path
-        }
-
-        return KeepTalkingActionCatalogSkillFile(
-            path: relativePath,
-            content: content,
-            maxCharacters: maxCharacters,
-            truncated: fileText.count > maxCharacters
-        )
-    }
-
-    private func normalizedSkillFileQueryArguments(
-        _ arguments: [String: Value]?
-    ) -> [String: Value] {
-        guard let arguments else {
-            return [:]
-        }
-        if let nested = arguments["arguments"]?.objectValue {
-            return nested
-        }
-        if let nested = arguments["params"]?.objectValue {
-            return nested
-        }
-        return arguments
-    }
-
-    private func validateSkillDirectoryForCatalog(_ directory: URL) throws {
-        var isDirectory: ObjCBool = false
-        let exists = FileManager.default.fileExists(
-            atPath: directory.path,
-            isDirectory: &isDirectory
-        )
-        guard exists, isDirectory.boolValue else {
-            throw SkillManagerError.invalidSkillDirectory(directory)
-        }
-
-        let manifestURL = SkillDirectoryDefinitions.entryURL(
-            .manifest,
-            in: directory
-        )
-        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
-            throw SkillManagerError.missingSkillManifest(manifestURL)
-        }
-    }
-
-    private func parseSkillManifestMetadata(
-        _ manifest: String
-    ) -> [String: String] {
-        guard manifest.hasPrefix("---") else {
-            return [:]
-        }
-
-        let lines = manifest.components(separatedBy: .newlines)
-        guard
-            lines.count >= 3,
-            lines[0].trimmingCharacters(in: .whitespaces) == "---"
-        else {
-            return [:]
-        }
-
-        var metadata: [String: String] = [:]
-        for line in lines.dropFirst() {
-            if line.trimmingCharacters(in: .whitespaces) == "---" {
-                break
-            }
-            guard
-                let separator = line.firstIndex(of: ":"),
-                separator != line.startIndex
-            else {
-                continue
-            }
-
-            let key = line[..<separator].trimmingCharacters(
-                in: .whitespacesAndNewlines
-            )
-            let value = line[line.index(after: separator)...]
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !key.isEmpty {
-                metadata[key] = value
-            }
-        }
-
-        return metadata
-    }
-
-    private func listSkillRelativeFiles(in directory: URL, root: URL) -> [String]
-    {
-        var isDirectory: ObjCBool = false
-        guard
-            FileManager.default.fileExists(
-                atPath: directory.path,
-                isDirectory: &isDirectory
-            ),
-            isDirectory.boolValue
-        else {
-            return []
-        }
-        guard
-            let enumerator = FileManager.default.enumerator(
-                at: directory,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles]
-            )
-        else {
-            return []
-        }
-
-        let rootPath = root.standardizedFileURL.path
-        var files: [String] = []
-        for case let fileURL as URL in enumerator {
-            guard
-                let values = try? fileURL.resourceValues(
-                    forKeys: [.isRegularFileKey]
-                ),
-                values.isRegularFile == true
-            else {
-                continue
-            }
-
-            let path = fileURL.standardizedFileURL.path
-            if path.hasPrefix(rootPath + "/") {
-                files.append(String(path.dropFirst(rootPath.count + 1)))
-            }
-        }
-        return files.sorted()
-    }
-
-    private func clippedSkillManifest(
-        _ text: String,
-        maxCharacters: Int
-    ) -> String {
-        guard text.count > maxCharacters else {
-            return text
-        }
-        return String(text.prefix(maxCharacters)) + "\n...[truncated]..."
     }
 }

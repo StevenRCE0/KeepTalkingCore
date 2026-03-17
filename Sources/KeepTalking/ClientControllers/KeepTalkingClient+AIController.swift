@@ -3,28 +3,6 @@ import Foundation
 import MCP
 import OpenAI
 
-private struct LocalExecutorRegistrationTimeoutError: LocalizedError {
-    let actionID: UUID
-    let source: String
-    let actionName: String
-    let timeoutSeconds: TimeInterval
-
-    var errorDescription: String? {
-        "Timed out registering \(source) executor '\(actionName)' (\(actionID.uuidString.lowercased())) after \(Int(timeoutSeconds))s."
-    }
-}
-
-private struct LocalExecutorRegistrationFailedError: LocalizedError {
-    let actionID: UUID
-    let source: String
-    let actionName: String
-    let underlying: Error
-
-    var errorDescription: String? {
-        "Failed registering \(source) executor '\(actionName)' (\(actionID.uuidString.lowercased())): \(underlying.localizedDescription)"
-    }
-}
-
 extension KeepTalkingClient {
     static let listingToolFunctionName = "kt_list_available_actions"
     static let maxAgentTurns = 8
@@ -221,32 +199,34 @@ extension KeepTalkingClient {
                     self.onLog?(
                         "[\(source)] registration timeout action=\(actionIDLabel) after=\(Int(timeoutSeconds))s"
                     )
-                    throw LocalExecutorRegistrationTimeoutError(
-                        actionID: actionID,
-                        source: source,
-                        actionName: actionName,
-                        timeoutSeconds: timeoutSeconds
-                    )
+                    throw KeepTalkingClientError
+                        .localExecutorRegistrationTimedOut(
+                            actionID: actionID,
+                            source: source,
+                            actionName: actionName,
+                            timeoutSeconds: timeoutSeconds
+                        )
                 }
 
                 guard try await group.next() != nil else {
-                    throw LocalExecutorRegistrationTimeoutError(
-                        actionID: actionID,
-                        source: source,
-                        actionName: actionName,
-                        timeoutSeconds: timeoutSeconds
-                    )
+                    throw KeepTalkingClientError
+                        .localExecutorRegistrationTimedOut(
+                            actionID: actionID,
+                            source: source,
+                            actionName: actionName,
+                            timeoutSeconds: timeoutSeconds
+                        )
                 }
                 group.cancelAll()
             }
-        } catch let error as LocalExecutorRegistrationTimeoutError {
+        } catch let error as KeepTalkingClientError {
             throw error
         } catch {
-            throw LocalExecutorRegistrationFailedError(
+            throw KeepTalkingClientError.localExecutorRegistrationFailed(
                 actionID: actionID,
                 source: source,
                 actionName: actionName,
-                underlying: error
+                message: error.localizedDescription
             )
         }
     }

@@ -30,10 +30,9 @@ extension KeepTalkingClient {
             type: type
         )
         persistedContext.updatedAt = message.timestamp
-        _ = try await persistedContext.$messages.get(on: localStore.database)
 
         try await message.save(on: localStore.database)
-        try await persistedContext.save(on: localStore.database)
+        try await persistedContext.refreshSyncMetadata(on: localStore.database)
         if emitLocalEnvelope {
             onEnvelope?(.message(message))
         }
@@ -81,49 +80,7 @@ extension KeepTalkingClient {
     func handleIncomingMessage(_ message: KeepTalkingContextMessage)
         async throws
     {
-        let contextID = message.$context.id
-        message.content = await decryptedContentIfNeeded(
-            message.content,
-            contextID: contextID
-        )
-
-        Task {
-            try? await message.save(on: localStore.database)
-        }
-
-        let node = try await getCurrentNodeInstance()
-
-        if case .node(let nodeID) = message.sender, nodeID != config.node {
-            let senderNode: KeepTalkingNode
-            if let existingSenderNode =
-                try await KeepTalkingNode
-                .query(on: localStore.database)
-                .filter(\.$id, .equal, nodeID)
-                .first()
-            {
-                senderNode = existingSenderNode
-            } else {
-                senderNode = KeepTalkingNode(id: nodeID)
-                try await senderNode.save(on: localStore.database)
-            }
-
-            let relationExists =
-                try await KeepTalkingNodeRelation
-                .query(on: localStore.database)
-                .filter(\.$from.$id, .equal, try node.requireID())
-                .filter(\.$to.$id, .equal, nodeID)
-                .count() > 0
-
-            if !relationExists {
-                let relationship = try KeepTalkingNodeRelation(
-                    from: node,
-                    to: senderNode,
-                    relationship: .pending
-                )
-                try await relationship.save(on: localStore.database)
-            }
-        }
-
+        try await saveIncomingMessages([message], in: message.$context.id)
     }
 
     func handleIncomingEnvelope(_ envelope: KeepTalkingP2PEnvelope)
@@ -143,6 +100,8 @@ extension KeepTalkingClient {
                 }
                 let status = try await decryptNodeStatusEnvelope(envelope)
                 try await mergeDiscoveredNodeStatus(status)
+            case .contextSync(let envelope):
+                try await handleIncomingContextSyncEnvelope(envelope)
             case .context(let context):
                 mergeContext(context)
             case .actionCallRequest(let request):
@@ -219,10 +178,58 @@ extension KeepTalkingClient {
 
     func saveContext(_ context: KeepTalkingContext) async throws {
         let persistedContext = try await upsertContext(context)
-        for message in context.messages {
-            message.context = persistedContext
+        let newMessages = try await filterNewMessages(context.messages)
+
+        for message in newMessages {
+            message.$context.id = try persistedContext.requireID()
+            message.$context.value = persistedContext
             try await message.save(on: localStore.database)
+            if let updatedAt = persistedContext.updatedAt {
+                persistedContext.updatedAt = max(updatedAt, message.timestamp)
+            } else {
+                persistedContext.updatedAt = message.timestamp
+            }
         }
+        try await persistedContext.refreshSyncMetadata(on: localStore.database)
+    }
+
+    func saveIncomingMessages(
+        _ messages: [KeepTalkingContextMessage],
+        in contextID: UUID
+    ) async throws {
+        guard !messages.isEmpty else {
+            return
+        }
+
+        let newMessages = try await filterNewMessages(messages)
+        guard !newMessages.isEmpty else {
+            return
+        }
+
+        let latestTimestamp = newMessages.map(\.timestamp).max() ?? Date()
+        let persistedContext = try await upsertContext(
+            KeepTalkingContext(
+                id: contextID,
+                updatedAt: latestTimestamp
+            )
+        )
+
+        for message in newMessages {
+            message.content = await decryptedContentIfNeeded(
+                message.content,
+                contextID: contextID
+            )
+            message.$context.id = try persistedContext.requireID()
+            message.$context.value = persistedContext
+            try await message.save(on: localStore.database)
+            try await ensureMessageSenderRelation(for: message)
+        }
+
+        persistedContext.updatedAt = max(
+            persistedContext.updatedAt ?? latestTimestamp,
+            latestTimestamp
+        )
+        try await persistedContext.refreshSyncMetadata(on: localStore.database)
     }
 
     func upsertContext(_ context: KeepTalkingContext) async throws
@@ -251,6 +258,83 @@ extension KeepTalkingClient {
 
         try await context.save(on: localStore.database)
         return context
+    }
+
+    private func filterNewMessages(
+        _ messages: [KeepTalkingContextMessage]
+    ) async throws -> [KeepTalkingContextMessage] {
+        var seen = Set<UUID>()
+        var uniqueMessages: [KeepTalkingContextMessage] = []
+        var identifiedMessages: [UUID] = []
+
+        for message in messages {
+            guard let messageID = message.id else {
+                uniqueMessages.append(message)
+                continue
+            }
+            guard seen.insert(messageID).inserted else {
+                continue
+            }
+            uniqueMessages.append(message)
+            identifiedMessages.append(messageID)
+        }
+
+        guard !identifiedMessages.isEmpty else {
+            return uniqueMessages
+        }
+
+        let existingIDs = Set(
+            try await KeepTalkingContextMessage.query(on: localStore.database)
+                .filter(\.$id ~~ identifiedMessages)
+                .all()
+                .compactMap(\.id)
+        )
+
+        return uniqueMessages.filter { message in
+            guard let messageID = message.id else {
+                return true
+            }
+            return !existingIDs.contains(messageID)
+        }
+    }
+
+    private func ensureMessageSenderRelation(
+        for message: KeepTalkingContextMessage
+    ) async throws {
+        let node = try await getCurrentNodeInstance()
+
+        guard case .node(let nodeID) = message.sender, nodeID != config.node
+        else {
+            return
+        }
+
+        let senderNode: KeepTalkingNode
+        if let existingSenderNode = try await KeepTalkingNode
+            .query(on: localStore.database)
+            .filter(\.$id, .equal, nodeID)
+            .first()
+        {
+            senderNode = existingSenderNode
+        } else {
+            senderNode = KeepTalkingNode(id: nodeID)
+            try await senderNode.save(on: localStore.database)
+        }
+
+        let relationExists =
+            try await KeepTalkingNodeRelation
+            .query(on: localStore.database)
+            .filter(\.$from.$id, .equal, try node.requireID())
+            .filter(\.$to.$id, .equal, nodeID)
+            .count() > 0
+
+        if !relationExists {
+            let relationship = try KeepTalkingNodeRelation(
+                from: node,
+                to: senderNode,
+                relationship: .pending
+            )
+            try await relationship.save(on: localStore.database)
+        }
     }
 
     /// Returns the symmetric key for a context, creating one if needed.

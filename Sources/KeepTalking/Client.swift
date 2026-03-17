@@ -13,6 +13,19 @@ public enum KeepTalkingClientError: LocalizedError {
     case actionCallNotAuthorized(action: UUID, caller: UUID, context: UUID)
     case actionCallTimeout(UUID)
     case actionCatalogTimeout(UUID)
+    case contextSyncTimeout(UUID)
+    case localExecutorRegistrationTimedOut(
+        actionID: UUID,
+        source: String,
+        actionName: String,
+        timeoutSeconds: TimeInterval
+    )
+    case localExecutorRegistrationFailed(
+        actionID: UUID,
+        source: String,
+        actionName: String,
+        message: String
+    )
     case localIdentityPrivateKeyMissing
     case remoteIdentityPublicKeyMissing(UUID)
     case remoteIdentityPublicKeyInvalid(UUID)
@@ -46,6 +59,22 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Timed out waiting for remote action call result: \(requestID)"
             case .actionCatalogTimeout(let requestID):
                 return "Timed out waiting for remote action catalog result: \(requestID)"
+            case .contextSyncTimeout(let requestID):
+                return "Timed out waiting for remote context sync result: \(requestID)"
+            case .localExecutorRegistrationTimedOut(
+                let actionID,
+                let source,
+                let actionName,
+                let timeoutSeconds
+            ):
+                return "Timed out registering \(source) executor '\(actionName)' (\(actionID.uuidString.lowercased())) after \(Int(timeoutSeconds))s."
+            case .localExecutorRegistrationFailed(
+                let actionID,
+                let source,
+                let actionName,
+                let message
+            ):
+                return "Failed registering \(source) executor '\(actionName)' (\(actionID.uuidString.lowercased())): \(message)"
             case .localIdentityPrivateKeyMissing:
                 return "Local private identity key is missing."
             case .remoteIdentityPublicKeyMissing(let nodeID):
@@ -115,6 +144,11 @@ public final class KeepTalkingClient: @unchecked Sendable {
         label: "KeepTalking.client.action-catalog"
     )
     var pendingActionCatalogResults: [UUID: CheckedContinuation<KeepTalkingActionCatalogResult, Error>] = [:]
+    let contextSyncQueue = DispatchQueue(
+        label: "KeepTalking.client.context-sync"
+    )
+    var pendingContextSyncSummaries: [UUID: CheckedContinuation<KeepTalkingContextSyncSummaryResult, Error>] = [:]
+    var pendingContextSyncMessages: [UUID: CheckedContinuation<KeepTalkingContextSyncMessagesResult, Error>] = [:]
     var nodeStateBroadcastDebounceTask: Task<Void, Never>?
 
     /// Creates a client with its transport, storage, and optional AI integrations.
@@ -230,6 +264,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public func disconnect() {
         failAllPendingActionCalls(error: SignalError.closed)
         failAllPendingActionCatalogRequests(error: SignalError.closed)
+        failAllPendingContextSync(error: SignalError.closed)
         cancelDebouncedNodeStateBroadcast()
         rtcClient.stop()
     }

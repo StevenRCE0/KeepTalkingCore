@@ -43,15 +43,275 @@ public enum SkillManagerError: LocalizedError {
     }
 }
 
-/// Executes skill-backed actions by exposing skill files and scripts as AI tools.
-public actor SkillManager {
-    private struct ScriptExecutionResult: Sendable {
+enum SkillScriptRunner {
+    struct ExecutionResult: Sendable {
         let command: [String]
         let exitCode: Int32
         let stdout: String
         let stderr: String
     }
 
+    private enum RunOutcome: Sendable {
+        case exited(Int32)
+        case timedOut
+    }
+
+    private final class ProcessBox: @unchecked Sendable {
+        let process = Process()
+    }
+
+    static func makeCommand(
+        scriptURL: URL,
+        arguments: [String]
+    ) -> [String] {
+        let path = scriptURL.path
+        switch scriptURL.pathExtension.lowercased() {
+            case "py":
+                return ["/usr/bin/env", "python3", path] + arguments
+            case "sh", "command":
+                return ["/bin/zsh", path] + arguments
+            default:
+                if FileManager.default.isExecutableFile(atPath: path) {
+                    return [path] + arguments
+                }
+                return ["/bin/zsh", path] + arguments
+        }
+    }
+
+    static func run(
+        command: [String],
+        currentDirectory: URL,
+        actionID: UUID,
+        timeoutSeconds: TimeInterval
+    ) async throws -> ExecutionResult {
+        guard let executable = command.first else {
+            return ExecutionResult(
+                command: [],
+                exitCode: 2,
+                stdout: "",
+                stderr: "Missing command executable."
+            )
+        }
+
+        let processBox = ProcessBox()
+        return try await withTaskCancellationHandler {
+            try await run(
+                process: processBox.process,
+                executable: executable,
+                command: command,
+                currentDirectory: currentDirectory,
+                actionID: actionID,
+                timeoutSeconds: timeoutSeconds
+            )
+        } onCancel: {
+            terminateProcessIfRunning(processBox.process)
+        }
+    }
+
+    private static func run(
+        process: Process,
+        executable: String,
+        command: [String],
+        currentDirectory: URL,
+        actionID: UUID,
+        timeoutSeconds: TimeInterval
+    ) async throws -> ExecutionResult {
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = Array(command.dropFirst())
+        process.currentDirectoryURL = currentDirectory
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.environment = mergedEnvironment(for: command)
+
+        async let stdoutData = readToEnd(stdoutPipe.fileHandleForReading)
+        async let stderrData = readToEnd(stderrPipe.fileHandleForReading)
+
+        let timeoutNanos = UInt64(max(timeoutSeconds, 1) * 1_000_000_000)
+        let exitCode: Int32
+        do {
+            let outcome = try await withThrowingTaskGroup(
+                of: RunOutcome.self
+            ) { group in
+                group.addTask {
+                    let status = try await withCheckedThrowingContinuation {
+                        (continuation: CheckedContinuation<Int32, Error>) in
+                        process.terminationHandler = { process in
+                            continuation.resume(
+                                returning: process.terminationStatus
+                            )
+                        }
+                        do {
+                            try process.run()
+                            stdoutPipe.fileHandleForWriting.closeFile()
+                            stderrPipe.fileHandleForWriting.closeFile()
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                    return .exited(status)
+                }
+
+                group.addTask {
+                    try await Task.sleep(nanoseconds: timeoutNanos)
+                    requestProcessTermination(process)
+                    return .timedOut
+                }
+
+                guard let result = try await group.next() else {
+                    throw SkillManagerError.toolCallTimedOut(
+                        actionID,
+                        timeoutSeconds
+                    )
+                }
+                group.cancelAll()
+                return result
+            }
+            switch outcome {
+                case .exited(let status):
+                    exitCode = status
+                case .timedOut:
+                    throw SkillManagerError.toolCallTimedOut(
+                        actionID,
+                        timeoutSeconds
+                    )
+            }
+        } catch {
+            terminateProcessIfRunning(process)
+            _ = try? await stdoutData
+            _ = try? await stderrData
+            throw error
+        }
+
+        let stdoutText = decode(data: try await stdoutData)
+        let stderrText = decode(data: try await stderrData)
+
+        return ExecutionResult(
+            command: command,
+            exitCode: exitCode,
+            stdout: stdoutText,
+            stderr: stderrText
+        )
+    }
+
+    private static func readToEnd(_ handle: FileHandle) async throws -> Data {
+        try await Task.detached(priority: .utility) {
+            try handle.readToEnd() ?? Data()
+        }.value
+    }
+
+    private static func decode(data: Data) -> String {
+        String(data: data, encoding: .utf8)
+            ?? String(decoding: data, as: UTF8.self)
+    }
+
+    private static func terminateProcessIfRunning(_ process: Process) {
+        guard process.isRunning else {
+            return
+        }
+        process.terminate()
+        process.waitUntilExit()
+    }
+
+    private static func requestProcessTermination(_ process: Process) {
+        guard process.isRunning else {
+            return
+        }
+        process.terminate()
+    }
+
+    private static func mergedEnvironment(for command: [String]) -> [String: String]
+    {
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = resolvePathEnvironment(
+            command: command,
+            environment: environment
+        )
+        environment["TMPDIR"] = resolveWritableTempDirectory(
+            environment: environment
+        )
+        if environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty ?? true
+        {
+            environment["HOME"] = NSHomeDirectory()
+        }
+        return environment
+    }
+
+    private static func resolveWritableTempDirectory(
+        environment: [String: String]
+    ) -> String {
+        let fileManager = FileManager.default
+        let fallback = "/tmp"
+        let candidates = [
+            environment["TMPDIR"],
+            ProcessInfo.processInfo.environment["TMPDIR"],
+            NSTemporaryDirectory(),
+            fallback,
+        ]
+        for candidate in candidates {
+            guard let candidate else {
+                continue
+            }
+            let path = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else {
+                continue
+            }
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory),
+                isDirectory.boolValue,
+                fileManager.isWritableFile(atPath: path)
+            else {
+                continue
+            }
+            return path
+        }
+        return fallback
+    }
+
+    private static func resolvePathEnvironment(
+        command: [String],
+        environment: [String: String]
+    ) -> String {
+        var components = (
+            environment["PATH"] ?? ProcessInfo.processInfo.environment["PATH"] ?? ""
+        )
+        .split(separator: ":")
+        .map(String.init)
+        .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+        let defaults = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+        for candidate in defaults where !components.contains(candidate) {
+            components.append(candidate)
+        }
+
+        if let executable = command.first,
+            executable.hasPrefix("/")
+        {
+            let directory = URL(fileURLWithPath: executable)
+                .deletingLastPathComponent().path
+            if !directory.isEmpty, !components.contains(directory) {
+                components.insert(directory, at: 0)
+            }
+        }
+
+        if components.isEmpty {
+            return defaults.joined(separator: ":")
+        }
+        return components.joined(separator: ":")
+    }
+}
+
+/// Executes skill-backed actions by exposing skill files and scripts as AI tools.
+public actor SkillManager {
     private struct SkillManifestContext: Sendable {
         let manifestURL: URL
         let manifestText: String
@@ -327,7 +587,9 @@ public actor SkillManager {
                 ? UUID().uuidString.lowercased()
                 : toolCall.id
             let functionName = toolCall.function.name
-            let arguments = try decodeToolArguments(toolCall.function.arguments)
+            let arguments = normalizedSkillToolArguments(
+                try decodeToolArguments(toolCall.function.arguments)
+            )
 
             let payload: String
             switch functionName {
@@ -412,11 +674,11 @@ public actor SkillManager {
             skillDirectory: skillDirectory
         )
         let scriptArguments = extractScriptArguments(arguments)
-        let command = makeScriptCommand(
+        let command = SkillScriptRunner.makeCommand(
             scriptURL: scriptURL,
-            scriptArguments: scriptArguments
+            arguments: scriptArguments
         )
-        let execution = try await Self.runCommandWithTimeout(
+        let execution = try await SkillScriptRunner.run(
             command: command,
             currentDirectory: skillDirectory,
             actionID: actionID,
@@ -444,14 +706,12 @@ public actor SkillManager {
 
     private func extractScriptArguments(_ arguments: [String: Value]) -> [String] {
         if let array = arguments["args"]?.arrayValue {
-            return array.compactMap { value in
-                value.stringValue
-                    ?? value.intValue.map { String($0) }
-                    ?? value.doubleValue.map { String($0) }
-            }
+            return array.compactMap(scriptArgumentString(for:))
         }
         if let object = arguments["args"]?.objectValue {
-            return object.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+            return object.sorted { $0.key < $1.key }.compactMap { key, value in
+                scriptArgumentString(for: value).map { "\(key)=\($0)" }
+            }
         }
         if let raw = arguments["args"]?.stringValue {
             return raw.split(whereSeparator: \.isWhitespace).map(String.init)
@@ -462,107 +722,32 @@ public actor SkillManager {
         return []
     }
 
-    private func makeScriptCommand(
-        scriptURL: URL,
-        scriptArguments: [String]
-    ) -> [String] {
-        let path = scriptURL.path
-        switch scriptURL.pathExtension.lowercased() {
-            case "py":
-                return ["/usr/bin/env", "python3", path] + scriptArguments
-            case "sh":
-                return ["/bin/zsh", path] + scriptArguments
-            default:
-                if FileManager.default.isExecutableFile(atPath: path) {
-                    return [path] + scriptArguments
-                }
-                return ["/bin/zsh", path] + scriptArguments
+    private func scriptArgumentString(for value: Value) -> String? {
+        if let string = value.stringValue {
+            return string
         }
+        if let int = value.intValue {
+            return String(int)
+        }
+        if let double = value.doubleValue {
+            return String(double)
+        }
+        if let bool = value.boolValue {
+            return String(bool)
+        }
+        return nil
     }
 
-    private nonisolated static func runCommandWithTimeout(
-        command: [String],
-        currentDirectory: URL,
-        actionID: UUID,
-        timeoutSeconds: TimeInterval
-    ) async throws -> ScriptExecutionResult {
-        let timeoutNanos = UInt64(max(timeoutSeconds, 1) * 1_000_000_000)
-        return try await withThrowingTaskGroup(
-            of: ScriptExecutionResult.self
-        ) { group in
-            group.addTask {
-                try runCommand(
-                    command: command,
-                    currentDirectory: currentDirectory
-                )
-            }
-            group.addTask {
-                try await Task.sleep(nanoseconds: timeoutNanos)
-                throw SkillManagerError.toolCallTimedOut(actionID, timeoutSeconds)
-            }
-
-            guard let result = try await group.next() else {
-                throw SkillManagerError.toolCallTimedOut(actionID, timeoutSeconds)
-            }
-            group.cancelAll()
-            return result
+    private func normalizedSkillToolArguments(_ arguments: [String: Value])
+        -> [String: Value]
+    {
+        if let nested = arguments["arguments"]?.objectValue {
+            return nested
         }
-    }
-
-    private nonisolated static func runCommand(
-        command: [String],
-        currentDirectory: URL
-    ) throws -> ScriptExecutionResult {
-        guard let executable = command.first else {
-            return ScriptExecutionResult(
-                command: [],
-                exitCode: 2,
-                stdout: "",
-                stderr: "Missing command executable."
-            )
+        if let nested = arguments["params"]?.objectValue {
+            return nested
         }
-
-        let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = Array(command.dropFirst())
-        process.currentDirectoryURL = currentDirectory
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        do {
-            try process.run()
-        } catch {
-            return ScriptExecutionResult(
-                command: command,
-                exitCode: 127,
-                stdout: "",
-                stderr: error.localizedDescription
-            )
-        }
-
-        process.waitUntilExit()
-
-        let stdoutData =
-            try stdoutPipe.fileHandleForReading.readToEnd()
-            ?? Data()
-        let stderrData =
-            try stderrPipe.fileHandleForReading.readToEnd()
-            ?? Data()
-        let stdoutText =
-            String(data: stdoutData, encoding: .utf8)
-            ?? String(decoding: stdoutData, as: UTF8.self)
-        let stderrText =
-            String(data: stderrData, encoding: .utf8)
-            ?? String(decoding: stderrData, as: UTF8.self)
-
-        return ScriptExecutionResult(
-            command: command,
-            exitCode: process.terminationStatus,
-            stdout: stdoutText,
-            stderr: stderrText
-        )
+        return arguments
     }
 
     private func validateSkillDirectory(_ directory: URL) throws {

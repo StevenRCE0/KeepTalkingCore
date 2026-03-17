@@ -400,20 +400,13 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     private func route(for envelope: KeepTalkingP2PEnvelope) throws
         -> EnvelopeRoute
     {
-        switch envelope {
-            case .message, .node, .nodeStatus, .encryptedNodeStatus, .context:
+        switch envelope.channel {
+            case .chat:
                 return .chat
-            case .p2pSignal, .p2pPresence:
-                throw P2PError.signalingInP2P
-            case .actionCallRequest,
-                .actionCallResult,
-                .encryptedActionCallRequest,
-                .encryptedActionCallResult,
-                .actionCatalogRequest,
-                .actionCatalogResult,
-                .encryptedActionCatalogRequest,
-                .encryptedActionCatalogResult:
+            case .actionCall:
                 return .actionCall
+            case .signaling:
+                throw P2PError.signalingInP2P
         }
     }
 

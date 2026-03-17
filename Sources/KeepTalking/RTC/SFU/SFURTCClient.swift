@@ -311,20 +311,13 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     }
 
     private func route(for envelope: KeepTalkingP2PEnvelope) -> EnvelopeRoute {
-        switch envelope {
-            case .message, .node, .nodeStatus, .encryptedNodeStatus, .context:
+        switch envelope.channel {
+            case .chat:
                 return .chat
-            case .p2pSignal, .p2pPresence:
-                return .signaling
-            case .actionCallRequest,
-                .actionCallResult,
-                .encryptedActionCallRequest,
-                .encryptedActionCallResult,
-                .actionCatalogRequest,
-                .actionCatalogResult,
-                .encryptedActionCatalogRequest,
-                .encryptedActionCatalogResult:
+            case .actionCall:
                 return .actionCall
+            case .signaling:
+                return .signaling
         }
     }
 
@@ -671,6 +664,10 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             case .encryptedActionCatalogResult(let envelope):
                 reportPeerConnected(envelope.senderNodeID)
                 reportPeerConnected(envelope.recipientNodeID)
+            case .contextSync(let envelope):
+                for node in peerNodes(in: envelope) {
+                    reportPeerConnected(node)
+                }
             case .p2pSignal(let signal):
                 reportPeerConnected(signal.from)
             case .p2pPresence(let presence):
