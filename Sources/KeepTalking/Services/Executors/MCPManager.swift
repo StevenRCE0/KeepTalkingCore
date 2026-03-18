@@ -11,6 +11,7 @@ public enum MCPManagerError: LocalizedError {
     case invalidAction
     case missingActionID
     case invalidStdioCommand
+    case stdioUnavailableOnThisPlatform
     case missingHTTPAuthURLHandler(UUID)
     case httpAuthCancelled(UUID)
     case httpAuthDeclined(UUID)
@@ -28,6 +29,8 @@ public enum MCPManagerError: LocalizedError {
                 return "Action must have an ID before registration."
             case .invalidStdioCommand:
                 return "Stdio MCP command must include an executable."
+            case .stdioUnavailableOnThisPlatform:
+                return "Stdio MCP is unavailable on this platform."
             case .missingHTTPAuthURLHandler(let actionID):
                 return "HTTP MCP action requires auth flow, but no auth handler is registered. action=\(actionID)"
             case .httpAuthCancelled(let actionID):
@@ -59,45 +62,15 @@ public enum KeepTalkingMCPHTTPAuthResult: Sendable {
 /// Manages MCP action registration, transport connections, and tool invocation.
 public actor MCPManager {
     private final class StdioProcessHandle: @unchecked Sendable {
-        let process: Process
-        let stdinPipe: Pipe
-        let stdoutPipe: Pipe
-        let stderrPipe: Pipe
+        let processHandler: any MCPStdioProcessHandling
 
-        init(
-            process: Process,
-            stdinPipe: Pipe,
-            stdoutPipe: Pipe,
-            stderrPipe: Pipe
-        ) {
-            self.process = process
-            self.stdinPipe = stdinPipe
-            self.stdoutPipe = stdoutPipe
-            self.stderrPipe = stderrPipe
-        }
-    }
-
-    private final class ProcessExitState: @unchecked Sendable {
-        private let lock = NSLock()
-        private var terminated = false
-        private var status: Int32 = 0
-
-        func setTerminated(status: Int32) {
-            lock.lock()
-            terminated = true
-            self.status = status
-            lock.unlock()
-        }
-
-        func snapshot() -> (terminated: Bool, status: Int32) {
-            lock.lock()
-            let result = (terminated, status)
-            lock.unlock()
-            return result
+        init(processHandler: any MCPStdioProcessHandling) {
+            self.processHandler = processHandler
         }
     }
 
     private let nodeConfig: KeepTalkingConfig
+    private let stdioTransportLauncher: (any MCPStdioTransportLaunching)?
     private let connectTimeoutSeconds: TimeInterval
     private let toolCallTimeoutSeconds: TimeInterval
     private var clientsByActionID: [UUID: Client] = [:]
@@ -111,10 +84,13 @@ public actor MCPManager {
     /// Creates an MCP manager for a node runtime.
     public init(
         nodeConfig: KeepTalkingConfig,
+        stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
+            DefaultMCPStdioTransportLauncher.current,
         connectTimeoutSeconds: TimeInterval = 10,
         toolCallTimeoutSeconds: TimeInterval = 20
     ) {
         self.nodeConfig = nodeConfig
+        self.stdioTransportLauncher = stdioTransportLauncher
         self.connectTimeoutSeconds = connectTimeoutSeconds
         self.toolCallTimeoutSeconds = toolCallTimeoutSeconds
     }
@@ -411,87 +387,26 @@ public actor MCPManager {
         guard !command.isEmpty else {
             throw MCPManagerError.invalidStdioCommand
         }
-
-        let process = Process()
-        let stdinPipe = Pipe()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        let exitState = ProcessExitState()
-        process.standardInput = stdinPipe
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = command
-        let actionIDLabel = actionID.uuidString.lowercased()
-        var mergedEnvironment = ProcessInfo.processInfo.environment
-        mergedEnvironment.merge(environment) { _, new in new }
-        mergedEnvironment["PATH"] = Self.resolvePathEnvironment(
-            command: command,
-            environment: mergedEnvironment
-        )
-        mergedEnvironment["TMPDIR"] = Self.resolveWritableTempDirectory(
-            environment: mergedEnvironment
-        )
-        if mergedEnvironment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-            .isEmpty ?? true
-        {
-            mergedEnvironment["HOME"] = NSHomeDirectory()
+        guard let stdioTransportLauncher else {
+            throw MCPManagerError.stdioUnavailableOnThisPlatform
         }
-        process.environment = mergedEnvironment
-        log(
-            "[mcp][stdio] env action=\(actionIDLabel) path=\(mergedEnvironment["PATH"] ?? "<unset>") tmpdir=\(mergedEnvironment["TMPDIR"] ?? "<unset>") home=\(mergedEnvironment["HOME"] ?? "<unset>")"
-        )
+
+        let actionIDLabel = actionID.uuidString.lowercased()
         log(
             "[mcp][stdio] launch action=\(actionIDLabel) command=\(command.joined(separator: " "))"
         )
-        process.terminationHandler = { [weak self] process in
-            let reason: String = switch process.terminationReason {
-                case .exit:
-                    "exit"
-                case .uncaughtSignal:
-                    "signal"
-                @unknown default:
-                    "unknown"
-            }
-            exitState.setTerminated(status: process.terminationStatus)
-            Task {
-                await self?.log(
-                    "[mcp][stdio] exited action=\(actionIDLabel) status=\(process.terminationStatus) reason=\(reason)"
-                )
-            }
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else {
-                handle.readabilityHandler = nil
-                return
-            }
+        let launched = try await stdioTransportLauncher.launchTransport(
+            command: command,
+            environment: environment
+        ) { [weak self] data in
             Task {
                 await self?.logStdioStderr(actionID: actionID, data: data)
             }
         }
-
-        do {
-            try process.run()
-        } catch {
-            stderrPipe.fileHandleForReading.readabilityHandler = nil
-            terminateProcessIfRunning(process)
-            throw error
-        }
+        let launchedTransport = launched.transport
+        let launchedProcessHandler = launched.processHandler
         log(
-            "[mcp][stdio] launched action=\(actionIDLabel) pid=\(process.processIdentifier)"
-        )
-
-        // Parent only writes to child's stdin and reads from child's stdout.
-        // Closing opposite ends prevents EOF/delimiter deadlocks if child exits.
-        stdinPipe.fileHandleForReading.closeFile()
-        stdoutPipe.fileHandleForWriting.closeFile()
-        stderrPipe.fileHandleForWriting.closeFile()
-
-        let transport = StdioTransport(
-            input: FileDescriptor(rawValue: stdoutPipe.fileHandleForReading.fileDescriptor),
-            output: FileDescriptor(rawValue: stdinPipe.fileHandleForWriting.fileDescriptor)
+            "[mcp][stdio] launched action=\(actionIDLabel)"
         )
 
         do {
@@ -502,7 +417,7 @@ public actor MCPManager {
                 group.addTask {
                     try await Self.connectClient(
                         client,
-                        transport: transport,
+                        transport: launchedTransport,
                         timeoutSeconds: self.connectTimeoutSeconds
                     )
                 }
@@ -510,11 +425,10 @@ public actor MCPManager {
                 group.addTask {
                     while true {
                         if Task.isCancelled { return }
-                        let state = exitState.snapshot()
-                        if state.terminated {
+                        if let status = launchedProcessHandler.terminationStatus() {
                             throw MCPManagerError.stdioProcessExitedEarly(
                                 command: command,
-                                status: state.status
+                                status: status
                             )
                         }
                         try await Task.sleep(nanoseconds: 100_000_000)
@@ -529,17 +443,13 @@ public actor MCPManager {
             log("[mcp][stdio] connected action=\(actionIDLabel)")
 
             stdioProcessesByActionID[actionID] = StdioProcessHandle(
-                process: process,
-                stdinPipe: stdinPipe,
-                stdoutPipe: stdoutPipe,
-                stderrPipe: stderrPipe
+                processHandler: launchedProcessHandler
             )
         } catch {
             log(
                 "[mcp][stdio] connect failed action=\(actionIDLabel) error=\(error.localizedDescription)"
             )
-            stderrPipe.fileHandleForReading.readabilityHandler = nil
-            terminateProcessIfRunning(process)
+            launchedProcessHandler.terminate()
             throw error
         }
     }
@@ -651,19 +561,7 @@ public actor MCPManager {
         guard let handle = stdioProcessesByActionID.removeValue(forKey: actionID) else {
             return
         }
-        terminateProcessIfRunning(handle.process)
-        handle.stdinPipe.fileHandleForWriting.closeFile()
-        handle.stdoutPipe.fileHandleForReading.closeFile()
-        handle.stderrPipe.fileHandleForReading.readabilityHandler = nil
-        handle.stderrPipe.fileHandleForReading.closeFile()
-    }
-
-    private func terminateProcessIfRunning(_ process: Process) {
-        guard process.isRunning else {
-            return
-        }
-        process.terminate()
-        process.waitUntilExit()
+        handle.processHandler.terminate()
     }
 
     private func log(_ message: String) {
@@ -748,78 +646,6 @@ public actor MCPManager {
                 .prefix(8)
         )
         return ["\(baseName)__\(suffix)"]
-    }
-
-    private static func resolveWritableTempDirectory(
-        environment: [String: String]
-    ) -> String {
-        let fileManager = FileManager.default
-        let fallback = "/tmp"
-        let candidates = [
-            environment["TMPDIR"],
-            ProcessInfo.processInfo.environment["TMPDIR"],
-            NSTemporaryDirectory(),
-            fallback,
-        ]
-        for candidate in candidates {
-            guard let candidate else {
-                continue
-            }
-            let path = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !path.isEmpty else {
-                continue
-            }
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory),
-                isDirectory.boolValue,
-                fileManager.isWritableFile(atPath: path)
-            else {
-                continue
-            }
-            return path
-        }
-        return fallback
-    }
-
-    private static func resolvePathEnvironment(
-        command: [String],
-        environment: [String: String]
-    ) -> String {
-        var components = (
-            environment["PATH"] ?? ProcessInfo.processInfo.environment["PATH"] ?? ""
-        )
-        .split(separator: ":")
-        .map(String.init)
-        .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-
-        let defaults = [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        ]
-        for candidate in defaults where !components.contains(candidate) {
-            components.append(candidate)
-        }
-
-        if let executable = command.first,
-            executable.hasPrefix("/")
-        {
-            let executableDirectory = URL(fileURLWithPath: executable)
-                .deletingLastPathComponent().path
-            if !executableDirectory.isEmpty,
-                !components.contains(executableDirectory)
-            {
-                components.insert(executableDirectory, at: 0)
-            }
-        }
-
-        if components.isEmpty {
-            return defaults.joined(separator: ":")
-        }
-        return components.joined(separator: ":")
     }
 
     private static func sanitizedHTTPHeaders(

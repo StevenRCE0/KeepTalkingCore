@@ -160,6 +160,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
     ///   - kvService: Optional KV backend used for node discovery and metadata.
     ///   - openAIAPIKey: Explicit OpenAI API key override.
     ///   - openAIEndpoint: Optional OpenAI-compatible endpoint override.
+    ///   - stdioTransportLauncher: Optional stdio transport launcher used for
+    ///     MCP stdio actions.
+    ///   - skillScriptExecutor: Optional skill script executor used for skill
+    ///     script tool calls.
     ///   - primitiveActionCallback: Callback used by primitive actions.
     ///   - logon: Correlation identifier for the current client runtime.
     ///   - localStore: Local persistence backend for models and state.
@@ -168,6 +172,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
         kvService: (any KeepTalkingKVService)? = nil,
         openAIAPIKey: String? = nil,
         openAIEndpoint: String? = nil,
+        stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
+            DefaultMCPStdioTransportLauncher.current,
+        skillScriptExecutor: (any SkillScriptExecuting)? =
+            DefaultSkillScriptExecutor.current,
         primitiveActionCallback: KeepTalkingPrimitiveActionCallback? = nil,
         logon: UUID = UUID(),
         localStore: any KeepTalkingLocalStore =
@@ -185,7 +193,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
             localStore: localStore,
             livenessState: livenessState
         )
-        self.mcpManager = MCPManager(nodeConfig: config)
+        self.mcpManager = MCPManager(
+            nodeConfig: config,
+            stdioTransportLauncher: stdioTransportLauncher
+        )
 
         let apiKey =
             openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -206,7 +217,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
         }
         self.skillManager = SkillManager(
             nodeConfig: config,
-            openAIConnector: self.openAIConnector
+            openAIConnector: self.openAIConnector,
+            scriptExecutor: skillScriptExecutor
         )
         self.primitiveActionManager = PrimitiveActionManager(
             callback: primitiveActionCallback
