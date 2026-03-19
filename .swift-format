@@ -4,6 +4,7 @@
     "spaces" : 4
   },
   "indentSwitchCaseLabels" : true,
+  "indentConditionalCompilationBlocks": false,
   "lineLength" : 120,
   "tabWidth" : 4
 }
