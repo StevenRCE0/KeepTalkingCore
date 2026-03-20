@@ -30,6 +30,9 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
     @OptionalField(key: "approving_context")
     public var approvingContext: ApprovingContext?
 
+    @OptionalField(key: "wake_handles")
+    public var wakeHandles: [KeepTalkingPushWakeHandle]?
+
     public init() {}
 
     init(
@@ -42,6 +45,7 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
         self.$relation.id = try relation.requireID()
         self.$action.id = try action.requireID()
         self.approvingContext = approvingContext
+        self.wakeHandles = nil
     }
 
     public func applicable(in context: KeepTalkingContext?) -> Bool {

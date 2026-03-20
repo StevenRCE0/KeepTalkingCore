@@ -64,31 +64,33 @@ public struct KeepTalkingAliasLookup: Sendable {
         aliases[target]
     }
 
-    public func resolve(node: UUID) -> KeepTalkingAliasResolution {
+    public func resolve(node: UUID, fallback: String? = nil) -> KeepTalkingAliasResolution {
         KeepTalkingAliasResolution(
             alias: alias(for: .node(node)),
-            id: node
+            id: node,
+            fallback: fallback
         )
     }
 
-    public func resolve(context: UUID) -> KeepTalkingAliasResolution {
+    public func resolve(context: UUID, fallback: String? = nil) -> KeepTalkingAliasResolution {
         KeepTalkingAliasResolution(
             alias: alias(for: .context(context)),
-            id: context
+            id: context,
+            fallback: fallback
         )
     }
 
-    public func resolve(sender: KeepTalkingContextMessage.Sender)
+    public func resolve(sender: KeepTalkingContextMessage.Sender, fallback: String? = nil)
         -> KeepTalkingAliasResolution
     {
         switch sender {
             case .node(let node):
-                return resolve(node: node)
+                return resolve(node: node, fallback: fallback)
             case .autonomous(let name):
                 return KeepTalkingAliasResolution(
                     alias: nil,
                     id: nil,
-                    fallback: name
+                    fallback: fallback ?? name
                 )
         }
     }

@@ -203,6 +203,40 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
         try await saveDocument(document)
     }
 
+    public func mintPushWakeHandles(
+        token: String,
+        topic: String,
+        environment: String,
+        scopes: [KeepTalkingPushWakeMintScope]
+    ) async throws -> [KeepTalkingPushWakeHandle] {
+        let payload = KeepTalkingPushWakeMintRequest(
+            token: token,
+            topic: topic,
+            environment: environment,
+            scopes: scopes
+        )
+        let response: KeepTalkingPushWakeMintResponse = try await postJSON(
+            path: "/api/apn/mint",
+            payload: payload
+        )
+        return response.handles
+    }
+
+    public func sendPushWake(
+        handle: KeepTalkingPushWakeHandle,
+        contextEnvelope: KeepTalkingPushWakeContextEnvelope? = nil,
+        actionEnvelope: KeepTalkingAsymmetricCipherEnvelope? = nil
+    ) async throws -> KeepTalkingPushWakeSendResponse {
+        try await postJSON(
+            path: "/api/apn/send",
+            payload: KeepTalkingPushWakeSendRequest(
+                handle: handle,
+                contextEnvelope: contextEnvelope,
+                actionEnvelope: actionEnvelope
+            )
+        )
+    }
+
     // Backwards-compat shim.
     public func storeNodeID(_ nodeID: String, for userID: String) async throws {
         try await storeNodeMetadata(
@@ -440,6 +474,29 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
             throw KeepTalkingKVServiceError.invalidStoredValue
         }
         return json
+    }
+
+    private func postJSON<Payload: Encodable, Response: Decodable>(
+        path: String,
+        payload: Payload,
+        expectedStatusCodes: [Int] = [200]
+    ) async throws -> Response {
+        var request = URLRequest(url: makeURL(path: path))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(payload)
+
+        let (data, response) = try await session.data(for: request)
+        try validateHTTP(response, expected: expectedStatusCodes)
+
+        guard !data.isEmpty else {
+            throw KeepTalkingKVServiceError.invalidResponsePayload
+        }
+        do {
+            return try decoder.decode(Response.self, from: data)
+        } catch {
+            throw KeepTalkingKVServiceError.invalidResponsePayload
+        }
     }
 
     private func decodeListResponse(_ data: Data) throws -> KVListResponse {

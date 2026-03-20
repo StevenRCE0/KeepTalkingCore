@@ -32,6 +32,24 @@ extension KeepTalkingClient {
                 )
             }
 
+            if action.blockingAuthorisation == true,
+                let context,
+                let actionApprovalHandler
+            {
+                let approved = await actionApprovalHandler(
+                    request,
+                    action,
+                    context
+                )
+                guard approved else {
+                    throw KeepTalkingClientError.actionCallNotAuthorized(
+                        action: request.call.action,
+                        caller: request.callerNodeID,
+                        context: request.contextID
+                    )
+                }
+            }
+
             let callResult: (content: [Tool.Content], isError: Bool?)
             switch action.payload {
                 case .mcpBundle:
@@ -104,14 +122,21 @@ extension KeepTalkingClient {
     func handleIncomingActionCallRequest(
         _ request: KeepTalkingActionCallRequest
     ) async throws {
-        let context = try await ensure(
-            request.contextID,
-            for: KeepTalkingContext.self
+        let requestID = request.id.uuidString.lowercased()
+        let actionID = request.call.action.uuidString.lowercased()
+        onLog?(
+            "[action-call/request] handling request=\(requestID) action=\(actionID) caller=\(request.callerNodeID.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased())"
+        )
+        let context = try await upsertContext(
+            KeepTalkingContext(id: request.contextID)
         )
 
         let result = await executeActionCallRequest(
             request,
             context: context
+        )
+        onLog?(
+            "[action-call/result] returning request=\(requestID) action=\(actionID) is_error=\(result.isError)"
         )
 
         let encryptedResult = try await encryptActionCallResultEnvelope(result)
@@ -130,9 +155,29 @@ extension KeepTalkingClient {
             targetNodeID: actionOwner,
             call: call
         )
+        let requestID = request.id.uuidString.lowercased()
+        let actionID = call.action.uuidString.lowercased()
 
         if actionOwner == config.node {
+            onLog?(
+                "[action-call/request] executing locally request=\(requestID) action=\(actionID)"
+            )
             return await executeActionCallRequest(request, context: context)
+        }
+
+        onLog?(
+            "[action-call/request] dispatching remote request=\(requestID) action=\(actionID) target=\(actionOwner.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased())"
+        )
+        if await shouldUseWakeAssistedDelivery(for: call.action) {
+            onLog?(
+                "[action-call/request] wake-assisted delivery request=\(requestID) action=\(actionID) target=\(actionOwner.uuidString.lowercased())"
+            )
+            await sendActionWakeIfNeeded(
+                actionOwner: actionOwner,
+                call: call,
+                context: context
+            )
+            await waitForNodeToComeOnline(actionOwner)
         }
 
         let encryptedRequest = try await encryptActionCallRequestEnvelope(
@@ -174,6 +219,9 @@ extension KeepTalkingClient {
                 try await Task.sleep(
                     nanoseconds: UInt64(timeoutSeconds * 1_000_000_000)
                 )
+                self?.onLog?(
+                    "[action-call/request] timed out request=\(requestID.uuidString.lowercased()) after=\(Int(timeoutSeconds))s"
+                )
                 self?.failPendingActionCall(
                     requestID: requestID,
                     error: KeepTalkingClientError.actionCallTimeout(requestID)
@@ -205,6 +253,17 @@ extension KeepTalkingClient {
             continuation.resume(returning: result)
             return true
         }
+    }
+
+    private func shouldUseWakeAssistedDelivery(for actionID: UUID) async -> Bool {
+        guard
+            let action = try? await KeepTalkingAction.query(on: localStore.database)
+                .filter(\.$id, .equal, actionID)
+                .first()
+        else {
+            return false
+        }
+        return action.blockingAuthorisation == true
     }
 
     func failPendingActionCall(requestID: UUID, error: Error) {

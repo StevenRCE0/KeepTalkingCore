@@ -9,6 +9,14 @@ import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
+    private static func normalizedBlockingAuthorisation(_ value: Bool) -> Bool {
+        #if os(iOS)
+            true
+        #else
+            value
+        #endif
+    }
+
     private static func loadedDescriptor(
         from action: KeepTalkingAction
     ) -> KeepTalkingActionDescriptor? {
@@ -108,6 +116,9 @@ extension KeepTalkingClient {
             let node = try await getCurrentNodeInstance()
             action.$node.id = try node.requireID()
         }
+        action.blockingAuthorisation = Self.normalizedBlockingAuthorisation(
+            action.blockingAuthorisation ?? false
+        )
         if Self.loadedDescriptor(from: action) == nil {
             switch payload {
                 case .mcpBundle(let bundle):
@@ -152,7 +163,9 @@ extension KeepTalkingClient {
         let action = KeepTalkingAction(
             payload: .mcpBundle(bundle),
             remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: blockingAuthorisation
+            blockingAuthorisation: normalizedBlockingAuthorisation(
+                blockingAuthorisation
+            )
         )
         action.$node.id = try node.requireID()
         action.descriptor =
@@ -200,7 +213,9 @@ extension KeepTalkingClient {
         let action = KeepTalkingAction(
             payload: .skill(bundle),
             remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: blockingAuthorisation
+            blockingAuthorisation: normalizedBlockingAuthorisation(
+                blockingAuthorisation
+            )
         )
         action.$node.id = try node.requireID()
         action.descriptor =
@@ -250,7 +265,9 @@ extension KeepTalkingClient {
         let action = KeepTalkingAction(
             payload: .primitive(persistedBundle),
             remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: blockingAuthorisation
+            blockingAuthorisation: normalizedBlockingAuthorisation(
+                blockingAuthorisation
+            )
         )
         action.$node.id = try node.requireID()
         action.descriptor =
@@ -295,7 +312,8 @@ extension KeepTalkingClient {
         }
 
         if let blockingAuthorisation {
-            action.blockingAuthorisation = blockingAuthorisation
+            action.blockingAuthorisation = Self
+                .normalizedBlockingAuthorisation(blockingAuthorisation)
         }
 
         try await action.save(on: localStore.database)
@@ -341,7 +359,8 @@ extension KeepTalkingClient {
         }
 
         if let blockingAuthorisation {
-            action.blockingAuthorisation = blockingAuthorisation
+            action.blockingAuthorisation = Self
+                .normalizedBlockingAuthorisation(blockingAuthorisation)
         }
 
         try await action.save(on: localStore.database)
@@ -387,7 +406,8 @@ extension KeepTalkingClient {
         }
 
         if let blockingAuthorisation {
-            action.blockingAuthorisation = blockingAuthorisation
+            action.blockingAuthorisation = Self
+                .normalizedBlockingAuthorisation(blockingAuthorisation)
         }
 
         try await action.save(on: localStore.database)

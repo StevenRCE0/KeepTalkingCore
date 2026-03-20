@@ -132,27 +132,34 @@ extension KeepTalkingClient {
             context: context
         )
 
-        let onlineOutgoingRelations = try await selfNode.$outgoingNodeRelations
-            .query(on: localStore.database).filter(
-                \.$to.$id ~~ onlineNodeIDs
-            ).all()
+        let outgoingRelations = try await selfNode.$outgoingNodeRelations
+            .query(on: localStore.database)
+            .all()
 
         let remoteActions = try await withThrowingTaskGroup(
             of: [KeepTalkingAction].self,
             returning: [KeepTalkingAction].self
         ) { group in
-            for relation in onlineOutgoingRelations {
+            for relation in outgoingRelations where relation.allows(context: context)
+            {
                 group.addTask {
                     let actionRelations = try await relation.$actionRelations
                         .query(on: self.localStore.database)
                         .with(\.$action)
                         .all()
 
-                    return try await self.authorizedActions(
+                    let authorizedActions = try await self.authorizedActions(
                         actionRelations.map(\.action),
                         for: KeepTalkingNode(id: relation.$to.id),
                         context: context
                     )
+                    return authorizedActions.filter { action in
+                        self.shouldInjectActionIntoCatalog(
+                            action,
+                            ownerNodeID: relation.$to.id,
+                            onlineNodeIDs: onlineNodeIDs
+                        )
+                    }
                 }
             }
 
@@ -323,12 +330,14 @@ extension KeepTalkingClient {
         context: KeepTalkingContext
     ) async -> KeepTalkingRemoteCatalogLookup {
         var queriesByNodeID: [UUID: [KeepTalkingActionCatalogQuery]] = [:]
+        let onlineNodeIDs = onlineNodeIDs()
 
         for action in actions {
             guard
                 let actionID = action.id,
                 let ownerNodeID = action.$node.id,
-                ownerNodeID != config.node
+                ownerNodeID != config.node,
+                onlineNodeIDs.contains(ownerNodeID)
             else {
                 continue
             }
@@ -433,6 +442,20 @@ extension KeepTalkingClient {
             result.append(query)
         }
         return result
+    }
+
+    private func shouldInjectActionIntoCatalog(
+        _ action: KeepTalkingAction,
+        ownerNodeID: UUID,
+        onlineNodeIDs: Set<UUID>
+    ) -> Bool {
+        if ownerNodeID == config.node {
+            return true
+        }
+        if onlineNodeIDs.contains(ownerNodeID) {
+            return true
+        }
+        return action.blockingAuthorisation == true
     }
 
     func loadSkillCatalogContext(

@@ -3,13 +3,15 @@ import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
-    private struct LocalKeyAgreementMaterial {
+    struct LocalKeyAgreementMaterial {
+        let relationID: UUID
+        let createdAt: Date
         let privateKey: Curve25519.KeyAgreement.PrivateKey
         let privateKeyBase64: String
         let publicKeyBase64: String
     }
 
-    private struct RemotePublicKeyCandidate {
+    struct RemotePublicKeyCandidate {
         let relationID: UUID
         let createdAt: Date
         let publicKeyBase64: String
@@ -245,39 +247,104 @@ extension KeepTalkingClient {
     private func asymmetricEnvelopeSymmetricKey(
         from sharedSecret: SharedSecret
     ) -> SymmetricKey {
-        let salt = "kt-asym-envelope-v1".data(using: .utf8) ?? Data()
-        return sharedSecret.hkdfDerivedSymmetricKey(
+        derivedSymmetricKey(
+            from: sharedSecret,
+            salt: "kt-asym-envelope-v1".data(using: .utf8) ?? Data(),
+            sharedInfo: Data()
+        )
+    }
+
+    func derivedSymmetricKey(
+        from sharedSecret: SharedSecret,
+        salt: Data,
+        sharedInfo: Data
+    ) -> SymmetricKey {
+        sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
             salt: salt,
-            sharedInfo: Data(),
+            sharedInfo: sharedInfo,
             outputByteCount: 32
         )
     }
 
-    private func localKeyAgreementMaterial(to node: KeepTalkingNode) async throws
+    func localKeyAgreementMaterial(to node: KeepTalkingNode) async throws
         -> LocalKeyAgreementMaterial
     {
-        let localIdentity = try await ensureLocalNodeSigningKeypair(to: node)
-        guard
-            let privateKeyData = localIdentity.privateKey,
-            !privateKeyData.isEmpty
+        guard let material = try await localKeyAgreementMaterials(to: node).first
         else {
             throw KeepTalkingClientError.localIdentityPrivateKeyMissing
         }
-        let privateKey = try Curve25519.KeyAgreement.PrivateKey(
-            rawRepresentation: privateKeyData
-        )
-        let privateKeyBase64 = privateKeyData.base64EncodedString()
-        let derivedPublicKeyBase64 = Data(privateKey.publicKey.rawRepresentation)
-            .base64EncodedString()
-        return LocalKeyAgreementMaterial(
-            privateKey: privateKey,
-            privateKeyBase64: privateKeyBase64,
-            publicKeyBase64: derivedPublicKeyBase64
-        )
+        return material
     }
 
-    private func remoteKeyAgreementPublicKeys(nodeID: UUID) async throws
+    func localKeyAgreementMaterials(to node: KeepTalkingNode) async throws
+        -> [LocalKeyAgreementMaterial]
+    {
+        guard let nodeID = node.id else {
+            throw KeepTalkingClientError.missingNode
+        }
+
+        _ = try await ensureLocalNodeSigningKeypair(to: node)
+
+        let relations = try await getCurrentNodeInstance().$outgoingNodeRelations
+            .query(on: localStore.database)
+            .filter(\.$to.$id == nodeID)
+            .all()
+
+        guard !relations.isEmpty else {
+            throw KeepTalkingClientError.missingRelation
+        }
+
+        var materials: [LocalKeyAgreementMaterial] = []
+        for relation in relations {
+            guard let relationID = relation.id else {
+                continue
+            }
+            let keypairs = try await KeepTalkingNodeIdentityKey.query(
+                on: localStore.database
+            )
+            .filter(\.$relation.$id, .equal, relationID)
+            .sort(\.$createdAt, .descending)
+            .all()
+
+            for key in keypairs {
+                guard
+                    let privateKeyData = key.privateKey,
+                    !privateKeyData.isEmpty
+                else {
+                    continue
+                }
+                let privateKey = try Curve25519.KeyAgreement.PrivateKey(
+                    rawRepresentation: privateKeyData
+                )
+                let privateKeyBase64 = privateKeyData.base64EncodedString()
+                let derivedPublicKeyBase64 = Data(
+                    privateKey.publicKey.rawRepresentation
+                )
+                .base64EncodedString()
+                materials.append(
+                    LocalKeyAgreementMaterial(
+                        relationID: relationID,
+                        createdAt: key.createdAt ?? .distantPast,
+                        privateKey: privateKey,
+                        privateKeyBase64: privateKeyBase64,
+                        publicKeyBase64: derivedPublicKeyBase64
+                    )
+                )
+            }
+        }
+
+        materials.sort { lhs, rhs in
+            lhs.createdAt > rhs.createdAt
+        }
+
+        guard !materials.isEmpty else {
+            throw KeepTalkingClientError.localIdentityPrivateKeyMissing
+        }
+        return materials
+    }
+
+    func remoteKeyAgreementPublicKeys(nodeID: UUID) async throws
         -> [RemotePublicKeyCandidate]
     {
         let relations = try await KeepTalkingNodeRelation.query(

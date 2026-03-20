@@ -165,15 +165,18 @@ public struct KeepTalkingNodeRelationStatus: Codable, Sendable {
     public let toNodeID: UUID
     public let relationship: KeepTalkingRelationship
     public let actions: [KeepTalkingAction]
+    public let actionWakeRoutes: [KeepTalkingActionWakeRoute]
 
     public init(
         toNodeID: UUID,
         relationship: KeepTalkingRelationship,
-        actions: [KeepTalkingAction]
+        actions: [KeepTalkingAction],
+        actionWakeRoutes: [KeepTalkingActionWakeRoute] = []
     ) {
         self.toNodeID = toNodeID
         self.relationship = relationship
         self.actions = actions
+        self.actionWakeRoutes = actionWakeRoutes
     }
 }
 

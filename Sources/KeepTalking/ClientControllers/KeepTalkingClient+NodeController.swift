@@ -267,11 +267,48 @@ extension KeepTalkingClient {
                 }
             }
 
+            let wakeHandlesByActionID: [UUID: [KeepTalkingPushWakeHandle]]
+            if let relationID = relation.id {
+                let relationActionLinks =
+                    try await KeepTalkingNodeRelationActionRelation
+                    .query(on: localStore.database)
+                    .filter(\.$relation.$id, .equal, relationID)
+                    .all()
+                wakeHandlesByActionID = Dictionary(
+                    uniqueKeysWithValues: relationActionLinks.compactMap {
+                        link in
+                        guard
+                            let wakeHandles = link.wakeHandles,
+                            !wakeHandles.isEmpty
+                        else {
+                            return nil
+                        }
+                        return (link.$action.id, wakeHandles)
+                    }
+                )
+            } else {
+                wakeHandlesByActionID = [:]
+            }
+            let actionWakeRoutes: [KeepTalkingActionWakeRoute] =
+                outgoingActions.compactMap { action in
+                guard
+                    let actionID = action.id,
+                    let wakeHandles = wakeHandlesByActionID[actionID]
+                else {
+                    return nil
+                }
+                return KeepTalkingActionWakeRoute(
+                    actionID: actionID,
+                    wakeHandles: wakeHandles
+                )
+            }
+
             relationStatuses.append(
                 KeepTalkingNodeRelationStatus(
                     toNodeID: relatedNodeID,
                     relationship: relation.relationship,
-                    actions: outgoingActions
+                    actions: outgoingActions,
+                    actionWakeRoutes: actionWakeRoutes
                 )
             )
         }
@@ -460,6 +497,13 @@ extension KeepTalkingClient {
         let grantedActionIDs = Set(
             grantsForLocal.flatMap(\.actions).compactMap(\.id)
         )
+        let wakeRoutesByActionID: [UUID: [KeepTalkingPushWakeHandle]] = Dictionary(
+            uniqueKeysWithValues: grantsForLocal.flatMap { relationStatus in
+                relationStatus.actionWakeRoutes.map { route in
+                    (route.actionID, route.wakeHandles)
+                }
+            }
+        )
         if grantedActionIDs.isEmpty {
             return
         }
@@ -494,6 +538,7 @@ extension KeepTalkingClient {
                 .first()
             {
                 existingLink.approvingContext = approvingContext
+                existingLink.wakeHandles = wakeRoutesByActionID[actionID]
                 try await existingLink.save(on: localStore.database)
             } else {
                 let link = try KeepTalkingNodeRelationActionRelation(
@@ -501,6 +546,7 @@ extension KeepTalkingClient {
                     action: action,
                     approvingContext: approvingContext
                 )
+                link.wakeHandles = wakeRoutesByActionID[actionID]
                 try await link.save(on: localStore.database)
             }
         }
@@ -660,6 +706,7 @@ extension KeepTalkingClient {
         .filter(\.$id, .equal, incomingNodeID)
         .first() {
             existing.lastSeenAt = max(existing.lastSeenAt, incoming.lastSeenAt)
+            existing.contextWakeHandles = incoming.contextWakeHandles
             try await existing.save(on: localStore.database)
             return
         }
@@ -668,6 +715,7 @@ extension KeepTalkingClient {
             id: incomingNodeID,
             lastSeenAt: incoming.lastSeenAt
         )
+        node.contextWakeHandles = incoming.contextWakeHandles
 
         try await node.save(on: localStore.database)
     }
@@ -892,6 +940,7 @@ extension KeepTalkingClient {
             on: localStore.database
         )
         .filter(\.$relation.$id, .equal, relationID)
+        .sort(\.$createdAt, .descending)
         .first() {
             return existingKeypair
         }

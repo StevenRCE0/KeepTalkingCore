@@ -10,13 +10,13 @@ public enum KeepTalkingActionResource: Codable, Sendable {
 
 /// Wraps an action resource with human-readable context for catalog displays.
 public struct KeepTalkingActionResourceWithDescription: Codable, Sendable {
-    var description: String
-    var resource: KeepTalkingActionResource
+    public var description: String
+    public var resource: KeepTalkingActionResource
 }
 
 /// Describes the verb portion of an action descriptor.
 public struct KeepTalkingActionWithDescription: Codable, Sendable {
-    var description: String
+    public var description: String
 }
 
 /// Provides subject-action-object metadata used to explain an action to users and AI planners.

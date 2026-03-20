@@ -10,6 +10,9 @@ public final class KeepTalkingNode: Model, @unchecked Sendable {
     @Field(key: "last_seen_at")
     public var lastSeenAt: Date
 
+    @OptionalField(key: "context_wake_handles")
+    public var contextWakeHandles: [KeepTalkingPushWakeHandle]?
+
     @Children(for: \.$node)
     public var actions: [KeepTalkingAction]
 
@@ -27,6 +30,7 @@ public final class KeepTalkingNode: Model, @unchecked Sendable {
     ) {
         self.id = id
         self.lastSeenAt = lastSeenAt
+        self.contextWakeHandles = nil
     }
 }
 
@@ -34,6 +38,7 @@ extension KeepTalkingNode: Codable {
     private enum CodingKeys: String, CodingKey {
         case id
         case lastSeenAt
+        case contextWakeHandles
     }
 
     public convenience init(from decoder: any Decoder) throws {
@@ -48,11 +53,19 @@ extension KeepTalkingNode: Codable {
             id: id,
             lastSeenAt: lastSeenAt
         )
+        self.contextWakeHandles = try container.decodeIfPresent(
+            [KeepTalkingPushWakeHandle].self,
+            forKey: .contextWakeHandles
+        )
     }
 
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(id, forKey: .id)
         try container.encode(lastSeenAt, forKey: .lastSeenAt)
+        try container.encodeIfPresent(
+            contextWakeHandles,
+            forKey: .contextWakeHandles
+        )
     }
 }

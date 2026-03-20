@@ -3,7 +3,7 @@ import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
-    private static let encryptedMessagePrefix = "ktenc:v1:"
+    private static let maxPushWakePreviewCharacters = 160
 
     /// Persists and broadcasts a message within a conversation context.
     ///
@@ -39,6 +39,18 @@ extension KeepTalkingClient {
 
         let encryptedMessage = try await encryptedOutboundMessage(message)
         try rtcClient.sendEnvelope(.message(encryptedMessage))
+        guard message.type == .message else {
+            return
+        }
+
+        if let messagePreview = await pushWakePreview(for: message) {
+            Task { [weak self] in
+                await self?.sendContextWakeNotificationsIfNeeded(
+                    for: persistedContext,
+                    messagePreview: messagePreview
+                )
+            }
+        }
     }
 
     /// Convenience overload that resolves the target context from its identifier.
@@ -107,7 +119,15 @@ extension KeepTalkingClient {
             case .actionCallRequest(let request):
                 if request.targetNodeID == config.node {
                     Task { [weak self] in
-                        try await self?.handleIncomingActionCallRequest(request)
+                        do {
+                            try await self?.handleIncomingActionCallRequest(
+                                request
+                            )
+                        } catch {
+                            self?.onLog?(
+                                "[action-call/request] failed request=\(request.id.uuidString.lowercased()) action=\(request.call.action.uuidString.lowercased()) error=\(error.localizedDescription)"
+                            )
+                        }
                     }
                 }
             case .actionCallResult(let result):
@@ -118,7 +138,15 @@ extension KeepTalkingClient {
                 }
                 let request = try await decryptActionCallRequestEnvelope(envelope)
                 Task { [weak self] in
-                    try await self?.handleIncomingActionCallRequest(request)
+                    do {
+                        try await self?.handleIncomingActionCallRequest(
+                            request
+                        )
+                    } catch {
+                        self?.onLog?(
+                            "[action-call/request] failed request=\(request.id.uuidString.lowercased()) action=\(request.call.action.uuidString.lowercased()) error=\(error.localizedDescription)"
+                        )
+                    }
                 }
             case .encryptedActionCallResult(let envelope):
                 guard envelope.recipientNodeID == config.node else {
@@ -407,21 +435,15 @@ extension KeepTalkingClient {
         -> String
     {
         let secret = try await ensureGroupChatSecret(for: contextID)
-        let key = SymmetricKey(data: secret)
-        let plaintext = Data(content.utf8)
-        let sealed = try AES.GCM.seal(plaintext, using: key)
-        guard let combined = sealed.combined else {
-            return content
-        }
-        return Self.encryptedMessagePrefix + combined.base64EncodedString()
+        return try KeepTalkingContextMessageCrypto.encrypt(
+            content,
+            secret: secret
+        )
     }
 
     private func decryptedContentIfNeeded(_ content: String, contextID: UUID)
         async -> String
     {
-        guard content.hasPrefix(Self.encryptedMessagePrefix) else {
-            return content
-        }
         let secret: Data?
         do {
             secret = try await loadGroupChatSecret(for: contextID)
@@ -437,18 +459,11 @@ extension KeepTalkingClient {
             )
             return content
         }
-        let payload = String(
-            content.dropFirst(Self.encryptedMessagePrefix.count)
-        )
-        guard let combined = Data(base64Encoded: payload) else {
-            return content
-        }
-
         do {
-            let sealed = try AES.GCM.SealedBox(combined: combined)
-            let key = SymmetricKey(data: secret)
-            let decrypted = try AES.GCM.open(sealed, using: key)
-            return String(decoding: decrypted, as: UTF8.self)
+            return try KeepTalkingContextMessageCrypto.decryptIfNeeded(
+                content,
+                secret: secret
+            )
         } catch {
             rtcClient.debug(
                 "failed to decrypt message for context=\(contextID.uuidString.lowercased()) error=\(error.localizedDescription)"
@@ -457,10 +472,34 @@ extension KeepTalkingClient {
         }
     }
 
-    private func loadGroupChatSecret(for contextID: UUID) async throws -> Data? {
+    func loadGroupChatSecret(for contextID: UUID) async throws -> Data? {
         try await KeepTalkingContextGroupSecret.query(on: localStore.database)
             .filter(\.$id, .equal, contextID)
             .first()?
             .secret
+    }
+
+    private func pushWakePreview(
+        for message: KeepTalkingContextMessage
+    ) async -> KeepTalkingPushWakeMessagePreview? {
+        let rawContent = message.content.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !rawContent.isEmpty else {
+            return nil
+        }
+
+        let previewText = String(
+            rawContent.prefix(Self.maxPushWakePreviewCharacters)
+        )
+        guard !previewText.isEmpty else {
+            return nil
+        }
+
+        return KeepTalkingPushWakeMessagePreview(
+            sender: message.sender,
+            content: previewText,
+            isTruncated: rawContent.count > previewText.count
+        )
     }
 }

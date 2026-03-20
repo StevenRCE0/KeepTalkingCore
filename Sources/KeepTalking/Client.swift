@@ -34,6 +34,7 @@ public enum KeepTalkingClientError: LocalizedError {
     case malformedEncryptedNodeStatus
     case unsupportedActionPayload
     case missingRelation
+    case missingContextSecret(UUID)
 
     public var errorDescription: String? {
         switch self {
@@ -91,6 +92,8 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Action payload is unsupported by local executors."
             case .missingRelation:
                 return "Missing relation."
+            case .missingContextSecret(let contextID):
+                return "Missing context secret for context: \(contextID)"
         }
     }
 }
@@ -101,6 +104,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
         KeepTalkingPrimitiveBundle.availablePrimitiveActions
     public typealias MCPHTTPAuthURLHandler =
         @Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult
+    public typealias ActionApprovalHandler =
+        @Sendable (KeepTalkingActionCallRequest, KeepTalkingAction, KeepTalkingContext) async -> Bool
 
     public typealias EnvelopeHandler = @Sendable (KeepTalkingP2PEnvelope) -> Void
     public typealias RawMessageHandler = @Sendable (String) -> Void
@@ -137,6 +142,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let primitiveActionManager: PrimitiveActionManager
     let openAIConnector: OpenAIConnector?
     private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
+    var actionApprovalHandler: ActionApprovalHandler?
 
     let actionCallQueue = DispatchQueue(
         label: "KeepTalking.client.action-call"
@@ -254,6 +260,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     public func onlineNodeIDs() -> Set<UUID> {
         livenessState.onlineNodeIDs()
+    }
+
+    public func setActionApprovalHandler(
+        _ handler: ActionApprovalHandler?
+    ) {
+        actionApprovalHandler = handler
     }
 
     func notifyContextDidSync(_ context: UUID) {
