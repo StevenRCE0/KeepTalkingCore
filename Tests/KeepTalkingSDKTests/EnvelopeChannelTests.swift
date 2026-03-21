@@ -35,4 +35,31 @@ struct EnvelopeChannelTests {
 
         #expect(envelope.channel == KeepTalkingEnvelopeChannel.actionCall)
     }
+
+    @Test("request acknowledgements stay on the action channel")
+    func requestAcknowledgementUsesActionChannel() {
+        let envelope = KeepTalkingP2PEnvelope.requestAck(
+            KeepTalkingRequestAck(
+                requestID: UUID(
+                    uuidString: "90000000-0000-0000-0000-000000000000"
+                )!,
+                contextID: UUID(
+                    uuidString: "A0000000-0000-0000-0000-000000000000"
+                )!,
+                callerNodeID: UUID(
+                    uuidString: "B0000000-0000-0000-0000-000000000000"
+                )!,
+                targetNodeID: UUID(
+                    uuidString: "C0000000-0000-0000-0000-000000000000"
+                )!,
+                kind: .actionCall,
+                state: .received,
+                actionID: UUID(
+                    uuidString: "D0000000-0000-0000-0000-000000000000"
+                )!
+            )
+        )
+
+        #expect(envelope.channel == KeepTalkingEnvelopeChannel.actionCall)
+    }
 }

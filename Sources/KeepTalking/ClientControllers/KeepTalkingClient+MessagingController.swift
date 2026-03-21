@@ -130,6 +130,10 @@ extension KeepTalkingClient {
                         }
                     }
                 }
+            case .requestAck(let acknowledgement):
+                if acknowledgement.callerNodeID == config.node {
+                    handleIncomingRequestAck(acknowledgement)
+                }
             case .actionCallResult(let result):
                 _ = resolvePendingActionCall(result)
             case .encryptedActionCallRequest(let envelope):
@@ -147,6 +151,16 @@ extension KeepTalkingClient {
                             "[action-call/request] failed request=\(request.id.uuidString.lowercased()) action=\(request.call.action.uuidString.lowercased()) error=\(error.localizedDescription)"
                         )
                     }
+                }
+            case .encryptedRequestAck(let envelope):
+                guard envelope.recipientNodeID == config.node else {
+                    break
+                }
+                let acknowledgement = try await decryptRequestAckEnvelope(
+                    envelope
+                )
+                if acknowledgement.callerNodeID == config.node {
+                    handleIncomingRequestAck(acknowledgement)
                 }
             case .encryptedActionCallResult(let envelope):
                 guard envelope.recipientNodeID == config.node else {

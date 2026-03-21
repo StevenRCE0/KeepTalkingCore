@@ -42,6 +42,7 @@ extension KeepTalkingClient {
                     ownerNodeID: ownerNodeID,
                     source: .mcp,
                     mcpToolName: bundle.name,
+                    supportsWakeAssist: action.blockingAuthorisation == true,
                     description: mcpProxyToolDescription(
                         originalToolName: bundle.name,
                         originalToolDescription: fallbackDescription,
@@ -74,6 +75,7 @@ extension KeepTalkingClient {
                 ownerNodeID: ownerNodeID,
                 source: .mcp,
                 mcpToolName: selectedToolName.isEmpty ? nil : selectedToolName,
+                supportsWakeAssist: action.blockingAuthorisation == true,
                 description: mcpProxyToolDescription(
                     originalToolName: selectedToolName.isEmpty
                         ? bundle.name
@@ -111,6 +113,7 @@ extension KeepTalkingClient {
                     ownerNodeID: ownerNodeID,
                     source: .mcp,
                     mcpToolName: bundle.name,
+                    supportsWakeAssist: action.blockingAuthorisation == true,
                     description: mcpProxyToolDescription(
                         originalToolName: bundle.name,
                         originalToolDescription: fallbackDescription,
@@ -139,6 +142,7 @@ extension KeepTalkingClient {
                 ownerNodeID: ownerNodeID,
                 source: .mcp,
                 mcpToolName: selectedToolName.isEmpty ? nil : selectedToolName,
+                supportsWakeAssist: action.blockingAuthorisation == true,
                 description: mcpProxyToolDescription(
                     originalToolName: selectedToolName.isEmpty
                         ? bundle.name
@@ -181,7 +185,8 @@ extension KeepTalkingClient {
         actionID: UUID,
         ownerNodeID: UUID,
         bundle: KeepTalkingSkillBundle,
-        descriptor: KeepTalkingActionDescriptor?
+        descriptor: KeepTalkingActionDescriptor?,
+        supportsWakeAssist: Bool = false
     ) -> KeepTalkingActionToolDefinition {
         let description =
             descriptor?.action?.description
@@ -196,6 +201,7 @@ extension KeepTalkingClient {
             ownerNodeID: ownerNodeID,
             source: .skill,
             mcpToolName: nil,
+            supportsWakeAssist: supportsWakeAssist,
             description: description,
             parameters: KeepTalkingActionToolDefinition.permissiveObjectParameters
         )
@@ -205,7 +211,8 @@ extension KeepTalkingClient {
         actionID: UUID,
         ownerNodeID: UUID,
         bundle: KeepTalkingPrimitiveBundle,
-        descriptor: KeepTalkingActionDescriptor?
+        descriptor: KeepTalkingActionDescriptor?,
+        supportsWakeAssist: Bool = false
     ) -> KeepTalkingActionToolDefinition {
         let description =
             descriptor?.action?.description
@@ -220,6 +227,7 @@ extension KeepTalkingClient {
             ownerNodeID: ownerNodeID,
             source: .primitive,
             mcpToolName: bundle.name,
+            supportsWakeAssist: supportsWakeAssist,
             description: description,
             parameters: primitiveActionParameters(for: bundle.action)
         )

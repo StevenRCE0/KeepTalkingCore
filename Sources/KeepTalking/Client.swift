@@ -30,6 +30,7 @@ public enum KeepTalkingClientError: LocalizedError {
     case remoteIdentityPublicKeyMissing(UUID)
     case remoteIdentityPublicKeyInvalid(UUID)
     case malformedEncryptedActionCall
+    case malformedEncryptedRequestAck
     case malformedEncryptedActionCatalog
     case malformedEncryptedNodeStatus
     case unsupportedActionPayload
@@ -84,6 +85,8 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Remote public key is invalid for node: \(nodeID)"
             case .malformedEncryptedActionCall:
                 return "Encrypted action-call envelope payload is malformed."
+            case .malformedEncryptedRequestAck:
+                return "Encrypted request-ack envelope payload is malformed."
             case .malformedEncryptedActionCatalog:
                 return "Encrypted action-catalog envelope payload is malformed."
             case .malformedEncryptedNodeStatus:
@@ -147,7 +150,15 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let actionCallQueue = DispatchQueue(
         label: "KeepTalking.client.action-call"
     )
+    var pendingActionCallAcknowledgements: [UUID: CheckedContinuation<KeepTalkingRequestAck, Error>] = [:]
+    var receivedActionCallAcknowledgements: [UUID: KeepTalkingRequestAck] = [:]
+    var receivedActionCallAcknowledgementOrder: [UUID] = []
     var pendingActionCallResults: [UUID: CheckedContinuation<KeepTalkingActionCallResult, Error>] = [:]
+    var receivedActionCallResults: [UUID: KeepTalkingActionCallResult] = [:]
+    var receivedActionCallResultOrder: [UUID] = []
+    var inFlightIncomingActionCalls: [UUID: Task<KeepTalkingActionCallResult, Never>] = [:]
+    var completedIncomingActionCallResults: [UUID: KeepTalkingActionCallResult] = [:]
+    var completedIncomingActionCallOrder: [UUID] = []
     let actionCatalogQueue = DispatchQueue(
         label: "KeepTalking.client.action-catalog"
     )

@@ -155,6 +155,10 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         debug("ignoring manual p2p trial: already using direct p2p transport")
     }
 
+    func preferReliableRoute(reason: String) {
+        debug("reliable route requested reason=\(reason)")
+    }
+
     func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws {
         let route = try route(for: envelope)
         let dataChannel: LKRTCDataChannel?

@@ -181,7 +181,8 @@ extension KeepTalkingClient {
             return friendlyToolCallPhrase(
                 toolName: functionName,
                 ownerNodeID: nil,
-                actionID: nil
+                actionID: nil,
+                supportsWakeAssist: false
             )
         }
 
@@ -213,25 +214,29 @@ extension KeepTalkingClient {
                 return friendlyToolCallPhrase(
                     toolName: routedToolName,
                     ownerNodeID: definition.ownerNodeID,
-                    actionID: definition.actionID
+                    actionID: definition.actionID,
+                    supportsWakeAssist: definition.supportsWakeAssist
                 )
             case .skillMetadata(let context):
                 return friendlyToolCallPhrase(
                     toolName: "skill metadata \(context.bundle.name)",
                     ownerNodeID: context.ownerNodeID,
-                    actionID: context.actionID
+                    actionID: context.actionID,
+                    supportsWakeAssist: false
                 )
             case .skillFileLocal(let context):
                 return friendlyToolCallPhrase(
                     toolName: "skill file \(context.bundle.name)",
                     ownerNodeID: context.ownerNodeID,
-                    actionID: context.actionID
+                    actionID: context.actionID,
+                    supportsWakeAssist: false
                 )
             case .skillFileRemote(let actionID, _, let skillName):
                 return friendlyToolCallPhrase(
                     toolName: "skill file \(skillName)",
                     ownerNodeID: nil,
-                    actionID: actionID
+                    actionID: actionID,
+                    supportsWakeAssist: false
                 )
         }
     }
@@ -239,7 +244,8 @@ extension KeepTalkingClient {
     func friendlyToolCallPhrase(
         toolName: String,
         ownerNodeID: UUID?,
-        actionID: UUID?
+        actionID: UUID?,
+        supportsWakeAssist: Bool
     ) -> String {
         let unroutedName: String
         if let actionID {
@@ -274,8 +280,14 @@ extension KeepTalkingClient {
         if ownerNodeID == config.node {
             return "\(collapsed) on local node"
         }
+        let wakeSuffix: String
+        if supportsWakeAssist && !onlineNodeIDs().contains(ownerNodeID) {
+            wakeSuffix = " while waking the node"
+        } else {
+            wakeSuffix = ""
+        }
         return
-            "\(collapsed) on node \(KeepTalkingActionToolDefinition.shortNodeID(ownerNodeID))"
+            "\(collapsed) on node \(KeepTalkingActionToolDefinition.shortNodeID(ownerNodeID))\(wakeSuffix)"
     }
 
     func renderCatalogListing(

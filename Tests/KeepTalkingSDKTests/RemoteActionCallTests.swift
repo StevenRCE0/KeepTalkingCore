@@ -5,6 +5,79 @@ import Testing
 @testable import KeepTalkingSDK
 
 struct RemoteActionCallTests {
+    @Test("early remote action result is cached until the caller waits for it")
+    func earlyRemoteActionResultIsCached() async throws {
+        let requestID = UUID(uuidString: "10000000-0000-0000-0000-000000000000")!
+        let contextID = UUID(uuidString: "20000000-0000-0000-0000-000000000000")!
+        let callerNodeID = UUID(uuidString: "30000000-0000-0000-0000-000000000000")!
+        let targetNodeID = UUID(uuidString: "40000000-0000-0000-0000-000000000000")!
+        let actionID = UUID(uuidString: "50000000-0000-0000-0000-000000000000")!
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(
+                signalURL: try #require(URL(string: "ws://127.0.0.1")),
+                contextID: contextID,
+                node: callerNodeID
+            ),
+            localStore: KeepTalkingInMemoryStore()
+        )
+        let result = KeepTalkingActionCallResult(
+            requestID: requestID,
+            contextID: contextID,
+            callerNodeID: callerNodeID,
+            targetNodeID: targetNodeID,
+            actionID: actionID,
+            content: [.text("ok")]
+        )
+
+        #expect(!client.resolvePendingActionCall(result))
+
+        let received = try await client.waitForActionCallResult(
+            requestID: requestID,
+            timeoutSeconds: 0.1
+        )
+
+        #expect(received.requestID == requestID)
+        #expect(received.content == [.text("ok")])
+    }
+
+    @Test("early action-call acknowledgement is cached until the caller waits for it")
+    func earlyActionCallAcknowledgementIsCached() async throws {
+        let requestID = UUID(uuidString: "60000000-0000-0000-0000-000000000000")!
+        let contextID = UUID(uuidString: "70000000-0000-0000-0000-000000000000")!
+        let callerNodeID = UUID(uuidString: "80000000-0000-0000-0000-000000000000")!
+        let targetNodeID = UUID(uuidString: "90000000-0000-0000-0000-000000000000")!
+        let actionID = UUID(uuidString: "A0000000-0000-0000-0000-000000000000")!
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(
+                signalURL: try #require(URL(string: "ws://127.0.0.1")),
+                contextID: contextID,
+                node: callerNodeID
+            ),
+            localStore: KeepTalkingInMemoryStore()
+        )
+        let acknowledgement = KeepTalkingRequestAck(
+            requestID: requestID,
+            contextID: contextID,
+            callerNodeID: callerNodeID,
+            targetNodeID: targetNodeID,
+            kind: .actionCall,
+            state: .received,
+            actionID: actionID,
+            message: "Received by target node."
+        )
+
+        #expect(!client.resolvePendingActionCallAcknowledgement(acknowledgement))
+
+        let received = try await client.waitForActionCallAcknowledgement(
+            requestID: requestID,
+            timeoutSeconds: 0.1
+        )
+
+        #expect(received?.requestID == requestID)
+        #expect(received?.state == .received)
+        #expect(received?.actionID == actionID)
+    }
+
     @Test("incoming remote action call creates a placeholder context when missing")
     func incomingRemoteActionCallCreatesPlaceholderContext() async throws {
         let localStore = KeepTalkingInMemoryStore()

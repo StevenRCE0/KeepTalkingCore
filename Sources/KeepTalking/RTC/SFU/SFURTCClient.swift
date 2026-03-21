@@ -236,6 +236,10 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         )
     }
 
+    func preferReliableRoute(reason: String) {
+        debug("already on reliable route reason=\(reason)")
+    }
+
     func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws {
         let route = route(for: envelope)
 
@@ -643,10 +647,16 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             case .actionCallRequest(let request):
                 reportPeerConnected(request.callerNodeID)
                 reportPeerConnected(request.targetNodeID)
+            case .requestAck(let acknowledgement):
+                reportPeerConnected(acknowledgement.callerNodeID)
+                reportPeerConnected(acknowledgement.targetNodeID)
             case .actionCallResult(let result):
                 reportPeerConnected(result.callerNodeID)
                 reportPeerConnected(result.targetNodeID)
             case .encryptedActionCallRequest(let envelope):
+                reportPeerConnected(envelope.senderNodeID)
+                reportPeerConnected(envelope.recipientNodeID)
+            case .encryptedRequestAck(let envelope):
                 reportPeerConnected(envelope.senderNodeID)
                 reportPeerConnected(envelope.recipientNodeID)
             case .encryptedActionCallResult(let envelope):

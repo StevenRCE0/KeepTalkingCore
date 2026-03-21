@@ -220,8 +220,10 @@ public enum KeepTalkingP2PEnvelope: Codable, Sendable {
     case encryptedNodeStatus(KeepTalkingAsymmetricCipherEnvelope)
     case contextSync(KeepTalkingContextSyncEnvelope)
     case actionCallRequest(KeepTalkingActionCallRequest)
+    case requestAck(KeepTalkingRequestAck)
     case actionCallResult(KeepTalkingActionCallResult)
     case encryptedActionCallRequest(KeepTalkingAsymmetricCipherEnvelope)
+    case encryptedRequestAck(KeepTalkingAsymmetricCipherEnvelope)
     case encryptedActionCallResult(KeepTalkingAsymmetricCipherEnvelope)
     case actionCatalogRequest(KeepTalkingActionCatalogRequest)
     case actionCatalogResult(KeepTalkingActionCatalogResult)
@@ -248,8 +250,10 @@ extension KeepTalkingP2PEnvelope {
                 .contextSync:
                 return .chat
             case .actionCallRequest,
+                .requestAck,
                 .actionCallResult,
                 .encryptedActionCallRequest,
+                .encryptedRequestAck,
                 .encryptedActionCallResult,
                 .actionCatalogRequest,
                 .actionCatalogResult,

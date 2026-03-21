@@ -208,7 +208,9 @@ extension KeepTalkingClient {
                             actionID: actionID,
                             ownerNodeID: ownerNodeID,
                             bundle: bundle,
-                            descriptor: action.descriptor
+                            descriptor: action.descriptor,
+                            supportsWakeAssist: action.blockingAuthorisation
+                                == true
                         )
                     definitionsByName[skillActionDefinition.functionName] =
                         skillActionDefinition
@@ -300,7 +302,9 @@ extension KeepTalkingClient {
                             actionID: actionID,
                             ownerNodeID: ownerNodeID,
                             bundle: bundle,
-                            descriptor: action.descriptor
+                            descriptor: action.descriptor,
+                            supportsWakeAssist: action.blockingAuthorisation
+                                == true
                         )
                     definitionsByName[primitiveActionDefinition.functionName] =
                         primitiveActionDefinition

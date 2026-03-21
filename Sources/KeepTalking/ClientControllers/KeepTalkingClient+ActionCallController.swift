@@ -4,52 +4,45 @@ import MCP
 
 extension KeepTalkingClient {
     private static let actionCallResultTimeoutSeconds: TimeInterval = 45
+    private static let actionCallAckTimeoutSeconds: TimeInterval = 4
+    private static let actionCallAckRetryLimit = 2
+    private static let actionCallDeliveryCacheLimit = 32
+    private static let completedIncomingActionCallCacheLimit = 32
 
     func executeActionCallRequest(
         _ request: KeepTalkingActionCallRequest,
-        context: KeepTalkingContext?
+        context: KeepTalkingContext?,
+        onAcknowledgement:
+            (@Sendable (KeepTalkingRequestAckState, String?) async -> Void)? =
+                nil
     ) async -> KeepTalkingActionCallResult {
+        let action: KeepTalkingAction
         do {
-            let action = try await resolveLocalActionForExecution(
-                actionID: request.call.action
+            action = try await prepareActionCallExecution(
+                request,
+                context: context
             )
-            let remoteNode = try await ensure(
-                request.callerNodeID,
-                for: KeepTalkingNode.self
+        } catch {
+            if let onAcknowledgement {
+                await onAcknowledgement(.rejected, error.localizedDescription)
+            }
+            return KeepTalkingActionCallResult(
+                requestID: request.id,
+                contextID: request.contextID,
+                callerNodeID: request.callerNodeID,
+                targetNodeID: request.targetNodeID,
+                actionID: request.call.action,
+                content: [],
+                isError: true,
+                errorMessage: error.localizedDescription
             )
+        }
 
-            guard
-                try await isNodeAuthorizedForAction(
-                    node: remoteNode,
-                    action: action,
-                    context: context
-                )
-            else {
-                throw KeepTalkingClientError.actionCallNotAuthorized(
-                    action: request.call.action,
-                    caller: request.callerNodeID,
-                    context: request.contextID
-                )
-            }
+        if let onAcknowledgement {
+            await onAcknowledgement(.accepted, "Accepted by target node.")
+        }
 
-            if action.blockingAuthorisation == true,
-                let context,
-                let actionApprovalHandler
-            {
-                let approved = await actionApprovalHandler(
-                    request,
-                    action,
-                    context
-                )
-                guard approved else {
-                    throw KeepTalkingClientError.actionCallNotAuthorized(
-                        action: request.call.action,
-                        caller: request.callerNodeID,
-                        context: request.contextID
-                    )
-                }
-            }
-
+        do {
             let callResult: (content: [Tool.Content], isError: Bool?)
             switch action.payload {
                 case .mcpBundle:
@@ -119,29 +112,264 @@ extension KeepTalkingClient {
         }
     }
 
+    private func prepareActionCallExecution(
+        _ request: KeepTalkingActionCallRequest,
+        context: KeepTalkingContext?
+    ) async throws -> KeepTalkingAction {
+        let action = try await resolveLocalActionForExecution(
+            actionID: request.call.action
+        )
+        let remoteNode = try await ensure(
+            request.callerNodeID,
+            for: KeepTalkingNode.self
+        )
+
+        guard
+            try await isNodeAuthorizedForAction(
+                node: remoteNode,
+                action: action,
+                context: context
+            )
+        else {
+            throw KeepTalkingClientError.actionCallNotAuthorized(
+                action: request.call.action,
+                caller: request.callerNodeID,
+                context: request.contextID
+            )
+        }
+
+        if action.blockingAuthorisation == true,
+            let context,
+            let actionApprovalHandler
+        {
+            let approved = await actionApprovalHandler(
+                request,
+                action,
+                context
+            )
+            guard approved else {
+                throw KeepTalkingClientError.actionCallNotAuthorized(
+                    action: request.call.action,
+                    caller: request.callerNodeID,
+                    context: request.contextID
+                )
+            }
+        }
+
+        return action
+    }
+
     func handleIncomingActionCallRequest(
         _ request: KeepTalkingActionCallRequest
     ) async throws {
         let requestID = request.id.uuidString.lowercased()
         let actionID = request.call.action.uuidString.lowercased()
-        onLog?(
-            "[action-call/request] handling request=\(requestID) action=\(actionID) caller=\(request.callerNodeID.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased())"
-        )
-        let context = try await upsertContext(
-            KeepTalkingContext(id: request.contextID)
+        let inFlightTask: Task<KeepTalkingActionCallResult, Never>
+
+        await sendActionCallAcknowledgementBestEffort(
+            request,
+            state: .received,
+            message: "Received by target node."
         )
 
-        let result = await executeActionCallRequest(
-            request,
-            context: context
+        if let cachedResult = cachedIncomingActionCallResult(for: request.id) {
+            onLog?(
+                "[action-call/request] duplicate completed request=\(requestID) action=\(actionID) resending cached result"
+            )
+            try await sendIncomingActionCallResult(
+                cachedResult,
+                requestID: requestID,
+                actionID: actionID
+            )
+            return
+        }
+
+        let existingTask = existingIncomingActionCallTask(for: request.id)
+        if let existingTask {
+            onLog?(
+                "[action-call/request] duplicate in-flight request=\(requestID) action=\(actionID) joining existing execution"
+            )
+            await sendActionCallAcknowledgementBestEffort(
+                request,
+                state: .accepted,
+                message: "Request is already running on target node."
+            )
+            inFlightTask = existingTask
+        } else {
+            onLog?(
+                "[action-call/request] handling request=\(requestID) action=\(actionID) caller=\(request.callerNodeID.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased())"
+            )
+            let createdTask = Task { [weak self] in
+                guard let self else {
+                    return Self.actionCallErrorResult(
+                        request,
+                        error: KeepTalkingClientError.actionCallTimeout(
+                            request.id
+                        )
+                    )
+                }
+                do {
+                    let context = try await self.upsertContext(
+                        KeepTalkingContext(id: request.contextID)
+                    )
+                    return await self.executeActionCallRequest(
+                        request,
+                        context: context,
+                        onAcknowledgement: { state, message in
+                            await self.sendActionCallAcknowledgementBestEffort(
+                                request,
+                                state: state,
+                                message: message
+                            )
+                        }
+                    )
+                } catch {
+                    await self.sendActionCallAcknowledgementBestEffort(
+                        request,
+                        state: .rejected,
+                        message: error.localizedDescription
+                    )
+                    return Self.actionCallErrorResult(request, error: error)
+                }
+            }
+            storeIncomingActionCallTask(createdTask, for: request.id)
+            inFlightTask = createdTask
+        }
+
+        let result = await inFlightTask.value
+        finalizeIncomingActionCall(
+            requestID: request.id,
+            result: result
         )
+        try await sendIncomingActionCallResult(
+            result,
+            requestID: requestID,
+            actionID: actionID
+        )
+    }
+
+    private static func actionCallErrorResult(
+        _ request: KeepTalkingActionCallRequest,
+        error: Error
+    ) -> KeepTalkingActionCallResult {
+        KeepTalkingActionCallResult(
+            requestID: request.id,
+            contextID: request.contextID,
+            callerNodeID: request.callerNodeID,
+            targetNodeID: request.targetNodeID,
+            actionID: request.call.action,
+            content: [],
+            isError: true,
+            errorMessage: error.localizedDescription
+        )
+    }
+
+    private func sendIncomingActionCallResult(
+        _ result: KeepTalkingActionCallResult,
+        requestID: String,
+        actionID: String
+    ) async throws {
         onLog?(
             "[action-call/result] returning request=\(requestID) action=\(actionID) is_error=\(result.isError)"
         )
 
         let encryptedResult = try await encryptActionCallResultEnvelope(result)
-
         try rtcClient.sendEnvelope(.encryptedActionCallResult(encryptedResult))
+    }
+
+    private func sendActionCallAcknowledgementBestEffort(
+        _ request: KeepTalkingActionCallRequest,
+        state: KeepTalkingRequestAckState,
+        message: String?
+    ) async {
+        let acknowledgement = KeepTalkingRequestAck(
+            requestID: request.id,
+            contextID: request.contextID,
+            callerNodeID: request.callerNodeID,
+            targetNodeID: request.targetNodeID,
+            kind: .actionCall,
+            state: state,
+            actionID: request.call.action,
+            message: message
+        )
+        let requestID = request.id.uuidString.lowercased()
+        let actionID = request.call.action.uuidString.lowercased()
+        let messageSuffix = acknowledgementLogMessageSuffix(message)
+        onLog?(
+            "[action-call/ack] sending request=\(requestID) action=\(actionID) state=\(state.rawValue)\(messageSuffix)"
+        )
+
+        do {
+            let encryptedAcknowledgement = try await encryptRequestAckEnvelope(
+                acknowledgement
+            )
+            try rtcClient.sendEnvelope(
+                .encryptedRequestAck(encryptedAcknowledgement)
+            )
+        } catch {
+            onLog?(
+                "[action-call/ack] failed request=\(requestID) action=\(actionID) state=\(state.rawValue) error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    func handleIncomingRequestAck(_ acknowledgement: KeepTalkingRequestAck) {
+        guard acknowledgement.kind == .actionCall else {
+            return
+        }
+        let requestID = acknowledgement.requestID.uuidString.lowercased()
+        let actionID = acknowledgement.actionID?.uuidString.lowercased() ?? ""
+        onLog?(
+            "[action-call/ack] received request=\(requestID) action=\(actionID) state=\(acknowledgement.state.rawValue)\(acknowledgementLogMessageSuffix(acknowledgement.message))"
+        )
+        _ = resolvePendingActionCallAcknowledgement(acknowledgement)
+    }
+
+    private func cachedIncomingActionCallResult(for requestID: UUID)
+        -> KeepTalkingActionCallResult?
+    {
+        actionCallQueue.sync {
+            completedIncomingActionCallResults[requestID]
+        }
+    }
+
+    private func existingIncomingActionCallTask(for requestID: UUID)
+        -> Task<KeepTalkingActionCallResult, Never>?
+    {
+        actionCallQueue.sync {
+            inFlightIncomingActionCalls[requestID]
+        }
+    }
+
+    private func storeIncomingActionCallTask(
+        _ task: Task<KeepTalkingActionCallResult, Never>,
+        for requestID: UUID
+    ) {
+        actionCallQueue.sync {
+            inFlightIncomingActionCalls[requestID] = task
+        }
+    }
+
+    private func finalizeIncomingActionCall(
+        requestID: UUID,
+        result: KeepTalkingActionCallResult
+    ) {
+        actionCallQueue.sync {
+            inFlightIncomingActionCalls.removeValue(forKey: requestID)
+            completedIncomingActionCallResults[requestID] = result
+            completedIncomingActionCallOrder.removeAll {
+                $0 == requestID
+            }
+            completedIncomingActionCallOrder.append(requestID)
+            while completedIncomingActionCallOrder.count
+                > Self.completedIncomingActionCallCacheLimit
+            {
+                let evicted = completedIncomingActionCallOrder.removeFirst()
+                completedIncomingActionCallResults.removeValue(
+                    forKey: evicted
+                )
+            }
+        }
     }
 
     func dispatchActionCall(
@@ -165,10 +393,16 @@ extension KeepTalkingClient {
             return await executeActionCallRequest(request, context: context)
         }
 
-        onLog?(
-            "[action-call/request] dispatching remote request=\(requestID) action=\(actionID) target=\(actionOwner.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased())"
+        let usesWakeAssistedDelivery = await shouldUseWakeAssistedDelivery(
+            for: call.action
         )
-        if await shouldUseWakeAssistedDelivery(for: call.action) {
+        let deliveryDescription = usesWakeAssistedDelivery
+            ? "rtc (with APN wake if needed)"
+            : "rtc"
+        onLog?(
+            "[action-call/request] dispatching remote request=\(requestID) action=\(actionID) target=\(actionOwner.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased()) delivery=\(deliveryDescription)"
+        )
+        if usesWakeAssistedDelivery {
             onLog?(
                 "[action-call/request] wake-assisted delivery request=\(requestID) action=\(actionID) target=\(actionOwner.uuidString.lowercased())"
             )
@@ -183,8 +417,10 @@ extension KeepTalkingClient {
         let encryptedRequest = try await encryptActionCallRequestEnvelope(
             request
         )
-        try rtcClient.sendEnvelope(
-            .encryptedActionCallRequest(encryptedRequest)
+        try await sendRemoteActionCallRequest(
+            request,
+            encryptedRequest: encryptedRequest,
+            deliveryDescription: deliveryDescription
         )
 
         return try await waitForActionCallResult(
@@ -193,11 +429,126 @@ extension KeepTalkingClient {
         )
     }
 
+    private func sendRemoteActionCallRequest(
+        _ request: KeepTalkingActionCallRequest,
+        encryptedRequest: KeepTalkingAsymmetricCipherEnvelope,
+        deliveryDescription: String
+    ) async throws {
+        let requestID = request.id.uuidString.lowercased()
+        let actionID = request.call.action.uuidString.lowercased()
+
+        for attempt in 1...Self.actionCallAckRetryLimit {
+            onLog?(
+                "[action-call/request] sending request=\(requestID) action=\(actionID) attempt=\(attempt) delivery=\(deliveryDescription)"
+            )
+            try rtcClient.sendEnvelope(
+                .encryptedActionCallRequest(encryptedRequest)
+            )
+
+            let acknowledgement = try await waitForActionCallAcknowledgement(
+                requestID: request.id,
+                timeoutSeconds: Self.actionCallAckTimeoutSeconds
+            )
+            if acknowledgement != nil {
+                return
+            }
+            if cachedReceivedActionCallResult(for: request.id) != nil {
+                onLog?(
+                    "[action-call/ack] missing request=\(requestID) action=\(actionID) but result already arrived"
+                )
+                return
+            }
+            guard attempt < Self.actionCallAckRetryLimit else {
+                onLog?(
+                    "[action-call/ack] missing request=\(requestID) action=\(actionID) after=\(Int(Self.actionCallAckTimeoutSeconds))s"
+                )
+                return
+            }
+
+            onLog?(
+                "[action-call/ack] missing request=\(requestID) action=\(actionID) after=\(Int(Self.actionCallAckTimeoutSeconds))s; retrying on reliable route"
+            )
+            rtcClient.preferReliableRoute(
+                reason: "missing action-call ack request=\(requestID)"
+            )
+        }
+    }
+
+    func waitForActionCallAcknowledgement(
+        requestID: UUID,
+        timeoutSeconds: TimeInterval
+    ) async throws -> KeepTalkingRequestAck? {
+        if let acknowledgement = consumeReceivedActionCallAcknowledgement(
+            for: requestID
+        ) {
+            return acknowledgement
+        }
+
+        return try await withThrowingTaskGroup(
+            of: KeepTalkingRequestAck?.self
+        ) { group in
+            group.addTask { [weak self] in
+                guard let self else {
+                    return nil
+                }
+                return try await withTaskCancellationHandler(
+                    operation: {
+                        try await withCheckedThrowingContinuation {
+                            (
+                                continuation: CheckedContinuation<
+                                    KeepTalkingRequestAck, Error
+                                >
+                            ) in
+                            self.actionCallQueue.sync {
+                                if let acknowledgement =
+                                    self
+                                    .consumeReceivedActionCallAcknowledgementLocked(
+                                        for: requestID
+                                    )
+                                {
+                                    continuation.resume(
+                                        returning: acknowledgement
+                                    )
+                                    return
+                                }
+                                self.pendingActionCallAcknowledgements[
+                                    requestID
+                                ] = continuation
+                            }
+                        }
+                    },
+                    onCancel: {
+                        self.cancelPendingActionCallAcknowledgement(
+                            requestID: requestID
+                        )
+                    }
+                )
+            }
+
+            group.addTask {
+                try await Task.sleep(
+                    nanoseconds: UInt64(timeoutSeconds * 1_000_000_000)
+                )
+                return nil
+            }
+
+            let first = try await group.next()
+            group.cancelAll()
+            return first ?? nil
+        }
+    }
+
     func waitForActionCallResult(
         requestID: UUID,
         timeoutSeconds: TimeInterval
     ) async throws -> KeepTalkingActionCallResult {
-        try await withThrowingTaskGroup(of: KeepTalkingActionCallResult.self) {
+        if let cachedResult = consumeReceivedActionCallResult(for: requestID) {
+            return cachedResult
+        }
+
+        return try await withThrowingTaskGroup(
+            of: KeepTalkingActionCallResult.self
+        ) {
             group in
             group.addTask { [weak self] in
                 guard let self else {
@@ -210,6 +561,14 @@ extension KeepTalkingClient {
                         >
                     ) in
                     self.actionCallQueue.sync {
+                        if let cachedResult =
+                            self.consumeReceivedActionCallResultLocked(
+                                for: requestID
+                            )
+                        {
+                            continuation.resume(returning: cachedResult)
+                            return
+                        }
                         self.pendingActionCallResults[requestID] = continuation
                     }
                 }
@@ -243,15 +602,31 @@ extension KeepTalkingClient {
         -> Bool
     {
         actionCallQueue.sync {
-            guard
-                let continuation = pendingActionCallResults.removeValue(
-                    forKey: result.requestID
-                )
-            else {
-                return false
+            if let continuation = pendingActionCallResults.removeValue(
+                forKey: result.requestID
+            ) {
+                continuation.resume(returning: result)
+                return true
             }
-            continuation.resume(returning: result)
-            return true
+
+            storeReceivedActionCallResultLocked(result)
+            return false
+        }
+    }
+
+    func resolvePendingActionCallAcknowledgement(
+        _ acknowledgement: KeepTalkingRequestAck
+    ) -> Bool {
+        actionCallQueue.sync {
+            if let continuation = pendingActionCallAcknowledgements
+                .removeValue(forKey: acknowledgement.requestID)
+            {
+                continuation.resume(returning: acknowledgement)
+                return true
+            }
+
+            storeReceivedActionCallAcknowledgementLocked(acknowledgement)
+            return false
         }
     }
 
@@ -268,25 +643,143 @@ extension KeepTalkingClient {
 
     func failPendingActionCall(requestID: UUID, error: Error) {
         actionCallQueue.sync {
-            guard
-                let continuation = pendingActionCallResults.removeValue(
-                    forKey: requestID
-                )
-            else {
-                return
+            if let continuation = pendingActionCallResults.removeValue(
+                forKey: requestID
+            ) {
+                continuation.resume(throwing: error)
             }
-            continuation.resume(throwing: error)
+            if let continuation = pendingActionCallAcknowledgements
+                .removeValue(forKey: requestID)
+            {
+                continuation.resume(throwing: error)
+            }
         }
     }
 
     func failAllPendingActionCalls(error: Error) {
         actionCallQueue.sync {
-            let pending = pendingActionCallResults
+            let pendingResults = pendingActionCallResults
+            let pendingAcknowledgements = pendingActionCallAcknowledgements
             pendingActionCallResults.removeAll()
-            for continuation in pending.values {
+            pendingActionCallAcknowledgements.removeAll()
+            receivedActionCallResults.removeAll()
+            receivedActionCallResultOrder.removeAll()
+            receivedActionCallAcknowledgements.removeAll()
+            receivedActionCallAcknowledgementOrder.removeAll()
+            for continuation in pendingResults.values {
+                continuation.resume(throwing: error)
+            }
+            for continuation in pendingAcknowledgements.values {
                 continuation.resume(throwing: error)
             }
         }
+    }
+
+    private func consumeReceivedActionCallAcknowledgement(for requestID: UUID)
+        -> KeepTalkingRequestAck?
+    {
+        actionCallQueue.sync {
+            consumeReceivedActionCallAcknowledgementLocked(for: requestID)
+        }
+    }
+
+    private func consumeReceivedActionCallAcknowledgementLocked(
+        for requestID: UUID
+    ) -> KeepTalkingRequestAck? {
+        let acknowledgement = receivedActionCallAcknowledgements.removeValue(
+            forKey: requestID
+        )
+        if acknowledgement != nil {
+            receivedActionCallAcknowledgementOrder.removeAll {
+                $0 == requestID
+            }
+        }
+        return acknowledgement
+    }
+
+    private func cancelPendingActionCallAcknowledgement(requestID: UUID) {
+        actionCallQueue.sync {
+            guard
+                let continuation = pendingActionCallAcknowledgements
+                    .removeValue(forKey: requestID)
+            else {
+                return
+            }
+            continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    private func storeReceivedActionCallAcknowledgementLocked(
+        _ acknowledgement: KeepTalkingRequestAck
+    ) {
+        receivedActionCallAcknowledgements[acknowledgement.requestID] =
+            acknowledgement
+        receivedActionCallAcknowledgementOrder.removeAll {
+            $0 == acknowledgement.requestID
+        }
+        receivedActionCallAcknowledgementOrder.append(
+            acknowledgement.requestID
+        )
+        while receivedActionCallAcknowledgementOrder.count
+            > Self.actionCallDeliveryCacheLimit
+        {
+            let evicted = receivedActionCallAcknowledgementOrder.removeFirst()
+            receivedActionCallAcknowledgements.removeValue(forKey: evicted)
+        }
+    }
+
+    private func consumeReceivedActionCallResult(for requestID: UUID)
+        -> KeepTalkingActionCallResult?
+    {
+        actionCallQueue.sync {
+            consumeReceivedActionCallResultLocked(for: requestID)
+        }
+    }
+
+    private func cachedReceivedActionCallResult(for requestID: UUID)
+        -> KeepTalkingActionCallResult?
+    {
+        actionCallQueue.sync {
+            receivedActionCallResults[requestID]
+        }
+    }
+
+    private func consumeReceivedActionCallResultLocked(for requestID: UUID)
+        -> KeepTalkingActionCallResult?
+    {
+        let result = receivedActionCallResults.removeValue(forKey: requestID)
+        if result != nil {
+            receivedActionCallResultOrder.removeAll {
+                $0 == requestID
+            }
+        }
+        return result
+    }
+
+    private func storeReceivedActionCallResultLocked(
+        _ result: KeepTalkingActionCallResult
+    ) {
+        receivedActionCallResults[result.requestID] = result
+        receivedActionCallResultOrder.removeAll {
+            $0 == result.requestID
+        }
+        receivedActionCallResultOrder.append(result.requestID)
+        while receivedActionCallResultOrder.count
+            > Self.actionCallDeliveryCacheLimit
+        {
+            let evicted = receivedActionCallResultOrder.removeFirst()
+            receivedActionCallResults.removeValue(forKey: evicted)
+        }
+    }
+
+    private func acknowledgementLogMessageSuffix(_ message: String?) -> String {
+        let trimmed = message?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard let trimmed, !trimmed.isEmpty else {
+            return ""
+        }
+        return " message=\(trimmed)"
     }
 
     func resolveLocalActionForExecution(actionID: UUID) async throws

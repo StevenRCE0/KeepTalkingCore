@@ -4,6 +4,11 @@ import Foundation
 final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     @unchecked Sendable
 {
+    private enum ActiveRoute: String {
+        case sfu
+        case p2p
+    }
+
     private static let heartbeatIntervalSeconds: TimeInterval = 59
     private static let presenceEchoCooldownSeconds: TimeInterval = 1
 
@@ -31,7 +36,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     private let stateQueue = DispatchQueue(label: "KeepTalking.hybrid.state")
     private var discoveredPeers = Set<UUID>()
     private var activeTransport: KeepTalkingTransportClient
-    private var activeRoute = "sfu"
+    private var activeRoute: ActiveRoute = .sfu
     private var isP2PTrialRunning = false
 
     init(
@@ -64,7 +69,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         }
         livenessState.reset()
         try await sfuClient.start()
-        setActiveTransport(sfuClient, route: "sfu")
+        setActiveTransport(sfuClient, route: .sfu)
         rememberPeer(config.node)
         sendPresence(advancingHeartbeat: true)
         startHeartbeatLoop()
@@ -91,7 +96,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                 try activeTransport.sendEnvelope(envelope)
             }
         } catch {
-            let shouldFallback = stateQueue.sync { activeRoute == "p2p" }
+            let shouldFallback = stateQueue.sync { activeRoute == .p2p }
             guard shouldFallback else {
                 throw error
             }
@@ -114,7 +119,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                 inboundLabel: stats.inboundLabel,
                 inboundState: stats.inboundState,
                 retainedChannels: stats.retainedChannels,
-                route: activeRoute
+                route: activeRoute.rawValue
             )
         }
     }
@@ -123,9 +128,13 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         beginP2PTrial(trigger: "manual", allowWhileOnP2P: true)
     }
 
+    func preferReliableRoute(reason: String) {
+        fallbackToSFU(reason: reason)
+    }
+
     private func setActiveTransport(
         _ transport: KeepTalkingTransportClient,
-        route: String
+        route: ActiveRoute
     ) {
         stateQueue.sync {
             activeTransport = transport
@@ -135,9 +144,9 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
 
     private func fallbackToSFU(reason: String) {
         let switched = stateQueue.sync {
-            guard activeRoute != "sfu" else { return false }
+            guard activeRoute != .sfu else { return false }
             activeTransport = sfuClient
-            activeRoute = "sfu"
+            activeRoute = .sfu
             return true
         }
         if switched {
@@ -156,10 +165,10 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             return
         }
 
-        let state = stateQueue.sync { () -> (route: String, running: Bool) in
+        let state = stateQueue.sync { () -> (route: ActiveRoute, running: Bool) in
             (activeRoute, isP2PTrialRunning)
         }
-        guard state.route != "p2p" || allowWhileOnP2P else {
+        guard state.route != .p2p || allowWhileOnP2P else {
             debug("p2p trial skipped trigger=\(trigger) reason=already-on-p2p")
             return
         }
@@ -169,7 +178,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             )
             return
         }
-        if state.route == "p2p" {
+        if state.route == .p2p {
             fallbackToSFU(reason: "forcing p2p retrial trigger=\(trigger)")
         }
 
@@ -198,7 +207,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
 
             do {
                 try await p2pClient.start()
-                setActiveTransport(p2pClient, route: "p2p")
+                setActiveTransport(p2pClient, route: .p2p)
                 debug("p2p route selected; keeping sfu as warm fallback")
             } catch {
                 p2pClient.stop()

@@ -82,6 +82,38 @@ extension KeepTalkingClient {
         return result
     }
 
+    func encryptRequestAckEnvelope(
+        _ acknowledgement: KeepTalkingRequestAck
+    ) async throws -> KeepTalkingAsymmetricCipherEnvelope {
+        let encoded = try JSONEncoder().encode(acknowledgement)
+        return try await encryptAsymmetricPayload(
+            encoded,
+            recipientNodeID: acknowledgement.callerNodeID,
+            purpose: "request-ack"
+        )
+    }
+
+    func decryptRequestAckEnvelope(
+        _ envelope: KeepTalkingAsymmetricCipherEnvelope
+    ) async throws -> KeepTalkingRequestAck {
+        let payload = try await decryptAsymmetricPayload(
+            envelope,
+            expectedSenderNodeID: envelope.senderNodeID,
+            purpose: "request-ack"
+        )
+        let acknowledgement = try JSONDecoder().decode(
+            KeepTalkingRequestAck.self,
+            from: payload
+        )
+        guard
+            acknowledgement.callerNodeID == envelope.recipientNodeID,
+            acknowledgement.targetNodeID == envelope.senderNodeID
+        else {
+            throw KeepTalkingClientError.malformedEncryptedRequestAck
+        }
+        return acknowledgement
+    }
+
     func encryptActionCatalogRequestEnvelope(
         _ request: KeepTalkingActionCatalogRequest
     ) async throws -> KeepTalkingAsymmetricCipherEnvelope {

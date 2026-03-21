@@ -13,6 +13,7 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
     public let ownerNodeID: UUID
     public let source: Source
     public let mcpToolName: String?
+    public let supportsWakeAssist: Bool
     public let description: String
     public let parameters: JSONSchema
 
@@ -22,6 +23,7 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         ownerNodeID: UUID,
         source: Source,
         mcpToolName: String? = nil,
+        supportsWakeAssist: Bool = false,
         description: String,
         parameters: JSONSchema
     ) {
@@ -30,6 +32,7 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         self.ownerNodeID = ownerNodeID
         self.source = source
         self.mcpToolName = mcpToolName
+        self.supportsWakeAssist = supportsWakeAssist
         self.description = description
         self.parameters = parameters
     }

@@ -77,6 +77,47 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
     }
 }
 
+public enum KeepTalkingRequestAckKind: String, Codable, Sendable {
+    case actionCall
+}
+
+public enum KeepTalkingRequestAckState: String, Codable, Sendable {
+    case received
+    case accepted
+    case rejected
+}
+
+public struct KeepTalkingRequestAck: Codable, Sendable {
+    public var requestID: UUID
+    public var contextID: UUID
+    public var callerNodeID: UUID
+    public var targetNodeID: UUID
+    public var kind: KeepTalkingRequestAckKind
+    public var state: KeepTalkingRequestAckState
+    public var actionID: UUID?
+    public var message: String?
+
+    public init(
+        requestID: UUID,
+        contextID: UUID,
+        callerNodeID: UUID,
+        targetNodeID: UUID,
+        kind: KeepTalkingRequestAckKind,
+        state: KeepTalkingRequestAckState,
+        actionID: UUID? = nil,
+        message: String? = nil
+    ) {
+        self.requestID = requestID
+        self.contextID = contextID
+        self.callerNodeID = callerNodeID
+        self.targetNodeID = targetNodeID
+        self.kind = kind
+        self.state = state
+        self.actionID = actionID
+        self.message = message
+    }
+}
+
 public enum KeepTalkingActionCatalogQueryKind: String, Codable, Sendable {
     case mcpTools
     case skillMetadata
