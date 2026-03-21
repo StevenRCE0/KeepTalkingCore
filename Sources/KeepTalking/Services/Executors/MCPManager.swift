@@ -1,5 +1,6 @@
 import Foundation
 import MCP
+import Logging
 
 #if canImport(System)
     import System
@@ -61,6 +62,195 @@ public enum KeepTalkingMCPHTTPAuthResult: Sendable {
 
 /// Manages MCP action registration, transport connections, and tool invocation.
 public actor MCPManager {
+    private actor IncrementingRequestIDTransport: Transport {
+        nonisolated let logger: Logger
+
+        private let base: any Transport
+        private var adapter = IncrementingRequestIDAdapter()
+
+        init(base: any Transport) {
+            self.base = base
+            self.logger = Logger(label: "keepTalking.transport.logging") { _ in
+                SwiftLogNoOpLogHandler()
+            }
+        }
+
+        func connect() async throws {
+            try await base.connect()
+        }
+
+        func disconnect() async {
+            await base.disconnect()
+        }
+
+        func send(_ data: Data) async throws {
+            try await base.send(rewriteOutgoingMessageData(data))
+        }
+
+        func receive() -> AsyncThrowingStream<Data, Error> {
+            AsyncThrowingStream { continuation in
+                Task {
+                    do {
+                        let stream = await base.receive()
+                        for try await data in stream {
+                            continuation.yield(await self.rewriteIncomingMessageData(data))
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+        }
+
+        private func rewriteOutgoingMessageData(_ data: Data) -> Data {
+            adapter.rewriteOutgoingMessageData(data)
+        }
+
+        private func rewriteIncomingMessageData(_ data: Data) async -> Data {
+            adapter.rewriteIncomingMessageData(data)
+        }
+    }
+
+    private struct IncrementingRequestIDAdapter: Sendable {
+        private var nextNumericRequestID = 1
+        private var numericRequestIDByOriginalID: [String: Int] = [:]
+        private var originalRequestIDByNumericID: [Int: String] = [:]
+
+        mutating func rewriteOutgoingMessageData(_ data: Data) -> Data {
+            rewriteMessageData(data, direction: .outgoing)
+        }
+
+        mutating func rewriteIncomingMessageData(_ data: Data) -> Data {
+            rewriteMessageData(data, direction: .incoming)
+        }
+
+        private enum Direction {
+            case outgoing
+            case incoming
+        }
+
+        private mutating func rewriteMessageData(
+            _ data: Data,
+            direction: Direction
+        ) -> Data {
+            guard
+                let object = try? JSONSerialization.jsonObject(with: data),
+                let rewrittenData = serializeRewrittenObject(
+                    rewriteTopLevelMessageObject(object, direction: direction)
+                )
+            else {
+                return data
+            }
+
+            return rewrittenData
+        }
+
+        private mutating func rewriteTopLevelMessageObject(
+            _ object: Any,
+            direction: Direction
+        ) -> Any {
+            if var message = object as? [String: Any] {
+                rewriteMessageDictionary(&message, direction: direction)
+                return message
+            }
+
+            if let batch = object as? [Any] {
+                return batch.map { element in
+                    guard var message = element as? [String: Any] else {
+                        return element
+                    }
+                    rewriteMessageDictionary(&message, direction: direction)
+                    return message
+                }
+            }
+
+            return object
+        }
+
+        private mutating func rewriteMessageDictionary(
+            _ message: inout [String: Any],
+            direction: Direction
+        ) {
+            switch direction {
+                case .outgoing:
+                    if let originalID = message["id"] as? String {
+                        message["id"] = numericRequestID(for: originalID)
+                    }
+                    rewriteRequestIdentifierField(
+                        in: &message,
+                        direction: .outgoing
+                    )
+                case .incoming:
+                    if let numericID = integerValue(from: message["id"]),
+                        let originalID = originalRequestIDByNumericID[numericID]
+                    {
+                        message["id"] = originalID
+                    }
+                    rewriteRequestIdentifierField(
+                        in: &message,
+                        direction: .incoming
+                    )
+            }
+        }
+
+        private mutating func rewriteRequestIdentifierField(
+            in message: inout [String: Any],
+            direction: Direction
+        ) {
+            guard var params = message["params"] as? [String: Any] else {
+                return
+            }
+
+            switch direction {
+                case .outgoing:
+                    if let originalID = params["requestId"] as? String,
+                        let numericID = numericRequestIDByOriginalID[originalID]
+                    {
+                        params["requestId"] = numericID
+                        message["params"] = params
+                    }
+                case .incoming:
+                    if let numericID = integerValue(from: params["requestId"]),
+                        let originalID = originalRequestIDByNumericID[numericID]
+                    {
+                        params["requestId"] = originalID
+                        message["params"] = params
+                    }
+            }
+        }
+
+        private mutating func numericRequestID(for originalID: String) -> Int {
+            if let numericID = numericRequestIDByOriginalID[originalID] {
+                return numericID
+            }
+
+            let numericID = nextNumericRequestID
+            nextNumericRequestID += 1
+            numericRequestIDByOriginalID[originalID] = numericID
+            originalRequestIDByNumericID[numericID] = originalID
+            return numericID
+        }
+
+        private func integerValue(from value: Any?) -> Int? {
+            switch value {
+                case let value as Int:
+                    return value
+                case let value as NSNumber:
+                    return value.intValue
+                default:
+                    return nil
+            }
+        }
+
+        private func serializeRewrittenObject(_ object: Any) -> Data? {
+            guard JSONSerialization.isValidJSONObject(object) else {
+                return nil
+            }
+            return try? JSONSerialization.data(withJSONObject: object)
+        }
+    }
+
     private final class StdioProcessHandle: @unchecked Sendable {
         let processHandler: any MCPStdioProcessHandling
 
@@ -391,10 +581,6 @@ public actor MCPManager {
             throw MCPManagerError.stdioUnavailableOnThisPlatform
         }
 
-        let actionIDLabel = actionID.uuidString.lowercased()
-        log(
-            "[mcp][stdio] launch action=\(actionIDLabel) command=\(command.joined(separator: " "))"
-        )
         let launched = try await stdioTransportLauncher.launchTransport(
             command: command,
             environment: environment
@@ -403,16 +589,12 @@ public actor MCPManager {
                 await self?.logStdioStderr(actionID: actionID, data: data)
             }
         }
-        let launchedTransport = launched.transport
-        let launchedProcessHandler = launched.processHandler
-        log(
-            "[mcp][stdio] launched action=\(actionIDLabel)"
+        let launchedTransport = IncrementingRequestIDTransport(
+            base: launched.transport
         )
+        let launchedProcessHandler = launched.processHandler
 
         do {
-            log(
-                "[mcp][stdio] connecting action=\(actionIDLabel) timeout=\(Int(connectTimeoutSeconds))s"
-            )
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask {
                     try await Self.connectClient(
@@ -440,15 +622,11 @@ public actor MCPManager {
                 }
                 group.cancelAll()
             }
-            log("[mcp][stdio] connected action=\(actionIDLabel)")
 
             stdioProcessesByActionID[actionID] = StdioProcessHandle(
                 processHandler: launchedProcessHandler
             )
         } catch {
-            log(
-                "[mcp][stdio] connect failed action=\(actionIDLabel) error=\(error.localizedDescription)"
-            )
             launchedProcessHandler.terminate()
             throw error
         }
@@ -504,7 +682,7 @@ public actor MCPManager {
                 )
                 try await Self.connectClient(
                     client,
-                    transport: transport,
+                    transport: IncrementingRequestIDTransport(base: transport),
                     timeoutSeconds: connectTimeoutSeconds
                 )
         }
@@ -610,7 +788,7 @@ public actor MCPManager {
         do {
             try await Self.connectClient(
                 client,
-                transport: transport,
+                transport: IncrementingRequestIDTransport(base: transport),
                 timeoutSeconds: connectTimeoutSeconds
             )
             _ = try await client.listTools()

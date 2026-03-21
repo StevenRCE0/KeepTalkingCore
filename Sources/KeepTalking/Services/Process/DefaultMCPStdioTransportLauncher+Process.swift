@@ -1,5 +1,7 @@
 #if !os(iOS) && !os(tvOS) && !os(watchOS) && !os(visionOS)
 import Foundation
+import Logging
+import MCP
 
 extension DefaultMCPStdioTransportLauncher {
     static var currentLauncher: (any MCPStdioTransportLaunching)? {
@@ -101,17 +103,139 @@ private struct Launcher: MCPStdioTransportLaunching {
         stdoutPipe.fileHandleForWriting.closeFile()
         stderrPipe.fileHandleForWriting.closeFile()
 
-        return MCPStdioTransportHandle(
-            inputFileDescriptor: stdoutPipe.fileHandleForReading.fileDescriptor,
-            outputFileDescriptor: stdinPipe.fileHandleForWriting.fileDescriptor,
-            processHandler: DefaultMCPStdioProcessHandler(
-                process: process,
-                stdinPipe: stdinPipe,
-                stdoutPipe: stdoutPipe,
-                stderrPipe: stderrPipe,
-                exitState: exitState
-            )
+        let processHandler = DefaultMCPStdioProcessHandler(
+            process: process,
+            stdinPipe: stdinPipe,
+            stdoutPipe: stdoutPipe,
+            stderrPipe: stderrPipe,
+            exitState: exitState
         )
+
+        return MCPStdioTransportHandle(
+            transport: MCPPipeTransport(
+                inputHandle: stdoutPipe.fileHandleForReading,
+                outputHandle: stdinPipe.fileHandleForWriting
+            ),
+            processHandler: processHandler
+        )
+    }
+}
+
+private actor MCPPipeTransport: Transport {
+    nonisolated let logger: Logger
+
+    private let inputHandle: FileHandle
+    private let outputHandle: FileHandle
+    private var isConnected = false
+    private var pendingData = Data()
+    private let messageStream: AsyncThrowingStream<Data, Swift.Error>
+    private let messageContinuation:
+        AsyncThrowingStream<Data, Swift.Error>.Continuation
+
+    init(
+        inputHandle: FileHandle,
+        outputHandle: FileHandle,
+        logger: Logger? = nil
+    ) {
+        self.inputHandle = inputHandle
+        self.outputHandle = outputHandle
+        self.logger = logger
+            ?? Logger(label: "keepTalking.transport.pipe") { _ in
+                SwiftLogNoOpLogHandler()
+            }
+
+        var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
+        self.messageStream = AsyncThrowingStream { continuation = $0 }
+        self.messageContinuation = continuation
+    }
+
+    func connect() async throws {
+        guard !isConnected else {
+            return
+        }
+
+        isConnected = true
+        inputHandle.readabilityHandler = { [weak inputHandle] handle in
+            let data = handle.availableData
+            Task {
+                await self.handleReadableData(data)
+                if data.isEmpty {
+                    inputHandle?.readabilityHandler = nil
+                }
+            }
+        }
+    }
+
+    func disconnect() async {
+        guard isConnected else {
+            return
+        }
+        isConnected = false
+        inputHandle.readabilityHandler = nil
+        messageContinuation.finish()
+    }
+
+    func send(_ data: Data) async throws {
+        guard isConnected else {
+            throw MCPError.internalError("Pipe transport is not connected")
+        }
+
+        var payload = data
+        payload.append(UInt8(ascii: "\n"))
+        try outputHandle.write(contentsOf: payload)
+    }
+
+    func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+        messageStream
+    }
+
+    private func handleReadableData(_ data: Data) async {
+        guard isConnected else {
+            return
+        }
+
+        if data.isEmpty {
+            inputHandle.readabilityHandler = nil
+            messageContinuation.finish()
+            return
+        }
+
+        pendingData.append(data)
+
+        while let message = extractNextMessage() {
+            messageContinuation.yield(message)
+        }
+    }
+
+    private func extractNextMessage() -> Data? {
+        if let newlineIndex = pendingData.firstIndex(of: UInt8(ascii: "\n")) {
+            let messageData = pendingData[..<newlineIndex]
+            pendingData.removeSubrange(...newlineIndex)
+            guard !messageData.isEmpty else {
+                return extractNextMessage()
+            }
+            return Data(messageData)
+        }
+
+        guard !pendingData.isEmpty else {
+            return nil
+        }
+
+        if isCompleteJSONMessage(pendingData) {
+            defer { pendingData.removeAll(keepingCapacity: true) }
+            return pendingData
+        }
+
+        return nil
+    }
+
+    private func isCompleteJSONMessage(_ data: Data) -> Bool {
+        do {
+            _ = try JSONSerialization.jsonObject(with: data)
+            return true
+        } catch {
+            return false
+        }
     }
 }
 #endif
