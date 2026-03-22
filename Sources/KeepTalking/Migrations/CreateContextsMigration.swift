@@ -5,6 +5,7 @@ struct CreateKeepTalkingContextsMigration: Migration {
         database.schema(KeepTalkingContext.schema)
             .id()
             .field("updated_at", .datetime, .required)
+            .field("sync_metadata", .json)
             .create()
     }
 

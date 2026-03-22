@@ -31,6 +31,7 @@ struct CreateNodeRelationsActionsRelationsMigration: AsyncMigration {
                 "approving_context",
                 .json,
             )
+            .field("wake_handles", .json)
             .create()
     }
 
