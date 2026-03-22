@@ -9,6 +9,40 @@ import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
+    static func relationPriority(_ relationship: KeepTalkingRelationship) -> Int {
+        switch relationship {
+            case .owner:
+                return 3
+            case .trustedInAllContext:
+                return 2
+            case .trusted:
+                return 1
+            case .pending:
+                return 0
+        }
+    }
+
+    static func preferredTrustedRelation(
+        from fromNodeID: UUID,
+        to toNodeID: UUID,
+        allowing context: KeepTalkingContext? = nil,
+        on database: any Database
+    ) async throws -> KeepTalkingNodeRelation? {
+        try await KeepTalkingNodeRelation
+            .query(on: database)
+            .filter(\.$from.$id, .equal, fromNodeID)
+            .filter(\.$to.$id, .equal, toNodeID)
+            .all()
+            .sorted(by: {
+                relationPriority($0.relationship)
+                    > relationPriority($1.relationship)
+            })
+            .first(where: { relation in
+                relation.relationship.isTrustedOrOwner
+                    && (context == nil || relation.relationship.allows(context: context))
+            })
+    }
+
     private static func normalizedBlockingAuthorisation(_ value: Bool) -> Bool {
         #if os(iOS)
             true
@@ -40,6 +74,75 @@ extension KeepTalkingClient {
         return byID.values.sorted {
             ($0.id?.uuidString ?? "") < ($1.id?.uuidString ?? "")
         } + withoutID
+    }
+
+    func deduplicatedAndSortedActions(
+        _ actions: [KeepTalkingAdvertisedAction]
+    ) -> [KeepTalkingAdvertisedAction] {
+        var byID: [UUID: KeepTalkingAdvertisedAction] = [:]
+
+        for action in actions {
+            byID[action.actionID] = action
+        }
+
+        return byID.values.sorted {
+            $0.actionID.uuidString < $1.actionID.uuidString
+        }
+    }
+
+    private static func resolveGrantHostNode(
+        for action: KeepTalkingAction,
+        authorizingNode: KeepTalkingNode,
+        on database: any Database
+    ) async throws -> KeepTalkingNode {
+        let actionID = try action.requireID()
+        let authorizingNodeID = try authorizingNode.requireID()
+
+        guard let hostNodeID = action.$node.id else {
+            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
+        }
+        if hostNodeID == authorizingNodeID {
+            return authorizingNode
+        }
+
+        guard
+            let ownershipRelation = try await KeepTalkingNodeRelation
+            .query(on: database)
+            .filter(\.$from.$id == authorizingNodeID)
+            .filter(\.$to.$id == hostNodeID)
+            .first(),
+            ownershipRelation.relationship == .owner,
+            let hostNode = try await KeepTalkingNode.find(
+                hostNodeID,
+                on: database
+            )
+        else {
+            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
+        }
+
+        return hostNode
+    }
+
+    private static func mergedApprovingContext(
+        current: KeepTalkingNodeRelationActionRelation.ApprovingContext?,
+        requestedScope: KeepTalkingActionPermissionScope
+    ) -> KeepTalkingNodeRelationActionRelation.ApprovingContext {
+        switch requestedScope {
+            case .all:
+                return .all
+            case .context(let approvingContext):
+                switch current {
+                    case .all:
+                        return .contexts([approvingContext])
+                    case .contexts(let originalContexts):
+                        guard !originalContexts.contains(approvingContext) else {
+                            return .contexts(originalContexts)
+                        }
+                        return .contexts(originalContexts + [approvingContext])
+                    case nil:
+                        return .contexts([approvingContext])
+                }
+        }
     }
 
     public func registerMCPAction(
@@ -599,20 +702,23 @@ extension KeepTalkingClient {
         callbackForBroadcasting: ((String) async -> Void)? = nil
     ) async throws {
         guard
-            let action = try await KeepTalkingAction.find(
-                actionID,
-                on: database
-            ),
-            action.$node.id == node.id
+            let action = try await KeepTalkingAction.find(actionID, on: database)
         else {
             throw KeepTalkingClientError.actionNotHostedLocally(actionID)
         }
+        let hostNode = try await resolveGrantHostNode(
+            for: action,
+            authorizingNode: node,
+            on: database
+        )
 
         guard
-            let relation = try await node.$outgoingNodeRelations
-                .query(on: database)
-                .filter(\.$to.$id == toNodeID)
-                .first()
+            let hostNodeID = hostNode.id,
+            let relation = try await preferredTrustedRelation(
+                from: hostNodeID,
+                to: toNodeID,
+                on: database
+            )
         else {
             // TODO: The error is inaccurate
             throw KeepTalkingClientError.relationNotTrustedOrOwned(toNodeID)
@@ -640,21 +746,10 @@ extension KeepTalkingClient {
 
             try await targetActionRelation!.create(on: database)
         } else {
-            switch scope {
-                case .all:
-                    targetActionRelation!.approvingContext = .all
-                case .context(let approvingContext):
-                    switch targetActionRelation!.approvingContext {
-                        case .all:
-                            targetActionRelation!.approvingContext = .all
-                        case .contexts(let originalContexts):
-                            targetActionRelation!.approvingContext = .contexts(
-                                originalContexts + [approvingContext]
-                            )
-                        default:
-                            break
-                    }
-            }
+            targetActionRelation!.approvingContext = mergedApprovingContext(
+                current: targetActionRelation!.approvingContext,
+                requestedScope: scope
+            )
 
             try await targetActionRelation!.update(on: database)
         }
@@ -669,23 +764,6 @@ extension KeepTalkingClient {
         toNodeID: UUID,
         scope: KeepTalkingActionPermissionScope
     ) async throws {
-        let authorizationContext: KeepTalkingContext?
-        switch scope {
-            case .all:
-                authorizationContext = nil
-            case .context(let context):
-                authorizationContext = context
-        }
-
-        guard
-            try await isNodeAuthorizedToAuthorizeAction(
-                node: KeepTalkingNode(id: toNodeID),
-                context: authorizationContext
-            )
-        else {
-            throw KeepTalkingClientError.relationNotTrustedOrOwned(toNodeID)
-        }
-
         let selfNode = try await ensure(
             config.node,
             for: KeepTalkingNode.self,
@@ -704,23 +782,17 @@ extension KeepTalkingClient {
         )
     }
 
-    func mergeNodeActions(_ actions: [KeepTalkingAction]) async throws {
+    func mergeNodeActions(_ actions: [KeepTalkingAdvertisedAction]) async throws {
         let advertisedActions = deduplicatedAndSortedActions(
             actions
         )
 
         for incomingAction in advertisedActions {
-            guard let actionID = incomingAction.id else {
-                continue
-            }
-
-            rtcClient.onLog?("Merging action: \(actionID)")
+            let actionID = incomingAction.actionID
 
             let persistedAction: KeepTalkingAction
             let existingDescriptor: KeepTalkingActionDescriptor?
             let existingPayload: KeepTalkingAction.Payload?
-            let existingRemoteAuthorisable: Bool?
-            let existingBlockingAuthorisation: Bool?
 
             if let existingAction = try await KeepTalkingAction.query(
                 on: localStore.database
@@ -730,18 +802,12 @@ extension KeepTalkingClient {
                 persistedAction = existingAction
                 existingDescriptor = existingAction.descriptor
                 existingPayload = existingAction.payload
-                existingRemoteAuthorisable = existingAction.remoteAuthorisable
-                existingBlockingAuthorisation =
-                    existingAction
-                    .blockingAuthorisation
             } else {
                 let newAction = KeepTalkingAction()
                 newAction.id = actionID
                 persistedAction = newAction
                 existingDescriptor = nil
                 existingPayload = nil
-                existingRemoteAuthorisable = nil
-                existingBlockingAuthorisation = nil
             }
 
             let fallbackDescription =
@@ -758,26 +824,28 @@ extension KeepTalkingClient {
                     object: nil
                 )
             let resolvedPayload: KeepTalkingAction.Payload =
-                incomingAction.payload
-                ?? existingPayload
+                existingPayload
                 ?? .mcpBundle(
                     virtualRemoteMCPBundle(
                         actionID: actionID,
+                        name: "remote_\(actionID.uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(8))",
                         description: fallbackDescription
                     )
                 )
+            let materializedPayload = materializedRemotePayload(
+                from: incomingAction,
+                fallbackDescription: fallbackDescription
+            )
 
-            persistedAction.$node.id = incomingAction.$node.id
+            persistedAction.$node.id = incomingAction.ownerNodeID
             persistedAction.descriptor = resolvedDescriptor
-            persistedAction.payload = resolvedPayload
+            persistedAction.payload = existingPayload ?? materializedPayload ?? resolvedPayload
             persistedAction.remoteAuthorisable =
                 incomingAction.remoteAuthorisable
-                ?? existingRemoteAuthorisable
-                ?? true
             persistedAction.blockingAuthorisation =
                 incomingAction.blockingAuthorisation
-                ?? existingBlockingAuthorisation
-                ?? false
+            persistedAction.createdAt = incomingAction.createdAt
+            persistedAction.lastUsed = incomingAction.lastUsed
 
             try await persistedAction.save(on: localStore.database)
 
@@ -803,15 +871,12 @@ extension KeepTalkingClient {
 
     private func virtualRemoteMCPBundle(
         actionID: UUID,
+        name: String,
         description: String
     ) -> KeepTalkingMCPBundle {
-        let shortID = actionID.uuidString
-            .replacingOccurrences(of: "-", with: "")
-            .lowercased()
-            .prefix(8)
         return KeepTalkingMCPBundle(
             id: actionID,
-            name: "remote_\(shortID)",
+            name: name,
             indexDescription: description,
             service: .stdio(
                 arguments: [
@@ -821,6 +886,61 @@ extension KeepTalkingClient {
                 environment: [:]
             )
         )
+    }
+
+    private func virtualRemoteSkillBundle(
+        actionID: UUID,
+        name: String,
+        description: String
+    ) -> KeepTalkingSkillBundle {
+        KeepTalkingSkillBundle(
+            id: actionID,
+            name: name,
+            indexDescription: description,
+            directory: URL(
+                fileURLWithPath:
+                    "/__kt_remote_skill__/\(actionID.uuidString.lowercased())"
+            )
+        )
+    }
+
+    private func materializedRemotePayload(
+        from action: KeepTalkingAdvertisedAction,
+        fallbackDescription: String
+    ) -> KeepTalkingAction.Payload? {
+        switch action.payloadSummary {
+            case .mcpBundle(let name, let indexDescription):
+                return .mcpBundle(
+                    virtualRemoteMCPBundle(
+                        actionID: action.actionID,
+                        name: name,
+                        description: indexDescription.isEmpty
+                            ? fallbackDescription
+                            : indexDescription
+                    )
+                )
+            case .skill(let name, let indexDescription):
+                return .skill(
+                    virtualRemoteSkillBundle(
+                        actionID: action.actionID,
+                        name: name,
+                        description: indexDescription.isEmpty
+                            ? fallbackDescription
+                            : indexDescription
+                    )
+                )
+            case .primitive(let name, let indexDescription, let primitiveKind):
+                return .primitive(
+                    KeepTalkingPrimitiveBundle(
+                        id: action.actionID,
+                        name: name,
+                        indexDescription: indexDescription.isEmpty
+                            ? fallbackDescription
+                            : indexDescription,
+                        action: primitiveKind
+                    )
+                )
+        }
     }
 
     private static func defaultDescriptor(

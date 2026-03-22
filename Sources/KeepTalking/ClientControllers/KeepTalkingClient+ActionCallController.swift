@@ -9,6 +9,65 @@ extension KeepTalkingClient {
     private static let actionCallDeliveryCacheLimit = 32
     private static let completedIncomingActionCallCacheLimit = 32
 
+    public func deliveryNodeID(forRemoteOwnerNodeID ownerNodeID: UUID) async throws
+        -> UUID
+    {
+        if ownerNodeID == config.node {
+            return ownerNodeID
+        }
+        return try await Self.deliveryNodeID(
+            forRemoteOwnerNodeID: ownerNodeID,
+            on: localStore.database
+        )
+    }
+
+    public func deliveryNodeID(for action: KeepTalkingAction) async throws -> UUID? {
+        guard let ownerNodeID = action.$node.id else {
+            return nil
+        }
+        return try await deliveryNodeID(forRemoteOwnerNodeID: ownerNodeID)
+    }
+
+    public func isActionReachable(_ action: KeepTalkingAction) async -> Bool {
+        guard let deliveryNodeID = try? await deliveryNodeID(for: action) else {
+            return false
+        }
+        if deliveryNodeID == config.node {
+            return true
+        }
+        return isNodeOnline(deliveryNodeID)
+    }
+
+    private static func deliveryNodeID(
+        forRemoteOwnerNodeID ownerNodeID: UUID,
+        on database: any Database,
+        visited: Set<UUID> = []
+    ) async throws -> UUID {
+        if visited.contains(ownerNodeID) {
+            return ownerNodeID
+        }
+
+        let ownerRelations = try await KeepTalkingNodeRelation.query(on: database)
+            .filter(\.$to.$id, .equal, ownerNodeID)
+            .all()
+            .filter { $0.relationship == .owner }
+            .sorted { lhs, rhs in
+                lhs.$from.id.uuidString < rhs.$from.id.uuidString
+            }
+
+        guard let ownerRelation = ownerRelations.first else {
+            return ownerNodeID
+        }
+
+        var nextVisited = visited
+        nextVisited.insert(ownerNodeID)
+        return try await deliveryNodeID(
+            forRemoteOwnerNodeID: ownerRelation.$from.id,
+            on: database,
+            visited: nextVisited
+        )
+    }
+
     func executeActionCallRequest(
         _ request: KeepTalkingActionCallRequest,
         context: KeepTalkingContext?,
@@ -246,6 +305,11 @@ extension KeepTalkingClient {
             requestID: requestID,
             actionID: actionID
         )
+        await runPrimitiveActionPostResultHookIfNeeded(
+            actionID: request.call.action,
+            call: request.call,
+            result: result
+        )
     }
 
     private static func actionCallErrorResult(
@@ -377,20 +441,29 @@ extension KeepTalkingClient {
         call: KeepTalkingActionCall,
         context: KeepTalkingContext
     ) async throws -> KeepTalkingActionCallResult {
+        let deliveryNodeID = try await deliveryNodeID(
+            forRemoteOwnerNodeID: actionOwner
+        )
         let request = KeepTalkingActionCallRequest(
             contextID: try context.requireID(),
             callerNodeID: config.node,
-            targetNodeID: actionOwner,
+            targetNodeID: deliveryNodeID,
             call: call
         )
         let requestID = request.id.uuidString.lowercased()
         let actionID = call.action.uuidString.lowercased()
 
-        if actionOwner == config.node {
+        if deliveryNodeID == config.node {
             onLog?(
                 "[action-call/request] executing locally request=\(requestID) action=\(actionID)"
             )
-            return await executeActionCallRequest(request, context: context)
+            let result = await executeActionCallRequest(request, context: context)
+            await runPrimitiveActionPostResultHookIfNeeded(
+                actionID: call.action,
+                call: call,
+                result: result
+            )
+            return result
         }
 
         let usesWakeAssistedDelivery = await shouldUseWakeAssistedDelivery(
@@ -400,18 +473,18 @@ extension KeepTalkingClient {
             ? "rtc (with APN wake if needed)"
             : "rtc"
         onLog?(
-            "[action-call/request] dispatching remote request=\(requestID) action=\(actionID) target=\(actionOwner.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased()) delivery=\(deliveryDescription)"
+            "[action-call/request] dispatching remote request=\(requestID) action=\(actionID) owner=\(actionOwner.uuidString.lowercased()) target=\(deliveryNodeID.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased()) delivery=\(deliveryDescription)"
         )
         if usesWakeAssistedDelivery {
             onLog?(
-                "[action-call/request] wake-assisted delivery request=\(requestID) action=\(actionID) target=\(actionOwner.uuidString.lowercased())"
+                "[action-call/request] wake-assisted delivery request=\(requestID) action=\(actionID) owner=\(actionOwner.uuidString.lowercased()) target=\(deliveryNodeID.uuidString.lowercased())"
             )
             await sendActionWakeIfNeeded(
-                actionOwner: actionOwner,
+                actionOwner: deliveryNodeID,
                 call: call,
                 context: context
             )
-            await waitForNodeToComeOnline(actionOwner)
+            await waitForNodeToComeOnline(deliveryNodeID)
         }
 
         let encryptedRequest = try await encryptActionCallRequestEnvelope(
@@ -782,6 +855,25 @@ extension KeepTalkingClient {
         return " message=\(trimmed)"
     }
 
+    private func runPrimitiveActionPostResultHookIfNeeded(
+        actionID: UUID,
+        call: KeepTalkingActionCall,
+        result: KeepTalkingActionCallResult
+    ) async {
+        guard !result.isError else {
+            return
+        }
+        guard
+            let action = try? await resolveLocalActionForExecution(
+                actionID: actionID
+            ),
+            case .primitive(let primitive) = action.payload
+        else {
+            return
+        }
+        primitiveActionPostResultHandler?(primitive, call)
+    }
+
     func resolveLocalActionForExecution(actionID: UUID) async throws
         -> KeepTalkingAction
     {
@@ -804,11 +896,80 @@ extension KeepTalkingClient {
         context: KeepTalkingContext?,
         on database: any Database
     ) async throws -> Bool {
+        let nodeID = try node.requireID()
+        guard let ownerNodeID = action.$node.id else {
+            return false
+        }
+        if nodeID == ownerNodeID {
+            return true
+        }
+
         let actionID = try action.requireID()
-        let approvals =
-            try await KeepTalkingNodeRelationActionRelation
+        guard
+            let relation = try await preferredTrustedRelation(
+                from: ownerNodeID,
+                to: nodeID,
+                allowing: context,
+                on: database
+            )
+        else {
+            return false
+        }
+
+        let approvals = try await relation.$actionRelations
             .query(on: database)
             .filter(\.$action.$id == actionID)
+            .all()
+
+        return approvals.contains { approval in
+            approval.applicable(in: context)
+        }
+    }
+
+    public static func isActionGrantedToNode(
+        node: KeepTalkingNode,
+        action: KeepTalkingAction,
+        context: KeepTalkingContext?,
+        on database: any Database
+    ) async throws -> Bool {
+        let nodeID = try node.requireID()
+        guard let ownerNodeID = action.$node.id else {
+            return false
+        }
+        if nodeID == ownerNodeID {
+            return true
+        }
+
+        if let relation = try await preferredTrustedRelation(
+            from: nodeID,
+            to: ownerNodeID,
+            allowing: context,
+            on: database
+        ),
+            relation.relationship == .owner
+        {
+            return true
+        }
+
+        let actionID = try action.requireID()
+        let relationIDs = try await KeepTalkingNodeRelation
+            .query(on: database)
+            .filter(\.$from.$id, .equal, nodeID)
+            .all()
+            .filter { relation in
+                relation.relationship.isTrustedOrOwner
+                    && relation.relationship.allows(context: context)
+            }
+            .compactMap(\.id)
+
+        guard !relationIDs.isEmpty else {
+            return false
+        }
+
+        let approvals = try await KeepTalkingNodeRelationActionRelation
+            .query(on: database)
+            .filter(\.$relation.$id ~~ relationIDs)
+            .filter(\.$action.$id, .equal, actionID)
             .all()
 
         return approvals.contains { approval in
@@ -822,6 +983,19 @@ extension KeepTalkingClient {
         context: KeepTalkingContext?
     ) async throws -> Bool {
         try await Self.isNodeAuthorizedForAction(
+            node: node,
+            action: action,
+            context: context,
+            on: localStore.database
+        )
+    }
+
+    public func isActionGrantedToNode(
+        node: KeepTalkingNode,
+        action: KeepTalkingAction,
+        context: KeepTalkingContext?
+    ) async throws -> Bool {
+        try await Self.isActionGrantedToNode(
             node: node,
             action: action,
             context: context,

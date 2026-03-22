@@ -1,11 +1,11 @@
 import Foundation
-import MCP
 import Logging
+import MCP
 
 #if canImport(System)
-    import System
+import System
 #else
-    @preconcurrency import SystemPackage
+@preconcurrency import SystemPackage
 #endif
 
 public enum MCPManagerError: LocalizedError {
@@ -268,8 +268,7 @@ public actor MCPManager {
     private var virtualToolNamesByActionID: [UUID: [String]] = [:]
     private var onActionToolsChanged: (@Sendable (UUID) async -> Void)?
     private var onLog: (@Sendable (String) -> Void)?
-    private var onHTTPAuthURL:
-        (@Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult)?
+    private var onHTTPAuthURL: (@Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult)?
 
     /// Creates an MCP manager for a node runtime.
     public init(

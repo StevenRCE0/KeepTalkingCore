@@ -14,7 +14,7 @@ public struct AIOrchestrator {
     public struct Configuration: Sendable {
         public let maxTurns: Int
 
-        public init(maxTurns: Int = 12) {
+        public init(maxTurns: Int = 32) {
             self.maxTurns = maxTurns
         }
     }

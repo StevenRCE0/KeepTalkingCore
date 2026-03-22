@@ -110,8 +110,12 @@ extension KeepTalkingClient {
                 guard envelope.recipientNodeID == config.node else {
                     break
                 }
-                let status = try await decryptNodeStatusEnvelope(envelope)
-                try await mergeDiscoveredNodeStatus(status)
+                do {
+                    let status = try await decryptNodeStatusEnvelope(envelope)
+                    try await mergeDiscoveredNodeStatus(status)
+                } catch {
+                    throw error
+                }
             case .contextSync(let envelope):
                 try await handleIncomingContextSyncEnvelope(envelope)
             case .context(let context):

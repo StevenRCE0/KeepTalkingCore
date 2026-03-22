@@ -82,14 +82,17 @@ extension KeepTalkingClient {
         queries: [KeepTalkingActionCatalogQuery],
         context: KeepTalkingContext
     ) async throws -> KeepTalkingActionCatalogResult {
+        let deliveryNodeID = try await deliveryNodeID(
+            forRemoteOwnerNodeID: targetNodeID
+        )
         let request = KeepTalkingActionCatalogRequest(
             contextID: try context.requireID(),
             callerNodeID: config.node,
-            targetNodeID: targetNodeID,
+            targetNodeID: deliveryNodeID,
             queries: queries
         )
 
-        if targetNodeID == config.node {
+        if deliveryNodeID == config.node {
             return await executeActionCatalogRequest(request, context: context)
         }
 

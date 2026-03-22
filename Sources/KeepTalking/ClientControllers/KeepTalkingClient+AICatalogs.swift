@@ -115,8 +115,6 @@ extension KeepTalkingClient {
         var routesByFunctionName: [String: KeepTalkingAgentToolRoute] = [:]
         var skillSummaryByActionID: [UUID: KeepTalkingSkillSummaryEntry] = [:]
 
-        let onlineNodeIDs = onlineNodeIDs()
-
         let selfNode = try await ensure(
             config.node,
             for: KeepTalkingNode.self,
@@ -147,19 +145,22 @@ extension KeepTalkingClient {
                         .query(on: self.localStore.database)
                         .with(\.$action)
                         .all()
-
-                    let authorizedActions = try await self.authorizedActions(
-                        actionRelations.map(\.action),
-                        for: KeepTalkingNode(id: relation.$to.id),
-                        context: context
-                    )
-                    return authorizedActions.filter { action in
-                        self.shouldInjectActionIntoCatalog(
+                    var injectedActions: [KeepTalkingAction] = []
+                    injectedActions.reserveCapacity(actionRelations.count)
+                    for actionRelation in actionRelations
+                    where actionRelation.applicable(in: context) {
+                        let action = actionRelation.action
+                        guard let ownerNodeID = action.$node.id else {
+                            continue
+                        }
+                        if try await self.shouldInjectActionIntoCatalog(
                             action,
-                            ownerNodeID: relation.$to.id,
-                            onlineNodeIDs: onlineNodeIDs
-                        )
+                            ownerNodeID: ownerNodeID
+                        ) {
+                            injectedActions.append(action)
+                        }
                     }
+                    return injectedActions
                 }
             }
 
@@ -340,8 +341,16 @@ extension KeepTalkingClient {
             guard
                 let actionID = action.id,
                 let ownerNodeID = action.$node.id,
-                ownerNodeID != config.node,
-                onlineNodeIDs.contains(ownerNodeID)
+                ownerNodeID != config.node
+            else {
+                continue
+            }
+
+            guard
+                let deliveryNodeID = try? await deliveryNodeID(
+                    forRemoteOwnerNodeID: ownerNodeID
+                ),
+                onlineNodeIDs.contains(deliveryNodeID)
             else {
                 continue
             }
@@ -361,7 +370,7 @@ extension KeepTalkingClient {
                 continue
             }
 
-            queriesByNodeID[ownerNodeID, default: []].append(
+            queriesByNodeID[deliveryNodeID, default: []].append(
                 KeepTalkingActionCatalogQuery(
                     actionID: actionID,
                     kind: queryKind
@@ -450,13 +459,15 @@ extension KeepTalkingClient {
 
     private func shouldInjectActionIntoCatalog(
         _ action: KeepTalkingAction,
-        ownerNodeID: UUID,
-        onlineNodeIDs: Set<UUID>
-    ) -> Bool {
+        ownerNodeID: UUID
+    ) async throws -> Bool {
         if ownerNodeID == config.node {
             return true
         }
-        if onlineNodeIDs.contains(ownerNodeID) {
+        let deliveryNodeID = try await deliveryNodeID(
+            forRemoteOwnerNodeID: ownerNodeID
+        )
+        if deliveryNodeID == config.node || isNodeOnline(deliveryNodeID) {
             return true
         }
         return action.blockingAuthorisation == true

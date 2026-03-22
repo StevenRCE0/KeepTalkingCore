@@ -109,6 +109,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
         @Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult
     public typealias ActionApprovalHandler =
         @Sendable (KeepTalkingActionCallRequest, KeepTalkingAction, KeepTalkingContext) async -> Bool
+    public typealias PrimitiveActionPostResultHandler =
+        @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall) -> Void
 
     public typealias EnvelopeHandler = @Sendable (KeepTalkingP2PEnvelope) -> Void
     public typealias RawMessageHandler = @Sendable (String) -> Void
@@ -146,6 +148,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let openAIConnector: OpenAIConnector?
     private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
     var actionApprovalHandler: ActionApprovalHandler?
+    var primitiveActionPostResultHandler: PrimitiveActionPostResultHandler?
 
     let actionCallQueue = DispatchQueue(
         label: "KeepTalking.client.action-call"
@@ -277,6 +280,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
         _ handler: ActionApprovalHandler?
     ) {
         actionApprovalHandler = handler
+    }
+
+    public func setPrimitiveActionPostResultHandler(
+        _ handler: PrimitiveActionPostResultHandler?
+    ) {
+        primitiveActionPostResultHandler = handler
     }
 
     func notifyContextDidSync(_ context: UUID) {

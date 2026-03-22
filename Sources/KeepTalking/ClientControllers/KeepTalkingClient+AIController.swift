@@ -5,7 +5,7 @@ import OpenAI
 
 extension KeepTalkingClient {
     static let listingToolFunctionName = "kt_list_available_actions"
-    static let maxAgentTurns = 8
+    static let maxAgentTurns = 32
     static let skillManifestPreviewMaxCharacters = 20_000
     static let skillFileMaxCharacters = 30_000
 

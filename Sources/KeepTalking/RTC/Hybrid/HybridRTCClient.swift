@@ -9,7 +9,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         case p2p
     }
 
-    private static let heartbeatIntervalSeconds: TimeInterval = 59
+    private static let heartbeatIntervalSeconds: TimeInterval = 13
     private static let presenceEchoCooldownSeconds: TimeInterval = 1
 
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)? {
@@ -91,10 +91,11 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     }
 
     func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws {
+        let transport = stateQueue.sync {
+            activeTransport
+        }
         do {
-            try stateQueue.sync {
-                try activeTransport.sendEnvelope(envelope)
-            }
+            try transport.sendEnvelope(envelope)
         } catch {
             let shouldFallback = stateQueue.sync { activeRoute == .p2p }
             guard shouldFallback else {

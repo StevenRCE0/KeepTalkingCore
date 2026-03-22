@@ -17,11 +17,12 @@ extension KeepTalkingClient {
             return
         }
 
-        let relations = (try? await KeepTalkingNodeRelation.query(
-            on: localStore.database
-        )
-        .filter(\.$from.$id, .equal, config.node)
-        .all()) ?? []
+        let relations =
+            (try? await KeepTalkingNodeRelation.query(
+                on: localStore.database
+            )
+            .filter(\.$from.$id, .equal, config.node)
+            .all()) ?? []
 
         for relation in relations where relation.relationship.allows(context: context) {
             let nodeID = relation.$to.id
@@ -67,9 +68,11 @@ extension KeepTalkingClient {
         guard let kvService = kvService as? KeepTalkingPassKVService else {
             return
         }
-        guard !isNodeOnline(actionOwner) else {
-            return
-        }
+
+        //        guard !isNodeOnline(actionOwner) else {
+        //            return
+        //        }
+
         guard
             let action = try? await KeepTalkingAction.query(on: localStore.database)
                 .filter(\.$id, .equal, call.action)
@@ -90,7 +93,8 @@ extension KeepTalkingClient {
         }
 
         guard
-            let relationAction = try? await KeepTalkingNodeRelationActionRelation
+            let relationAction =
+                try? await KeepTalkingNodeRelationActionRelation
                 .query(on: localStore.database)
                 .filter(\.$relation.$id, .equal, relationID)
                 .filter(\.$action.$id, .equal, call.action)
@@ -131,11 +135,11 @@ extension KeepTalkingClient {
 
     func waitForNodeToComeOnline(
         _ nodeID: UUID,
-        timeoutSeconds: TimeInterval = 10
+        timeoutSeconds: TimeInterval = 60
     ) async {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while !isNodeOnline(nodeID) && Date() < deadline {
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            try? await Task.sleep(for: .seconds(1))
         }
     }
 

@@ -203,10 +203,81 @@ extension KeepTalkingClient {
         try await identityKey.save(on: localStore.database)
     }
 
+    public func eraseRemoteNodeRelationsAndNonLocalActionRelations()
+        async throws
+    {
+        let localNode = try await getCurrentNodeInstance()
+        try await Self.eraseRemoteNodeRelationsAndNonLocalActionRelations(
+            preservingLocalNode: localNode,
+            on: localStore.database
+        )
+    }
+
+    static public func eraseRemoteNodeRelationsAndNonLocalActionRelations(
+        preservingLocalNode localNode: KeepTalkingNode,
+        on database: any Database
+    ) async throws {
+        let localNodeID = try localNode.requireID()
+
+        try await database.transaction { database in
+            let localRelations = try await KeepTalkingNodeRelation.query(
+                on: database
+            )
+            .filter(\.$from.$id, .equal, localNodeID)
+            .filter(\.$to.$id, .equal, localNodeID)
+            .all()
+
+            let preservedLocalRelation: KeepTalkingNodeRelation
+            if let existing = localRelations.first {
+                preservedLocalRelation = existing
+                if existing.relationship != .owner {
+                    existing.relationship = .owner
+                    try await existing.save(on: database)
+                }
+            } else {
+                preservedLocalRelation = try KeepTalkingNodeRelation(
+                    from: localNode,
+                    to: localNode,
+                    relationship: .owner
+                )
+                try await preservedLocalRelation.save(on: database)
+            }
+
+            let preservedLocalRelationID = try preservedLocalRelation.requireID()
+
+            for relation in localRelations
+            where relation.id != preservedLocalRelationID {
+                try await relation.delete(on: database)
+            }
+
+            let remoteRelations = try await KeepTalkingNodeRelation.query(
+                on: database
+            )
+            .all()
+            .filter { relation in
+                !(relation.$from.id == localNodeID && relation.$to.id == localNodeID)
+            }
+
+            for relation in remoteRelations {
+                try await relation.delete(on: database)
+            }
+
+            let remainingActionRelations =
+                try await KeepTalkingNodeRelationActionRelation.query(
+                    on: database
+                )
+                .all()
+
+            for relation in remainingActionRelations
+            where relation.$relation.id != preservedLocalRelationID {
+                try await relation.delete(on: database)
+            }
+        }
+    }
+
     func currentNodeStatus(
         context: KeepTalkingContext? = nil,
-        recipientNodeID: UUID? = nil,
-        includeActionPayloads: Bool = true
+        recipientNodeID: UUID? = nil
     ) async throws
         -> KeepTalkingNodeStatus
     {
@@ -258,18 +329,14 @@ extension KeepTalkingClient {
                 )
             )
 
-            let outgoingActions: [KeepTalkingAction]
-            if includeActionPayloads {
-                outgoingActions = relationActions
-            } else {
-                outgoingActions = relationActions.map {
-                    redactedBroadcastAction(from: $0)
-                }
+            let outgoingActions = relationActions.compactMap {
+                advertisedAction(from: $0)
             }
 
+            let relationActionLinks: [KeepTalkingNodeRelationActionRelation]
             let wakeHandlesByActionID: [UUID: [KeepTalkingPushWakeHandle]]
             if let relationID = relation.id {
-                let relationActionLinks =
+                relationActionLinks =
                     try await KeepTalkingNodeRelationActionRelation
                     .query(on: localStore.database)
                     .filter(\.$relation.$id, .equal, relationID)
@@ -287,18 +354,18 @@ extension KeepTalkingClient {
                     }
                 )
             } else {
+                relationActionLinks = []
                 wakeHandlesByActionID = [:]
             }
             let actionWakeRoutes: [KeepTalkingActionWakeRoute] =
                 outgoingActions.compactMap { action in
                 guard
-                    let actionID = action.id,
-                    let wakeHandles = wakeHandlesByActionID[actionID]
+                    let wakeHandles = wakeHandlesByActionID[action.actionID]
                 else {
                     return nil
                 }
                 return KeepTalkingActionWakeRoute(
-                    actionID: actionID,
+                    actionID: action.actionID,
                     wakeHandles: wakeHandles
                 )
             }
@@ -342,8 +409,7 @@ extension KeepTalkingClient {
     {
         let statusesByRecipient = try await qualifiedNodeStatuses(
             in: context,
-            from: nodes,
-            includeActionPayloads: false
+            from: nodes
         )
 
         let sortedRecipientNodeIDs = statusesByRecipient.keys.sorted {
@@ -361,13 +427,6 @@ extension KeepTalkingClient {
                             as: UTF8.self
                         )
                 )
-                if let keyInfo = try await asymmetricPublicKeysForRecipient(
-                    nodeID: recipientNodeID
-                ) {
-                    rtcClient.debug(
-                        "[broadcastCurrentNodeStatus.keys] recipient=\(recipientNodeID.uuidString.lowercased()) localPublicKey=\(keyInfo.localPublicKey) remotePublicKey=\(keyInfo.remotePublicKey) relation=\(keyInfo.relationID.uuidString.lowercased())"
-                    )
-                }
                 let encryptedEnvelope = try await encryptNodeStatusEnvelope(
                     status,
                     recipientNodeID: recipientNodeID
@@ -395,13 +454,6 @@ extension KeepTalkingClient {
     }
 
     func mergeDiscoveredNodeStatus(_ status: KeepTalkingNodeStatus) async throws {
-        rtcClient.debug(
-            "[mergeDiscoveredNodeStatus] "
-                + String(
-                    decoding: try! JSONEncoder().encode(status),
-                    as: UTF8.self
-                )
-        )
         try await mergeDiscoveredNode(status.node)
 
         let advertisedActions = deduplicatedAndSortedActions(
@@ -417,7 +469,7 @@ extension KeepTalkingClient {
 
     private func mergeIncomingActionAuthorisations(
         from status: KeepTalkingNodeStatus,
-        advertisedActions: [KeepTalkingAction]
+        advertisedActions: [KeepTalkingAdvertisedAction]
     ) async throws {
         guard let remoteNodeID = status.node.id, remoteNodeID != config.node
         else {
@@ -433,69 +485,9 @@ extension KeepTalkingClient {
             return
         }
 
-        let localNode = try await getCurrentNodeInstance()
-        let remoteNode: KeepTalkingNode
-        if let existingRemote = try await KeepTalkingNode.query(
-            on: localStore.database
-        )
-        .filter(\.$id, .equal, remoteNodeID)
-        .first() {
-            remoteNode = existingRemote
-        } else {
-            let created = KeepTalkingNode(id: remoteNodeID)
-            try await created.save(on: localStore.database)
-            remoteNode = created
-        }
-
-        let relationCandidates = try await KeepTalkingNodeRelation.query(
-            on: localStore.database
-        )
-        .filter(\.$from.$id, .equal, config.node)
-        .filter(\.$to.$id, .equal, remoteNodeID)
-        .all()
-        let relation: KeepTalkingNodeRelation
-        if let preferred = relationCandidates.sorted(by: {
-            relationPriority($0.relationship)
-                > relationPriority($1.relationship)
-        }).first {
-            relation = preferred
-        } else {
-            let created = try KeepTalkingNodeRelation(
-                from: localNode,
-                to: remoteNode,
-                relationship: .pending
-            )
-            try await created.save(on: localStore.database)
-            relation = created
-        }
-
-        let requestedTrustScope: KeepTalkingNodeTrustScope =
-            grantsForLocal.contains {
-                switch $0.relationship {
-                    case .owner, .trustedInAllContext:
-                        return true
-                    case .trusted(_), .pending:
-                        return false
-                }
-            } ? .allContexts : .context(status.context)
-
-        let mergedRelationship = mergedTrustRelationship(
-            current: relation.relationship,
-            requestedScope: requestedTrustScope
-        )
-        if mergedRelationship != relation.relationship {
-            relation.relationship = mergedRelationship
-            try await relation.save(on: localStore.database)
-        }
-
-        let advertisedByID: [UUID: KeepTalkingAction] = Dictionary(
-            uniqueKeysWithValues: advertisedActions.compactMap { action in
-                guard let actionID = action.id else { return nil }
-                return (actionID, action)
-            }
-        )
+        let advertisedActionIDs = Set(advertisedActions.map(\.actionID))
         let grantedActionIDs = Set(
-            grantsForLocal.flatMap(\.actions).compactMap(\.id)
+            grantsForLocal.flatMap(\.actions).map(\.actionID)
         )
         let wakeRoutesByActionID: [UUID: [KeepTalkingPushWakeHandle]] = Dictionary(
             uniqueKeysWithValues: grantsForLocal.flatMap { relationStatus in
@@ -508,6 +500,18 @@ extension KeepTalkingClient {
             return
         }
 
+        guard
+            let localRelation = try await Self.preferredTrustedRelation(
+                from: config.node,
+                to: remoteNodeID,
+                allowing: status.context,
+                on: localStore.database
+            ),
+            let localRelationID = localRelation.id
+        else {
+            return
+        }
+
         let approvingContext =
             KeepTalkingNodeRelationActionRelation.ApprovingContext.contexts(
                 [
@@ -515,9 +519,8 @@ extension KeepTalkingClient {
                 ]
             )
 
-        guard let relationID = relation.id else { return }
         for actionID in grantedActionIDs {
-            guard advertisedByID[actionID] != nil else {
+            guard advertisedActionIDs.contains(actionID) else {
                 continue
             }
             guard
@@ -530,10 +533,14 @@ extension KeepTalkingClient {
                 continue
             }
 
+            guard action.$node.id != nil else {
+                continue
+            }
+
             if let existingLink =
                 try await KeepTalkingNodeRelationActionRelation
                 .query(on: localStore.database)
-                .filter(\.$relation.$id, .equal, relationID)
+                .filter(\.$relation.$id, .equal, localRelationID)
                 .filter(\.$action.$id, .equal, actionID)
                 .first()
             {
@@ -542,28 +549,13 @@ extension KeepTalkingClient {
                 try await existingLink.save(on: localStore.database)
             } else {
                 let link = try KeepTalkingNodeRelationActionRelation(
-                    relation: relation,
+                    relation: localRelation,
                     action: action,
                     approvingContext: approvingContext
                 )
                 link.wakeHandles = wakeRoutesByActionID[actionID]
                 try await link.save(on: localStore.database)
             }
-        }
-    }
-
-    private func relationPriority(_ relationship: KeepTalkingRelationship)
-        -> Int
-    {
-        switch relationship {
-            case .owner:
-                return 3
-            case .trustedInAllContext:
-                return 2
-            case .trusted:
-                return 1
-            case .pending:
-                return 0
         }
     }
 
@@ -599,8 +591,7 @@ extension KeepTalkingClient {
 
     private func qualifiedNodeStatuses(
         in context: KeepTalkingContext,
-        from nodes: [KeepTalkingNode]?,
-        includeActionPayloads: Bool
+        from nodes: [KeepTalkingNode]?
     ) async throws -> [UUID: KeepTalkingNodeStatus] {
         let selfNode = try await ensure(
             config.node,
@@ -629,8 +620,7 @@ extension KeepTalkingClient {
         for recipientNodeID in recipientNodeIDs {
             let status = try await currentNodeStatus(
                 context: context,
-                recipientNodeID: recipientNodeID,
-                includeActionPayloads: includeActionPayloads
+                recipientNodeID: recipientNodeID
             )
             statusesByRecipient[recipientNodeID] = status
         }
@@ -752,66 +742,43 @@ extension KeepTalkingClient {
         )
     }
 
-    private func redactedBroadcastAction(from action: KeepTalkingAction)
-        -> KeepTalkingAction
+    private func advertisedAction(from action: KeepTalkingAction)
+        -> KeepTalkingAdvertisedAction?
     {
-        let redacted = KeepTalkingAction()
-        redacted.id = action.id
-        redacted.$node.id = action.$node.id
-        redacted.descriptor = action.descriptor
-        redacted.payload = redactedBroadcastPayload(
-            action.payload,
-            actionID: action.id
-        )
-        redacted.remoteAuthorisable = action.remoteAuthorisable
-        redacted.blockingAuthorisation = action.blockingAuthorisation
-        redacted.createdAt = action.createdAt
-        redacted.lastUsed = action.lastUsed
-
-        return redacted
-    }
-
-    private func redactedBroadcastPayload(
-        _ payload: KeepTalkingAction.Payload?,
-        actionID: UUID?
-    ) -> KeepTalkingAction.Payload? {
-        guard let payload else {
+        guard let actionID = action.id, let payload = action.payload else {
             return nil
         }
 
+        let payloadSummary: KeepTalkingAdvertisedAction.PayloadSummary
         switch payload {
             case .mcpBundle(let bundle):
-                let token = actionID?.uuidString.lowercased() ?? "unknown"
-                return .mcpBundle(
-                    KeepTalkingMCPBundle(
-                        id: bundle.id,
-                        name: bundle.name,
-                        indexDescription: bundle.indexDescription,
-                        service: .stdio(
-                            arguments: [
-                                "__kt_redacted_mcp_action__",
-                                token,
-                            ],
-                            environment: [:]
-                        )
-                    )
+                payloadSummary = .mcpBundle(
+                    name: bundle.name,
+                    indexDescription: bundle.indexDescription
+                )
+            case .skill(let bundle):
+                payloadSummary = .skill(
+                    name: bundle.name,
+                    indexDescription: bundle.indexDescription
                 )
             case .primitive(let bundle):
-                return .primitive(bundle)
-            case .skill(let bundle):
-                let token = actionID?.uuidString.lowercased() ?? "unknown"
-                return .skill(
-                    KeepTalkingSkillBundle(
-                        id: bundle.id,
-                        name: bundle.name,
-                        indexDescription: bundle.indexDescription,
-                        directory: URL(
-                            fileURLWithPath:
-                                "/__kt_remote_skill__/\(token)"
-                        )
-                    )
+                payloadSummary = .primitive(
+                    name: bundle.name,
+                    indexDescription: bundle.indexDescription,
+                    action: bundle.action
                 )
         }
+
+        return KeepTalkingAdvertisedAction(
+            actionID: actionID,
+            ownerNodeID: action.$node.id,
+            descriptor: action.descriptor,
+            payloadSummary: payloadSummary,
+            remoteAuthorisable: action.remoteAuthorisable ?? true,
+            blockingAuthorisation: action.blockingAuthorisation ?? false,
+            createdAt: action.createdAt,
+            lastUsed: action.lastUsed
+        )
     }
 
     func broadcastLocalNodeState(reason: String) async {
