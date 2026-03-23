@@ -43,29 +43,31 @@ extension KeepTalkingClient {
         on database: any Database,
         visited: Set<UUID> = []
     ) async throws -> UUID {
-        if visited.contains(ownerNodeID) {
-            return ownerNodeID
-        }
-
-        let ownerRelations = try await KeepTalkingNodeRelation.query(on: database)
-            .filter(\.$to.$id, .equal, ownerNodeID)
-            .all()
-            .filter { $0.relationship == .owner }
-            .sorted { lhs, rhs in
-                lhs.$from.id.uuidString < rhs.$from.id.uuidString
-            }
-
-        guard let ownerRelation = ownerRelations.first else {
-            return ownerNodeID
-        }
-
-        var nextVisited = visited
-        nextVisited.insert(ownerNodeID)
-        return try await deliveryNodeID(
-            forRemoteOwnerNodeID: ownerRelation.$from.id,
-            on: database,
-            visited: nextVisited
-        )
+        return ownerNodeID
+// TODO: Very interesting walking logic, leave it for another day...Not hopping now.
+//        if visited.contains(ownerNodeID) {
+//            return ownerNodeID
+//        }
+//
+//        let ownerRelations = try await KeepTalkingNodeRelation.query(on: database)
+//            .filter(\.$to.$id, .equal, ownerNodeID)
+//            .all()
+//            .filter { $0.relationship == .owner }
+//            .sorted { lhs, rhs in
+//                lhs.$from.id.uuidString < rhs.$from.id.uuidString
+//            }
+//
+//        guard let ownerRelation = ownerRelations.first else {
+//            return ownerNodeID
+//        }
+//
+//        var nextVisited = visited
+//        nextVisited.insert(ownerNodeID)
+//        return try await deliveryNodeID(
+//            forRemoteOwnerNodeID: ownerRelation.$from.id,
+//            on: database,
+//            visited: nextVisited
+//        )
     }
 
     func executeActionCallRequest(
@@ -441,9 +443,11 @@ extension KeepTalkingClient {
         call: KeepTalkingActionCall,
         context: KeepTalkingContext
     ) async throws -> KeepTalkingActionCallResult {
+        // TODO: This is a bug
         let deliveryNodeID = try await deliveryNodeID(
             forRemoteOwnerNodeID: actionOwner
         )
+
         let request = KeepTalkingActionCallRequest(
             contextID: try context.requireID(),
             callerNodeID: config.node,

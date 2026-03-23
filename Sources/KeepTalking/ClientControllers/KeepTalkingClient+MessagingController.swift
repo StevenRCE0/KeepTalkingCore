@@ -430,7 +430,7 @@ extension KeepTalkingClient {
         try await contextSecret.save(on: localStore.database)
     }
 
-    private func encryptedOutboundMessage(
+    func encryptedOutboundMessage(
         _ message: KeepTalkingContextMessage
     ) async throws -> KeepTalkingContextMessage {
         let contextID = message.$context.id
@@ -459,7 +459,7 @@ extension KeepTalkingClient {
         )
     }
 
-    private func decryptedContentIfNeeded(_ content: String, contextID: UUID)
+    func decryptedContentIfNeeded(_ content: String, contextID: UUID)
         async -> String
     {
         let secret: Data?

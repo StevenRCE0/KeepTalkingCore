@@ -108,7 +108,10 @@ extension KeepTalkingClient {
                 guard result.requester == config.node else {
                     return
                 }
-                _ = resolvePendingContextSyncMessages(result)
+                let decryptedResult = await decryptedContextSyncMessagesResult(
+                    result
+                )
+                _ = resolvePendingContextSyncMessages(decryptedResult)
         }
     }
 
@@ -372,7 +375,9 @@ extension KeepTalkingClient {
             context: request.context,
             requester: request.requester,
             responder: config.node,
-            messages: snapshot.messages(after: request.senders)
+            messages: try await encryptedContextSyncMessages(
+                snapshot.messages(after: request.senders)
+            )
         )
     }
 
@@ -385,7 +390,55 @@ extension KeepTalkingClient {
             context: request.context,
             requester: request.requester,
             responder: config.node,
-            messages: snapshot.messages(in: request.chunks)
+            messages: try await encryptedContextSyncMessages(
+                snapshot.messages(in: request.chunks)
+            )
+        )
+    }
+
+    private func encryptedContextSyncMessages(
+        _ messages: [KeepTalkingContextMessage]
+    ) async throws -> [KeepTalkingContextMessage] {
+        var encryptedMessages: [KeepTalkingContextMessage] = []
+        encryptedMessages.reserveCapacity(messages.count)
+
+        for message in messages {
+            encryptedMessages.append(
+                try await encryptedOutboundMessage(message)
+            )
+        }
+
+        return encryptedMessages
+    }
+
+    private func decryptedContextSyncMessagesResult(
+        _ result: KeepTalkingContextSyncMessagesResult
+    ) async -> KeepTalkingContextSyncMessagesResult {
+        var decryptedMessages: [KeepTalkingContextMessage] = []
+        decryptedMessages.reserveCapacity(result.messages.count)
+
+        for message in result.messages {
+            decryptedMessages.append(
+                KeepTalkingContextMessage(
+                    id: message.id ?? UUID(),
+                    context: KeepTalkingContext(id: result.context),
+                    sender: message.sender,
+                    content: await decryptedContentIfNeeded(
+                        message.content,
+                        contextID: result.context
+                    ),
+                    timestamp: message.timestamp,
+                    type: message.type
+                )
+            )
+        }
+
+        return KeepTalkingContextSyncMessagesResult(
+            request: result.request,
+            context: result.context,
+            requester: result.requester,
+            responder: result.responder,
+            messages: decryptedMessages
         )
     }
 }
