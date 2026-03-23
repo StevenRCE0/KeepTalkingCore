@@ -27,7 +27,8 @@ public enum KeepTalkingPushWakePreviewResolver {
             return nil
         }
 
-        let decryptedPayload = try KeepTalkingContextMessageCrypto.decryptIfNeeded(
+        let decryptedPayload = try KeepTalkingPreviewCrypto
+            .decryptStringIfNeeded(
             envelope.ciphertext,
             secret: secret
         )

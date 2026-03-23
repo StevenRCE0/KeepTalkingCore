@@ -247,6 +247,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
         rtcClient.onLog = { [weak self] line in
             self?.onLog?(line)
         }
+        rtcClient.contextSecretProvider = { [weak self] contextID in
+            try await self?.loadGroupChatSecret(for: contextID)
+        }
         rtcClient.onRawMessage = { [weak self] raw in
             self?.onRawMessage?(raw)
         }

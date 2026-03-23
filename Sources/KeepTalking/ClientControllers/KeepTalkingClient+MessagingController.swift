@@ -37,8 +37,8 @@ extension KeepTalkingClient {
             onEnvelope?(.message(message))
         }
 
-        let encryptedMessage = try await encryptedOutboundMessage(message)
-        try rtcClient.sendEnvelope(.message(encryptedMessage))
+        _ = try await ensureGroupChatSecret(for: persistedContext.requireID())
+        try rtcClient.sendEnvelope(.message(message))
         guard message.type == .message else {
             return
         }
@@ -261,10 +261,6 @@ extension KeepTalkingClient {
         )
 
         for message in newMessages {
-            message.content = await decryptedContentIfNeeded(
-                message.content,
-                contextID: contextID
-            )
             message.$context.id = try persistedContext.requireID()
             message.$context.value = persistedContext
             try await message.save(on: localStore.database)
@@ -428,66 +424,6 @@ extension KeepTalkingClient {
             secret: secret
         )
         try await contextSecret.save(on: localStore.database)
-    }
-
-    private func encryptedOutboundMessage(
-        _ message: KeepTalkingContextMessage
-    ) async throws -> KeepTalkingContextMessage {
-        let contextID = message.$context.id
-        let encryptedContent = try await encryptContent(
-            message.content,
-            contextID: contextID
-        )
-        let outbound = KeepTalkingContextMessage(
-            id: message.id ?? UUID(),
-            context: KeepTalkingContext(id: contextID),
-            sender: message.sender,
-            content: encryptedContent,
-            timestamp: message.timestamp,
-            type: message.type
-        )
-        return outbound
-    }
-
-    private func encryptContent(_ content: String, contextID: UUID) async throws
-        -> String
-    {
-        let secret = try await ensureGroupChatSecret(for: contextID)
-        return try KeepTalkingContextMessageCrypto.encrypt(
-            content,
-            secret: secret
-        )
-    }
-
-    private func decryptedContentIfNeeded(_ content: String, contextID: UUID)
-        async -> String
-    {
-        let secret: Data?
-        do {
-            secret = try await loadGroupChatSecret(for: contextID)
-        } catch {
-            rtcClient.debug(
-                "loading group secret failed for context=\(contextID.uuidString.lowercased()) error=\(error.localizedDescription)"
-            )
-            return content
-        }
-        guard let secret else {
-            rtcClient.debug(
-                "encrypted message received but no group secret found for context=\(contextID.uuidString.lowercased())"
-            )
-            return content
-        }
-        do {
-            return try KeepTalkingContextMessageCrypto.decryptIfNeeded(
-                content,
-                secret: secret
-            )
-        } catch {
-            rtcClient.debug(
-                "failed to decrypt message for context=\(contextID.uuidString.lowercased()) error=\(error.localizedDescription)"
-            )
-            return content
-        }
     }
 
     func loadGroupChatSecret(for contextID: UUID) async throws -> Data? {

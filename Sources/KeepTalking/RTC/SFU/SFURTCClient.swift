@@ -45,6 +45,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             signal.onLog = onLog
         }
     }
+    var contextSecretProvider: KeepTalkingTransportContextSecretProvider?
 
     private let config: KeepTalkingConfig
     private let signal: IonJsonRpcSignal
@@ -261,7 +262,12 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             throw RTCError.dataChannelNotOpen(sendChannel.label)
         }
 
-        let payload = try JSONEncoder().encode(envelope)
+        let payload = try KeepTalkingPacketTransportCrypto
+            .outboundPayload(
+                for: envelope,
+                localNodeID: config.node,
+                contextSecretProvider: contextSecretProvider
+            )
         let packet = LKRTCDataBuffer(data: payload, isBinary: false)
         debug(
             "send envelope kind=\(envelope) bytes=\(payload.count) label=\(sendChannel.label) channelState=\(sendChannel.readyState.rawValue)"
@@ -591,25 +597,33 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             return
         }
 
-        if let envelope = try? JSONDecoder().decode(
-            KeepTalkingP2PEnvelope.self,
-            from: buffer.data
-        ) {
-            reportConnectedPeers(from: envelope)
-            if case .message = envelope,
-                dataChannel.label != config.chatChannelLabel
+        do {
+            if let envelope = try KeepTalkingPacketTransportCrypto
+                .inboundEnvelope(
+                    from: buffer.data,
+                    contextSecretProvider: contextSecretProvider
+                )
             {
+                reportConnectedPeers(from: envelope)
+                if case .message = envelope,
+                    dataChannel.label != config.chatChannelLabel
+                {
+                    debug(
+                        "ignored message envelope on non-chat channel label=\(dataChannel.label)"
+                    )
+                    return
+                }
+
+                onEnvelope?(envelope)
                 debug(
-                    "ignored message envelope on non-chat channel label=\(dataChannel.label)"
+                    "delivered envelope label=\(dataChannel.label) \(envelope)"
                 )
                 return
             }
-
-            onEnvelope?(envelope)
+        } catch {
             debug(
-                "delivered envelope label=\(dataChannel.label) \(envelope)"
+                "chat decode failed; encrypted envelope error=\(error.localizedDescription)"
             )
-            return
         }
 
         if let text = String(data: buffer.data, encoding: .utf8) {

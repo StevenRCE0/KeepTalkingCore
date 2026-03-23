@@ -47,6 +47,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     var onPeerConnect: (@Sendable (UUID) -> Void)?
     var onLog: (@Sendable (String) -> Void)?
     var onTransportDegraded: (@Sendable (String) -> Void)?
+    var contextSecretProvider: KeepTalkingTransportContextSecretProvider?
 
     private let config: KeepTalkingConfig
     private let localNodeID: UUID
@@ -181,7 +182,12 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             throw P2PError.dataChannelNotOpen(dataChannel.label)
         }
 
-        let payload = try JSONEncoder().encode(envelope)
+        let payload = try KeepTalkingPacketTransportCrypto
+            .outboundPayload(
+                for: envelope,
+                localNodeID: localNodeID,
+                contextSecretProvider: contextSecretProvider
+            )
         let packet = LKRTCDataBuffer(data: payload, isBinary: false)
         if !dataChannel.sendData(packet) {
             reportTransportDegraded("sendData returned false")
@@ -670,20 +676,28 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             return
         }
 
-        if let envelope = try? JSONDecoder().decode(
-            KeepTalkingP2PEnvelope.self,
-            from: buffer.data
-        ) {
-            if case .message = envelope,
-                dataChannel.label != config.chatChannelLabel
-            {
-                debug(
-                    "ignored message envelope on non-chat channel label=\(dataChannel.label)"
+        do {
+            if let envelope = try KeepTalkingPacketTransportCrypto
+                .inboundEnvelope(
+                    from: buffer.data,
+                    contextSecretProvider: contextSecretProvider
                 )
+            {
+                if case .message = envelope,
+                    dataChannel.label != config.chatChannelLabel
+                {
+                    debug(
+                        "ignored message envelope on non-chat channel label=\(dataChannel.label)"
+                    )
+                    return
+                }
+                onEnvelope?(envelope)
                 return
             }
-            onEnvelope?(envelope)
-            return
+        } catch {
+            debug(
+                "chat decode failed; encrypted envelope error=\(error.localizedDescription)"
+            )
         }
 
         if let text = String(data: buffer.data, encoding: .utf8) {

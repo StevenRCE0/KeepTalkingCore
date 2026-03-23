@@ -149,7 +149,7 @@ extension KeepTalkingClient {
     ) async throws -> KeepTalkingPushWakeContextEnvelope {
         let secret = try await ensureGroupChatSecret(for: contextID)
         let encoded = try JSONEncoder().encode(preview)
-        let ciphertext = try KeepTalkingContextMessageCrypto.encrypt(
+        let ciphertext = try KeepTalkingPreviewCrypto.encryptString(
             String(decoding: encoded, as: UTF8.self),
             secret: secret
         )

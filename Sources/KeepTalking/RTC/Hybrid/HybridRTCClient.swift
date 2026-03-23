@@ -24,6 +24,9 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     var onLog: (@Sendable (String) -> Void)? {
         didSet { bindCallbacks() }
     }
+    var contextSecretProvider: KeepTalkingTransportContextSecretProvider? {
+        didSet { bindCallbacks() }
+    }
 
     private let config: KeepTalkingConfig
     private let localStore: KeepTalkingLocalStore
@@ -401,6 +404,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         sfuClient.onRawMessage = forwardRaw
         sfuClient.onPeerConnect = nil
         sfuClient.onLog = logger
+        sfuClient.contextSecretProvider = contextSecretProvider
 
         p2pClient?.onEnvelope = { [weak self] envelope in
             self?.onEnvelope?(envelope)
@@ -413,6 +417,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             self?.fallbackToSFU(reason: reason)
         }
         p2pClient?.onLog = logger
+        p2pClient?.contextSecretProvider = contextSecretProvider
     }
 
     private func startHeartbeatLoop() {
