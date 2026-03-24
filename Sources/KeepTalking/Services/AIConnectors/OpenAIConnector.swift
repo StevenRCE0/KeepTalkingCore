@@ -4,16 +4,40 @@ import OpenAI
 public actor OpenAIConnector {
     public static func keepTalkingSystemPrompt(
         listingToolFunctionName: String,
+        attachmentListingToolFunctionName: String,
+        attachmentReaderToolFunctionName: String,
+        currentPromptIncludesAttachments: Bool,
+        currentPromptShouldAvoidAutomaticToolUse: Bool,
         contextTranscript: String
     ) -> String {
-        """
+        let currentPromptGuidance: String
+        if currentPromptIncludesAttachments {
+            currentPromptGuidance = currentPromptShouldAvoidAutomaticToolUse
+                ? """
+                The current user turn already includes its newly attached files natively.
+                Do not call attachment tools, the action listing tool, or any other tool just to inspect those current attachments.
+                Only call a tool if the user explicitly asks for tool/action use, web lookup, or inspection of a different context file that is not already included in the current turn.
+                """
+                : """
+                The current user turn already includes its newly attached files natively.
+                Do not call attachment tools just to inspect those current attachments.
+                """
+        } else {
+            currentPromptGuidance = ""
+        }
+
+        return """
         You are a KeepTalking participant in a group chat.
         Use the provided conversation context when deciding whether to call tools and when writing your response.
         Use tools only when they are relevant to the user's request.
         If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
         Do not fabricate tool outputs.
-        Call \(listingToolFunctionName) before deciding any tool plan, but notice that you might have native tools
-        like web search outside of the listed tool
+        Call \(listingToolFunctionName) before deciding any KeepTalking action plan, but notice that you might also have built-in tools
+        like web search and context attachment access outside of the listed action tool output.
+        You do not have general filesystem access. Attachment tools expose only files that are already attached to the active context.
+        If the user asks about a file already attached to this context, call \(attachmentListingToolFunctionName) to inspect the available attachments.
+        Prefer \(attachmentReaderToolFunctionName) with mode=metadata or mode=preview_text first, and use mode=native only when you need the actual file or image content added to the next model turn.
+        \(currentPromptGuidance)
 
         Skill execution policy (mandatory):
         1) If you will use any tool where listing output shows source=skill and route_kind=action_proxy, first call the matching source=skill route_kind=skill_metadata tool for that same action_id.
@@ -201,10 +225,10 @@ public actor OpenAIConnector {
                         )
                     }
                 case .user(let payload):
-                    if let text = text(from: payload.content) {
+                    if let content = userContent(from: payload.content) {
                         input.append(
                             .inputMessage(
-                                .init(role: .user, content: .textInput(text))
+                                .init(role: .user, content: content)
                             )
                         )
                     }
@@ -352,23 +376,6 @@ public actor OpenAIConnector {
     }
 
     private func text(
-        from content: ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content
-    ) -> String? {
-        switch content {
-            case .string(let text):
-                return text
-            case .contentParts(let parts):
-                let joined = parts.compactMap { part -> String? in
-                    if case .text(let textPart) = part {
-                        return textPart.text
-                    }
-                    return nil
-                }.joined()
-                return joined.isEmpty ? nil : joined
-        }
-    }
-
-    private func text(
         from content: ChatQuery.ChatCompletionMessageParam.TextOrRefusalContent
     ) -> String? {
         switch content {
@@ -384,6 +391,82 @@ public actor OpenAIConnector {
                     }
                 }.joined()
                 return joined.isEmpty ? nil : joined
+        }
+    }
+
+    private func userContent(
+        from content: ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content
+    ) -> EasyInputMessage.ContentPayload? {
+        switch content {
+            case .string(let text):
+                guard !text.isEmpty else {
+                    return nil
+                }
+                return .textInput(text)
+            case .contentParts(let parts):
+                let inputParts = parts.compactMap(inputContent(from:))
+                guard !inputParts.isEmpty else {
+                    return nil
+                }
+                return .inputItemContentList(inputParts)
+        }
+    }
+
+    private func inputContent(
+        from part: ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content
+            .ContentPart
+    ) -> InputContent? {
+        switch part {
+            case .text(let textPart):
+                guard !textPart.text.isEmpty else {
+                    return nil
+                }
+                return .inputText(
+                    .init(
+                        _type: .inputText,
+                        text: textPart.text
+                    )
+                )
+            case .image(let imagePart):
+                return .inputImage(
+                    .init(
+                        _type: .inputImage,
+                        imageUrl: imagePart.imageUrl.url,
+                        detail: inputImageDetail(from: imagePart.imageUrl.detail)
+                    )
+                )
+            case .file(let filePart):
+                guard
+                    filePart.file.fileData != nil || filePart.file.fileId != nil
+                else {
+                    return nil
+                }
+                return .inputFile(
+                    .init(
+                        _type: .inputFile,
+                        fileId: filePart.file.fileId.map {
+                            .init(value1: $0)
+                        },
+                        filename: filePart.file.filename,
+                        fileData: filePart.file.fileData
+                    )
+                )
+            case .audio:
+                return nil
+        }
+    }
+
+    private func inputImageDetail(
+        from detail: ChatQuery.ChatCompletionMessageParam
+            .ContentPartImageParam.ImageURL.Detail?
+    ) -> InputImage.DetailPayload {
+        switch detail {
+            case .high:
+                return .high
+            case .low:
+                return .low
+            case .auto, .none:
+                return .auto
         }
     }
 }

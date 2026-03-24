@@ -15,6 +15,9 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)? {
         didSet { bindCallbacks() }
     }
+    var onBlobData: KeepTalkingTransportBlobDataHandler? {
+        didSet { bindCallbacks() }
+    }
     var onRawMessage: (@Sendable (String) -> Void)? {
         didSet { bindCallbacks() }
     }
@@ -109,6 +112,25 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             )
             fallbackToSFU(reason: "p2p send failure")
             try sfuClient.sendEnvelope(envelope)
+        }
+    }
+
+    func sendBlobData(_ data: Data) throws {
+        let transport = stateQueue.sync {
+            activeTransport
+        }
+        do {
+            try transport.sendBlobData(data)
+        } catch {
+            let shouldFallback = stateQueue.sync { activeRoute == .p2p }
+            guard shouldFallback else {
+                throw error
+            }
+            debug(
+                "p2p blob send failed; falling back to sfu error=\(error.localizedDescription)"
+            )
+            fallbackToSFU(reason: "p2p blob send failure")
+            try sfuClient.sendBlobData(data)
         }
     }
 
@@ -384,6 +406,10 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     }
 
     private func bindCallbacks() {
+        let forwardBlobData: KeepTalkingTransportBlobDataHandler? = {
+            [weak self] data in
+            self?.onBlobData?(data)
+        }
         let forwardRaw: @Sendable (String) -> Void = { [weak self] raw in
             self?.onRawMessage?(raw)
         }
@@ -401,6 +427,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                 }
             }
         }
+        sfuClient.onBlobData = forwardBlobData
         sfuClient.onRawMessage = forwardRaw
         sfuClient.onPeerConnect = nil
         sfuClient.onLog = logger
@@ -409,6 +436,7 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
         p2pClient?.onEnvelope = { [weak self] envelope in
             self?.onEnvelope?(envelope)
         }
+        p2pClient?.onBlobData = forwardBlobData
         p2pClient?.onRawMessage = forwardRaw
         p2pClient?.onPeerConnect = { [weak self] nodeID in
             self?.reportPeerConnected(nodeID, source: "p2p")

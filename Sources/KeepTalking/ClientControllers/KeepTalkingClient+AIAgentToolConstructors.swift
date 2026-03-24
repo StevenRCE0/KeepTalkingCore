@@ -313,6 +313,65 @@ extension KeepTalkingClient {
             )
     }
 
+    func makeContextAttachmentListingTool() -> OpenAITool {
+        OpenAITool
+            .functionTool(
+                .init(
+                    name: Self.contextAttachmentListingToolFunctionName,
+                    description:
+                        "List attachments already stored in the active KeepTalking context, including ids, filenames, mime types, availability, and derived metadata.",
+                    parameters: JSONSchema(
+                        .type(.object),
+                        .properties([:]),
+                        .additionalProperties(.boolean(false))
+                    ),
+                    strict: false
+                )
+            )
+    }
+
+    func makeContextAttachmentReadTool() -> OpenAITool {
+        OpenAITool
+            .functionTool(
+                .init(
+                    name: Self.contextAttachmentReadToolFunctionName,
+                    description:
+                        "Inspect a specific context attachment. Use mode metadata for attachment fields, preview_text for derived text/description, and native only when you need the actual file or image added to the next model turn.",
+                    parameters: JSONSchema(
+                        .type(.object),
+                        .properties([
+                            "attachment_id": JSONSchema(
+                                .type(.string),
+                                .description(
+                                    "Attachment identifier returned by kt_list_context_attachments."
+                                )
+                            ),
+                            "mode": JSONSchema(
+                                .type(.string),
+                                .enumValues([
+                                    "metadata",
+                                    "preview_text",
+                                    "native",
+                                ]),
+                                .description(
+                                    "How to inspect the attachment."
+                                )
+                            ),
+                            "max_characters": JSONSchema(
+                                .type(.integer),
+                                .description(
+                                    "Optional maximum preview length for preview_text mode."
+                                )
+                            ),
+                        ]),
+                        .required(["attachment_id", "mode"]),
+                        .additionalProperties(.boolean(false))
+                    ),
+                    strict: false
+                )
+            )
+    }
+
     func makeWebSearchTool() -> OpenAITool {
         OpenAITool
             .webSearchTool(

@@ -368,6 +368,60 @@ struct ContextSyncTransportTests {
         #expect(result == expected)
     }
 
+    @Test("recent attachment sync returns only attachments inside the lookback window")
+    func recentAttachmentDispatchReturnsRecentAttachments() async throws {
+        let localStore = KeepTalkingInMemoryStore()
+        let config = KeepTalkingConfig(
+            signalURL: try #require(URL(string: "ws://127.0.0.1")),
+            contextID: UUID(uuidString: "A0000000-0000-0000-0000-000000000000")!,
+            node: UUID(uuidString: "EEEEEEEE-1111-1111-1111-111111111111")!
+        )
+        let client = KeepTalkingClient(
+            config: config,
+            localStore: localStore
+        )
+        let context = KeepTalkingContext(id: config.contextID)
+        try await context.save(on: localStore.database)
+
+        let sender = KeepTalkingContextMessage.Sender.node(
+            node: UUID(uuidString: "FFFFFFFF-2222-2222-2222-222222222222")!
+        )
+        let oldAttachment = KeepTalkingContextAttachment(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000501")!,
+            context: context,
+            sender: sender,
+            blobID: String(repeating: "a", count: 64),
+            filename: "old.png",
+            mimeType: "image/png",
+            byteCount: 10,
+            createdAt: Date(timeIntervalSince1970: 10),
+            sortIndex: 0
+        )
+        let recentAttachment = KeepTalkingContextAttachment(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000502")!,
+            context: context,
+            sender: sender,
+            blobID: String(repeating: "b", count: 64),
+            filename: "recent.png",
+            mimeType: "image/png",
+            byteCount: 20,
+            createdAt: Date(timeIntervalSince1970: 20),
+            sortIndex: 0
+        )
+        try await oldAttachment.save(on: localStore.database)
+        try await recentAttachment.save(on: localStore.database)
+
+        let result = try await client.dispatchContextSyncRecentAttachmentsRequest(
+            to: config.node,
+            contextID: config.contextID,
+            since: Date(timeIntervalSince1970: 15)
+        )
+
+        #expect(result.attachments.compactMap(\.id) == [
+            UUID(uuidString: "00000000-0000-0000-0000-000000000502")!
+        ])
+    }
+
     private func seededContext(
         on localStore: KeepTalkingInMemoryStore,
         id: UUID,

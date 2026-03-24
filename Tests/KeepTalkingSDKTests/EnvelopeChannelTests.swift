@@ -4,6 +4,21 @@ import Testing
 @testable import KeepTalkingSDK
 
 struct EnvelopeChannelTests {
+    @Test("config exposes a context-scoped blob channel label")
+    func configExposesBlobChannelLabel() throws {
+        let contextID = UUID(uuidString: "01000000-0000-0000-0000-000000000000")!
+        let config = KeepTalkingConfig(
+            signalURL: try #require(URL(string: "ws://127.0.0.1")),
+            contextID: contextID,
+            node: UUID(uuidString: "02000000-0000-0000-0000-000000000000")!
+        )
+
+        #expect(
+            config.blobChannelLabel
+                == "keep-talking.blob.\(contextID.uuidString.lowercased())"
+        )
+    }
+
     @Test("context sync envelopes use the chat channel")
     func contextSyncUsesChatChannel() {
         let envelope = KeepTalkingP2PEnvelope.contextSync(
@@ -17,6 +32,30 @@ struct EnvelopeChannelTests {
         )
 
         #expect(envelope.channel == KeepTalkingEnvelopeChannel.chat)
+    }
+
+    @Test("attachment envelopes use the blob channel")
+    func attachmentUsesBlobChannel() {
+        let context = KeepTalkingContext(
+            id: UUID(uuidString: "11000000-0000-0000-0000-000000000000")!
+        )
+        let envelope = KeepTalkingP2PEnvelope.attachment(
+            KeepTalkingContextAttachment(
+                id: UUID(uuidString: "12000000-0000-0000-0000-000000000000")!,
+                context: context,
+                sender: .node(
+                    node: UUID(
+                        uuidString: "13000000-0000-0000-0000-000000000000"
+                    )!
+                ),
+                blobID: "blob-1",
+                filename: "image.png",
+                mimeType: "image/png",
+                byteCount: 1024
+            )
+        )
+
+        #expect(envelope.channel == KeepTalkingEnvelopeChannel.blob)
     }
 
     @Test("action call envelopes stay on the action channel")

@@ -5,6 +5,7 @@ import Foundation
 public struct KeepTalkingConfig: Sendable {
     public static let signalingChannel = "keep-talking.signaling"
     public static let chatChannelPrefix = "keep-talking.chat"
+    public static let blobChannelPrefix = "keep-talking.blob"
     public static let actionCallChannelPrefix = "keep-talking.action_call"
 
     public let signalURL: URL
@@ -13,6 +14,7 @@ public struct KeepTalkingConfig: Sendable {
     public let p2pPreferredRemoteID: String?
     public let p2pAttemptTimeoutSeconds: TimeInterval
     public let p2pStunServers: [String]
+    public let recentAttachmentSyncLookback: TimeInterval
 
     /// Creates a configuration for a single KeepTalking node session.
     ///
@@ -29,7 +31,8 @@ public struct KeepTalkingConfig: Sendable {
         node: UUID = UUID(),
         p2pPreferredRemoteID: String? = nil,
         p2pAttemptTimeoutSeconds: TimeInterval = 5,
-        p2pStunServers: [String] = ["stun:stun.l.google.com:19302"]
+        p2pStunServers: [String] = ["stun:stun.l.google.com:19302"],
+        recentAttachmentSyncLookback: TimeInterval = 14 * 24 * 60 * 60
     ) {
         self.signalURL = signalURL
         self.contextID = contextID
@@ -37,6 +40,7 @@ public struct KeepTalkingConfig: Sendable {
         self.p2pPreferredRemoteID = p2pPreferredRemoteID
         self.p2pAttemptTimeoutSeconds = p2pAttemptTimeoutSeconds
         self.p2pStunServers = p2pStunServers
+        self.recentAttachmentSyncLookback = max(0, recentAttachmentSyncLookback)
     }
 
     public var chatChannelLabel: String {
@@ -45,6 +49,10 @@ public struct KeepTalkingConfig: Sendable {
 
     public var actionCallChannelLabel: String {
         "\(Self.actionCallChannelPrefix).\(scopedSessionID)"
+    }
+
+    public var blobChannelLabel: String {
+        "\(Self.blobChannelPrefix).\(scopedSessionID)"
     }
 
     public var signalingChannelLabel: String {
@@ -63,7 +71,8 @@ public struct KeepTalkingConfig: Sendable {
             node: node,
             p2pPreferredRemoteID: p2pPreferredRemoteID,
             p2pAttemptTimeoutSeconds: p2pAttemptTimeoutSeconds,
-            p2pStunServers: p2pStunServers
+            p2pStunServers: p2pStunServers,
+            recentAttachmentSyncLookback: recentAttachmentSyncLookback
         )
     }
 }
@@ -255,6 +264,7 @@ public struct KeepTalkingAsymmetricCipherEnvelope: Codable, Sendable {
 
 public enum KeepTalkingP2PEnvelope: Codable, Sendable {
     case message(KeepTalkingContextMessage)
+    case attachment(KeepTalkingContextAttachment)
     case context(KeepTalkingContext)
     case node(KeepTalkingNode)
     case nodeStatus(KeepTalkingNodeStatus)
@@ -276,6 +286,7 @@ public enum KeepTalkingP2PEnvelope: Codable, Sendable {
 
 enum KeepTalkingEnvelopeChannel: Sendable {
     case chat
+    case blob
     case actionCall
     case signaling
 }
@@ -290,6 +301,8 @@ extension KeepTalkingP2PEnvelope {
                 .encryptedNodeStatus,
                 .contextSync:
                 return .chat
+            case .attachment:
+                return .blob
             case .actionCallRequest,
                 .requestAck,
                 .actionCallResult,
@@ -303,6 +316,21 @@ extension KeepTalkingP2PEnvelope {
                 return .actionCall
             case .p2pSignal, .p2pPresence:
                 return .signaling
+        }
+    }
+}
+
+extension KeepTalkingConfig {
+    func label(for channel: KeepTalkingEnvelopeChannel) -> String {
+        switch channel {
+            case .chat:
+                return chatChannelLabel
+            case .blob:
+                return blobChannelLabel
+            case .actionCall:
+                return actionCallChannelLabel
+            case .signaling:
+                return signalingChannelLabel
         }
     }
 }

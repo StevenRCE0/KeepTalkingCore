@@ -55,7 +55,8 @@ public struct AIOrchestrator {
     public func run(
         messages: [Message],
         tools: [OpenAITool],
-        model: OpenAIModel
+        model: OpenAIModel,
+        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam = .auto
     ) async throws -> String {
         var transcript = messages
         var latestAssistantText = ""
@@ -65,7 +66,7 @@ public struct AIOrchestrator {
                 messages: transcript,
                 tools: tools,
                 model: model,
-                toolChoice: .auto
+                toolChoice: toolChoice
             )
 
             if let assistantMessage =

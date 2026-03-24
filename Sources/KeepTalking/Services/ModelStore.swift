@@ -47,6 +47,11 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
         self.manager.db(self.databaseID, logger: self.logger)
     }
 
+    public func reset() async throws {
+        try await self.manager.autoRevert()
+        try await self.manager.autoMigrate()
+    }
+
     private static func defaultDatabaseURL(for fileName: String? = nil) -> URL {
         let fm = FileManager.default
         let baseDir =
@@ -88,6 +93,8 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             CreateKeepTalkingOperatorContextsMigration(),
             CreateContextGroupSecretsMigration(),
             CreateKeepTalkingContextMessagesMigration(),
+            CreateKeepTalkingContextAttachmentsMigration(),
+            CreateKeepTalkingBlobRecordsMigration(),
             to: databaseID
         )
         try blocking {

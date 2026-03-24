@@ -1,6 +1,14 @@
 import FluentKit
 import Foundation
 
+private actor KeepTalkingBlobFrameProcessor {
+    func process(
+        _ operation: @Sendable () async throws -> Void
+    ) async rethrows {
+        try await operation()
+    }
+}
+
 public enum KeepTalkingClientError: LocalizedError {
     case kvServiceNotConfigured
     case missingNode
@@ -114,12 +122,14 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     public typealias EnvelopeHandler = @Sendable (KeepTalkingP2PEnvelope) -> Void
     public typealias RawMessageHandler = @Sendable (String) -> Void
+    public typealias BlobAvailabilityHandler = @Sendable (UUID, String) -> Void
     public typealias PeerConnectHandler = @Sendable (UUID) -> Void
     public typealias ContextSyncHandler = @Sendable (UUID) -> Void
     public typealias LogHandler = @Sendable (String) -> Void
 
     public var onEnvelope: EnvelopeHandler?
     public var onRawMessage: RawMessageHandler?
+    public var onBlobAvailabilityChange: BlobAvailabilityHandler?
     public var onPeerConnect: PeerConnectHandler?
     public var onContextSync: ContextSyncHandler?
     public var onLog: LogHandler? {
@@ -146,6 +156,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let skillManager: SkillManager
     let primitiveActionManager: PrimitiveActionManager
     let openAIConnector: OpenAIConnector?
+    let blobStore: KeepTalkingBlobStore
     private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
     var actionApprovalHandler: ActionApprovalHandler?
     var primitiveActionPostResultHandler: PrimitiveActionPostResultHandler?
@@ -171,7 +182,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     )
     var pendingContextSyncSummaries: [UUID: CheckedContinuation<KeepTalkingContextSyncSummaryResult, Error>] = [:]
     var pendingContextSyncMessages: [UUID: CheckedContinuation<KeepTalkingContextSyncMessagesResult, Error>] = [:]
+    var pendingContextSyncAttachments: [UUID: CheckedContinuation<KeepTalkingContextSyncAttachmentsResult, Error>] = [:]
     var nodeStateBroadcastDebounceTask: Task<Void, Never>?
+    private let blobFrameProcessor = KeepTalkingBlobFrameProcessor()
 
     /// Creates a client with its transport, storage, and optional AI integrations.
     ///
@@ -205,6 +218,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.kvService = kvService
         self.localStore = localStore
         self.logon = logon
+        self.blobStore = KeepTalkingBlobStore.makeDefault(for: localStore)
         livenessState = KeepTalkingContextLivenessState(
             localNode: config.node
         )
@@ -253,6 +267,22 @@ public final class KeepTalkingClient: @unchecked Sendable {
         rtcClient.onRawMessage = { [weak self] raw in
             self?.onRawMessage?(raw)
         }
+        rtcClient.onBlobData = { [weak self] data in
+            guard let self else {
+                return
+            }
+            Task {
+                do {
+                    try await self.blobFrameProcessor.process {
+                        try await self.handleIncomingBlobFrameData(data)
+                    }
+                } catch {
+                    self.onLog?(
+                        "[client/blob] failed handling blob frame error=\(error.localizedDescription)"
+                    )
+                }
+            }
+        }
         rtcClient.onEnvelope = { [weak self] envelope in
             Task {
                 do {
@@ -293,6 +323,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     func notifyContextDidSync(_ context: UUID) {
         onContextSync?(context)
+    }
+
+    func notifyBlobAvailabilityChange(contextID: UUID, blobID: String) {
+        onBlobAvailabilityChange?(contextID, blobID)
     }
 
     /// Creates the default local store, preferring SQLite and falling back to memory.

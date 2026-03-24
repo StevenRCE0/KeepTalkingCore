@@ -252,12 +252,60 @@ public struct KeepTalkingContextSyncMessagesResult: Codable, Sendable {
     }
 }
 
+public struct KeepTalkingContextSyncRecentAttachmentsRequest: Codable,
+    Sendable, Equatable
+{
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let recipient: UUID
+    public let since: Date
+
+    public init(
+        request: UUID = UUID(),
+        context: UUID,
+        requester: UUID,
+        recipient: UUID,
+        since: Date
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.recipient = recipient
+        self.since = since
+    }
+}
+
+public struct KeepTalkingContextSyncAttachmentsResult: Codable, Sendable {
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let responder: UUID
+    public let attachments: [KeepTalkingContextAttachment]
+
+    public init(
+        request: UUID,
+        context: UUID,
+        requester: UUID,
+        responder: UUID,
+        attachments: [KeepTalkingContextAttachment]
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.responder = responder
+        self.attachments = attachments
+    }
+}
+
 public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
     case summaryRequest(KeepTalkingContextSyncSummaryRequest)
     case summaryResult(KeepTalkingContextSyncSummaryResult)
     case tailRequest(KeepTalkingContextSyncTailRequest)
     case chunkRequest(KeepTalkingContextSyncChunkRequest)
     case messagesResult(KeepTalkingContextSyncMessagesResult)
+    case recentAttachmentsRequest(KeepTalkingContextSyncRecentAttachmentsRequest)
+    case attachmentsResult(KeepTalkingContextSyncAttachmentsResult)
 }
 
 public struct KeepTalkingContextSyncSnapshot: Sendable {

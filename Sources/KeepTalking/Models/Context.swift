@@ -59,15 +59,22 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     @Children(for: \.$context)
     public var messages: [KeepTalkingContextMessage]
 
+    @Children(for: \.$context)
+    public var attachments: [KeepTalkingContextAttachment]
+
     public init() {}
 
     public init(
         id: UUID = UUID(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        messages: [KeepTalkingContextMessage] = [],
+        attachments: [KeepTalkingContextAttachment] = []
     ) {
         self.id = id
         self.updatedAt = updatedAt
         self.syncMetadata = nil
+        self.$messages.value = messages
+        self.$attachments.value = attachments
     }
 
     /// The Hasher protocol is merely satisfied by the ID, no message comparison logic.
@@ -81,6 +88,7 @@ extension KeepTalkingContext: Codable {
         case id
         case updatedAt
         case messages
+        case attachments
     }
 
     public convenience init(from decoder: any Decoder) throws {
@@ -99,6 +107,10 @@ extension KeepTalkingContext: Codable {
             [KeepTalkingContextMessage].self,
             forKey: .messages
         ) ?? []
+        self.$attachments.value = try container.decodeIfPresent(
+            [KeepTalkingContextAttachment].self,
+            forKey: .attachments
+        ) ?? []
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -106,6 +118,7 @@ extension KeepTalkingContext: Codable {
         try container.encodeIfPresent(id, forKey: .id)
         try container.encodeIfPresent(updatedAt, forKey: .updatedAt)
         try container.encode($messages.value ?? [], forKey: .messages)
+        try container.encode($attachments.value ?? [], forKey: .attachments)
     }
 }
 

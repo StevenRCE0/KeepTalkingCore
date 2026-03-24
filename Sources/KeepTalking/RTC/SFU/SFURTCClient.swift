@@ -33,11 +33,13 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     }
     private enum EnvelopeRoute {
         case chat
+        case blob
         case actionCall
         case signaling
     }
 
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)?
+    var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
     var onLog: (@Sendable (String) -> Void)? {
@@ -53,8 +55,10 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
     private var peerPool: [Int: LKRTCPeerConnection] = [:]
     private var outboundChatChannel: LKRTCDataChannel?
+    private var outboundBlobChannel: LKRTCDataChannel?
     private var outboundActionCallChannel: LKRTCDataChannel?
     private var inboundChatChannel: LKRTCDataChannel?
+    private var inboundBlobChannel: LKRTCDataChannel?
     private var inboundActionCallChannel: LKRTCDataChannel?
     private var outboundSignalingChannel: LKRTCDataChannel?
     private var inboundSignalingChannel: LKRTCDataChannel?
@@ -78,7 +82,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     func start() async throws {
         notifiedConnectedPeers.removeAll()
         debug(
-            "starting session=\(config.scopedSessionID) id=\(config.node.uuidString) context=\(config.contextID.uuidString.lowercased()) chat=\(config.chatChannelLabel) action=\(config.actionCallChannelLabel)"
+            "starting session=\(config.scopedSessionID) id=\(config.node.uuidString) context=\(config.contextID.uuidString.lowercased()) chat=\(config.chatChannelLabel) blob=\(config.blobChannelLabel) action=\(config.actionCallChannelLabel)"
         )
         try await signal.connect()
 
@@ -154,6 +158,22 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         retainChannel(chatChannel)
         debug("created outbound chat channel label=\(chatChannel.label)")
 
+        let blobChannelConfig = LKRTCDataChannelConfiguration()
+        blobChannelConfig.isOrdered = true
+        guard
+            let blobChannel = publisher.dataChannel(
+                forLabel: config.blobChannelLabel,
+                configuration: blobChannelConfig
+            )
+        else {
+            throw RTCError.dataChannelCreateFailed(config.blobChannelLabel)
+        }
+
+        blobChannel.delegate = self
+        outboundBlobChannel = blobChannel
+        retainChannel(blobChannel)
+        debug("created outbound blob channel label=\(blobChannel.label)")
+
         let actionCallChannelConfig = LKRTCDataChannelConfiguration()
         actionCallChannelConfig.isOrdered = true
         guard
@@ -210,8 +230,10 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     func stop() {
         debug("stopping sent=\(sentMessageCount) recv=\(recvMessageCount)")
         outboundChatChannel?.close()
+        outboundBlobChannel?.close()
         outboundActionCallChannel?.close()
         inboundChatChannel?.close()
+        inboundBlobChannel?.close()
         inboundActionCallChannel?.close()
         outboundSignalingChannel?.close()
         inboundSignalingChannel?.close()
@@ -220,8 +242,10 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         }
         peerPool.removeAll()
         outboundChatChannel = nil
+        outboundBlobChannel = nil
         outboundActionCallChannel = nil
         inboundChatChannel = nil
+        inboundBlobChannel = nil
         inboundActionCallChannel = nil
         outboundSignalingChannel = nil
         inboundSignalingChannel = nil
@@ -250,6 +274,8 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
                 sendChannel = preferredSignalingChannel()
             case .chat:
                 sendChannel = preferredChatChannel()
+            case .blob:
+                sendChannel = preferredBlobChannel()
             case .actionCall:
                 sendChannel = preferredActionCallChannel()
         }
@@ -271,6 +297,25 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         let packet = LKRTCDataBuffer(data: payload, isBinary: false)
         debug(
             "send envelope kind=\(envelope) bytes=\(payload.count) label=\(sendChannel.label) channelState=\(sendChannel.readyState.rawValue)"
+        )
+        if !sendChannel.sendData(packet) {
+            throw RTCError.dataChannelNotOpen(sendChannel.label)
+        }
+        sentMessageCount += 1
+    }
+
+    func sendBlobData(_ data: Data) throws {
+        guard let sendChannel = preferredBlobChannel() else {
+            throw RTCError.dataChannelCreateFailed(config.blobChannelLabel)
+        }
+
+        guard sendChannel.readyState == .open else {
+            throw RTCError.dataChannelNotOpen(sendChannel.label)
+        }
+
+        let packet = LKRTCDataBuffer(data: data, isBinary: true)
+        debug(
+            "send blob bytes=\(data.count) label=\(sendChannel.label) channelState=\(sendChannel.readyState.rawValue)"
         )
         if !sendChannel.sendData(packet) {
             throw RTCError.dataChannelNotOpen(sendChannel.label)
@@ -307,6 +352,13 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         return outboundActionCallChannel
     }
 
+    private func preferredBlobChannel() -> LKRTCDataChannel? {
+        if let inboundBlobChannel, inboundBlobChannel.readyState == .open {
+            return inboundBlobChannel
+        }
+        return outboundBlobChannel
+    }
+
     private func preferredSignalingChannel() -> LKRTCDataChannel? {
         if let inboundSignalingChannel,
             inboundSignalingChannel.readyState == .open
@@ -324,6 +376,8 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         switch envelope.channel {
             case .chat:
                 return .chat
+            case .blob:
+                return .blob
             case .actionCall:
                 return .actionCall
             case .signaling:
@@ -335,6 +389,8 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         switch route {
             case .chat:
                 return config.chatChannelLabel
+            case .blob:
+                return config.blobChannelLabel
             case .actionCall:
                 return config.actionCallChannelLabel
             case .signaling:
@@ -556,6 +612,9 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         if dataChannel.label == config.chatChannelLabel {
             inboundChatChannel = dataChannel
             debug("bound inbound chat channel label=\(dataChannel.label)")
+        } else if dataChannel.label == config.blobChannelLabel {
+            inboundBlobChannel = dataChannel
+            debug("bound inbound blob channel label=\(dataChannel.label)")
         } else if dataChannel.label == config.actionCallChannelLabel {
             inboundActionCallChannel = dataChannel
             debug("bound inbound action channel label=\(dataChannel.label)")
@@ -579,19 +638,19 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         debug(
             "recv dc label=\(dataChannel.label) bytes=\(buffer.data.count) binary=\(buffer.isBinary)"
         )
-
         guard
             dataChannel.label == config.chatChannelLabel
+                || dataChannel.label == config.blobChannelLabel
                 || dataChannel.label == config.actionCallChannelLabel
                 || dataChannel.label == config.signalingChannelLabel
         else {
             if let text = String(data: buffer.data, encoding: .utf8) {
                 debug(
-                    "ignored non-chat label=\(dataChannel.label) text=\(text)"
+                    "ignored unexpected label=\(dataChannel.label) text=\(text)"
                 )
             } else {
                 debug(
-                    "ignored non-chat label=\(dataChannel.label) non-utf8-bytes=\(buffer.data.count)"
+                    "ignored unexpected label=\(dataChannel.label) non-utf8-bytes=\(buffer.data.count)"
                 )
             }
             return
@@ -605,11 +664,10 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
                 )
             {
                 reportConnectedPeers(from: envelope)
-                if case .message = envelope,
-                    dataChannel.label != config.chatChannelLabel
-                {
+                let expectedLabel = config.label(for: envelope.channel)
+                guard dataChannel.label == expectedLabel else {
                     debug(
-                        "ignored message envelope on non-chat channel label=\(dataChannel.label)"
+                        "ignored envelope on unexpected channel label=\(dataChannel.label) expected=\(expectedLabel)"
                     )
                     return
                 }
@@ -621,16 +679,23 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
                 return
             }
         } catch {
-            debug(
-                "chat decode failed; encrypted envelope error=\(error.localizedDescription)"
-            )
+            if dataChannel.label != config.blobChannelLabel {
+                debug(
+                    "envelope decode failed; encrypted envelope error=\(error.localizedDescription)"
+                )
+            }
+        }
+
+        if dataChannel.label == config.blobChannelLabel {
+            onBlobData?(buffer.data)
+            return
         }
 
         if let text = String(data: buffer.data, encoding: .utf8) {
-            debug("chat decode failed; raw utf8=\(text)")
+            debug("envelope decode failed; raw utf8=\(text)")
             onRawMessage?(text)
         } else {
-            debug("chat decode failed; non-utf8 bytes=\(buffer.data.count)")
+            debug("envelope decode failed; non-utf8 bytes=\(buffer.data.count)")
             onRawMessage?("<\(buffer.data.count) bytes>")
         }
     }
@@ -641,9 +706,18 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
                 if case .node(let nodeID) = message.sender {
                     reportPeerConnected(nodeID)
                 }
+            case .attachment(let attachment):
+                if case .node(let nodeID) = attachment.sender {
+                    reportPeerConnected(nodeID)
+                }
             case .context(let context):
                 for message in context.messages {
                     if case .node(let nodeID) = message.sender {
+                        reportPeerConnected(nodeID)
+                    }
+                }
+                for attachment in context.attachments {
+                    if case .node(let nodeID) = attachment.sender {
                         reportPeerConnected(nodeID)
                     }
                 }

@@ -39,10 +39,12 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
 {
     private enum EnvelopeRoute {
         case chat
+        case blob
         case actionCall
     }
 
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)?
+    var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
     var onLog: (@Sendable (String) -> Void)?
@@ -58,8 +60,10 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
 
     private var peerConnection: LKRTCPeerConnection?
     private var outboundChatChannel: LKRTCDataChannel?
+    private var outboundBlobChannel: LKRTCDataChannel?
     private var outboundActionCallChannel: LKRTCDataChannel?
     private var inboundChatChannel: LKRTCDataChannel?
+    private var inboundBlobChannel: LKRTCDataChannel?
     private var inboundActionCallChannel: LKRTCDataChannel?
     private var pendingRemoteCandidates: [LKRTCIceCandidate] = []
     private var remotePeerID: UUID?
@@ -134,8 +138,10 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         isStopping = true
         debug("stopping sent=\(sentMessageCount) recv=\(recvMessageCount)")
         outboundChatChannel?.close()
+        outboundBlobChannel?.close()
         outboundActionCallChannel?.close()
         inboundChatChannel?.close()
+        inboundBlobChannel?.close()
         inboundActionCallChannel?.close()
         peerConnection?.close()
 
@@ -146,8 +152,10 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
 
         peerConnection = nil
         outboundChatChannel = nil
+        outboundBlobChannel = nil
         outboundActionCallChannel = nil
         inboundChatChannel = nil
+        inboundBlobChannel = nil
         inboundActionCallChannel = nil
         remotePeerID = nil
     }
@@ -166,6 +174,8 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         switch route {
             case .chat:
                 dataChannel = preferredChatChannel()
+            case .blob:
+                dataChannel = preferredBlobChannel()
             case .actionCall:
                 dataChannel = preferredActionCallChannel()
         }
@@ -196,6 +206,27 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         sentMessageCount += 1
     }
 
+    func sendBlobData(_ data: Data) throws {
+        guard let dataChannel = preferredBlobChannel() else {
+            reportTransportDegraded("blob send failed: channel missing")
+            throw P2PError.dataChannelCreateFailed(config.blobChannelLabel)
+        }
+
+        guard dataChannel.readyState == .open else {
+            reportTransportDegraded(
+                "blob send failed: channel not open state=\(dataChannel.readyState.rawValue)"
+            )
+            throw P2PError.dataChannelNotOpen(dataChannel.label)
+        }
+
+        let packet = LKRTCDataBuffer(data: data, isBinary: true)
+        if !dataChannel.sendData(packet) {
+            reportTransportDegraded("blob sendData returned false")
+            throw P2PError.dataChannelNotOpen(dataChannel.label)
+        }
+        sentMessageCount += 1
+    }
+
     func runtimeStats() -> KeepTalkingRuntimeStats {
         KeepTalkingRuntimeStats(
             sent: sentMessageCount,
@@ -205,8 +236,9 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             inboundLabel: inboundChatChannel?.label,
             inboundState: inboundChatChannel?.readyState.rawValue,
             retainedChannels: [
-                outboundChatChannel, outboundActionCallChannel,
-                inboundChatChannel, inboundActionCallChannel,
+                outboundChatChannel, outboundBlobChannel,
+                outboundActionCallChannel, inboundChatChannel,
+                inboundBlobChannel, inboundActionCallChannel,
             ].compactMap { $0 }.count,
             route: "p2p"
         )
@@ -259,6 +291,20 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         chatChannel.delegate = self
         outboundChatChannel = chatChannel
         debug("created outbound chat channel label=\(chatChannel.label)")
+
+        let blobChannelConfig = LKRTCDataChannelConfiguration()
+        blobChannelConfig.isOrdered = true
+        guard
+            let blobChannel = peerConnection.dataChannel(
+                forLabel: config.blobChannelLabel,
+                configuration: blobChannelConfig
+            )
+        else {
+            throw P2PError.dataChannelCreateFailed(config.blobChannelLabel)
+        }
+        blobChannel.delegate = self
+        outboundBlobChannel = blobChannel
+        debug("created outbound blob channel label=\(blobChannel.label)")
 
         let actionChannelConfig = LKRTCDataChannelConfiguration()
         actionChannelConfig.isOrdered = true
@@ -407,12 +453,21 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         return outboundActionCallChannel
     }
 
+    private func preferredBlobChannel() -> LKRTCDataChannel? {
+        if let inboundBlobChannel, inboundBlobChannel.readyState == .open {
+            return inboundBlobChannel
+        }
+        return outboundBlobChannel
+    }
+
     private func route(for envelope: KeepTalkingP2PEnvelope) throws
         -> EnvelopeRoute
     {
         switch envelope.channel {
             case .chat:
                 return .chat
+            case .blob:
+                return .blob
             case .actionCall:
                 return .actionCall
             case .signaling:
@@ -424,6 +479,8 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         switch route {
             case .chat:
                 return config.chatChannelLabel
+            case .blob:
+                return config.blobChannelLabel
             case .actionCall:
                 return config.actionCallChannelLabel
         }
@@ -638,6 +695,9 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         if dataChannel.label == config.chatChannelLabel {
             self.inboundChatChannel = dataChannel
             debug("bound inbound chat channel label=\(dataChannel.label)")
+        } else if dataChannel.label == config.blobChannelLabel {
+            self.inboundBlobChannel = dataChannel
+            debug("bound inbound blob channel label=\(dataChannel.label)")
         } else if dataChannel.label == config.actionCallChannelLabel {
             self.inboundActionCallChannel = dataChannel
             debug("bound inbound action channel label=\(dataChannel.label)")
@@ -650,6 +710,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         )
         guard
             dataChannel.label == config.chatChannelLabel
+                || dataChannel.label == config.blobChannelLabel
                 || dataChannel.label == config.actionCallChannelLabel
         else {
             return
@@ -671,6 +732,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         recvMessageCount += 1
         guard
             dataChannel.label == config.chatChannelLabel
+                || dataChannel.label == config.blobChannelLabel
                 || dataChannel.label == config.actionCallChannelLabel
         else {
             return
@@ -683,11 +745,10 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
                     contextSecretProvider: contextSecretProvider
                 )
             {
-                if case .message = envelope,
-                    dataChannel.label != config.chatChannelLabel
-                {
+                let expectedLabel = config.label(for: envelope.channel)
+                guard dataChannel.label == expectedLabel else {
                     debug(
-                        "ignored message envelope on non-chat channel label=\(dataChannel.label)"
+                        "ignored envelope on unexpected channel label=\(dataChannel.label) expected=\(expectedLabel)"
                     )
                     return
                 }
@@ -695,9 +756,16 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
                 return
             }
         } catch {
-            debug(
-                "chat decode failed; encrypted envelope error=\(error.localizedDescription)"
-            )
+            if dataChannel.label != config.blobChannelLabel {
+                debug(
+                    "envelope decode failed; encrypted envelope error=\(error.localizedDescription)"
+                )
+            }
+        }
+
+        if dataChannel.label == config.blobChannelLabel {
+            onBlobData?(buffer.data)
+            return
         }
 
         if let text = String(data: buffer.data, encoding: .utf8) {

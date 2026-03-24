@@ -13,6 +13,10 @@ extension KeepTalkingRTCClient {
                 return [request.requester, request.recipient]
             case .messagesResult(let result):
                 return [result.requester, result.responder]
+            case .recentAttachmentsRequest(let request):
+                return [request.requester, request.recipient]
+            case .attachmentsResult(let result):
+                return [result.requester, result.responder]
         }
     }
 }

@@ -2,10 +2,16 @@ import FluentKit
 import Foundation
 import MCP
 import OpenAI
+import UniformTypeIdentifiers
 
 extension KeepTalkingClient {
     static let listingToolFunctionName = "kt_list_available_actions"
+    static let contextAttachmentListingToolFunctionName =
+        "kt_list_context_attachments"
+    static let contextAttachmentReadToolFunctionName =
+        "kt_get_context_attachment"
     static let maxAgentTurns = 32
+    static let maxAINativeAttachmentBytes = 8 * 1024 * 1024
     static let skillManifestPreviewMaxCharacters = 20_000
     static let skillFileMaxCharacters = 30_000
 
@@ -13,7 +19,8 @@ extension KeepTalkingClient {
         prompt: String,
         in context: KeepTalkingContext,
         model: OpenAIModel = "gpt-5-codex",
-        roleName: String = "ai"
+        roleName: String = "ai",
+        currentPromptAttachments: [KeepTalkingLocalAttachmentInput] = []
     ) async throws -> String {
         guard let openAIConnector = try await resolveOpenAIConnector() else {
             throw KeepTalkingClientError.aiNotConfigured
@@ -32,19 +39,30 @@ extension KeepTalkingClient {
         // TODO: be able to switch off in the configurations
         let webSearchTool = makeWebSearchTool()
         let listingTool = makeListingTool()
+        let attachmentListingTool = makeContextAttachmentListingTool()
+        let attachmentReadTool = makeContextAttachmentReadTool()
 
-        let allTools: [OpenAITool] =
-            runtimeCatalog.catalog.definitions.isEmpty
-            ? []
-            : [
-                listingTool, webSearchTool,
-            ] + runtimeCatalog.catalog.openAITools
+        let allTools: [OpenAITool] = [
+            listingTool,
+            attachmentListingTool,
+            attachmentReadTool,
+            webSearchTool,
+        ] + runtimeCatalog.catalog.openAITools
         let skillNameByActionID = skillNamesByActionID(
             routesByFunctionName: runtimeCatalog.routesByFunctionName
         )
         let contextTranscript = try await agentContextTranscript(
             persistedContext,
             skillSummaries: runtimeCatalog.skillSummaries
+        )
+        let hasCurrentPromptAttachments = !currentPromptAttachments.isEmpty
+        let allowAutomaticToolUse = Self.shouldAllowAutomaticToolUse(
+            prompt: prompt,
+            hasCurrentPromptAttachments: hasCurrentPromptAttachments
+        )
+        let userMessage = try currentPromptUserMessage(
+            prompt: prompt,
+            attachments: currentPromptAttachments
         )
 
         logInjectedAITools(
@@ -61,12 +79,21 @@ extension KeepTalkingClient {
                         OpenAIConnector.keepTalkingSystemPrompt(
                             listingToolFunctionName:
                                 Self.listingToolFunctionName,
+                            attachmentListingToolFunctionName:
+                                Self.contextAttachmentListingToolFunctionName,
+                            attachmentReaderToolFunctionName:
+                                Self.contextAttachmentReadToolFunctionName,
+                            currentPromptIncludesAttachments:
+                                hasCurrentPromptAttachments,
+                            currentPromptShouldAvoidAutomaticToolUse:
+                                hasCurrentPromptAttachments
+                                && !allowAutomaticToolUse,
                             contextTranscript: contextTranscript
                         )
                     )
                 )
             ),
-            .user(.init(content: .string(prompt))),
+            userMessage,
         ]
 
         let orchestrator = AIOrchestrator(
@@ -106,8 +133,169 @@ extension KeepTalkingClient {
         return try await orchestrator.run(
             messages: messages,
             tools: allTools,
-            model: model
+            model: model,
+            toolChoice: allowAutomaticToolUse ? .auto : .none
         )
+    }
+
+    // TODO: questionable...
+    static func shouldAllowAutomaticToolUse(
+        prompt: String,
+        hasCurrentPromptAttachments: Bool
+    ) -> Bool {
+        guard hasCurrentPromptAttachments else {
+            return true
+        }
+
+        let normalizedPrompt = prompt.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).lowercased()
+        guard !normalizedPrompt.isEmpty else {
+            return false
+        }
+
+        let explicitToolHints = [
+            "use tool",
+            "use tools",
+            "call tool",
+            "call tools",
+            "run tool",
+            "run tools",
+            "use action",
+            "run action",
+            "search the web",
+            "web search",
+            "browse",
+            "look up",
+            "google",
+            "available actions",
+            "kt_list_",
+            "kt_get_",
+            "context attachment",
+            "context file",
+            "previous attachment",
+            "previous file",
+            "earlier attachment",
+            "earlier file",
+            "other attachment",
+            "other file",
+            "last attachment",
+            "last file",
+            "shared earlier",
+            "sent earlier",
+            "uploaded earlier",
+            "from before",
+        ]
+
+        return explicitToolHints.contains(where: normalizedPrompt.contains)
+    }
+
+    func currentPromptUserMessage(
+        prompt: String,
+        attachments: [KeepTalkingLocalAttachmentInput]
+    ) throws -> ChatQuery.ChatCompletionMessageParam {
+        guard !attachments.isEmpty else {
+            return .user(.init(content: .string(prompt)))
+        }
+
+        var contentParts: [ChatQuery.ChatCompletionMessageParam.UserMessageParam
+            .Content.ContentPart] = []
+        let trimmedPrompt = prompt.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        if !trimmedPrompt.isEmpty {
+            contentParts.append(.text(.init(text: trimmedPrompt)))
+        }
+
+        for attachment in attachments {
+            let filename = currentPromptAttachmentFilename(attachment)
+            let mimeType = currentPromptAttachmentMimeType(
+                attachment,
+                filename: filename
+            )
+            let data = try Data(contentsOf: attachment.sourceURL)
+
+            guard data.count <= Self.maxAINativeAttachmentBytes else {
+                contentParts.append(
+                    .text(
+                        .init(
+                            text:
+                                "Attachment '\(filename)' was omitted because it exceeds the native AI input budget."
+                        )
+                    )
+                )
+                continue
+            }
+
+            if mimeType.hasPrefix("image/") {
+                contentParts.append(
+                    .image(
+                        .init(
+                            imageUrl: .init(
+                                url:
+                                    "data:\(mimeType);base64,\(data.base64EncodedString())",
+                                detail: .auto
+                            )
+                        )
+                    )
+                )
+            } else {
+                contentParts.append(
+                    .file(
+                        .init(
+                            file: .init(
+                                data: data,
+                                filename: filename
+                            )
+                        )
+                    )
+                )
+            }
+        }
+
+        if contentParts.isEmpty {
+            return .user(.init(content: .string(prompt)))
+        }
+
+        return .user(
+            .init(content: .contentParts(contentParts))
+        )
+    }
+
+    private func currentPromptAttachmentFilename(
+        _ attachment: KeepTalkingLocalAttachmentInput
+    ) -> String {
+        let filename = attachment.filename?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        if let filename, !filename.isEmpty {
+            return filename
+        }
+        return attachment.sourceURL.lastPathComponent
+    }
+
+    private func currentPromptAttachmentMimeType(
+        _ attachment: KeepTalkingLocalAttachmentInput,
+        filename: String
+    ) -> String {
+        if let mimeType = attachment.mimeType?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ), !mimeType.isEmpty {
+            return mimeType
+        }
+
+        let pathExtension = attachment.sourceURL.pathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedExtension =
+            pathExtension.isEmpty
+            ? URL(fileURLWithPath: filename).pathExtension
+            : pathExtension
+        if let type = UTType(filenameExtension: resolvedExtension),
+            let mimeType = type.preferredMIMEType
+        {
+            return mimeType
+        }
+        return "application/octet-stream"
     }
 
     func registerLocalActionsInExecutors() async throws {
@@ -293,7 +481,10 @@ extension KeepTalkingClient {
         }
 
         onLog?(
-            "[ai/tools] listing_tool_name=\(Self.listingToolFunctionName) injected=\(!runtimeCatalog.catalog.definitions.isEmpty)"
+            "[ai/tools] built_ins=\(Self.listingToolFunctionName),\(Self.contextAttachmentListingToolFunctionName),\(Self.contextAttachmentReadToolFunctionName),web_search_preview"
+        )
+        onLog?(
+            "[ai/tools] listing_tool_name=\(Self.listingToolFunctionName) injected=true"
         )
     }
 }

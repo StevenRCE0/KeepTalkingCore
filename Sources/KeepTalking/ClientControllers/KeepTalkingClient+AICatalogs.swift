@@ -542,16 +542,41 @@ extension KeepTalkingClient {
             }.joined(separator: "\n")
         }
 
-        let skillSummary = renderSkillContextSummary(skillSummaries)
-        guard !skillSummary.isEmpty else {
-            return conversationTranscript
+        let attachmentCount = try await KeepTalkingContextAttachment.query(
+            on: localStore.database
+        )
+        .filter(\.$context.$id, .equal, contextID)
+        .count()
+        let recentAttachmentNames = try await KeepTalkingContextAttachment.query(
+            on: localStore.database
+        )
+        .filter(\.$context.$id, .equal, contextID)
+        .sort(\.$createdAt, .descending)
+        .sort(\.$sortIndex, .descending)
+        .limit(8)
+        .all()
+        .map(\.filename)
+        .reversed()
+
+        let attachmentSummary: String
+        if attachmentCount > 0 {
+            let preview = previewList(
+                Array(recentAttachmentNames),
+                maxItems: 8
+            )
+            attachmentSummary = """
+                Context attachments: \(attachmentCount)
+                Recent attachment names: \(preview)
+                Use \(Self.contextAttachmentListingToolFunctionName) for the full inventory and \(Self.contextAttachmentReadToolFunctionName) to inspect one.
+                """
+        } else {
+            attachmentSummary = ""
         }
 
-        return """
-            \(conversationTranscript)
-
-            \(skillSummary)
-            """
+        let skillSummary = renderSkillContextSummary(skillSummaries)
+        return [conversationTranscript, attachmentSummary, skillSummary]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
     }
 
     func renderSkillContextSummary(
