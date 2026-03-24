@@ -19,7 +19,7 @@ public struct KeepTalkingAliasResolution: Sendable, Hashable {
     }
 
     public func primary(uppercaseID: Bool = false) -> String {
-        alias ?? idText(uppercase: uppercaseID) ?? fallback ?? "Unknown"
+        alias ?? fallback ?? idText(uppercase: uppercaseID) ?? "Unknown"
     }
 
     public func secondary(uppercaseID: Bool = false) -> String? {

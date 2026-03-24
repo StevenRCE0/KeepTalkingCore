@@ -75,7 +75,7 @@ extension KeepTalkingClient {
         context: KeepTalkingContext?,
         onAcknowledgement:
             (@Sendable (KeepTalkingRequestAckState, String?) async -> Void)? =
-                nil
+            nil
     ) async -> KeepTalkingActionCallResult {
         let action: KeepTalkingAction
         do {
@@ -473,7 +473,8 @@ extension KeepTalkingClient {
         let usesWakeAssistedDelivery = await shouldUseWakeAssistedDelivery(
             for: call.action
         )
-        let deliveryDescription = usesWakeAssistedDelivery
+        let deliveryDescription =
+            usesWakeAssistedDelivery
             ? "rtc (with APN wake if needed)"
             : "rtc"
         onLog?(
@@ -695,7 +696,8 @@ extension KeepTalkingClient {
         _ acknowledgement: KeepTalkingRequestAck
     ) -> Bool {
         actionCallQueue.sync {
-            if let continuation = pendingActionCallAcknowledgements
+            if let continuation =
+                pendingActionCallAcknowledgements
                 .removeValue(forKey: acknowledgement.requestID)
             {
                 continuation.resume(returning: acknowledgement)
@@ -725,7 +727,8 @@ extension KeepTalkingClient {
             ) {
                 continuation.resume(throwing: error)
             }
-            if let continuation = pendingActionCallAcknowledgements
+            if let continuation =
+                pendingActionCallAcknowledgements
                 .removeValue(forKey: requestID)
             {
                 continuation.resume(throwing: error)
@@ -777,7 +780,8 @@ extension KeepTalkingClient {
     private func cancelPendingActionCallAcknowledgement(requestID: UUID) {
         actionCallQueue.sync {
             guard
-                let continuation = pendingActionCallAcknowledgements
+                let continuation =
+                    pendingActionCallAcknowledgements
                     .removeValue(forKey: requestID)
             else {
                 return
@@ -940,23 +944,17 @@ extension KeepTalkingClient {
         guard let ownerNodeID = action.$node.id else {
             return false
         }
-        if nodeID == ownerNodeID {
-            return true
-        }
 
-        if let relation = try await preferredTrustedRelation(
+        let relation = try await preferredTrustedRelation(
             from: nodeID,
             to: ownerNodeID,
             allowing: context,
             on: database
-        ),
-            relation.relationship == .owner
-        {
-            return true
-        }
+        )
 
         let actionID = try action.requireID()
-        let relationIDs = try await KeepTalkingNodeRelation
+        let relationIDs =
+            try await KeepTalkingNodeRelation
             .query(on: database)
             .filter(\.$from.$id, .equal, nodeID)
             .all()
@@ -970,7 +968,8 @@ extension KeepTalkingClient {
             return false
         }
 
-        let approvals = try await KeepTalkingNodeRelationActionRelation
+        let approvals =
+            try await KeepTalkingNodeRelationActionRelation
             .query(on: database)
             .filter(\.$relation.$id ~~ relationIDs)
             .filter(\.$action.$id, .equal, actionID)
