@@ -9,30 +9,37 @@ import LiveKitWebRTC
 ///
 /// **Strict open-only policy**: `preferred(for:)` only returns a channel that
 /// is currently `.open`.  Callers never receive a closed/closing channel.
-struct RTCChannelSet {
+final class RTCChannelSet: @unchecked Sendable {
+    private let lock = NSLock()
 
     private var outbound: [KeepTalkingEnvelopeChannel: LKRTCDataChannel] = [:]
     private var inbound: [KeepTalkingEnvelopeChannel: LKRTCDataChannel] = [:]
 
     // MARK: - Mutation
 
-    mutating func setOutbound(
+    func setOutbound(
         _ channel: LKRTCDataChannel,
         for kind: KeepTalkingEnvelopeChannel
     ) {
+        lock.lock()
+        defer { lock.unlock() }
         outbound[kind] = channel
     }
 
-    mutating func setInbound(
+    func setInbound(
         _ channel: LKRTCDataChannel,
         for kind: KeepTalkingEnvelopeChannel
     ) {
+        lock.lock()
+        defer { lock.unlock() }
         inbound[kind] = channel
     }
 
     /// Remove a channel that has closed/failed so `preferred()` no longer
     /// returns it.  Matches by object identity.
-    mutating func removeChannel(_ channel: LKRTCDataChannel) {
+    func removeChannel(_ channel: LKRTCDataChannel) {
+        lock.lock()
+        defer { lock.unlock() }
         for (kind, ch) in outbound where ch === channel {
             outbound.removeValue(forKey: kind)
         }
@@ -46,6 +53,8 @@ struct RTCChannelSet {
     /// Returns the best **open** channel for sending on `kind`, or `nil`.
     /// Prefers inbound when open; falls back to outbound only if also open.
     func preferred(for kind: KeepTalkingEnvelopeChannel) -> LKRTCDataChannel? {
+        lock.lock()
+        defer { lock.unlock() }
         if let ch = inbound[kind], ch.readyState == .open {
             return ch
         }
@@ -58,6 +67,8 @@ struct RTCChannelSet {
     /// True when at least one channel exists for `kind` and every present
     /// channel (outbound and/or inbound) is open.
     func isOpen(for kind: KeepTalkingEnvelopeChannel) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
         let present = [outbound[kind], inbound[kind]].compactMap { $0 }
         guard !present.isEmpty else { return false }
         return present.allSatisfy { $0.readyState == .open }
@@ -65,33 +76,41 @@ struct RTCChannelSet {
 
     /// True when a channel for `kind` exists (regardless of state).
     func hasChannel(for kind: KeepTalkingEnvelopeChannel) -> Bool {
-        outbound[kind] != nil || inbound[kind] != nil
+        lock.lock()
+        defer { lock.unlock() }
+        return outbound[kind] != nil || inbound[kind] != nil
     }
 
     /// All channels currently stored (outbound + inbound).
     var allChannels: [LKRTCDataChannel] {
-        Array(outbound.values) + Array(inbound.values)
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(outbound.values) + Array(inbound.values)
     }
 
     var channelCount: Int {
-        allChannels.count
+        lock.lock()
+        defer { lock.unlock() }
+        return outbound.values.count + inbound.values.count
     }
 
     // MARK: - Lifecycle
 
-    mutating func clearDelegates() {
+    func clearDelegates() {
         for channel in allChannels {
             channel.delegate = nil
         }
     }
 
-    mutating func closeAll() {
+    func closeAll() {
         for channel in allChannels {
             channel.close()
         }
     }
 
-    mutating func removeAll() {
+    func removeAll() {
+        lock.lock()
+        defer { lock.unlock() }
         outbound.removeAll()
         inbound.removeAll()
     }
@@ -99,7 +118,9 @@ struct RTCChannelSet {
     // MARK: - Diagnostics
 
     func stateSummary(for kinds: [KeepTalkingEnvelopeChannel]) -> String {
-        kinds.map { kind in
+        lock.lock()
+        defer { lock.unlock() }
+        return kinds.map { kind in
             let name: String
             switch kind {
                 case .chat: name = "chat"

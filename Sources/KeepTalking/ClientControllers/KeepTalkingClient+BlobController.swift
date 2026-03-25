@@ -10,7 +10,8 @@ import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
-    private static let blobChunkSize = 64 * 1024
+    // Max payload size to keep entire frame well under 64KB SCTP limit
+    private static let blobChunkSize = 32 * 1024
 
     func upsertBlobRecord(
         blobID: String,
@@ -515,15 +516,14 @@ extension KeepTalkingClient {
                 via: route
             )
             chunkIndex += 1
-            // Yield between chunks to let WebRTC flush the SCTP send buffer
-            // and prevent bufferedAmount from spiking, which can force-close
-            // the data channel.
-            await Task.yield()
+            // Sleep slightly between chunks to let WebRTC flush the SCTP send buffer
+            // and prevent bufferedAmount from spiking without blocking the thread locally.
+            try await Task.sleep(nanoseconds: 10_000_000) // 10ms
         }
 
-        // Brief yield before the completion frame so the last chunk
+        // Brief sleep before the completion frame so the last chunk
         // has time to drain from the send buffer.
-        await Task.yield()
+        try await Task.sleep(nanoseconds: 20_000_000)
 
         let completionHeader = KeepTalkingBlobTransferHeader(
             kind: .complete,

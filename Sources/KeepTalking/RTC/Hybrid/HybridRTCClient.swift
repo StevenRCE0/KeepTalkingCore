@@ -72,6 +72,8 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     private var routeState: HybridRouteState = .sfu
     private var currentP2PClient: KeepTalkingP2PRTCClient?
     private var p2pUpgradeTask: Task<Void, Never>?
+    private var p2pFailures: [UUID: Int] = [:]
+    private let maxP2PFailures = 3
     private var heartbeatTask: Task<Void, Never>?
     private var discoveredPeers = Set<UUID>()
     private var retiredP2PClients: [ObjectIdentifier: KeepTalkingP2PRTCClient] = [:]
@@ -314,7 +316,17 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
                 }
                 self.transition(to: .p2p(p2pClient))
                 self.debug("p2p route selected; keeping sfu as warm fallback")
+                if let peerID = p2pClient.remotePeerID {
+                    self.stateQueue.sync { self.p2pFailures[peerID] = 0 }
+                }
             } catch {
+                if let peerID = p2pClient.remotePeerID {
+                    self.stateQueue.sync {
+                        let count = (self.p2pFailures[peerID] ?? 0) + 1
+                        self.p2pFailures[peerID] = count
+                        self.debug("recorded p2p failure for peer=\(peerID.uuidString.lowercased()) count=\(count)")
+                    }
+                }
                 if self.isCurrentP2PClient(p2pClient) {
                     self.teardownP2PClient()
                 } else {
@@ -485,6 +497,15 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
             guard let self, let p2pClient,
                 self.isCurrentP2PClient(p2pClient)
             else { return }
+            
+            if let peerID = p2pClient.remotePeerID {
+                self.stateQueue.sync {
+                    let count = (self.p2pFailures[peerID] ?? 0) + 1
+                    self.p2pFailures[peerID] = count
+                    self.debug("recorded p2p degrade for peer=\(peerID.uuidString.lowercased()) count=\(count)")
+                }
+            }
+
             self.transition(to: .sfu, reason: reason)
             self.teardownP2PClient()
         }
@@ -606,7 +627,9 @@ final class KeepTalkingHybridRTCClient: KeepTalkingTransportClient,
     }
 
     private func peersSnapshot() -> [UUID] {
-        stateQueue.sync { Array(discoveredPeers) }
+        stateQueue.sync {
+            Array(discoveredPeers).filter { (p2pFailures[$0] ?? 0) < maxP2PFailures }
+        }
     }
 
     // MARK: - SFU envelope handling

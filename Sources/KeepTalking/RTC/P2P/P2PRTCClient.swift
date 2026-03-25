@@ -60,7 +60,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     private var channels = RTCChannelSet()
     private var pendingRemoteCandidates: [LKRTCIceCandidate] = []
     private var pendingSignals: [(UUID, KeepTalkingP2PSignalData)] = []
-    private var remotePeerID: UUID?
+    private(set) var remotePeerID: UUID?
     private var sentMessageCount = 0
     private var recvMessageCount = 0
     private var isStopping = false
