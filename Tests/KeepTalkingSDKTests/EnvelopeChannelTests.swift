@@ -34,28 +34,24 @@ struct EnvelopeChannelTests {
         #expect(envelope.channel == KeepTalkingEnvelopeChannel.chat)
     }
 
-    @Test("attachment envelopes use the blob channel")
-    func attachmentUsesBlobChannel() {
-        let context = KeepTalkingContext(
-            id: UUID(uuidString: "11000000-0000-0000-0000-000000000000")!
-        )
+    @Test("attachment envelopes use the chat channel")
+    func attachmentUsesChatChannel() {
         let envelope = KeepTalkingP2PEnvelope.attachment(
-            KeepTalkingContextAttachment(
+            KeepTalkingContextAttachmentDTO(
                 id: UUID(uuidString: "12000000-0000-0000-0000-000000000000")!,
-                context: context,
-                sender: .node(
-                    node: UUID(
-                        uuidString: "13000000-0000-0000-0000-000000000000"
-                    )!
-                ),
+                contextID: UUID(uuidString: "11000000-0000-0000-0000-000000000000")!,
+                parentMessageID: UUID(
+                    uuidString: "13000000-0000-0000-0000-000000000000"
+                )!,
                 blobID: "blob-1",
                 filename: "image.png",
                 mimeType: "image/png",
-                byteCount: 1024
+                byteCount: 1024,
+                sortIndex: 0
             )
         )
 
-        #expect(envelope.channel == KeepTalkingEnvelopeChannel.blob)
+        #expect(envelope.channel == KeepTalkingEnvelopeChannel.chat)
     }
 
     @Test("action call envelopes stay on the action channel")

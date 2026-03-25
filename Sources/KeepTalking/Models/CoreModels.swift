@@ -88,6 +88,13 @@ public struct KeepTalkingRuntimeStats: Sendable {
     public let retainedChannels: Int
     public let route: String?
 
+    public var outboundIsOpen: Bool {
+        outboundState == 1
+    }
+    public var inboundIsOpen: Bool {
+        inboundState == 1
+    }
+
     init(
         sent: Int,
         received: Int,
@@ -264,7 +271,7 @@ public struct KeepTalkingAsymmetricCipherEnvelope: Codable, Sendable {
 
 public enum KeepTalkingP2PEnvelope: Codable, Sendable {
     case message(KeepTalkingContextMessage)
-    case attachment(KeepTalkingContextAttachment)
+    case attachment(KeepTalkingContextAttachmentDTO)
     case context(KeepTalkingContext)
     case node(KeepTalkingNode)
     case nodeStatus(KeepTalkingNodeStatus)
@@ -284,25 +291,92 @@ public enum KeepTalkingP2PEnvelope: Codable, Sendable {
     case p2pPresence(KeepTalkingP2PPresencePayload)
 }
 
-enum KeepTalkingEnvelopeChannel: Sendable {
+enum KeepTalkingEnvelopeChannel: Hashable, Sendable {
     case chat
     case blob
     case actionCall
     case signaling
 }
 
+extension KeepTalkingContextSyncEnvelope {
+    /// Node IDs involved in this sync exchange.
+    var participantNodeIDs: [UUID] {
+        switch self {
+            case .summaryRequest(let r):
+                return [r.requester, r.recipient]
+            case .summaryResult(let r):
+                return [r.requester, r.responder]
+            case .tailRequest(let r):
+                return [r.requester, r.recipient]
+            case .chunkRequest(let r):
+                return [r.requester, r.recipient]
+            case .messagesResult(let r):
+                return [r.requester, r.responder]
+            case .attachmentRequest(let r):
+                return [r.requester]
+        }
+    }
+}
+
 extension KeepTalkingP2PEnvelope {
+    /// All remote node IDs that can be inferred from the envelope payload.
+    var participantNodeIDs: [UUID] {
+        switch self {
+            case .message(let m):
+                if case .node(let id) = m.sender { return [id] }
+                return []
+            case .attachment:
+                return []
+            case .context(let ctx):
+                var ids: [UUID] = []
+                for msg in ctx.messages {
+                    if case .node(let id) = msg.sender { ids.append(id) }
+                }
+                for att in ctx.attachments {
+                    if case .node(let id) = att.sender { ids.append(id) }
+                }
+                return ids
+            case .node(let n):
+                return n.id.map { [$0] } ?? []
+            case .nodeStatus(let s):
+                return s.node.id.map { [$0] } ?? []
+            case .encryptedNodeStatus(let e):
+                return [e.senderNodeID, e.recipientNodeID]
+            case .contextSync(let e):
+                return e.participantNodeIDs
+            case .actionCallRequest(let r):
+                return [r.callerNodeID, r.targetNodeID]
+            case .requestAck(let a):
+                return [a.callerNodeID, a.targetNodeID]
+            case .actionCallResult(let r):
+                return [r.callerNodeID, r.targetNodeID]
+            case .encryptedActionCallRequest(let e),
+                .encryptedRequestAck(let e),
+                .encryptedActionCallResult(let e),
+                .encryptedActionCatalogRequest(let e),
+                .encryptedActionCatalogResult(let e):
+                return [e.senderNodeID, e.recipientNodeID]
+            case .actionCatalogRequest(let r):
+                return [r.callerNodeID, r.targetNodeID]
+            case .actionCatalogResult(let r):
+                return [r.callerNodeID, r.targetNodeID]
+            case .p2pSignal(let s):
+                return [s.from]
+            case .p2pPresence(let p):
+                return [p.node]
+        }
+    }
+
     var channel: KeepTalkingEnvelopeChannel {
         switch self {
             case .message,
+                .attachment,
                 .context,
                 .node,
                 .nodeStatus,
                 .encryptedNodeStatus,
                 .contextSync:
                 return .chat
-            case .attachment:
-                return .blob
             case .actionCallRequest,
                 .requestAck,
                 .actionCallResult,

@@ -183,7 +183,7 @@ enum KeepTalkingPacketTransportCrypto {
             case .message(let message):
                 return message.$context.id
             case .attachment(let attachment):
-                return attachment.$context.id
+                return attachment.contextID
             case .context(let context):
                 return context.id
             case .contextSync(let contextSyncEnvelope):
@@ -207,10 +207,8 @@ enum KeepTalkingPacketTransportCrypto {
                 return request.context
             case .messagesResult(let result):
                 return result.context
-            case .recentAttachmentsRequest(let request):
+            case .attachmentRequest(let request):
                 return request.context
-            case .attachmentsResult(let result):
-                return result.context
         }
     }
 }

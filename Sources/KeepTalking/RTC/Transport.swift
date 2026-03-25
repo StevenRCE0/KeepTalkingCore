@@ -3,6 +3,11 @@ import Foundation
 typealias KeepTalkingTransportContextSecretProvider = @Sendable (UUID) async throws -> Data?
 typealias KeepTalkingTransportBlobDataHandler = @Sendable (Data) -> Void
 
+enum KeepTalkingTransportRoute: String, Sendable {
+    case sfu
+    case p2p
+}
+
 protocol KeepTalkingTransportClient: AnyObject {
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)? { get set }
     var onBlobData: KeepTalkingTransportBlobDataHandler? { get set }
@@ -14,7 +19,11 @@ protocol KeepTalkingTransportClient: AnyObject {
     func start() async throws
     func stop()
     func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws
-    func sendBlobData(_ data: Data) throws
+    func sendBlobData(
+        _ data: Data,
+        via route: KeepTalkingTransportRoute?
+    ) throws
+    func currentRoute() -> KeepTalkingTransportRoute
     func runtimeStats() -> KeepTalkingRuntimeStats
     func requestP2PTrial()
     func preferReliableRoute(reason: String)

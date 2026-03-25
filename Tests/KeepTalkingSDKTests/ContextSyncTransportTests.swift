@@ -194,6 +194,9 @@ struct ContextSyncTransportTests {
         let sender = KeepTalkingContextMessage.Sender.node(
             node: UUID(uuidString: "44444444-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
         )
+        let attachmentMessageID = UUID(
+            uuidString: "00000000-0000-0000-0000-000000000303"
+        )!
         _ = try await seededContext(
             on: localStore,
             id: config.contextID,
@@ -214,7 +217,7 @@ struct ContextSyncTransportTests {
                     second: 2
                 ),
                 makeMessage(
-                    id: "00000000-0000-0000-0000-000000000303",
+                    id: attachmentMessageID.uuidString,
                     context: config.contextID,
                     sender: sender,
                     content: "three",
@@ -234,6 +237,19 @@ struct ContextSyncTransportTests {
                     content: "five",
                     second: 5
                 ),
+            ],
+            attachments: [
+                makeAttachment(
+                    id: "00000000-0000-0000-0000-000000000306",
+                    context: config.contextID,
+                    parentMessageID: attachmentMessageID,
+                    sender: sender,
+                    blobID: String(repeating: "f", count: 64),
+                    filename: "three.png",
+                    mimeType: "image/png",
+                    byteCount: 42,
+                    second: 3
+                )
             ]
         )
 
@@ -256,6 +272,9 @@ struct ContextSyncTransportTests {
                 UUID(uuidString: "00000000-0000-0000-0000-000000000305")!,
             ]
         )
+        #expect(result.attachments.map(\.parentMessageID) == [
+            attachmentMessageID
+        ])
     }
 
     @Test("incoming sync skips messages that already exist locally")
@@ -331,6 +350,78 @@ struct ContextSyncTransportTests {
         #expect(metadata.messageCount == 2)
     }
 
+    @Test("incoming attachment dto creates a pending attachment placeholder")
+    func saveIncomingAttachmentDTOCreatesPlaceholder() async throws {
+        let localStore = KeepTalkingInMemoryStore()
+        let config = KeepTalkingConfig(
+            signalURL: try #require(URL(string: "ws://127.0.0.1")),
+            contextID: UUID(uuidString: "81000000-0000-0000-0000-000000000000")!,
+            node: UUID(uuidString: "AAAAAAAA-8888-8888-8888-888888888888")!
+        )
+        let client = KeepTalkingClient(
+            config: config,
+            localStore: localStore
+        )
+
+        let sender = KeepTalkingContextMessage.Sender.node(
+            node: UUID(uuidString: "BBBBBBBB-8888-8888-8888-888888888888")!
+        )
+        let parentMessageID = UUID(
+            uuidString: "00000000-0000-0000-0000-000000000411"
+        )!
+        _ = try await seededContext(
+            on: localStore,
+            id: config.contextID,
+            chunkSize: 2,
+            messages: [
+                makeMessage(
+                    id: parentMessageID.uuidString,
+                    context: config.contextID,
+                    sender: sender,
+                    content: "",
+                    second: 1
+                )
+            ]
+        )
+
+        let attachments = try await client.saveIncomingAttachments(
+            [
+                KeepTalkingContextAttachmentDTO(
+                    id: UUID(
+                        uuidString: "00000000-0000-0000-0000-000000000412"
+                    )!,
+                    contextID: config.contextID,
+                    parentMessageID: parentMessageID,
+                    blobID: String(repeating: "d", count: 64),
+                    filename: "pending.png",
+                    mimeType: "image/png",
+                    byteCount: 1234,
+                    sortIndex: 0
+                )
+            ]
+        )
+
+        #expect(attachments.count == 1)
+        #expect(attachments.first?.$parentMessage.id == parentMessageID)
+        let attachmentID = try #require(attachments[0].id)
+
+        let storedAttachment = try #require(
+            try await KeepTalkingContextAttachment.query(on: localStore.database)
+                .filter(\.$id, .equal, attachmentID)
+                .first()
+        )
+        #expect(storedAttachment.filename == "pending.png")
+        #expect(storedAttachment.sender == sender)
+
+        let blobRecord = try #require(
+            try await KeepTalkingBlobRecord.query(on: localStore.database)
+                .filter(\.$id, .equal, attachments[0].blobID)
+                .first()
+        )
+        #expect(blobRecord.availability == .missing)
+        #expect(blobRecord.byteCount == 1234)
+    }
+
     @Test("summary wait resolves when the reply arrives immediately during send")
     func immediateSummaryReplyDoesNotRaceThePendingWait() async throws {
         let localStore = KeepTalkingInMemoryStore()
@@ -368,8 +459,8 @@ struct ContextSyncTransportTests {
         #expect(result == expected)
     }
 
-    @Test("recent attachment sync returns only attachments inside the lookback window")
-    func recentAttachmentDispatchReturnsRecentAttachments() async throws {
+    @Test("attachment sync request includes only recent missing hashes")
+    func attachmentRequestReturnsRecentMissingHashes() async throws {
         let localStore = KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
             signalURL: try #require(URL(string: "ws://127.0.0.1")),
@@ -408,30 +499,57 @@ struct ContextSyncTransportTests {
             createdAt: Date(timeIntervalSince1970: 20),
             sortIndex: 0
         )
+        let missingRecentAttachment = KeepTalkingContextAttachment(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000503")!,
+            context: context,
+            sender: sender,
+            blobID: String(repeating: "c", count: 64),
+            filename: "missing.png",
+            mimeType: "image/png",
+            byteCount: 30,
+            createdAt: Date(timeIntervalSince1970: 25),
+            sortIndex: 1
+        )
         try await oldAttachment.save(on: localStore.database)
         try await recentAttachment.save(on: localStore.database)
+        try await missingRecentAttachment.save(on: localStore.database)
 
-        let result = try await client.dispatchContextSyncRecentAttachmentsRequest(
-            to: config.node,
-            contextID: config.contextID,
+        let stored = try client.blobStore.put(
+            data: Data([0x01, 0x02]),
+            blobID: recentAttachment.blobID,
+            pathExtension: "png"
+        )
+        try await client.upsertBlobRecord(
+            blobID: recentAttachment.blobID,
+            relativePath: stored.relativePath,
+            availability: .ready,
+            mimeType: recentAttachment.mimeType,
+            byteCount: recentAttachment.byteCount,
+            receivedBytes: recentAttachment.byteCount
+        )
+
+        let request = try await client.contextSyncAttachmentRequest(
+            in: config.contextID,
             since: Date(timeIntervalSince1970: 15)
         )
 
-        #expect(result.attachments.compactMap(\.id) == [
-            UUID(uuidString: "00000000-0000-0000-0000-000000000502")!
-        ])
+        #expect(request?.hashes == [missingRecentAttachment.blobID])
     }
 
     private func seededContext(
         on localStore: KeepTalkingInMemoryStore,
         id: UUID,
         chunkSize: Int,
-        messages: [KeepTalkingContextMessage]
+        messages: [KeepTalkingContextMessage],
+        attachments: [KeepTalkingContextAttachment] = []
     ) async throws -> KeepTalkingContext {
         let context = KeepTalkingContext(id: id)
         try await context.save(on: localStore.database)
         for message in messages {
             try await message.save(on: localStore.database)
+        }
+        for attachment in attachments {
+            try await attachment.save(on: localStore.database)
         }
         try await context.refreshSyncMetadata(
             on: localStore.database,
@@ -457,6 +575,31 @@ struct ContextSyncTransportTests {
             sender: sender,
             content: content,
             timestamp: Date(timeIntervalSince1970: second)
+        )
+    }
+
+    private func makeAttachment(
+        id: String,
+        context: UUID,
+        parentMessageID: UUID,
+        sender: KeepTalkingContextMessage.Sender,
+        blobID: String,
+        filename: String,
+        mimeType: String,
+        byteCount: Int,
+        second: TimeInterval
+    ) -> KeepTalkingContextAttachment {
+        KeepTalkingContextAttachment(
+            id: UUID(uuidString: id)!,
+            context: KeepTalkingContext(id: context),
+            parentMessageID: parentMessageID,
+            sender: sender,
+            blobID: blobID,
+            filename: filename,
+            mimeType: mimeType,
+            byteCount: byteCount,
+            createdAt: Date(timeIntervalSince1970: second),
+            sortIndex: 0
         )
     }
 }

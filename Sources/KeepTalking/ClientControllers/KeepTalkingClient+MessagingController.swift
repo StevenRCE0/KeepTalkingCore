@@ -5,7 +5,6 @@ import UniformTypeIdentifiers
 
 extension KeepTalkingClient {
     private static let maxPushWakePreviewCharacters = 160
-    private static let blobChunkSize = 64 * 1024
 
     /// Persists and broadcasts a message within a conversation context.
     ///
@@ -62,13 +61,20 @@ extension KeepTalkingClient {
         try await persistedContext.refreshSyncMetadata(on: localStore.database)
         if emitLocalEnvelope {
             onEnvelope?(.message(message))
-            savedAttachments.forEach { onEnvelope?(.attachment($0)) }
+            for attachment in savedAttachments {
+                if let attachmentDTO = KeepTalkingContextAttachmentDTO(attachment) {
+                    onEnvelope?(.attachment(attachmentDTO))
+                }
+            }
         }
 
         _ = try await ensureGroupChatSecret(for: persistedContext.requireID())
         try rtcClient.sendEnvelope(.message(message))
         for attachment in savedAttachments {
-            try rtcClient.sendEnvelope(.attachment(attachment))
+            guard let attachmentDTO = KeepTalkingContextAttachmentDTO(attachment) else {
+                continue
+            }
+            try rtcClient.sendEnvelope(.attachment(attachmentDTO))
         }
         scheduleOutgoingBlobTransfers(for: savedAttachments)
         guard message.type == .message else {
@@ -146,12 +152,18 @@ extension KeepTalkingClient {
         try await saveIncomingMessages([message], in: message.$context.id)
     }
 
-    func handleIncomingAttachment(_ attachment: KeepTalkingContextAttachment)
+    func handleIncomingAttachment(_ attachment: KeepTalkingContextAttachmentDTO)
         async throws
     {
-        try await saveIncomingAttachments(
-            [attachment],
-            in: attachment.$context.id
+        let savedAttachments = try await saveIncomingAttachments(
+            [attachment]
+        )
+        guard !savedAttachments.isEmpty else {
+            return
+        }
+        try await requestAttachmentBlobsIfNeeded(
+            for: savedAttachments,
+            in: attachment.contextID
         )
     }
 
@@ -351,39 +363,76 @@ extension KeepTalkingClient {
     }
 
     func saveIncomingAttachments(
-        _ attachments: [KeepTalkingContextAttachment],
-        in contextID: UUID
-    ) async throws {
+        _ attachments: [KeepTalkingContextAttachmentDTO]
+    ) async throws -> [KeepTalkingContextAttachment] {
         guard !attachments.isEmpty else {
-            return
+            return []
         }
 
-        let newAttachments = try await filterNewAttachments(attachments)
+        let newAttachments = try await filterNewAttachmentDTOs(attachments)
         guard !newAttachments.isEmpty else {
-            return
+            return []
         }
 
-        let latestTimestamp = newAttachments.map(\.createdAt).max() ?? Date()
-        let persistedContext = try await upsertContext(
-            KeepTalkingContext(
-                id: contextID,
-                updatedAt: latestTimestamp
-            )
+        let parentMessageIDs = Array(
+            Set(newAttachments.map(\.parentMessageID))
         )
+        let parentMessages = try await KeepTalkingContextMessage.query(
+            on: localStore.database
+        )
+        .filter(\.$id ~~ parentMessageIDs)
+        .all()
+
+        var parentMessagesByID: [UUID: KeepTalkingContextMessage] = [:]
+        for parentMessage in parentMessages {
+            guard let messageID = parentMessage.id else {
+                continue
+            }
+            parentMessagesByID[messageID] = parentMessage
+        }
+        var contextsByID: [UUID: KeepTalkingContext] = [:]
+        var savedAttachments: [KeepTalkingContextAttachment] = []
 
         for attachment in newAttachments {
-            attachment.$context.id = try persistedContext.requireID()
-            attachment.$context.value = persistedContext
-            try await attachment.save(on: localStore.database)
-            try await ensureSenderRelation(for: attachment.sender)
-            try await ensureBlobRecordPlaceholder(for: attachment)
-        }
+            guard let parentMessage = parentMessagesByID[attachment.parentMessageID]
+            else {
+                rtcClient.debug(
+                    "ignored attachment dto missing parent message attachment=\(attachment.id.uuidString.lowercased()) parent=\(attachment.parentMessageID.uuidString.lowercased())"
+                )
+                continue
+            }
+            let parentContextID = parentMessage.$context.id
+            guard parentContextID == attachment.contextID else {
+                rtcClient.debug(
+                    "ignored attachment dto context mismatch attachment=\(attachment.id.uuidString.lowercased()) parent=\(attachment.parentMessageID.uuidString.lowercased())"
+                )
+                continue
+            }
 
-        persistedContext.updatedAt = max(
-            persistedContext.updatedAt ?? latestTimestamp,
-            latestTimestamp
-        )
-        try await persistedContext.refreshSyncMetadata(on: localStore.database)
+            let persistedContext: KeepTalkingContext
+            if let existing = contextsByID[parentContextID] {
+                persistedContext = existing
+            } else {
+                let context = try await upsertContext(
+                    KeepTalkingContext(
+                        id: parentContextID,
+                        updatedAt: parentMessage.timestamp
+                    )
+                )
+                contextsByID[parentContextID] = context
+                persistedContext = context
+            }
+
+            let model = attachment.makeModel(
+                in: persistedContext,
+                parentMessage: parentMessage
+            )
+            try await model.save(on: localStore.database)
+            try await ensureSenderRelation(for: model.sender)
+            try await ensureBlobRecordPlaceholder(for: model)
+            savedAttachments.append(model)
+        }
+        return savedAttachments
     }
 
     func upsertContext(_ context: KeepTalkingContext) async throws
@@ -490,6 +539,38 @@ extension KeepTalkingClient {
         }
     }
 
+    private func filterNewAttachmentDTOs(
+        _ attachments: [KeepTalkingContextAttachmentDTO]
+    ) async throws -> [KeepTalkingContextAttachmentDTO] {
+        var seen = Set<UUID>()
+        var uniqueAttachments: [KeepTalkingContextAttachmentDTO] = []
+        var identifiedAttachments: [UUID] = []
+
+        for attachment in attachments {
+            let attachmentID = attachment.id
+            guard seen.insert(attachmentID).inserted else {
+                continue
+            }
+            uniqueAttachments.append(attachment)
+            identifiedAttachments.append(attachmentID)
+        }
+
+        guard !identifiedAttachments.isEmpty else {
+            return uniqueAttachments
+        }
+
+        let existingIDs = Set(
+            try await KeepTalkingContextAttachment.query(on: localStore.database)
+                .filter(\.$id ~~ identifiedAttachments)
+                .all()
+                .compactMap(\.id)
+        )
+
+        return uniqueAttachments.filter { attachment in
+            !existingIDs.contains(attachment.id)
+        }
+    }
+
     private func ensureSenderRelation(
         for sender: KeepTalkingContextMessage.Sender
     ) async throws {
@@ -591,449 +672,6 @@ extension KeepTalkingClient {
         return saved
     }
 
-    func upsertBlobRecord(
-        blobID: String,
-        relativePath: String?,
-        availability: KeepTalkingBlobAvailability,
-        mimeType: String,
-        byteCount: Int,
-        receivedBytes: Int
-    ) async throws {
-        if let existing = try await KeepTalkingBlobRecord.query(
-            on: localStore.database
-        )
-        .filter(\.$id, .equal, blobID)
-        .first() {
-            existing.relativePath = relativePath ?? existing.relativePath
-            existing.availability = availability
-            existing.mimeType = mimeType
-            existing.byteCount = byteCount
-            existing.receivedBytes = max(existing.receivedBytes, receivedBytes)
-            existing.lastAccessedAt = Date()
-            try await existing.save(on: localStore.database)
-            return
-        }
-
-        let record = KeepTalkingBlobRecord(
-            blobID: blobID,
-            relativePath: relativePath,
-            availability: availability,
-            mimeType: mimeType,
-            byteCount: byteCount,
-            receivedBytes: receivedBytes,
-            lastAccessedAt: Date()
-        )
-        try await record.save(on: localStore.database)
-    }
-
-    private func ensureBlobRecordPlaceholder(
-        for attachment: KeepTalkingContextAttachment
-    ) async throws {
-        let blobID = attachment.blobID
-        guard
-            try await KeepTalkingBlobRecord.query(on: localStore.database)
-                .filter(\.$id, .equal, blobID)
-                .first() == nil
-        else {
-            return
-        }
-
-        let record = KeepTalkingBlobRecord(
-            blobID: blobID,
-            relativePath: nil,
-            availability: .missing,
-            mimeType: attachment.mimeType,
-            byteCount: attachment.byteCount,
-            receivedBytes: 0
-        )
-        try await record.save(on: localStore.database)
-    }
-
-    private func scheduleOutgoingBlobTransfers(
-        for attachments: [KeepTalkingContextAttachment]
-    ) {
-        guard !attachments.isEmpty else {
-            return
-        }
-
-        let uniqueAttachments = Dictionary(
-            attachments.map { ($0.blobID, $0) },
-            uniquingKeysWith: { first, _ in first }
-        ).values.sorted {
-            if $0.createdAt != $1.createdAt {
-                return $0.createdAt < $1.createdAt
-            }
-            return $0.sortIndex < $1.sortIndex
-        }
-
-        Task { [weak self] in
-            guard let self else {
-                return
-            }
-            for attachment in uniqueAttachments {
-                do {
-                    try await self.sendBlobFrames(
-                        blobID: attachment.blobID,
-                        mimeType: attachment.mimeType,
-                        pathExtension: self.pathExtension(for: attachment),
-                        expectedByteCount: attachment.byteCount,
-                        recipientNodeID: nil
-                    )
-                } catch {
-                    self.rtcClient.debug(
-                        "blob push failed blob=\(attachment.blobID) error=\(error.localizedDescription)"
-                    )
-                }
-            }
-        }
-    }
-
-    func handleIncomingBlobFrameData(_ data: Data) async throws {
-        let frame = try KeepTalkingBlobTransferCodec.decode(data)
-        switch frame.header.kind {
-            case .request:
-                try await handleIncomingBlobRequest(frame.header)
-            case .chunk:
-                try await handleIncomingBlobChunk(frame)
-            case .complete:
-                try await handleIncomingBlobComplete(frame.header)
-        }
-    }
-
-    func requestRecentMissingBlobs(from node: UUID, in contextID: UUID) async throws {
-        guard config.recentAttachmentSyncLookback > 0 else {
-            return
-        }
-
-        let cutoff = Date(
-            timeIntervalSinceNow: -config.recentAttachmentSyncLookback
-        )
-        let attachments = try await recentAttachments(
-            in: contextID,
-            since: cutoff
-        )
-        var requestedBlobIDs = Set<String>()
-
-        for attachment in attachments {
-            guard requestedBlobIDs.insert(attachment.blobID).inserted else {
-                continue
-            }
-            guard try await isBlobReady(blobID: attachment.blobID) == false else {
-                continue
-            }
-            try sendBlobRequest(for: attachment, to: node)
-        }
-    }
-
-    private func handleIncomingBlobRequest(
-        _ header: KeepTalkingBlobTransferHeader
-    ) async throws {
-        guard header.recipientNodeID == config.node else {
-            return
-        }
-
-        try await sendBlobFrames(
-            blobID: header.blobID,
-            mimeType: header.mimeType ?? "application/octet-stream",
-            pathExtension: normalizedPathExtension(header.pathExtension),
-            expectedByteCount: header.byteCount ?? 0,
-            recipientNodeID: header.senderNodeID
-        )
-    }
-
-    private func handleIncomingBlobChunk(
-        _ frame: KeepTalkingBlobTransferFrame
-    ) async throws {
-        let header = frame.header
-        guard shouldAcceptBlobFrame(header) else {
-            return
-        }
-        guard try await isBlobReady(blobID: header.blobID) == false else {
-            return
-        }
-
-        let byteCount = max(header.byteCount ?? frame.payload.count, 0)
-        let receivedBytes = try blobStore.appendPartial(
-            data: frame.payload,
-            blobID: header.blobID,
-            reset: header.chunkIndex == 0
-        )
-        try await upsertBlobRecord(
-            blobID: header.blobID,
-            relativePath: nil,
-            availability: .partial,
-            mimeType: header.mimeType ?? "application/octet-stream",
-            byteCount: byteCount,
-            receivedBytes: receivedBytes
-        )
-    }
-
-    private func handleIncomingBlobComplete(
-        _ header: KeepTalkingBlobTransferHeader
-    ) async throws {
-        guard shouldAcceptBlobFrame(header) else {
-            return
-        }
-        guard try await isBlobReady(blobID: header.blobID) == false else {
-            return
-        }
-
-        let byteCount = max(header.byteCount ?? 0, 0)
-        let mimeType = header.mimeType ?? "application/octet-stream"
-        let pathExtension = normalizedPathExtension(header.pathExtension)
-
-        if byteCount == 0 {
-            let stored = try blobStore.put(
-                data: Data(),
-                blobID: header.blobID,
-                pathExtension: pathExtension
-            )
-            try await upsertBlobRecord(
-                blobID: header.blobID,
-                relativePath: stored.relativePath,
-                availability: .ready,
-                mimeType: mimeType,
-                byteCount: 0,
-                receivedBytes: 0
-            )
-            notifyBlobAvailabilityChange(
-                contextID: config.contextID,
-                blobID: header.blobID
-            )
-            return
-        }
-
-        let partialData = try blobStore.partialData(blobID: header.blobID)
-        guard partialData.count == byteCount else {
-            try await upsertBlobRecord(
-                blobID: header.blobID,
-                relativePath: nil,
-                availability: .partial,
-                mimeType: mimeType,
-                byteCount: byteCount,
-                receivedBytes: partialData.count
-            )
-            rtcClient.debug(
-                "blob complete deferred blob=\(header.blobID) expected=\(byteCount) received=\(partialData.count)"
-            )
-            return
-        }
-
-        guard hexDigest(for: partialData) == header.blobID else {
-            try? blobStore.removePartial(blobID: header.blobID)
-            try await upsertBlobRecord(
-                blobID: header.blobID,
-                relativePath: nil,
-                availability: .missing,
-                mimeType: mimeType,
-                byteCount: byteCount,
-                receivedBytes: 0
-            )
-            rtcClient.debug("blob digest mismatch blob=\(header.blobID)")
-            return
-        }
-
-        let stored = try blobStore.promotePartial(
-            blobID: header.blobID,
-            pathExtension: pathExtension
-        )
-        try await upsertBlobRecord(
-            blobID: header.blobID,
-            relativePath: stored.relativePath,
-            availability: .ready,
-            mimeType: mimeType,
-            byteCount: byteCount,
-            receivedBytes: byteCount
-        )
-        notifyBlobAvailabilityChange(
-            contextID: config.contextID,
-            blobID: header.blobID
-        )
-    }
-
-    private func sendBlobFrames(
-        blobID: String,
-        mimeType: String,
-        pathExtension: String?,
-        expectedByteCount: Int,
-        recipientNodeID: UUID?
-    ) async throws {
-        guard let blobRecord = try await blobRecord(for: blobID),
-            blobRecord.availability == .ready,
-            let relativePath = blobRecord.relativePath
-        else {
-            throw KeepTalkingBlobStoreError.blobNotFound(blobID)
-        }
-
-        let fileURL = blobStore.fileURL(forRelativePath: relativePath)
-        let fileAttributes = try FileManager.default.attributesOfItem(
-            atPath: fileURL.path
-        )
-        let fileByteCount =
-            (fileAttributes[.size] as? NSNumber)?.intValue ?? expectedByteCount
-        let byteCount = max(fileByteCount, expectedByteCount)
-        let chunkCount =
-            byteCount == 0
-            ? 0
-            : (byteCount + Self.blobChunkSize - 1) / Self.blobChunkSize
-
-        let handle = try FileHandle(forReadingFrom: fileURL)
-        defer { try? handle.close() }
-
-        var chunkIndex = 0
-        while true {
-            let chunk = handle.readData(ofLength: Self.blobChunkSize)
-            guard !chunk.isEmpty else {
-                break
-            }
-
-            let header = KeepTalkingBlobTransferHeader(
-                kind: .chunk,
-                senderNodeID: config.node,
-                recipientNodeID: recipientNodeID,
-                blobID: blobID,
-                mimeType: mimeType,
-                pathExtension: pathExtension,
-                byteCount: byteCount,
-                chunkIndex: chunkIndex,
-                chunkCount: chunkCount,
-                chunkByteCount: chunk.count
-            )
-            try rtcClient.sendBlobData(
-                try KeepTalkingBlobTransferCodec.encode(
-                    KeepTalkingBlobTransferFrame(
-                        header: header,
-                        payload: chunk
-                    )
-                )
-            )
-            chunkIndex += 1
-        }
-
-        let completionHeader = KeepTalkingBlobTransferHeader(
-            kind: .complete,
-            senderNodeID: config.node,
-            recipientNodeID: recipientNodeID,
-            blobID: blobID,
-            mimeType: mimeType,
-            pathExtension: pathExtension,
-            byteCount: byteCount,
-            chunkIndex: nil,
-            chunkCount: chunkCount,
-            chunkByteCount: nil
-        )
-        try rtcClient.sendBlobData(
-            try KeepTalkingBlobTransferCodec.encode(
-                KeepTalkingBlobTransferFrame(
-                    header: completionHeader,
-                    payload: Data()
-                )
-            )
-        )
-    }
-
-    private func sendBlobRequest(
-        for attachment: KeepTalkingContextAttachment,
-        to node: UUID
-    ) throws {
-        let header = KeepTalkingBlobTransferHeader(
-            kind: .request,
-            senderNodeID: config.node,
-            recipientNodeID: node,
-            blobID: attachment.blobID,
-            mimeType: attachment.mimeType,
-            pathExtension: pathExtension(for: attachment),
-            byteCount: attachment.byteCount,
-            chunkIndex: nil,
-            chunkCount: nil,
-            chunkByteCount: nil
-        )
-        try rtcClient.sendBlobData(
-            try KeepTalkingBlobTransferCodec.encode(
-                KeepTalkingBlobTransferFrame(
-                    header: header,
-                    payload: Data()
-                )
-            )
-        )
-    }
-
-    private func recentAttachments(
-        in contextID: UUID,
-        since: Date
-    ) async throws -> [KeepTalkingContextAttachment] {
-        let attachments = try await KeepTalkingContextAttachment.query(
-            on: localStore.database
-        )
-            .filter(\.$context.$id, .equal, contextID)
-            .all()
-        return attachments
-            .filter { $0.createdAt >= since }
-            .sorted {
-                if $0.createdAt != $1.createdAt {
-                    return $0.createdAt < $1.createdAt
-                }
-                if $0.sortIndex != $1.sortIndex {
-                    return $0.sortIndex < $1.sortIndex
-                }
-                return ($0.id?.uuidString ?? "") < ($1.id?.uuidString ?? "")
-            }
-    }
-
-    private func blobRecord(for blobID: String) async throws -> KeepTalkingBlobRecord? {
-        try await KeepTalkingBlobRecord.query(on: localStore.database)
-            .filter(\.$id, .equal, blobID)
-            .first()
-    }
-
-    private func isBlobReady(blobID: String) async throws -> Bool {
-        guard let blobRecord = try await blobRecord(for: blobID),
-            blobRecord.availability == .ready
-        else {
-            return false
-        }
-
-        do {
-            _ = try blobStore.read(
-                relativePath: blobRecord.relativePath,
-                blobID: blobID
-            )
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    private func shouldAcceptBlobFrame(
-        _ header: KeepTalkingBlobTransferHeader
-    ) -> Bool {
-        switch header.kind {
-            case .request:
-                return header.recipientNodeID == config.node
-            case .chunk, .complete:
-                guard let recipientNodeID = header.recipientNodeID else {
-                    return true
-                }
-                return recipientNodeID == config.node
-        }
-    }
-
-    private func pathExtension(
-        for attachment: KeepTalkingContextAttachment
-    ) -> String? {
-        normalizedPathExtension(
-            URL(fileURLWithPath: attachment.filename).pathExtension
-        )
-    }
-
-    private func normalizedPathExtension(_ pathExtension: String?) -> String? {
-        guard let pathExtension = pathExtension?.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        ), !pathExtension.isEmpty else {
-            return nil
-        }
-        return pathExtension
-    }
 
     private func resolvedAttachmentFilename(
         _ attachmentInput: KeepTalkingLocalAttachmentInput
@@ -1125,10 +763,6 @@ extension KeepTalkingClient {
         let preview = String(decoding: data.prefix(4_000), as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return preview.isEmpty ? nil : preview
-    }
-
-    private func hexDigest(for data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Returns the symmetric key for a context, creating one if needed.

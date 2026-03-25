@@ -1,14 +1,6 @@
 import FluentKit
 import Foundation
 
-private actor KeepTalkingBlobFrameProcessor {
-    func process(
-        _ operation: @Sendable () async throws -> Void
-    ) async rethrows {
-        try await operation()
-    }
-}
-
 public enum KeepTalkingClientError: LocalizedError {
     case kvServiceNotConfigured
     case missingNode
@@ -161,6 +153,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
     var actionApprovalHandler: ActionApprovalHandler?
     var primitiveActionPostResultHandler: PrimitiveActionPostResultHandler?
 
+    // MARK: NodeState Broadcast properties
+    var nodeStateBroadcastDebounceTask: Task<Void, Never>?
+
+    // MARK: Action Call properties
     let actionCallQueue = DispatchQueue(
         label: "KeepTalking.client.action-call"
     )
@@ -173,18 +169,27 @@ public final class KeepTalkingClient: @unchecked Sendable {
     var inFlightIncomingActionCalls: [UUID: Task<KeepTalkingActionCallResult, Never>] = [:]
     var completedIncomingActionCallResults: [UUID: KeepTalkingActionCallResult] = [:]
     var completedIncomingActionCallOrder: [UUID] = []
+
+    // MARK: Action Catalog properties
     let actionCatalogQueue = DispatchQueue(
         label: "KeepTalking.client.action-catalog"
     )
     var pendingActionCatalogResults: [UUID: CheckedContinuation<KeepTalkingActionCatalogResult, Error>] = [:]
+
+    // MARK: Context Sync properties
     let contextSyncQueue = DispatchQueue(
         label: "KeepTalking.client.context-sync"
     )
     var pendingContextSyncSummaries: [UUID: CheckedContinuation<KeepTalkingContextSyncSummaryResult, Error>] = [:]
     var pendingContextSyncMessages: [UUID: CheckedContinuation<KeepTalkingContextSyncMessagesResult, Error>] = [:]
-    var pendingContextSyncAttachments: [UUID: CheckedContinuation<KeepTalkingContextSyncAttachmentsResult, Error>] = [:]
-    var nodeStateBroadcastDebounceTask: Task<Void, Never>?
-    private let blobFrameProcessor = KeepTalkingBlobFrameProcessor()
+
+    // MARK: Blob request/response properties
+    let blobRequestResponseQueue = DispatchQueue(
+        label: "KeepTalking.client.blob-request-response"
+    )
+    var pendingBlobRequestResponseTask: Task<Void, Never>?
+
+    let blobFrameProcessor = KeepTalkingBlobFrameProcessor()
 
     /// Creates a client with its transport, storage, and optional AI integrations.
     ///

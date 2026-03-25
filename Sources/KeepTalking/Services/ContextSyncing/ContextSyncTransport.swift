@@ -236,65 +236,58 @@ public struct KeepTalkingContextSyncMessagesResult: Codable, Sendable {
     public let requester: UUID
     public let responder: UUID
     public let messages: [KeepTalkingContextMessage]
+    public let attachments: [KeepTalkingContextAttachmentDTO]
 
     public init(
         request: UUID,
         context: UUID,
         requester: UUID,
         responder: UUID,
-        messages: [KeepTalkingContextMessage]
+        messages: [KeepTalkingContextMessage],
+        attachments: [KeepTalkingContextAttachmentDTO] = []
     ) {
         self.request = request
         self.context = context
         self.requester = requester
         self.responder = responder
         self.messages = messages
-    }
-}
-
-public struct KeepTalkingContextSyncRecentAttachmentsRequest: Codable,
-    Sendable, Equatable
-{
-    public let request: UUID
-    public let context: UUID
-    public let requester: UUID
-    public let recipient: UUID
-    public let since: Date
-
-    public init(
-        request: UUID = UUID(),
-        context: UUID,
-        requester: UUID,
-        recipient: UUID,
-        since: Date
-    ) {
-        self.request = request
-        self.context = context
-        self.requester = requester
-        self.recipient = recipient
-        self.since = since
-    }
-}
-
-public struct KeepTalkingContextSyncAttachmentsResult: Codable, Sendable {
-    public let request: UUID
-    public let context: UUID
-    public let requester: UUID
-    public let responder: UUID
-    public let attachments: [KeepTalkingContextAttachment]
-
-    public init(
-        request: UUID,
-        context: UUID,
-        requester: UUID,
-        responder: UUID,
-        attachments: [KeepTalkingContextAttachment]
-    ) {
-        self.request = request
-        self.context = context
-        self.requester = requester
-        self.responder = responder
         self.attachments = attachments
+    }
+}
+
+public struct KeepTalkingContextSyncAttachmentRequest: Codable, Sendable,
+    Equatable
+{
+    public let context: UUID
+    public let requester: UUID
+    public let hashes: [String]
+
+    public init(
+        context: UUID,
+        requester: UUID,
+        hashes: [String]
+    ) {
+        self.context = context
+        self.requester = requester
+        self.hashes = Self.normalized(hashes)
+    }
+
+    private static func normalized(_ hashes: [String]) -> [String] {
+        var seen = Set<String>()
+        var normalized: [String] = []
+
+        for hash in hashes {
+            let trimmed = hash.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                continue
+            }
+            guard seen.insert(trimmed).inserted else {
+                continue
+            }
+            normalized.append(trimmed)
+        }
+
+        return normalized
     }
 }
 
@@ -304,8 +297,7 @@ public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
     case tailRequest(KeepTalkingContextSyncTailRequest)
     case chunkRequest(KeepTalkingContextSyncChunkRequest)
     case messagesResult(KeepTalkingContextSyncMessagesResult)
-    case recentAttachmentsRequest(KeepTalkingContextSyncRecentAttachmentsRequest)
-    case attachmentsResult(KeepTalkingContextSyncAttachmentsResult)
+    case attachmentRequest(KeepTalkingContextSyncAttachmentRequest)
 }
 
 public struct KeepTalkingContextSyncSnapshot: Sendable {
@@ -313,10 +305,12 @@ public struct KeepTalkingContextSyncSnapshot: Sendable {
     public let summary: KeepTalkingContextSyncMetadata
 
     private let messagesBySender: [KeepTalkingContextMessage.Sender: [KeepTalkingContextMessage]]
+    private let attachmentsByMessageID: [UUID: [KeepTalkingContextAttachmentDTO]]
 
     public init(
         context: UUID,
         messages: [KeepTalkingContextMessage],
+        attachments: [KeepTalkingContextAttachment],
         chunkSize: Int = KeepTalkingContextSyncMetadata.defaultChunkSize
     ) {
         self.context = context
@@ -328,6 +322,17 @@ public struct KeepTalkingContextSyncSnapshot: Sendable {
             grouping: messages,
             by: \.sender
         ).mapValues { $0.sortedForSync() }
+        self.attachmentsByMessageID = Dictionary(
+            grouping: attachments.compactMap(KeepTalkingContextAttachmentDTO.init),
+            by: \.parentMessageID
+        ).mapValues {
+            $0.sorted { lhs, rhs in
+                if lhs.sortIndex != rhs.sortIndex {
+                    return lhs.sortIndex < rhs.sortIndex
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+        }
     }
 
     public func messages(
@@ -352,6 +357,21 @@ public struct KeepTalkingContextSyncSnapshot: Sendable {
             )
         }.sortedForSync()
     }
+
+    public func attachments(
+        for messages: [KeepTalkingContextMessage]
+    ) -> [KeepTalkingContextAttachmentDTO] {
+        var attachments: [KeepTalkingContextAttachmentDTO] = []
+        for message in messages {
+            guard let messageID = message.id else {
+                continue
+            }
+            attachments.append(
+                contentsOf: attachmentsByMessageID[messageID, default: []]
+            )
+        }
+        return attachments
+    }
 }
 
 extension KeepTalkingClient {
@@ -369,9 +389,15 @@ extension KeepTalkingClient {
         let messages = try await KeepTalkingContextMessage.query(on: localStore.database)
             .filter(\.$context.$id, .equal, context)
             .all()
+        let attachments = try await KeepTalkingContextAttachment.query(
+            on: localStore.database
+        )
+        .filter(\.$context.$id, .equal, context)
+        .all()
         return KeepTalkingContextSyncSnapshot(
             context: context,
             messages: messages,
+            attachments: attachments,
             chunkSize: chunkSize
         )
     }

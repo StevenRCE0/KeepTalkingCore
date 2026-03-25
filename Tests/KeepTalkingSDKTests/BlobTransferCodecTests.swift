@@ -10,6 +10,7 @@ struct BlobTransferCodecTests {
         let frame = KeepTalkingBlobTransferFrame(
             header: KeepTalkingBlobTransferHeader(
                 kind: .chunk,
+                transferID: UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!,
                 senderNodeID: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
                 recipientNodeID: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
                 blobID: String(repeating: "c", count: 64),
@@ -34,7 +35,8 @@ struct BlobTransferCodecTests {
         let encoded = try KeepTalkingBlobTransferCodec.encode(
             KeepTalkingBlobTransferFrame(
                 header: KeepTalkingBlobTransferHeader(
-                    kind: .request,
+                    kind: .complete,
+                    transferID: UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!,
                     senderNodeID: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
                     recipientNodeID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                     blobID: String(repeating: "d", count: 64),

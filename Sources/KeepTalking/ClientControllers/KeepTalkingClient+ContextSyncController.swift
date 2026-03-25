@@ -33,10 +33,7 @@ extension KeepTalkingClient {
                 let tailResult = try await dispatchContextSyncTailRequest(
                     tailRequest
                 )
-                try await saveIncomingMessages(
-                    tailResult.messages,
-                    in: contextID
-                )
+                try await persistContextSyncMessagesResult(tailResult)
             }
 
             localSummary = try await contextSyncSnapshot(
@@ -53,30 +50,19 @@ extension KeepTalkingClient {
                 let chunkResult = try await dispatchContextSyncChunkRequest(
                     chunkRequest
                 )
-                try await saveIncomingMessages(
-                    chunkResult.messages,
-                    in: contextID
-                )
+                try await persistContextSyncMessagesResult(chunkResult)
             }
 
-            if config.recentAttachmentSyncLookback > 0 {
-                let recentAttachmentsResult =
-                    try await dispatchContextSyncRecentAttachmentsRequest(
-                        to: node,
-                        contextID: contextID,
+            Task.detached(priority: .background) { [self] in
+                if config.recentAttachmentSyncLookback > 0 {
+                    try await requestRecentMissingAttachmentBlobs(
+                        in: contextID,
                         since: Date(
                             timeIntervalSinceNow: -config
                                 .recentAttachmentSyncLookback
                         )
                     )
-                try await saveIncomingAttachments(
-                    recentAttachmentsResult.attachments,
-                    in: contextID
-                )
-                try await requestRecentMissingBlobs(
-                    from: node,
-                    in: contextID
-                )
+                }
             }
 
             rtcClient.debug(
@@ -130,21 +116,11 @@ extension KeepTalkingClient {
                     return
                 }
                 _ = resolvePendingContextSyncMessages(result)
-            case .recentAttachmentsRequest(let request):
-                guard request.recipient == config.node else {
+            case .attachmentRequest(let request):
+                guard request.requester != config.node else {
                     return
                 }
-                let result = try await executeContextSyncRecentAttachmentsRequest(
-                    request
-                )
-                try rtcClient.sendEnvelope(
-                    .contextSync(.attachmentsResult(result))
-                )
-            case .attachmentsResult(let result):
-                guard result.requester == config.node else {
-                    return
-                }
-                _ = resolvePendingContextSyncAttachments(result)
+                try await respondToContextSyncAttachmentRequest(request)
         }
     }
 
@@ -202,33 +178,6 @@ extension KeepTalkingClient {
             send: { [weak self] in
                 try self?.rtcClient.sendEnvelope(
                     .contextSync(.chunkRequest(request))
-                )
-            }
-        )
-    }
-
-    func dispatchContextSyncRecentAttachmentsRequest(
-        to node: UUID,
-        contextID: UUID,
-        since: Date
-    ) async throws -> KeepTalkingContextSyncAttachmentsResult {
-        let request = KeepTalkingContextSyncRecentAttachmentsRequest(
-            context: contextID,
-            requester: config.node,
-            recipient: node,
-            since: since
-        )
-
-        if node == config.node {
-            return try await executeContextSyncRecentAttachmentsRequest(request)
-        }
-
-        return try await waitForContextSyncAttachments(
-            request: request.request,
-            timeoutSeconds: Self.contextSyncResultTimeoutSeconds,
-            send: { [weak self] in
-                try self?.rtcClient.sendEnvelope(
-                    .contextSync(.recentAttachmentsRequest(request))
                 )
             }
         )
@@ -340,75 +289,6 @@ extension KeepTalkingClient {
         }
     }
 
-    func waitForContextSyncAttachments(
-        request: UUID,
-        timeoutSeconds: TimeInterval,
-        send: @escaping @Sendable () throws -> Void = {}
-    ) async throws -> KeepTalkingContextSyncAttachmentsResult {
-        try await withThrowingTaskGroup(
-            of: KeepTalkingContextSyncAttachmentsResult.self
-        ) { group in
-            group.addTask { [weak self] in
-                guard let self else {
-                    throw KeepTalkingClientError.contextSyncTimeout(request)
-                }
-                return try await withCheckedThrowingContinuation {
-                    (
-                        continuation: CheckedContinuation<
-                            KeepTalkingContextSyncAttachmentsResult, Error
-                        >
-                    ) in
-                    do {
-                        self.contextSyncQueue.sync {
-                            self.pendingContextSyncAttachments[request] =
-                                continuation
-                        }
-                        try send()
-                    } catch {
-                        self.failPendingContextSyncAttachments(
-                            request: request,
-                            error: error
-                        )
-                    }
-                }
-            }
-
-            group.addTask { [weak self] in
-                try await Task.sleep(
-                    nanoseconds: UInt64(timeoutSeconds * 1_000_000_000)
-                )
-                self?.failPendingContextSyncAttachments(
-                    request: request,
-                    error: KeepTalkingClientError.contextSyncTimeout(request)
-                )
-                throw KeepTalkingClientError.contextSyncTimeout(request)
-            }
-
-            let first = try await group.next()
-            group.cancelAll()
-            guard let first else {
-                throw KeepTalkingClientError.contextSyncTimeout(request)
-            }
-            return first
-        }
-    }
-
-    func resolvePendingContextSyncSummary(
-        _ result: KeepTalkingContextSyncSummaryResult
-    ) -> Bool {
-        contextSyncQueue.sync {
-            guard
-                let continuation = pendingContextSyncSummaries.removeValue(
-                    forKey: result.request
-                )
-            else {
-                return false
-            }
-            continuation.resume(returning: result)
-            return true
-        }
-    }
-
     func resolvePendingContextSyncMessages(
         _ result: KeepTalkingContextSyncMessagesResult
     ) -> Bool {
@@ -425,12 +305,12 @@ extension KeepTalkingClient {
         }
     }
 
-    func resolvePendingContextSyncAttachments(
-        _ result: KeepTalkingContextSyncAttachmentsResult
+    func resolvePendingContextSyncSummary(
+        _ result: KeepTalkingContextSyncSummaryResult
     ) -> Bool {
         contextSyncQueue.sync {
             guard
-                let continuation = pendingContextSyncAttachments.removeValue(
+                let continuation = pendingContextSyncSummaries.removeValue(
                     forKey: result.request
                 )
             else {
@@ -467,34 +347,16 @@ extension KeepTalkingClient {
         }
     }
 
-    func failPendingContextSyncAttachments(request: UUID, error: Error) {
-        contextSyncQueue.sync {
-            guard
-                let continuation = pendingContextSyncAttachments.removeValue(
-                    forKey: request
-                )
-            else {
-                return
-            }
-            continuation.resume(throwing: error)
-        }
-    }
-
     func failAllPendingContextSync(error: Error) {
         contextSyncQueue.sync {
             let summaries = pendingContextSyncSummaries
             let messages = pendingContextSyncMessages
-            let attachments = pendingContextSyncAttachments
             pendingContextSyncSummaries.removeAll()
             pendingContextSyncMessages.removeAll()
-            pendingContextSyncAttachments.removeAll()
             for continuation in summaries.values {
                 continuation.resume(throwing: error)
             }
             for continuation in messages.values {
-                continuation.resume(throwing: error)
-            }
-            for continuation in attachments.values {
                 continuation.resume(throwing: error)
             }
         }
@@ -517,12 +379,14 @@ extension KeepTalkingClient {
         _ request: KeepTalkingContextSyncTailRequest
     ) async throws -> KeepTalkingContextSyncMessagesResult {
         let snapshot = try await contextSyncSnapshot(for: request.context)
+        let messages = snapshot.messages(after: request.senders)
         return KeepTalkingContextSyncMessagesResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
-            messages: snapshot.messages(after: request.senders)
+            messages: messages,
+            attachments: snapshot.attachments(for: messages)
         )
     }
 
@@ -530,41 +394,33 @@ extension KeepTalkingClient {
         _ request: KeepTalkingContextSyncChunkRequest
     ) async throws -> KeepTalkingContextSyncMessagesResult {
         let snapshot = try await contextSyncSnapshot(for: request.context)
+        let messages = snapshot.messages(in: request.chunks)
         return KeepTalkingContextSyncMessagesResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
-            messages: snapshot.messages(in: request.chunks)
+            messages: messages,
+            attachments: snapshot.attachments(for: messages)
         )
     }
 
-    private func executeContextSyncRecentAttachmentsRequest(
-        _ request: KeepTalkingContextSyncRecentAttachmentsRequest
-    ) async throws -> KeepTalkingContextSyncAttachmentsResult {
-        let loadedAttachments = try await KeepTalkingContextAttachment.query(
-            on: localStore.database
+    private func persistContextSyncMessagesResult(
+        _ result: KeepTalkingContextSyncMessagesResult
+    ) async throws {
+        try await saveIncomingMessages(
+            result.messages,
+            in: result.context
         )
-        .filter(\.$context.$id, .equal, request.context)
-        .all()
-        let attachments = loadedAttachments
-            .filter { $0.createdAt >= request.since }
-            .sorted {
-            if $0.createdAt != $1.createdAt {
-                return $0.createdAt < $1.createdAt
-            }
-            if $0.sortIndex != $1.sortIndex {
-                return $0.sortIndex < $1.sortIndex
-            }
-            return ($0.id?.uuidString ?? "") < ($1.id?.uuidString ?? "")
+        let savedAttachments = try await saveIncomingAttachments(
+            result.attachments
+        )
+        guard !savedAttachments.isEmpty else {
+            return
         }
-
-        return KeepTalkingContextSyncAttachmentsResult(
-            request: request.request,
-            context: request.context,
-            requester: request.requester,
-            responder: config.node,
-            attachments: attachments
+        try await requestAttachmentBlobsIfNeeded(
+            for: savedAttachments,
+            in: result.context
         )
     }
 }

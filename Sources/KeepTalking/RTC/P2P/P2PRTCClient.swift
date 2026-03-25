@@ -37,11 +37,9 @@ enum P2PError: LocalizedError {
 final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     @unchecked Sendable
 {
-    private enum EnvelopeRoute {
-        case chat
-        case blob
-        case actionCall
-    }
+    private static let requiredChannels: [KeepTalkingEnvelopeChannel] = [
+        .chat, .blob, .actionCall,
+    ]
 
     var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
@@ -59,13 +57,9 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     private let peerFactory = LKRTCPeerConnectionFactory()
 
     private var peerConnection: LKRTCPeerConnection?
-    private var outboundChatChannel: LKRTCDataChannel?
-    private var outboundBlobChannel: LKRTCDataChannel?
-    private var outboundActionCallChannel: LKRTCDataChannel?
-    private var inboundChatChannel: LKRTCDataChannel?
-    private var inboundBlobChannel: LKRTCDataChannel?
-    private var inboundActionCallChannel: LKRTCDataChannel?
+    private var channels = RTCChannelSet()
     private var pendingRemoteCandidates: [LKRTCIceCandidate] = []
+    private var pendingSignals: [(UUID, KeepTalkingP2PSignalData)] = []
     private var remotePeerID: UUID?
     private var sentMessageCount = 0
     private var recvMessageCount = 0
@@ -95,6 +89,8 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         onLog?("[\(ts)] [p2p] \(message)")
     }
 
+    // MARK: - Lifecycle
+
     func start() async throws {
         isStopping = false
         didReportDegrade = false
@@ -104,6 +100,13 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         )
         announcePresence()
         try createPeerConnection()
+        try createDataChannels()
+
+        let signalsToFlush = pendingSignals
+        pendingSignals.removeAll()
+        for (from, data) in signalsToFlush {
+            handleSignal(from: from, data: data)
+        }
 
         let targetPeerID = try await waitForTargetPeer(
             timeoutSeconds: config.p2pAttemptTimeoutSeconds
@@ -118,7 +121,6 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         )
 
         if isOfferer {
-            try createOutboundDataChannels()
             try await sendOffer(to: targetPeerID)
         }
 
@@ -137,12 +139,9 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     func stop() {
         isStopping = true
         debug("stopping sent=\(sentMessageCount) recv=\(recvMessageCount)")
-        outboundChatChannel?.close()
-        outboundBlobChannel?.close()
-        outboundActionCallChannel?.close()
-        inboundChatChannel?.close()
-        inboundBlobChannel?.close()
-        inboundActionCallChannel?.close()
+        channels.clearDelegates()
+        peerConnection?.delegate = nil
+        channels.closeAll()
         peerConnection?.close()
 
         defer {
@@ -150,15 +149,13 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             notifiedConnectedPeers.removeAll()
         }
 
+        channels.removeAll()
         peerConnection = nil
-        outboundChatChannel = nil
-        outboundBlobChannel = nil
-        outboundActionCallChannel = nil
-        inboundChatChannel = nil
-        inboundBlobChannel = nil
-        inboundActionCallChannel = nil
         remotePeerID = nil
+        pendingSignals.removeAll()
     }
+
+    // MARK: - Transport protocol
 
     func requestP2PTrial() {
         debug("ignoring manual p2p trial: already using direct p2p transport")
@@ -168,21 +165,19 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         debug("reliable route requested reason=\(reason)")
     }
 
+    func currentRoute() -> KeepTalkingTransportRoute {
+        .p2p
+    }
+
     func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws {
-        let route = try route(for: envelope)
-        let dataChannel: LKRTCDataChannel?
-        switch route {
-            case .chat:
-                dataChannel = preferredChatChannel()
-            case .blob:
-                dataChannel = preferredBlobChannel()
-            case .actionCall:
-                dataChannel = preferredActionCallChannel()
+        let kind = envelope.channel
+        guard kind != .signaling else {
+            throw P2PError.signalingInP2P
         }
 
-        guard let dataChannel else {
+        guard let dataChannel = channels.preferred(for: kind) else {
             reportTransportDegraded("send failed: channel missing")
-            throw P2PError.dataChannelCreateFailed(routeLabel(for: route))
+            throw P2PError.dataChannelCreateFailed(config.label(for: kind))
         }
 
         guard dataChannel.readyState == .open else {
@@ -206,17 +201,19 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         sentMessageCount += 1
     }
 
-    func sendBlobData(_ data: Data) throws {
-        guard let dataChannel = preferredBlobChannel() else {
-            reportTransportDegraded("blob send failed: channel missing")
-            throw P2PError.dataChannelCreateFailed(config.blobChannelLabel)
-        }
+    private static let maxBufferedAmount: UInt64 = 128 * 1024
 
-        guard dataChannel.readyState == .open else {
-            reportTransportDegraded(
-                "blob send failed: channel not open state=\(dataChannel.readyState.rawValue)"
+    func sendBlobData(
+        _ data: Data,
+        via route: KeepTalkingTransportRoute?
+    ) throws {
+        guard let dataChannel = channels.preferred(for: .blob) else {
+            let summary = channels.stateSummary(for: Self.requiredChannels)
+            debug(
+                "blob send failed: no open blob channel \(summary)"
             )
-            throw P2PError.dataChannelNotOpen(dataChannel.label)
+            reportTransportDegraded("blob send failed: channel missing")
+            throw P2PError.dataChannelNotOpen(config.blobChannelLabel)
         }
 
         let packet = LKRTCDataBuffer(data: data, isBinary: true)
@@ -228,21 +225,25 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     }
 
     func runtimeStats() -> KeepTalkingRuntimeStats {
-        KeepTalkingRuntimeStats(
+        let outChat = channels.preferred(for: .chat)
+        return KeepTalkingRuntimeStats(
             sent: sentMessageCount,
             received: recvMessageCount,
-            outboundLabel: outboundChatChannel?.label,
-            outboundState: outboundChatChannel?.readyState.rawValue,
-            inboundLabel: inboundChatChannel?.label,
-            inboundState: inboundChatChannel?.readyState.rawValue,
-            retainedChannels: [
-                outboundChatChannel, outboundBlobChannel,
-                outboundActionCallChannel, inboundChatChannel,
-                inboundBlobChannel, inboundActionCallChannel,
-            ].compactMap { $0 }.count,
+            outboundLabel: outChat?.label,
+            outboundState: outChat?.readyState.rawValue,
+            inboundLabel: nil,
+            inboundState: nil,
+            retainedChannels: channels.channelCount,
             route: "p2p"
         )
     }
+
+    /// Indicates whether all required inbound/outbound data channels are currently open.
+    func isReady() -> Bool {
+        Self.requiredChannels.allSatisfy { channels.isOpen(for: $0) }
+    }
+
+    // MARK: - P2P signaling
 
     func receivePresence(from node: UUID) {
         guard node != localNodeID else { return }
@@ -253,6 +254,8 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         guard payload.to == localNodeID else { return }
         handleSignal(from: payload.from, data: payload.data)
     }
+
+    // MARK: - WebRTC setup
 
     private func createPeerConnection() throws {
         let rtcConfig = RTCShared.makeRTCConfiguration(
@@ -273,54 +276,36 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         self.peerConnection = peerConnection
     }
 
-    private func createOutboundDataChannels() throws {
+    private func createDataChannels() throws {
         guard let peerConnection else {
             throw P2PError.peerConnectionCreateFailed
         }
 
-        let chatChannelConfig = LKRTCDataChannelConfiguration()
-        chatChannelConfig.isOrdered = true
-        guard
-            let chatChannel = peerConnection.dataChannel(
-                forLabel: config.chatChannelLabel,
-                configuration: chatChannelConfig
-            )
-        else {
-            throw P2PError.dataChannelCreateFailed(config.chatChannelLabel)
-        }
-        chatChannel.delegate = self
-        outboundChatChannel = chatChannel
-        debug("created outbound chat channel label=\(chatChannel.label)")
+        let channelDefs: [(KeepTalkingEnvelopeChannel, String, Int32)] = [
+            (.chat, config.chatChannelLabel, 10),
+            (.blob, config.blobChannelLabel, 20),
+            (.actionCall, config.actionCallChannelLabel, 30),
+        ]
 
-        let blobChannelConfig = LKRTCDataChannelConfiguration()
-        blobChannelConfig.isOrdered = true
-        guard
-            let blobChannel = peerConnection.dataChannel(
-                forLabel: config.blobChannelLabel,
-                configuration: blobChannelConfig
-            )
-        else {
-            throw P2PError.dataChannelCreateFailed(config.blobChannelLabel)
+        for (kind, label, id) in channelDefs {
+            let channelConfig = LKRTCDataChannelConfiguration()
+            channelConfig.isOrdered = true
+            channelConfig.isNegotiated = true
+            channelConfig.channelId = id
+            guard
+                let channel = peerConnection.dataChannel(
+                    forLabel: label,
+                    configuration: channelConfig
+                )
+            else {
+                throw P2PError.dataChannelCreateFailed(label)
+            }
+            channel.delegate = self
+            // When using pre-negotiated channels, the same LKRTCDataChannel instance 
+            // handles both sending and receiving immediately upon connection.
+            channels.setOutbound(channel, for: kind)
+            debug("created negotiated data channel kind=\(kind) label=\(label) id=\(id)")
         }
-        blobChannel.delegate = self
-        outboundBlobChannel = blobChannel
-        debug("created outbound blob channel label=\(blobChannel.label)")
-
-        let actionChannelConfig = LKRTCDataChannelConfiguration()
-        actionChannelConfig.isOrdered = true
-        guard
-            let actionChannel = peerConnection.dataChannel(
-                forLabel: config.actionCallChannelLabel,
-                configuration: actionChannelConfig
-            )
-        else {
-            throw P2PError.dataChannelCreateFailed(
-                config.actionCallChannelLabel
-            )
-        }
-        actionChannel.delegate = self
-        outboundActionCallChannel = actionChannel
-        debug("created outbound action channel label=\(actionChannel.label)")
     }
 
     private func sendOffer(to peerID: UUID) async throws {
@@ -340,6 +325,8 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         sendSignal(peerID, Self.signalData(kind: "offer", description: offer))
         debug("offer sent peer=\(peerID.uuidString.lowercased())")
     }
+
+    // MARK: - Peer discovery
 
     private func waitForTargetPeer(timeoutSeconds: TimeInterval) async throws
         -> UUID
@@ -390,36 +377,25 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         throw P2PError.noRemotePeerFound
     }
 
+    // MARK: - Channel readiness
+
     private func waitForRequiredChannelsOpen(timeoutSeconds: TimeInterval) async
         -> Bool
     {
-        let chatOpened = await RTCShared.waitForOpenDataChannel(
-            timeoutSeconds: timeoutSeconds
-        ) { [weak self] in
-            self?.preferredChatChannel()
+        let start = Date()
+        while Date().timeIntervalSince(start) < timeoutSeconds {
+            if isReady() { return true }
+            try? await Task.sleep(nanoseconds: 200_000_000)
         }
-        if !chatOpened {
-            debug("timeout waiting for chat channel open")
-            reportTransportDegraded(
-                "handshake timeout waiting for chat channel"
-            )
-            return false
-        }
-
-        let actionOpened = await RTCShared.waitForOpenDataChannel(
-            timeoutSeconds: timeoutSeconds
-        ) { [weak self] in
-            self?.preferredActionCallChannel()
-        }
-        if !actionOpened {
-            debug("timeout waiting for action channel open")
-            reportTransportDegraded(
-                "handshake timeout waiting for action channel"
-            )
-            return false
-        }
-        return true
+        let states = channels.stateSummary(for: Self.requiredChannels)
+        debug("timeout waiting for required channel set open \(states)")
+        reportTransportDegraded(
+            "handshake timeout waiting for required channel set"
+        )
+        return false
     }
+
+    // MARK: - Degradation
 
     private func reportTransportDegraded(_ reason: String) {
         guard !isStopping else { return }
@@ -437,54 +413,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         onPeerConnect?(nodeID)
     }
 
-    private func preferredChatChannel() -> LKRTCDataChannel? {
-        if let inboundChatChannel, inboundChatChannel.readyState == .open {
-            return inboundChatChannel
-        }
-        return outboundChatChannel
-    }
-
-    private func preferredActionCallChannel() -> LKRTCDataChannel? {
-        if let inboundActionCallChannel,
-            inboundActionCallChannel.readyState == .open
-        {
-            return inboundActionCallChannel
-        }
-        return outboundActionCallChannel
-    }
-
-    private func preferredBlobChannel() -> LKRTCDataChannel? {
-        if let inboundBlobChannel, inboundBlobChannel.readyState == .open {
-            return inboundBlobChannel
-        }
-        return outboundBlobChannel
-    }
-
-    private func route(for envelope: KeepTalkingP2PEnvelope) throws
-        -> EnvelopeRoute
-    {
-        switch envelope.channel {
-            case .chat:
-                return .chat
-            case .blob:
-                return .blob
-            case .actionCall:
-                return .actionCall
-            case .signaling:
-                throw P2PError.signalingInP2P
-        }
-    }
-
-    private func routeLabel(for route: EnvelopeRoute) -> String {
-        switch route {
-            case .chat:
-                return config.chatChannelLabel
-            case .blob:
-                return config.blobChannelLabel
-            case .actionCall:
-                return config.actionCallChannelLabel
-        }
-    }
+    // MARK: - Signaling handler
 
     private func handleSignal(from: UUID, data: KeepTalkingP2PSignalData) {
         if let configuredRemote = remotePeerID, configuredRemote != from {
@@ -496,7 +425,8 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
 
         remotePeerID = from
         guard let peerConnection else {
-            debug("ignoring signal without peer connection")
+            debug("buffering signal without peer connection yet kind=\(data.kind)")
+            pendingSignals.append((from, data))
             return
         }
 
@@ -625,6 +555,8 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         )
     }
 
+    // MARK: - Peer connection delegate handlers
+
     func handlePeerConnectionSignalingStateChange(
         _ peerConnection: LKRTCPeerConnection,
         stateChanged: LKRTCSignalingState
@@ -692,34 +624,25 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         dataChannel: LKRTCDataChannel
     ) {
         dataChannel.delegate = self
-        if dataChannel.label == config.chatChannelLabel {
-            self.inboundChatChannel = dataChannel
-            debug("bound inbound chat channel label=\(dataChannel.label)")
-        } else if dataChannel.label == config.blobChannelLabel {
-            self.inboundBlobChannel = dataChannel
-            debug("bound inbound blob channel label=\(dataChannel.label)")
-        } else if dataChannel.label == config.actionCallChannelLabel {
-            self.inboundActionCallChannel = dataChannel
-            debug("bound inbound action channel label=\(dataChannel.label)")
+        if let kind = channelKind(for: dataChannel.label) {
+            channels.setInbound(dataChannel, for: kind)
+            debug("bound inbound channel kind=\(kind) label=\(dataChannel.label)")
         }
     }
+
+    // MARK: - Data channel delegate handlers
 
     func handleDataChannelDidChangeState(_ dataChannel: LKRTCDataChannel) {
         debug(
             "channel state label=\(dataChannel.label) state=\(dataChannel.readyState.rawValue)"
         )
-        guard
-            dataChannel.label == config.chatChannelLabel
-                || dataChannel.label == config.blobChannelLabel
-                || dataChannel.label == config.actionCallChannelLabel
-        else {
-            return
-        }
+        guard isKnownChannel(dataChannel.label) else { return }
         switch dataChannel.readyState {
-            case .closing:
-                reportTransportDegraded("data channel closing")
-            case .closed:
-                reportTransportDegraded("data channel closed")
+            case .closing, .closed:
+                channels.removeChannel(dataChannel)
+                reportTransportDegraded(
+                    "data channel \(dataChannel.readyState == .closing ? "closing" : "closed")"
+                )
             default:
                 break
         }
@@ -730,13 +653,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         buffer: LKRTCDataBuffer
     ) {
         recvMessageCount += 1
-        guard
-            dataChannel.label == config.chatChannelLabel
-                || dataChannel.label == config.blobChannelLabel
-                || dataChannel.label == config.actionCallChannelLabel
-        else {
-            return
-        }
+        guard isKnownChannel(dataChannel.label) else { return }
 
         do {
             if let envelope = try KeepTalkingPacketTransportCrypto
@@ -773,5 +690,18 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         } else {
             onRawMessage?("<\(buffer.data.count) bytes>")
         }
+    }
+
+    // MARK: - Channel label helpers
+
+    private func channelKind(for label: String) -> KeepTalkingEnvelopeChannel? {
+        if label == config.chatChannelLabel { return .chat }
+        if label == config.blobChannelLabel { return .blob }
+        if label == config.actionCallChannelLabel { return .actionCall }
+        return nil
+    }
+
+    private func isKnownChannel(_ label: String) -> Bool {
+        channelKind(for: label) != nil
     }
 }

@@ -44,6 +44,76 @@ public struct KeepTalkingLocalAttachmentInput: Sendable, Equatable {
     }
 }
 
+public struct KeepTalkingContextAttachmentDTO: Codable, Sendable, Equatable {
+    public let id: UUID
+    public let contextID: UUID
+    public let parentMessageID: UUID
+    public let blobID: String
+    public let filename: String
+    public let mimeType: String
+    public let byteCount: Int
+    public let sortIndex: Int
+
+    public init(
+        id: UUID,
+        contextID: UUID,
+        parentMessageID: UUID,
+        blobID: String,
+        filename: String,
+        mimeType: String,
+        byteCount: Int,
+        sortIndex: Int
+    ) {
+        self.id = id
+        self.contextID = contextID
+        self.parentMessageID = parentMessageID
+        self.blobID = blobID
+        self.filename = filename
+        self.mimeType = mimeType
+        self.byteCount = max(byteCount, 0)
+        self.sortIndex = sortIndex
+    }
+
+    public init?(_ attachment: KeepTalkingContextAttachment) {
+        let contextID = attachment.$context.id
+        guard
+            let id = attachment.id,
+            let parentMessageID = attachment.$parentMessage.id
+        else {
+            return nil
+        }
+
+        self.init(
+            id: id,
+            contextID: contextID,
+            parentMessageID: parentMessageID,
+            blobID: attachment.blobID,
+            filename: attachment.filename,
+            mimeType: attachment.mimeType,
+            byteCount: attachment.byteCount,
+            sortIndex: attachment.sortIndex
+        )
+    }
+
+    func makeModel(
+        in context: KeepTalkingContext,
+        parentMessage: KeepTalkingContextMessage
+    ) -> KeepTalkingContextAttachment {
+        KeepTalkingContextAttachment(
+            id: id,
+            context: context,
+            parentMessageID: parentMessage.id ?? parentMessageID,
+            sender: parentMessage.sender,
+            blobID: blobID,
+            filename: filename,
+            mimeType: mimeType,
+            byteCount: byteCount,
+            createdAt: parentMessage.timestamp,
+            sortIndex: sortIndex
+        )
+    }
+}
+
 public final class KeepTalkingContextAttachment: Model, @unchecked Sendable {
     public static let schema = "kt_context_attachments"
 
