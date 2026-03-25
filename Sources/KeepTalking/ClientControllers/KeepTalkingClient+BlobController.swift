@@ -121,86 +121,68 @@ extension KeepTalkingClient {
         in contextID: UUID,
         since: Date
     ) async throws {
-        try await runBlobRequestResponse { [self] in
-            guard
-                let request = try await contextSyncAttachmentRequest(
-                    in: contextID,
-                    since: since
-                )
-            else {
-                return
-            }
+        guard let request = try await contextSyncAttachmentRequest(
+            in: contextID,
+            since: since
+        ) else { return }
 
-            try rtcClient.sendEnvelope(
-                .contextSync(.attachmentRequest(request))
-            )
-        }
+        try rtcClient.sendEnvelope(.contextSync(.attachmentRequest(request)))
     }
 
     func requestAttachmentBlobsIfNeeded(
         for attachments: [KeepTalkingContextAttachment],
         in contextID: UUID
     ) async throws {
-        try await runBlobRequestResponse { [self] in
-            guard
-                let request = try await attachmentRequest(
-                    for: attachments,
-                    in: contextID
-                )
-            else {
-                return
-            }
+        guard let request = try await attachmentRequest(
+            for: attachments,
+            in: contextID
+        ) else { return }
 
-            try rtcClient.sendEnvelope(
-                .contextSync(.attachmentRequest(request))
-            )
-        }
+        try rtcClient.sendEnvelope(.contextSync(.attachmentRequest(request)))
     }
 
     func respondToContextSyncAttachmentRequest(
         _ request: KeepTalkingContextSyncAttachmentRequest
     ) async throws {
-        try await runBlobRequestResponse { [self] in
-            for hash in request.hashes {
-                guard let blobRecord = try await blobRecord(for: hash),
-                    blobRecord.availability == .ready
-                else {
-                    continue
-                }
-
-                do {
-                    try await sendBlobFrames(
-                        blobID: hash,
-                        recipientNodeID: request.requester
-                    )
-                } catch {
-                    rtcClient.debug(
-                        "blob response failed blob=\(hash) requester=\(request.requester.uuidString.lowercased()) error=\(error.localizedDescription)"
-                    )
-                }
-            }
+        for hash in request.hashes {
+            let mask = request.masks?[hash]
+            guard let blobRecord = try await blobRecord(for: hash),
+                blobRecord.availability == .ready
+            else { continue }
+            
+            await blobTransportQueue.enqueue(
+                blobID: hash,
+                mask: mask,
+                recipient: request.requester
+            )
         }
+        triggerBlobTransportQueue()
     }
 
     func hexDigest(for data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private func runBlobRequestResponse(
-        _ operation: @Sendable @escaping () async throws -> Void
-    ) async throws {
-        let task = blobRequestResponseQueue.sync {
-            let previous = pendingBlobRequestResponseTask
-            let task = Task<Void, Error> {
-                _ = await previous?.result
-                try await operation()
+    private func triggerBlobTransportQueue() {
+        Task { [weak self] in
+            guard let self else { return }
+            let isSending = await self.blobTransportQueue.markSending()
+            guard !isSending else { return }
+            
+            while let (blobID, request) = await self.blobTransportQueue.next() {
+                do {
+                    if request.recipients.isEmpty {
+                        try await self.sendBlobFrames(blobID: blobID, mask: request.mask, recipientNodeID: nil)
+                    } else {
+                        for recipient in request.recipients {
+                            try await self.sendBlobFrames(blobID: blobID, mask: request.mask, recipientNodeID: recipient)
+                        }
+                    }
+                } catch {
+                    self.rtcClient.debug("blob transport failed blob=\(blobID) error=\(error.localizedDescription)")
+                }
             }
-            pendingBlobRequestResponseTask = Task {
-                _ = try? await task.value
-            }
-            return task
         }
-        try await task.value
     }
 
     func contextSyncAttachmentRequest(
@@ -221,23 +203,23 @@ extension KeepTalkingClient {
         for attachments: [KeepTalkingContextAttachment],
         in contextID: UUID
     ) async throws -> KeepTalkingContextSyncAttachmentRequest? {
-        let hashes = try await missingAttachmentHashes(for: attachments)
-        guard !hashes.isEmpty else {
-            return nil
-        }
+        let missing = try await missingAttachmentRequests(for: attachments)
+        guard !missing.hashes.isEmpty else { return nil }
 
         return KeepTalkingContextSyncAttachmentRequest(
             context: contextID,
             requester: config.node,
-            hashes: hashes
+            hashes: missing.hashes,
+            masks: missing.masks.isEmpty ? nil : missing.masks
         )
     }
 
-    private func missingAttachmentHashes(
+    private func missingAttachmentRequests(
         for attachments: [KeepTalkingContextAttachment]
-    ) async throws -> [String] {
+    ) async throws -> (hashes: [String], masks: [String: Data]) {
         var requestedBlobIDs = Set<String>()
         var missingHashes: [String] = []
+        var missingMasks: [String: Data] = [:]
 
         for attachment in attachments {
             guard requestedBlobIDs.insert(attachment.blobID).inserted else {
@@ -247,9 +229,26 @@ extension KeepTalkingClient {
                 continue
             }
             missingHashes.append(attachment.blobID)
+
+            if let tryPartial = try? blobStore.partialData(blobID: attachment.blobID) {
+                let receivedBytes = tryPartial.count
+                let chunkIndex = receivedBytes / Self.blobChunkSize
+                var maskData = Data(repeating: 0, count: (chunkIndex + 7) / 8)
+                if chunkIndex > 0 {
+                    let bitRemainder = chunkIndex % 8
+                    if bitRemainder > 0 {
+                        var lastByte: UInt8 = 0
+                        for b in bitRemainder..<8 {
+                            lastByte |= (1 << b)
+                        }
+                        maskData[maskData.count - 1] = lastByte
+                    }
+                }
+                missingMasks[attachment.blobID] = maskData
+            }
         }
 
-        return missingHashes
+        return (missingHashes, missingMasks)
     }
 
     private func handleIncomingBlobChunk(
@@ -399,6 +398,7 @@ extension KeepTalkingClient {
 
     private func sendBlobFrames(
         blobID: String,
+        mask: Data? = nil,
         recipientNodeID: UUID?
     ) async throws {
         guard let blobRecord = try await blobRecord(for: blobID),
@@ -412,6 +412,7 @@ extension KeepTalkingClient {
             mimeType: blobRecord.mimeType,
             pathExtension: blobPathExtension(from: blobRecord.relativePath),
             expectedByteCount: blobRecord.byteCount,
+            mask: mask,
             recipientNodeID: recipientNodeID,
             via: rtcClient.currentRoute()
         )
@@ -422,6 +423,7 @@ extension KeepTalkingClient {
         mimeType: String,
         pathExtension: String?,
         expectedByteCount: Int,
+        mask: Data? = nil,
         recipientNodeID: UUID?,
         via route: KeepTalkingTransportRoute
     ) async throws {
@@ -438,6 +440,7 @@ extension KeepTalkingClient {
                 mimeType: mimeType,
                 pathExtension: pathExtension,
                 expectedByteCount: expectedByteCount,
+                mask: mask,
                 recipientNodeID: recipientNodeID,
                 via: route,
                 relativePath: relativePath
@@ -454,6 +457,7 @@ extension KeepTalkingClient {
                 mimeType: mimeType,
                 pathExtension: pathExtension,
                 expectedByteCount: expectedByteCount,
+                mask: mask,
                 recipientNodeID: recipientNodeID,
                 via: .sfu,
                 relativePath: relativePath
@@ -466,6 +470,7 @@ extension KeepTalkingClient {
         mimeType: String,
         pathExtension: String?,
         expectedByteCount: Int,
+        mask: Data? = nil,
         recipientNodeID: UUID?,
         via route: KeepTalkingTransportRoute,
         relativePath: String
@@ -493,32 +498,47 @@ extension KeepTalkingClient {
                 break
             }
 
-            let header = KeepTalkingBlobTransferHeader(
-                kind: .chunk,
-                transferID: transferID,
-                senderNodeID: config.node,
-                recipientNodeID: recipientNodeID,
-                blobID: blobID,
-                mimeType: mimeType,
-                pathExtension: pathExtension,
-                byteCount: byteCount,
-                chunkIndex: chunkIndex,
-                chunkCount: chunkCount,
-                chunkByteCount: chunk.count
-            )
-            try rtcClient.sendBlobData(
-                try KeepTalkingBlobTransferCodec.encode(
-                    KeepTalkingBlobTransferFrame(
-                        header: header,
-                        payload: chunk
-                    )
-                ),
-                via: route
-            )
+            let shouldSend: Bool
+            if let mask {
+                let byteIndex = chunkIndex / 8
+                let bitIndex = chunkIndex % 8
+                if byteIndex < mask.count {
+                    shouldSend = (mask[byteIndex] & (1 << bitIndex)) != 0
+                } else {
+                    shouldSend = true
+                }
+            } else {
+                shouldSend = true
+            }
+
+            if shouldSend {
+                let header = KeepTalkingBlobTransferHeader(
+                    kind: .chunk,
+                    transferID: transferID,
+                    senderNodeID: config.node,
+                    recipientNodeID: recipientNodeID,
+                    blobID: blobID,
+                    mimeType: mimeType,
+                    pathExtension: pathExtension,
+                    byteCount: byteCount,
+                    chunkIndex: chunkIndex,
+                    chunkCount: chunkCount,
+                    chunkByteCount: chunk.count
+                )
+                try rtcClient.sendBlobData(
+                    try KeepTalkingBlobTransferCodec.encode(
+                        KeepTalkingBlobTransferFrame(
+                            header: header,
+                            payload: chunk
+                        )
+                    ),
+                    via: route
+                )
+                // Sleep slightly between chunks to let WebRTC flush the SCTP send buffer
+                // and prevent bufferedAmount from spiking without blocking the thread locally.
+                try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+            }
             chunkIndex += 1
-            // Sleep slightly between chunks to let WebRTC flush the SCTP send buffer
-            // and prevent bufferedAmount from spiking without blocking the thread locally.
-            try await Task.sleep(nanoseconds: 10_000_000) // 10ms
         }
 
         // Brief sleep before the completion frame so the last chunk

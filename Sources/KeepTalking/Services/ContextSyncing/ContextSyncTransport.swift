@@ -261,15 +261,18 @@ public struct KeepTalkingContextSyncAttachmentRequest: Codable, Sendable,
     public let context: UUID
     public let requester: UUID
     public let hashes: [String]
+    public let masks: [String: Data]?
 
     public init(
         context: UUID,
         requester: UUID,
-        hashes: [String]
+        hashes: [String],
+        masks: [String: Data]? = nil
     ) {
         self.context = context
         self.requester = requester
         self.hashes = Self.normalized(hashes)
+        self.masks = masks
     }
 
     private static func normalized(_ hashes: [String]) -> [String] {

@@ -184,10 +184,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     var pendingContextSyncMessages: [UUID: CheckedContinuation<KeepTalkingContextSyncMessagesResult, Error>] = [:]
 
     // MARK: Blob request/response properties
-    let blobRequestResponseQueue = DispatchQueue(
-        label: "KeepTalking.client.blob-request-response"
-    )
-    var pendingBlobRequestResponseTask: Task<Void, Never>?
+    let blobTransportQueue = KeepTalkingBlobTransportQueue()
 
     let blobFrameProcessor = KeepTalkingBlobFrameProcessor()
 
