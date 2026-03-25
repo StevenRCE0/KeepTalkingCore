@@ -195,6 +195,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     ///   - kvService: Optional KV backend used for node discovery and metadata.
     ///   - openAIAPIKey: Explicit OpenAI API key override.
     ///   - openAIEndpoint: Optional OpenAI-compatible endpoint override.
+    ///   - openAIAPIMode: Which OpenAI API to use (`.responses` or `.chatCompletions`).
     ///   - stdioTransportLauncher: Optional stdio transport launcher used for
     ///     MCP stdio actions.
     ///   - skillScriptExecutor: Optional skill script executor used for skill
@@ -207,6 +208,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         kvService: (any KeepTalkingKVService)? = nil,
         openAIAPIKey: String? = nil,
         openAIEndpoint: String? = nil,
+        openAIAPIMode: OpenAIAPIMode = .responses,
         stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
             DefaultMCPStdioTransportLauncher.current,
         skillScriptExecutor: (any SkillScriptExecuting)? =
@@ -247,7 +249,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
         if let apiKey, !apiKey.isEmpty {
             self.openAIConnector =
-                try? OpenAIConnector(apiKey: apiKey, endpoint: endpoint)
+                try? OpenAIConnector(apiKey: apiKey, endpoint: endpoint, apiMode: openAIAPIMode)
         } else {
             self.openAIConnector = nil
         }
