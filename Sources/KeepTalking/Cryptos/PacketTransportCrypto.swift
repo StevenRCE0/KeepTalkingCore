@@ -49,22 +49,25 @@ enum KeepTalkingPacketTransportCryptoError: LocalizedError {
 
 enum KeepTalkingPacketTransportCrypto {
     static func outboundPayload(
-        for envelope: KeepTalkingP2PEnvelope,
+        for envelope: any KeepTalkingEnvelope,
         localNodeID: UUID,
         contextSecretProvider: KeepTalkingTransportContextSecretProvider?
     ) throws -> Data {
         guard let contextID = encryptedContextID(for: envelope) else {
-            return try JSONEncoder().encode(envelope)
+            return try JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope))
         }
-        guard let secret = try loadContextSecret(
-            for: contextID,
-            using: contextSecretProvider
-        ) else {
-            throw KeepTalkingPacketTransportCryptoError
+        guard
+            let secret = try loadContextSecret(
+                for: contextID,
+                using: contextSecretProvider
+            )
+        else {
+            throw
+                KeepTalkingPacketTransportCryptoError
                 .missingContextSecret(contextID)
         }
 
-        let plaintext = try JSONEncoder().encode(envelope)
+        let plaintext = try JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope))
         let cryptor = try makeCryptor(secret: secret)
         let senderIdentity = localNodeID.uuidString.lowercased()
         guard
@@ -92,12 +95,12 @@ enum KeepTalkingPacketTransportCrypto {
     static func inboundEnvelope(
         from payload: Data,
         contextSecretProvider: KeepTalkingTransportContextSecretProvider?
-    ) throws -> KeepTalkingP2PEnvelope? {
+    ) throws -> (any KeepTalkingEnvelope)? {
         if let envelope = try? JSONDecoder().decode(
-            KeepTalkingP2PEnvelope.self,
+            KeepTalkingEnvelopePacket.self,
             from: payload
         ) {
-            return envelope
+            return envelope.envelope
         }
 
         guard
@@ -111,11 +114,14 @@ enum KeepTalkingPacketTransportCrypto {
             return nil
         }
 
-        guard let secret = try loadContextSecret(
-            for: encryptedEnvelope.contextID,
-            using: contextSecretProvider
-        ) else {
-            throw KeepTalkingPacketTransportCryptoError
+        guard
+            let secret = try loadContextSecret(
+                for: encryptedEnvelope.contextID,
+                using: contextSecretProvider
+            )
+        else {
+            throw
+                KeepTalkingPacketTransportCryptoError
                 .missingContextSecret(encryptedEnvelope.contextID)
         }
 
@@ -138,9 +144,9 @@ enum KeepTalkingPacketTransportCrypto {
         }
 
         let envelope = try JSONDecoder().decode(
-            KeepTalkingP2PEnvelope.self,
+            KeepTalkingEnvelopePacket.self,
             from: plaintext
-        )
+        ).envelope
         guard
             let contextID = encryptedContextID(for: envelope),
             contextID == encryptedEnvelope.contextID
@@ -176,39 +182,9 @@ enum KeepTalkingPacketTransportCrypto {
         }
     }
 
-    private static func encryptedContextID(for envelope: KeepTalkingP2PEnvelope)
+    private static func encryptedContextID(for envelope: any KeepTalkingEnvelope)
         -> UUID?
     {
-        switch envelope {
-            case .message(let message):
-                return message.$context.id
-            case .attachment(let attachment):
-                return attachment.contextID
-            case .context(let context):
-                return context.id
-            case .contextSync(let contextSyncEnvelope):
-                return contextID(for: contextSyncEnvelope)
-            default:
-                return nil
-        }
-    }
-
-    private static func contextID(for envelope: KeepTalkingContextSyncEnvelope)
-        -> UUID
-    {
-        switch envelope {
-            case .summaryRequest(let request):
-                return request.context
-            case .summaryResult(let result):
-                return result.context
-            case .tailRequest(let request):
-                return request.context
-            case .chunkRequest(let request):
-                return request.context
-            case .messagesResult(let result):
-                return result.context
-            case .attachmentRequest(let request):
-                return request.context
-        }
+        envelope.transportContextID
     }
 }

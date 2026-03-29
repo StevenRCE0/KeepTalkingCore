@@ -569,7 +569,7 @@ struct RemoteActionCallTests {
             callerNodeID: callerNodeID,
             targetNodeID: targetNodeID,
             actionID: actionID,
-            content: [.text("ok")]
+            content: [.text(text: "ok", annotations: nil, _meta: nil)]
         )
 
         #expect(!client.resolvePendingActionCall(result))
@@ -580,7 +580,10 @@ struct RemoteActionCallTests {
         )
 
         #expect(received.requestID == requestID)
-        #expect(received.content == [.text("ok")])
+        #expect(
+            received.content
+                == [.text(text: "ok", annotations: nil, _meta: nil)]
+        )
     }
 
     @Test("early action-call acknowledgement is cached until the caller waits for it")

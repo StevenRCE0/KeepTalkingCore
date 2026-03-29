@@ -42,6 +42,10 @@ actor KeepTalkingBlobFrameProcessor {
             activeTransfers[blobID] = transferID
             return .accept(reset: true)
         }
+        if activeTransfers[blobID] == nil {
+            activeTransfers[blobID] = transferID
+            return .accept(reset: false)
+        }
         guard activeTransfers[blobID] == transferID else {
             return .ignore
         }

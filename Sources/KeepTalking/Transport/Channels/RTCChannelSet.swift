@@ -128,9 +128,11 @@ final class RTCChannelSet: @unchecked Sendable {
                 case .actionCall: name = "action"
                 case .signaling: name = "signaling"
             }
-            let out = outbound[kind].map { String($0.readyState.rawValue) }
+            let out =
+                outbound[kind].map { String($0.readyState.rawValue) }
                 ?? "nil"
-            let `in` = inbound[kind].map { String($0.readyState.rawValue) }
+            let `in` =
+                inbound[kind].map { String($0.readyState.rawValue) }
                 ?? "nil"
             return "\(name)[out=\(out) in=\(`in`)]"
         }.joined(separator: " ")

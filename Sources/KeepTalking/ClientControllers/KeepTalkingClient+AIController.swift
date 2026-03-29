@@ -42,12 +42,13 @@ extension KeepTalkingClient {
         let attachmentListingTool = makeContextAttachmentListingTool()
         let attachmentReadTool = makeContextAttachmentReadTool()
 
-        let allTools: [OpenAITool] = [
-            listingTool,
-            attachmentListingTool,
-            attachmentReadTool,
-            webSearchTool,
-        ] + runtimeCatalog.catalog.openAITools
+        let allTools: [OpenAITool] =
+            [
+                listingTool,
+                attachmentListingTool,
+                attachmentReadTool,
+                webSearchTool,
+            ] + runtimeCatalog.catalog.openAITools
         let skillNameByActionID = skillNamesByActionID(
             routesByFunctionName: runtimeCatalog.routesByFunctionName
         )
@@ -198,8 +199,9 @@ extension KeepTalkingClient {
             return .user(.init(content: .string(prompt)))
         }
 
-        var contentParts: [ChatQuery.ChatCompletionMessageParam.UserMessageParam
-            .Content.ContentPart] = []
+        var contentParts:
+            [ChatQuery.ChatCompletionMessageParam.UserMessageParam
+                .Content.ContentPart] = []
         let trimmedPrompt = prompt.trimmingCharacters(
             in: .whitespacesAndNewlines
         )
@@ -355,19 +357,22 @@ extension KeepTalkingClient {
                 group.addTask { [self] in
                     switch action.payload {
                         case .mcpBundle:
-                            let actionID = action.id?.uuidString.lowercased()
+                            let actionID =
+                                action.id?.uuidString.lowercased()
                                 ?? "unknown"
                             onLog?("[mcp] registering local action=\(actionID)")
                             try await mcpManager.registerIfNeeded(action)
                             onLog?("[mcp] registered local action=\(actionID)")
                         case .skill:
-                            let actionID = action.id?.uuidString.lowercased()
+                            let actionID =
+                                action.id?.uuidString.lowercased()
                                 ?? "unknown"
                             onLog?("[skill] registering local action=\(actionID)")
                             try await skillManager.registerIfNeeded(action)
                             onLog?("[skill] registered local action=\(actionID)")
                         case .primitive:
-                            let actionID = action.id?.uuidString.lowercased()
+                            let actionID =
+                                action.id?.uuidString.lowercased()
                                 ?? "unknown"
                             onLog?(
                                 "[primitive] registering local action=\(actionID)"
@@ -387,7 +392,8 @@ extension KeepTalkingClient {
                     self.onLog?(
                         "[\(source)] registration timeout action=\(actionIDLabel) after=\(Int(timeoutSeconds))s"
                     )
-                    throw KeepTalkingClientError
+                    throw
+                        KeepTalkingClientError
                         .localExecutorRegistrationTimedOut(
                             actionID: actionID,
                             source: source,
@@ -397,7 +403,8 @@ extension KeepTalkingClient {
                 }
 
                 guard try await group.next() != nil else {
-                    throw KeepTalkingClientError
+                    throw
+                        KeepTalkingClientError
                         .localExecutorRegistrationTimedOut(
                             actionID: actionID,
                             source: source,

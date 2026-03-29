@@ -99,18 +99,18 @@ final class KeepTalkingCLIController {
         targetClient.onLog = { line in
             print(line)
         }
-        targetClient.onEnvelope = { (envelope: KeepTalkingP2PEnvelope) in
-            switch envelope {
-                case .message(let message):
-                    print(renderMessage(message))
-                case .context(let context):
-                    if let latestMessage = context.messages.max(by: {
-                        $0.timestamp < $1.timestamp
-                    }) {
-                        print(renderMessage(latestMessage))
-                    }
-                default:
-                    break
+        targetClient.onEnvelope = { (envelope: KeepTalkingEnvelope) in
+            if let message = envelope.message {
+                print(renderMessage(message))
+                return
+            }
+
+            if let context = envelope.context {
+                if let latestMessage = context.messages.max(by: {
+                    $0.timestamp < $1.timestamp
+                }) {
+                    print(renderMessage(latestMessage))
+                }
             }
         }
         targetClient.onRawMessage = { (raw: String) in

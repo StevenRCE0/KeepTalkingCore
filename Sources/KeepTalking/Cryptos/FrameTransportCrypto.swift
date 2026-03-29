@@ -37,10 +37,12 @@ enum KeepTalkingFrameTransportCrypto {
     static func makePacketCryptor(secret: Data) throws
         -> LKRTCDataPacketCryptor
     {
-        guard let cryptor = LKRTCDataPacketCryptor(
-            algorithm: .aesGcm,
-            keyProvider: makeKeyProvider(secret: secret)
-        ) else {
+        guard
+            let cryptor = LKRTCDataPacketCryptor(
+                algorithm: .aesGcm,
+                keyProvider: makeKeyProvider(secret: secret)
+            )
+        else {
             throw KeepTalkingFrameTransportCryptoError.packetCryptorUnavailable
         }
         return cryptor

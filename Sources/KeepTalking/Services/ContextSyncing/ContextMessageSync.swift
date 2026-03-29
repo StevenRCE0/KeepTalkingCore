@@ -200,12 +200,14 @@ public struct KeepTalkingContextMessageIncrementalPlan: Codable, Sendable,
             senderSortKey($0) < senderSortKey($1)
         }).flatMap { sender in
             let remoteState = remoteBySender[sender]!
-            let localState = localBySender[sender] ?? .init(
-                sender: sender,
-                contiguousSequence: 0,
-                lastSequence: 0,
-                missingSequences: []
-            )
+            let localState =
+                localBySender[sender]
+                ?? .init(
+                    sender: sender,
+                    contiguousSequence: 0,
+                    lastSequence: 0,
+                    missingSequences: []
+                )
             let needed = subtractRanges(
                 availableRanges(for: remoteState),
                 excluding: availableRanges(for: localState)

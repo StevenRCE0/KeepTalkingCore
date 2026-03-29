@@ -30,8 +30,7 @@ public actor PrimitiveActionManager {
         self.callback = callback
     }
 
-    public func registerPrimitiveAction(_ action: KeepTalkingAction) async throws
-    {
+    public func registerPrimitiveAction(_ action: KeepTalkingAction) async throws {
         guard case .primitive(let primitiveBundle) = action.payload else {
             throw PrimitiveActionManagerError.invalidAction
         }
@@ -76,7 +75,7 @@ public actor PrimitiveActionManager {
 
         let response = try await callback(primitiveBundle, call)
         return (
-            content: [.text(response.text)],
+            content: [.text(text: response.text, annotations: nil, _meta: nil)],
             isError: response.isError
         )
     }

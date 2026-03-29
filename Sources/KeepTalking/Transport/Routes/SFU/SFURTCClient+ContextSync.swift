@@ -1,3 +1,3 @@
 // Context sync peer extraction is now handled by
-// KeepTalkingP2PEnvelope.participantNodeIDs and
+// KeepTalkingEnvelope.participantNodeIDs and
 // KeepTalkingContextSyncEnvelope.participantNodeIDs.

@@ -103,14 +103,16 @@ extension KeepTalkingContext: Codable {
             id: id,
             updatedAt: updatedAt
         )
-        self.$messages.value = try container.decodeIfPresent(
-            [KeepTalkingContextMessage].self,
-            forKey: .messages
-        ) ?? []
-        self.$attachments.value = try container.decodeIfPresent(
-            [KeepTalkingContextAttachment].self,
-            forKey: .attachments
-        ) ?? []
+        self.$messages.value =
+            try container.decodeIfPresent(
+                [KeepTalkingContextMessage].self,
+                forKey: .messages
+            ) ?? []
+        self.$attachments.value =
+            try container.decodeIfPresent(
+                [KeepTalkingContextAttachment].self,
+                forKey: .attachments
+            ) ?? []
     }
 
     public func encode(to encoder: any Encoder) throws {

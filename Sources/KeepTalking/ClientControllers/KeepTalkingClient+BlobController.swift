@@ -121,24 +121,32 @@ extension KeepTalkingClient {
         in contextID: UUID,
         since: Date
     ) async throws {
-        guard let request = try await contextSyncAttachmentRequest(
-            in: contextID,
-            since: since
-        ) else { return }
+        guard
+            let request = try await contextSyncAttachmentRequest(
+                in: contextID,
+                since: since
+            )
+        else { return }
 
-        try rtcClient.sendEnvelope(.contextSync(.attachmentRequest(request)))
+        try rtcClient.sendEnvelope(
+            KeepTalkingContextSyncEnvelope.attachmentRequest(request)
+        )
     }
 
     func requestAttachmentBlobsIfNeeded(
         for attachments: [KeepTalkingContextAttachment],
         in contextID: UUID
     ) async throws {
-        guard let request = try await attachmentRequest(
-            for: attachments,
-            in: contextID
-        ) else { return }
+        guard
+            let request = try await attachmentRequest(
+                for: attachments,
+                in: contextID
+            )
+        else { return }
 
-        try rtcClient.sendEnvelope(.contextSync(.attachmentRequest(request)))
+        try rtcClient.sendEnvelope(
+            KeepTalkingContextSyncEnvelope.attachmentRequest(request)
+        )
     }
 
     func respondToContextSyncAttachmentRequest(
@@ -149,7 +157,7 @@ extension KeepTalkingClient {
             guard let blobRecord = try await blobRecord(for: hash),
                 blobRecord.availability == .ready
             else { continue }
-            
+
             await blobTransportQueue.enqueue(
                 blobID: hash,
                 mask: mask,
@@ -168,14 +176,15 @@ extension KeepTalkingClient {
             guard let self else { return }
             let isSending = await self.blobTransportQueue.markSending()
             guard !isSending else { return }
-            
+
             while let (blobID, request) = await self.blobTransportQueue.next() {
                 do {
                     if request.recipients.isEmpty {
                         try await self.sendBlobFrames(blobID: blobID, mask: request.mask, recipientNodeID: nil)
                     } else {
                         for recipient in request.recipients {
-                            try await self.sendBlobFrames(blobID: blobID, mask: request.mask, recipientNodeID: recipient)
+                            try await self.sendBlobFrames(
+                                blobID: blobID, mask: request.mask, recipientNodeID: recipient)
                         }
                     }
                 } catch {
@@ -413,8 +422,7 @@ extension KeepTalkingClient {
             pathExtension: blobPathExtension(from: blobRecord.relativePath),
             expectedByteCount: blobRecord.byteCount,
             mask: mask,
-            recipientNodeID: recipientNodeID,
-            via: rtcClient.currentRoute()
+            recipientNodeID: recipientNodeID
         )
     }
 
@@ -424,8 +432,7 @@ extension KeepTalkingClient {
         pathExtension: String?,
         expectedByteCount: Int,
         mask: Data? = nil,
-        recipientNodeID: UUID?,
-        via route: KeepTalkingTransportRoute
+        recipientNodeID: UUID?
     ) async throws {
         guard let blobRecord = try await blobRecord(for: blobID),
             blobRecord.availability == .ready,
@@ -434,35 +441,15 @@ extension KeepTalkingClient {
             throw KeepTalkingBlobStoreError.blobNotFound(blobID)
         }
 
-        do {
-            try await streamBlobFrames(
-                blobID: blobID,
-                mimeType: mimeType,
-                pathExtension: pathExtension,
-                expectedByteCount: expectedByteCount,
-                mask: mask,
-                recipientNodeID: recipientNodeID,
-                via: route,
-                relativePath: relativePath
-            )
-        } catch {
-            guard route == .p2p else {
-                throw error
-            }
-            rtcClient.debug(
-                "blob transfer retrying on sfu blob=\(blobID) error=\(error.localizedDescription)"
-            )
-            try await streamBlobFrames(
-                blobID: blobID,
-                mimeType: mimeType,
-                pathExtension: pathExtension,
-                expectedByteCount: expectedByteCount,
-                mask: mask,
-                recipientNodeID: recipientNodeID,
-                via: .sfu,
-                relativePath: relativePath
-            )
-        }
+        try await streamBlobFrames(
+            blobID: blobID,
+            mimeType: mimeType,
+            pathExtension: pathExtension,
+            expectedByteCount: expectedByteCount,
+            mask: mask,
+            recipientNodeID: recipientNodeID,
+            relativePath: relativePath
+        )
     }
 
     private func streamBlobFrames(
@@ -472,7 +459,6 @@ extension KeepTalkingClient {
         expectedByteCount: Int,
         mask: Data? = nil,
         recipientNodeID: UUID?,
-        via route: KeepTalkingTransportRoute,
         relativePath: String
     ) async throws {
         let fileURL = blobStore.fileURL(forRelativePath: relativePath)
@@ -532,11 +518,11 @@ extension KeepTalkingClient {
                             payload: chunk
                         )
                     ),
-                    via: route
+                    targetPeerNodeID: recipientNodeID
                 )
                 // Sleep slightly between chunks to let WebRTC flush the SCTP send buffer
                 // and prevent bufferedAmount from spiking without blocking the thread locally.
-                try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+                try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
             }
             chunkIndex += 1
         }
@@ -565,7 +551,7 @@ extension KeepTalkingClient {
                     payload: Data()
                 )
             ),
-            via: route
+            targetPeerNodeID: recipientNodeID
         )
     }
 
@@ -576,9 +562,10 @@ extension KeepTalkingClient {
         let attachments = try await KeepTalkingContextAttachment.query(
             on: localStore.database
         )
-            .filter(\.$context.$id, .equal, contextID)
-            .all()
-        return attachments
+        .filter(\.$context.$id, .equal, contextID)
+        .all()
+        return
+            attachments
             .filter { $0.createdAt >= since }
             .sorted {
                 if $0.createdAt != $1.createdAt {
@@ -638,9 +625,11 @@ extension KeepTalkingClient {
     }
 
     private func normalizedPathExtension(_ pathExtension: String?) -> String? {
-        guard let pathExtension = pathExtension?.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        ), !pathExtension.isEmpty else {
+        guard
+            let pathExtension = pathExtension?.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ), !pathExtension.isEmpty
+        else {
             return nil
         }
         return pathExtension

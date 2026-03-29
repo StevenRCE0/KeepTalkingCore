@@ -15,21 +15,21 @@ actor KeepTalkingBlobTransportQueue {
         recipient: UUID?
     ) {
         var details = pendingTransfers[blobID] ?? TransferDetails(mask: mask, recipients: [])
-        
+
         // Merge masks. If any mask is nil, we default to sending all chunks (nil)
         if let currentMask = details.mask, let newMask = mask {
             details.mask = Self.mergeMasks(currentMask, newMask)
         } else {
             details.mask = nil
         }
-        
+
         if let recipient {
             details.recipients.insert(recipient)
         }
-        
+
         pendingTransfers[blobID] = details
     }
-    
+
     func next() -> (blobID: String, details: TransferDetails)? {
         guard let key = pendingTransfers.keys.first else {
             isSending = false

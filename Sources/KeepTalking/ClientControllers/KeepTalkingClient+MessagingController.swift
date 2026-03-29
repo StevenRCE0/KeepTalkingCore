@@ -60,21 +60,21 @@ extension KeepTalkingClient {
         )
         try await persistedContext.refreshSyncMetadata(on: localStore.database)
         if emitLocalEnvelope {
-            onEnvelope?(.message(message))
+            onEnvelope?(message)
             for attachment in savedAttachments {
                 if let attachmentDTO = KeepTalkingContextAttachmentDTO(attachment) {
-                    onEnvelope?(.attachment(attachmentDTO))
+                    onEnvelope?(attachmentDTO)
                 }
             }
         }
 
         _ = try await ensureGroupChatSecret(for: persistedContext.requireID())
-        try rtcClient.sendEnvelope(.message(message))
+        try rtcClient.sendEnvelope(message)
         for attachment in savedAttachments {
             guard let attachmentDTO = KeepTalkingContextAttachmentDTO(attachment) else {
                 continue
             }
-            try rtcClient.sendEnvelope(.attachment(attachmentDTO))
+            try rtcClient.sendEnvelope(attachmentDTO)
         }
         scheduleOutgoingBlobTransfers(for: savedAttachments)
         guard message.type == .message else {
@@ -137,7 +137,7 @@ extension KeepTalkingClient {
         _ context: KeepTalkingConversationContext
     ) async throws {
         try await saveContext(context)
-        try rtcClient.sendEnvelope(.context(context))
+        try rtcClient.sendEnvelope(context)
     }
 
     func mergeContext(_ context: KeepTalkingContext) {
@@ -165,135 +165,6 @@ extension KeepTalkingClient {
             for: savedAttachments,
             in: attachment.contextID
         )
-    }
-
-    func handleIncomingEnvelope(_ envelope: KeepTalkingP2PEnvelope)
-        async throws
-    {
-        switch envelope {
-            case .message(let message):
-                try await handleIncomingMessage(message)
-                rtcClient.debug("Message cast to envelope")
-            case .attachment(let attachment):
-                try await handleIncomingAttachment(attachment)
-            case .node(let node):
-                try await mergeDiscoveredNode(node)
-            case .nodeStatus(let status):
-                try await mergeDiscoveredNodeStatus(status)
-            case .encryptedNodeStatus(let envelope):
-                guard envelope.recipientNodeID == config.node else {
-                    break
-                }
-                do {
-                    let status = try await decryptNodeStatusEnvelope(envelope)
-                    try await mergeDiscoveredNodeStatus(status)
-                } catch {
-                    throw error
-                }
-            case .contextSync(let envelope):
-                try await handleIncomingContextSyncEnvelope(envelope)
-            case .context(let context):
-                mergeContext(context)
-            case .actionCallRequest(let request):
-                if request.targetNodeID == config.node {
-                    Task { [weak self] in
-                        do {
-                            try await self?.handleIncomingActionCallRequest(
-                                request
-                            )
-                        } catch {
-                            self?.onLog?(
-                                "[action-call/request] failed request=\(request.id.uuidString.lowercased()) action=\(request.call.action.uuidString.lowercased()) error=\(error.localizedDescription)"
-                            )
-                        }
-                    }
-                }
-            case .requestAck(let acknowledgement):
-                if acknowledgement.callerNodeID == config.node {
-                    handleIncomingRequestAck(acknowledgement)
-                }
-            case .actionCallResult(let result):
-                _ = resolvePendingActionCall(result)
-            case .encryptedActionCallRequest(let envelope):
-                guard envelope.recipientNodeID == config.node else {
-                    break
-                }
-                let request = try await decryptActionCallRequestEnvelope(envelope)
-                Task { [weak self] in
-                    do {
-                        try await self?.handleIncomingActionCallRequest(
-                            request
-                        )
-                    } catch {
-                        self?.onLog?(
-                            "[action-call/request] failed request=\(request.id.uuidString.lowercased()) action=\(request.call.action.uuidString.lowercased()) error=\(error.localizedDescription)"
-                        )
-                    }
-                }
-            case .encryptedRequestAck(let envelope):
-                guard envelope.recipientNodeID == config.node else {
-                    break
-                }
-                let acknowledgement = try await decryptRequestAckEnvelope(
-                    envelope
-                )
-                if acknowledgement.callerNodeID == config.node {
-                    handleIncomingRequestAck(acknowledgement)
-                }
-            case .encryptedActionCallResult(let envelope):
-                guard envelope.recipientNodeID == config.node else {
-                    break
-                }
-                let result = try await decryptActionCallResultEnvelope(envelope)
-                _ = resolvePendingActionCall(result)
-            case .actionCatalogRequest(let request):
-                if request.targetNodeID == config.node {
-                    Task { [weak self] in
-                        try await self?.handleIncomingActionCatalogRequest(
-                            request
-                        )
-                    }
-                }
-            case .actionCatalogResult(let result):
-                _ = resolvePendingActionCatalogResult(result)
-            case .encryptedActionCatalogRequest(let envelope):
-                guard envelope.recipientNodeID == config.node else {
-                    break
-                }
-                let request = try await decryptActionCatalogRequestEnvelope(
-                    envelope
-                )
-                Task { [weak self] in
-                    try await self?.handleIncomingActionCatalogRequest(request)
-                }
-            case .encryptedActionCatalogResult(let envelope):
-                guard envelope.recipientNodeID == config.node else {
-                    break
-                }
-                let result = try await decryptActionCatalogResultEnvelope(
-                    envelope
-                )
-                _ = resolvePendingActionCatalogResult(result)
-            case .p2pPresence(let presence):
-                guard presence.node != config.node else {
-                    break
-                }
-                let nodeIDText = presence.node.uuidString.lowercased()
-                do {
-                    try await markNodeDiscovered(presence.node)
-                } catch {
-                    rtcClient.debug(
-                        "mark node discovered failed node=\(nodeIDText) error=\(error.localizedDescription)"
-                    )
-                }
-                scheduleDebouncedNodeStateBroadcast(
-                    reason: "p2pPresence node=\(nodeIDText)"
-                )
-            default:
-                break
-        }
-
-        onEnvelope?(envelope)
     }
 
     func saveContext(_ context: KeepTalkingContext) async throws {
@@ -581,7 +452,8 @@ extension KeepTalkingClient {
         }
 
         let senderNode: KeepTalkingNode
-        if let existingSenderNode = try await KeepTalkingNode
+        if let existingSenderNode =
+            try await KeepTalkingNode
             .query(on: localStore.database)
             .filter(\.$id, .equal, nodeID)
             .first()
@@ -672,7 +544,6 @@ extension KeepTalkingClient {
         return saved
     }
 
-
     private func resolvedAttachmentFilename(
         _ attachmentInput: KeepTalkingLocalAttachmentInput
     ) -> String {
@@ -710,10 +581,11 @@ extension KeepTalkingClient {
             return mimeType
         }
 
-        let pathExtension = resolvedAttachmentPathExtension(
-            attachmentInput,
-            filename: filename
-        ) ?? ""
+        let pathExtension =
+            resolvedAttachmentPathExtension(
+                attachmentInput,
+                filename: filename
+            ) ?? ""
         if let type = UTType(filenameExtension: pathExtension),
             let mimeType = type.preferredMIMEType
         {
@@ -841,5 +713,20 @@ extension KeepTalkingClient {
             content: previewText,
             isTruncated: rawContent.count > previewText.count
         )
+    }
+}
+
+extension KeepTalkingEnvelopeAsyncHandlers {
+    mutating func registerMessagingHandlers(for client: KeepTalkingClient) {
+        onMessage { message in
+            try await client.handleIncomingMessage(message)
+            client.rtcClient.debug("Message cast to envelope")
+        }
+        onAttachment { attachment in
+            try await client.handleIncomingAttachment(attachment)
+        }
+        onContext { context in
+            client.mergeContext(context)
+        }
     }
 }

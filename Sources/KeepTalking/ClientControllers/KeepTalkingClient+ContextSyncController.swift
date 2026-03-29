@@ -88,7 +88,7 @@ extension KeepTalkingClient {
                     request
                 )
                 try rtcClient.sendEnvelope(
-                    .contextSync(.summaryResult(result))
+                    KeepTalkingContextSyncEnvelope.summaryResult(result)
                 )
             case .summaryResult(let result):
                 guard result.requester == config.node else {
@@ -101,7 +101,7 @@ extension KeepTalkingClient {
                 }
                 let result = try await executeContextSyncTailRequest(request)
                 try rtcClient.sendEnvelope(
-                    .contextSync(.messagesResult(result))
+                    KeepTalkingContextSyncEnvelope.messagesResult(result)
                 )
             case .chunkRequest(let request):
                 guard request.recipient == config.node else {
@@ -109,7 +109,7 @@ extension KeepTalkingClient {
                 }
                 let result = try await executeContextSyncChunkRequest(request)
                 try rtcClient.sendEnvelope(
-                    .contextSync(.messagesResult(result))
+                    KeepTalkingContextSyncEnvelope.messagesResult(result)
                 )
             case .messagesResult(let result):
                 guard result.requester == config.node else {
@@ -143,7 +143,7 @@ extension KeepTalkingClient {
             timeoutSeconds: Self.contextSyncResultTimeoutSeconds,
             send: { [weak self] in
                 try self?.rtcClient.sendEnvelope(
-                    .contextSync(.summaryRequest(request))
+                    KeepTalkingContextSyncEnvelope.summaryRequest(request)
                 )
             }
         )
@@ -160,7 +160,9 @@ extension KeepTalkingClient {
             request: request.request,
             timeoutSeconds: Self.contextSyncResultTimeoutSeconds,
             send: { [weak self] in
-                try self?.rtcClient.sendEnvelope(.contextSync(.tailRequest(request)))
+                try self?.rtcClient.sendEnvelope(
+                    KeepTalkingContextSyncEnvelope.tailRequest(request)
+                )
             }
         )
     }
@@ -177,7 +179,7 @@ extension KeepTalkingClient {
             timeoutSeconds: Self.contextSyncResultTimeoutSeconds,
             send: { [weak self] in
                 try self?.rtcClient.sendEnvelope(
-                    .contextSync(.chunkRequest(request))
+                    KeepTalkingContextSyncEnvelope.chunkRequest(request)
                 )
             }
         )
@@ -422,5 +424,13 @@ extension KeepTalkingClient {
             for: savedAttachments,
             in: result.context
         )
+    }
+}
+
+extension KeepTalkingEnvelopeAsyncHandlers {
+    mutating func registerContextSyncHandlers(for client: KeepTalkingClient) {
+        onContextSync { payload in
+            try await client.handleIncomingContextSyncEnvelope(payload)
+        }
     }
 }

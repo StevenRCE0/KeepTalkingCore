@@ -60,7 +60,8 @@ private struct Launcher: MCPStdioTransportLaunching {
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         let exitState = DefaultProcessExitState()
-        let mergedEnvironment = DefaultProcessExecutionSupport
+        let mergedEnvironment =
+            DefaultProcessExecutionSupport
             .mergedEnvironment(
                 for: command,
                 environment: environment
@@ -129,8 +130,7 @@ private actor MCPPipeTransport: Transport {
     private var isConnected = false
     private var pendingData = Data()
     private let messageStream: AsyncThrowingStream<Data, Swift.Error>
-    private let messageContinuation:
-        AsyncThrowingStream<Data, Swift.Error>.Continuation
+    private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
     init(
         inputHandle: FileHandle,
@@ -139,7 +139,8 @@ private actor MCPPipeTransport: Transport {
     ) {
         self.inputHandle = inputHandle
         self.outputHandle = outputHandle
-        self.logger = logger
+        self.logger =
+            logger
             ?? Logger(label: "keepTalking.transport.pipe") { _ in
                 SwiftLogNoOpLogHandler()
             }

@@ -36,7 +36,7 @@ struct PrimitiveActionManagerTests {
 
         #expect(response.isError == true)
         #expect(response.content.count == 1)
-        if case .text(let text) = try #require(response.content.first) {
+        if case .text(text: let text, annotations: _, _meta: _) = try #require(response.content.first) {
             #expect(text == "opened")
         } else {
             Issue.record("Expected text content from primitive action callback")

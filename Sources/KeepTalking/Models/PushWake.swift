@@ -110,8 +110,8 @@ public struct KeepTalkingPushWakeActionPayload: Codable, Sendable, Hashable {
     }
 }
 
-public extension KeepTalkingAsymmetricCipherEnvelope {
-    static func decodePushWakeActionEnvelope(
+extension KeepTalkingAsymmetricCipherEnvelope {
+    public static func decodePushWakeActionEnvelope(
         from userInfo: [AnyHashable: Any]
     ) -> KeepTalkingAsymmetricCipherEnvelope? {
         if let json = userInfo["kt_action_wake"] as? String,

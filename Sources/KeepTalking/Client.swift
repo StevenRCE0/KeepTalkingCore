@@ -69,14 +69,16 @@ public enum KeepTalkingClientError: LocalizedError {
                 let actionName,
                 let timeoutSeconds
             ):
-                return "Timed out registering \(source) executor '\(actionName)' (\(actionID.uuidString.lowercased())) after \(Int(timeoutSeconds))s."
+                return
+                    "Timed out registering \(source) executor '\(actionName)' (\(actionID.uuidString.lowercased())) after \(Int(timeoutSeconds))s."
             case .localExecutorRegistrationFailed(
                 let actionID,
                 let source,
                 let actionName,
                 let message
             ):
-                return "Failed registering \(source) executor '\(actionName)' (\(actionID.uuidString.lowercased())): \(message)"
+                return
+                    "Failed registering \(source) executor '\(actionName)' (\(actionID.uuidString.lowercased())): \(message)"
             case .localIdentityPrivateKeyMissing:
                 return "Local private identity key is missing."
             case .remoteIdentityPublicKeyMissing(let nodeID):
@@ -112,7 +114,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public typealias PrimitiveActionPostResultHandler =
         @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall) -> Void
 
-    public typealias EnvelopeHandler = @Sendable (KeepTalkingP2PEnvelope) -> Void
+    public typealias EnvelopeHandler = @Sendable (any KeepTalkingEnvelope) -> Void
     public typealias RawMessageHandler = @Sendable (String) -> Void
     public typealias BlobAvailabilityHandler = @Sendable (UUID, String) -> Void
     public typealias PeerConnectHandler = @Sendable (UUID) -> Void
@@ -226,9 +228,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
         livenessState = KeepTalkingContextLivenessState(
             localNode: config.node
         )
-        self.rtcClient = KeepTalkingHybridRTCClient(
+        self.rtcClient = KeepTalkingContextTransport(
             config: config,
-            localStore: localStore,
             livenessState: livenessState
         )
         self.mcpManager = MCPManager(

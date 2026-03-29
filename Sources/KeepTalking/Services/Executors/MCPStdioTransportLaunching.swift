@@ -2,9 +2,9 @@ import Foundation
 import MCP
 
 #if canImport(System)
-    import System
+import System
 #else
-    @preconcurrency import SystemPackage
+@preconcurrency import SystemPackage
 #endif
 
 public protocol MCPStdioProcessHandling: Sendable {

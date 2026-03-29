@@ -265,11 +265,12 @@ extension KeepTalkingClient {
                         .trimmingCharacters(in: .whitespacesAndNewlines),
                     !selectedTool.isEmpty
                 {
-                    routedToolName = KeepTalkingActionToolDefinition
+                    routedToolName =
+                        KeepTalkingActionToolDefinition
                         .routedActionName(
-                        selectedTool,
-                        actionID: definition.actionID
-                    )
+                            selectedTool,
+                            actionID: definition.actionID
+                        )
                 } else {
                     routedToolName = actionDisplayName(
                         for: definition,
@@ -324,7 +325,8 @@ extension KeepTalkingClient {
             unroutedName = toolName
         }
 
-        let collapsed = unroutedName
+        let collapsed =
+            unroutedName
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(
                 of: "[_\\-]+",
@@ -784,10 +786,11 @@ extension KeepTalkingClient {
                 "Inspect the attached context file '\(attachment.filename)'."
         }
 
-        var contentParts: [ChatQuery.ChatCompletionMessageParam.UserMessageParam
-            .Content.ContentPart] = [
-                .text(.init(text: leadText))
-            ]
+        var contentParts:
+            [ChatQuery.ChatCompletionMessageParam.UserMessageParam
+                .Content.ContentPart] = [
+                    .text(.init(text: leadText))
+                ]
 
         if attachment.isImage {
             contentParts.append(
@@ -913,7 +916,8 @@ extension KeepTalkingClient {
         let renderedContent = result.content.map { content -> String in
             switch content {
                 case .text(let text):
-                    return text
+                    // TODO: we'll probably add metadata support here
+                    return text.text
                 default:
                     if let data = try? JSONEncoder().encode(content),
                         let json = String(data: data, encoding: .utf8)

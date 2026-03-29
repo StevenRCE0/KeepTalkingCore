@@ -32,7 +32,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         static let subscriber = 1
     }
 
-    var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)?
+    var onEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
@@ -230,7 +230,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         .sfu
     }
 
-    func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws {
+    func sendEnvelope(_ envelope: any KeepTalkingEnvelope) throws {
         let kind = envelope.channel
         guard let sendChannel = channels.preferred(for: kind) else {
             throw RTCError.dataChannelCreateFailed(config.label(for: kind))
@@ -240,7 +240,8 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             throw RTCError.dataChannelNotOpen(sendChannel.label)
         }
 
-        let payload = try KeepTalkingPacketTransportCrypto
+        let payload =
+            try KeepTalkingPacketTransportCrypto
             .outboundPayload(
                 for: envelope,
                 localNodeID: config.node,
@@ -263,7 +264,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
     func sendBlobData(
         _ data: Data,
-        via route: KeepTalkingTransportRoute?
+        targetPeerNodeID: UUID?
     ) throws {
         guard let sendChannel = channels.preferred(for: .blob) else {
             let summary = channels.stateSummary(for: [.blob])
@@ -605,7 +606,8 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         }
 
         do {
-            if let envelope = try KeepTalkingPacketTransportCrypto
+            if let envelope =
+                try KeepTalkingPacketTransportCrypto
                 .inboundEnvelope(
                     from: buffer.data,
                     contextSecretProvider: contextSecretProvider
@@ -653,7 +655,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
     // MARK: - Peer tracking
 
-    private func reportConnectedPeers(from envelope: KeepTalkingP2PEnvelope) {
+    private func reportConnectedPeers(from envelope: any KeepTalkingEnvelope) {
         for nodeID in envelope.participantNodeIDs {
             reportPeerConnected(nodeID)
         }

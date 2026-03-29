@@ -73,8 +73,10 @@ extension KeepTalkingClient {
             request,
             context: context
         )
-        let encryptedResult = try await encryptActionCatalogResultEnvelope(result)
-        try rtcClient.sendEnvelope(.encryptedActionCatalogResult(encryptedResult))
+        try await rtcClient.sendTrustedEnvelope(
+            result,
+            cryptorSource: trustedEnvelopeCryptorSource()
+        )
     }
 
     func dispatchActionCatalogRequest(
@@ -96,11 +98,9 @@ extension KeepTalkingClient {
             return await executeActionCatalogRequest(request, context: context)
         }
 
-        let encryptedRequest = try await encryptActionCatalogRequestEnvelope(
-            request
-        )
-        try rtcClient.sendEnvelope(
-            .encryptedActionCatalogRequest(encryptedRequest)
+        try await rtcClient.sendTrustedEnvelope(
+            request,
+            cryptorSource: trustedEnvelopeCryptorSource()
         )
 
         return try await waitForActionCatalogResult(
@@ -113,8 +113,7 @@ extension KeepTalkingClient {
         requestID: UUID,
         timeoutSeconds: TimeInterval
     ) async throws -> KeepTalkingActionCatalogResult {
-        try await withThrowingTaskGroup(of: KeepTalkingActionCatalogResult.self)
-        { group in
+        try await withThrowingTaskGroup(of: KeepTalkingActionCatalogResult.self) { group in
             group.addTask { [weak self] in
                 guard let self else {
                     throw KeepTalkingClientError.actionCatalogTimeout(requestID)
@@ -191,6 +190,17 @@ extension KeepTalkingClient {
         }
     }
 
+    fileprivate func enqueueIncomingActionCatalogRequest(
+        _ request: KeepTalkingActionCatalogRequest
+    ) {
+        guard request.targetNodeID == config.node else {
+            return
+        }
+        Task { [weak self] in
+            try await self?.handleIncomingActionCatalogRequest(request)
+        }
+    }
+
     private func deduplicatedCatalogQueries(
         _ queries: [KeepTalkingActionCatalogQuery]
     ) -> [KeepTalkingActionCatalogQuery] {
@@ -200,7 +210,8 @@ extension KeepTalkingClient {
 
         for query in queries {
             let argumentsKey: String
-            let normalizedArguments = KeepTalkingSkillCatalogLoader
+            let normalizedArguments =
+                KeepTalkingSkillCatalogLoader
                 .normalizedFileArguments(query.arguments)
             if query.kind == .skillFile,
                 !normalizedArguments.isEmpty,
@@ -320,5 +331,34 @@ extension KeepTalkingClient {
             bundle: bundle,
             arguments: arguments
         )
+    }
+}
+
+extension KeepTalkingEnvelopeAsyncHandlers {
+    mutating func registerActionCatalogHandlers(for client: KeepTalkingClient) {
+        onActionCatalogRequest { request in
+            client.enqueueIncomingActionCatalogRequest(request)
+        }
+        onActionCatalogResult { result in
+            _ = client.resolvePendingActionCatalogResult(result)
+        }
+        onEncryptedActionCatalogRequest { encryptedRequest in
+            let decrypted = try await client.decryptTrustedEnvelope(
+                KeepTalkingEncryptedActionCatalogRequestEnvelope(encryptedRequest)
+            )
+            guard let request = decrypted.actionCatalogRequest else {
+                return
+            }
+            client.enqueueIncomingActionCatalogRequest(request)
+        }
+        onEncryptedActionCatalogResult { encryptedResult in
+            let decrypted = try await client.decryptTrustedEnvelope(
+                KeepTalkingEncryptedActionCatalogResultEnvelope(encryptedResult)
+            )
+            guard let result = decrypted.actionCatalogResult else {
+                return
+            }
+            _ = client.resolvePendingActionCatalogResult(result)
+        }
     }
 }

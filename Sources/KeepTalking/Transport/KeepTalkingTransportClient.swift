@@ -3,13 +3,8 @@ import Foundation
 typealias KeepTalkingTransportContextSecretProvider = @Sendable (UUID) async throws -> Data?
 typealias KeepTalkingTransportBlobDataHandler = @Sendable (Data) -> Void
 
-enum KeepTalkingTransportRoute: String, Sendable {
-    case sfu
-    case p2p
-}
-
 protocol KeepTalkingTransportClient: AnyObject {
-    var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)? { get set }
+    var onEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)? { get set }
     var onBlobData: KeepTalkingTransportBlobDataHandler? { get set }
     var onRawMessage: (@Sendable (String) -> Void)? { get set }
     var onPeerConnect: (@Sendable (UUID) -> Void)? { get set }
@@ -18,14 +13,28 @@ protocol KeepTalkingTransportClient: AnyObject {
 
     func start() async throws
     func stop()
-    func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws
+    func sendEnvelope(_ envelope: any KeepTalkingEnvelope) throws
     func sendBlobData(
         _ data: Data,
-        via route: KeepTalkingTransportRoute?
+        targetPeerNodeID: UUID?
     ) throws
     func currentRoute() -> KeepTalkingTransportRoute
     func runtimeStats() -> KeepTalkingRuntimeStats
     func requestP2PTrial()
     func preferReliableRoute(reason: String)
     func debug(_ message: String)
+}
+
+extension KeepTalkingTransportClient {
+    func sendTrustedEnvelope(
+        _ envelope: any KeepTalkingEnvelope,
+        cryptorSource: KeepTalkingTrustedEnvelopeCryptorSource
+    ) async throws {
+        guard let cryptor = try await cryptorSource(envelope) else {
+            throw
+                KeepTalkingTrustedEnvelopeCryptorError
+                .missingCryptor(envelope.kind)
+        }
+        try sendEnvelope(try await cryptor.encrypt(envelope))
+    }
 }

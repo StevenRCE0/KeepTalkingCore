@@ -137,12 +137,15 @@ extension KeepTalkingCLIController {
             )
         )
         let actionID = action.id?.uuidString.lowercased() ?? "unknown"
-        let headerLabel = headers.isEmpty
+        let headerLabel =
+            headers.isEmpty
             ? "none"
             : headers.sorted { $0.key < $1.key }
                 .map { "\($0.key)=\($0.value)" }
                 .joined(separator: ",")
-        print("[mcp] registered action=\(actionID) type=http name=\(name) url=\(url.absoluteString) headers=\(headerLabel)")
+        print(
+            "[mcp] registered action=\(actionID) type=http name=\(name) url=\(url.absoluteString) headers=\(headerLabel)"
+        )
     }
 
     func installMCPHTTPAuthHandler(on targetClient: KeepTalkingClient) {

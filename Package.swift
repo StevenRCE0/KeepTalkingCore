@@ -29,7 +29,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/modelcontextprotocol/swift-sdk.git",
-            from: "0.11.0"
+            from: "0.12.0"
         ),
         .package(
             url: "https://github.com/MacPaw/OpenAI.git",

@@ -305,10 +305,14 @@ struct CliConfig {
                             skillCommand = .remove(actionID: actionID)
                         case "add-directory", "add-dir":
                             index += 1
-                            guard index < args.count else { throw CliError.missingValue("--skill add-directory <name>") }
+                            guard index < args.count else {
+                                throw CliError.missingValue("--skill add-directory <name>")
+                            }
                             let name = args[index]
                             index += 1
-                            guard index < args.count else { throw CliError.missingValue("--skill add-directory <path>") }
+                            guard index < args.count else {
+                                throw CliError.missingValue("--skill add-directory <path>")
+                            }
                             let directory = try resolveSkillDirectoryURL(args[index])
                             var descriptionParts: [String] = []
                             while index + 1 < args.count, !args[index + 1].hasPrefix("--") {
@@ -491,7 +495,7 @@ struct CliConfig {
         guard
             let components = URLComponents(string: raw),
             let scheme = components.scheme?.lowercased(),
-            (scheme == "http" || scheme == "https"),
+            scheme == "http" || scheme == "https",
             let host = components.host,
             !host.isEmpty
         else {

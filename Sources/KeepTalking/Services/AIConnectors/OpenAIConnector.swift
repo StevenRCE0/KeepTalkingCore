@@ -24,7 +24,8 @@ public actor OpenAIConnector {
     ) -> String {
         let currentPromptGuidance: String
         if currentPromptIncludesAttachments {
-            currentPromptGuidance = currentPromptShouldAvoidAutomaticToolUse
+            currentPromptGuidance =
+                currentPromptShouldAvoidAutomaticToolUse
                 ? """
                 The current user turn already includes its newly attached files natively.
                 Do not call attachment tools, the action listing tool, or any other tool just to inspect those current attachments.
@@ -39,33 +40,33 @@ public actor OpenAIConnector {
         }
 
         return """
-        You are a KeepTalking participant in a group chat.
-        Use the provided conversation context when deciding whether to call tools and when writing your response.
-        Use tools only when they are relevant to the user's request.
-        If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
-        Do not fabricate tool outputs.
-        Call \(listingToolFunctionName) before deciding any KeepTalking action plan, but notice that you might also have built-in tools
-        like web search and context attachment access outside of the listed action tool output.
-        You do not have general filesystem access. Attachment tools expose only files that are already attached to the active context.
-        If the user asks about a file already attached to this context, call \(attachmentListingToolFunctionName) to inspect the available attachments.
-        Prefer \(attachmentReaderToolFunctionName) with mode=metadata or mode=preview_text first, and use mode=native only when you need the actual file or image content added to the next model turn.
-        \(currentPromptGuidance)
+            You are a KeepTalking participant in a group chat.
+            Use the provided conversation context when deciding whether to call tools and when writing your response.
+            Use tools only when they are relevant to the user's request.
+            If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
+            Do not fabricate tool outputs.
+            Call \(listingToolFunctionName) before deciding any KeepTalking action plan, but notice that you might also have built-in tools
+            like web search and context attachment access outside of the listed action tool output.
+            You do not have general filesystem access. Attachment tools expose only files that are already attached to the active context.
+            If the user asks about a file already attached to this context, call \(attachmentListingToolFunctionName) to inspect the available attachments.
+            Prefer \(attachmentReaderToolFunctionName) with mode=metadata or mode=preview_text first, and use mode=native only when you need the actual file or image content added to the next model turn.
+            \(currentPromptGuidance)
 
-        Skill execution policy (mandatory):
-        1) If you will use any tool where listing output shows source=skill and route_kind=action_proxy, first call the matching source=skill route_kind=skill_metadata tool for that same action_id.
-        2) Then call the matching source=skill route_kind=skill_file tool at least once for that same action_id to inspect concrete file content.
-        3) Only after a successful skill_file read may you call the skill action_proxy tool for that action_id.
-        4) Never skip the skill_file step for skill actions, even if metadata looks sufficient.
-        5) If skill_file fails, explain the failure and do not continue with that skill action_proxy call.
+            Skill execution policy (mandatory):
+            1) If you will use any tool where listing output shows source=skill and route_kind=action_proxy, first call the matching source=skill route_kind=skill_metadata tool for that same action_id.
+            2) Then call the matching source=skill route_kind=skill_file tool at least once for that same action_id to inspect concrete file content.
+            3) Only after a successful skill_file read may you call the skill action_proxy tool for that action_id.
+            4) Never skip the skill_file step for skill actions, even if metadata looks sufficient.
+            5) If skill_file fails, explain the failure and do not continue with that skill action_proxy call.
 
-        Tool-result response policy:
-        1) When tool output contains user-relevant findings, include a concise assistant text summary after processing the tool output.
-        2) If the tool output has nothing meaningful for the user, keep the assistant text brief and explicit about that.
-        3) Do not just stop at tool calls when the user would benefit from a short natural-language update.
+            Tool-result response policy:
+            1) When tool output contains user-relevant findings, include a concise assistant text summary after processing the tool output.
+            2) If the tool output has nothing meaningful for the user, keep the assistant text brief and explicit about that.
+            3) Do not just stop at tool calls when the user would benefit from a short natural-language update.
 
-        Conversation context:
-        \(contextTranscript)
-        """
+            Conversation context:
+            \(contextTranscript)
+            """
     }
 
     public struct ToolPlanningResult: Sendable {
@@ -180,7 +181,7 @@ public actor OpenAIConnector {
         guard statusCode == 200 else {
             let message =
                 (try? JSONDecoder().decode(APIErrorWrapper.self, from: data))
-                    .map(\.error.message)
+                .map(\.error.message)
                 ?? HTTPURLResponse.localizedString(forStatusCode: statusCode)
             throw ConnectorError.apiError(statusCode, message)
         }
@@ -286,12 +287,13 @@ public actor OpenAIConnector {
     ) -> ChatQuery.ChatCompletionToolParam? {
         switch tool {
             case .functionTool(let fn):
-                return .init(function: .init(
-                    name: fn.name,
-                    description: fn.description,
-                    parameters: fn.parameters,
-                    strict: fn.strict
-                ))
+                return .init(
+                    function: .init(
+                        name: fn.name,
+                        description: fn.description,
+                        parameters: fn.parameters,
+                        strict: fn.strict
+                    ))
             default:
                 return nil
         }

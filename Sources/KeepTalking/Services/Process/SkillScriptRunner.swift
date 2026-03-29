@@ -74,7 +74,8 @@ public enum SkillScriptRunner {
         process.currentDirectoryURL = currentDirectory
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
-        process.environment = DefaultProcessExecutionSupport
+        process.environment =
+            DefaultProcessExecutionSupport
             .mergedEnvironment(
                 for: command,
                 environment: [:]

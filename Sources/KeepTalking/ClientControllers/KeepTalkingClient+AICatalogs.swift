@@ -138,8 +138,7 @@ extension KeepTalkingClient {
             of: [KeepTalkingAction].self,
             returning: [KeepTalkingAction].self
         ) { group in
-            for relation in outgoingRelations where relation.allows(context: context)
-            {
+            for relation in outgoingRelations where relation.allows(context: context) {
                 group.addTask {
                     let actionRelations = try await relation.$actionRelations
                         .query(on: self.localStore.database)
@@ -533,13 +532,15 @@ extension KeepTalkingClient {
         if recentMessages.isEmpty {
             conversationTranscript = "No prior messages in this context."
         } else {
-            conversationTranscript = recentMessages
+            conversationTranscript =
+                recentMessages
                 .reversed()
                 .map { message in
-                let sender = KeepTalkingActionToolDefinition
-                    .conversationSenderTag(message.sender)
-                return "[\(sender)] \(message.content)"
-            }.joined(separator: "\n")
+                    let sender =
+                        KeepTalkingActionToolDefinition
+                        .conversationSenderTag(message.sender)
+                    return "[\(sender)] \(message.content)"
+                }.joined(separator: "\n")
         }
 
         let attachmentCount = try await KeepTalkingContextAttachment.query(

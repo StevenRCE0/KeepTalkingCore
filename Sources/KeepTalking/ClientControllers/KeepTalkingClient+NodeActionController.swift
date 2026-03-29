@@ -45,9 +45,9 @@ extension KeepTalkingClient {
 
     private static func normalizedBlockingAuthorisation(_ value: Bool) -> Bool {
         #if os(iOS)
-            true
+        true
         #else
-            value
+        value
         #endif
     }
 
@@ -106,11 +106,12 @@ extension KeepTalkingClient {
         }
 
         guard
-            let ownershipRelation = try await KeepTalkingNodeRelation
-            .query(on: database)
-            .filter(\.$from.$id == authorizingNodeID)
-            .filter(\.$to.$id == hostNodeID)
-            .first(),
+            let ownershipRelation =
+                try await KeepTalkingNodeRelation
+                .query(on: database)
+                .filter(\.$from.$id == authorizingNodeID)
+                .filter(\.$to.$id == hostNodeID)
+                .first(),
             ownershipRelation.relationship == .owner,
             let hostNode = try await KeepTalkingNode.find(
                 hostNodeID,
@@ -415,7 +416,8 @@ extension KeepTalkingClient {
         }
 
         if let blockingAuthorisation {
-            action.blockingAuthorisation = Self
+            action.blockingAuthorisation =
+                Self
                 .normalizedBlockingAuthorisation(blockingAuthorisation)
         }
 
@@ -462,7 +464,8 @@ extension KeepTalkingClient {
         }
 
         if let blockingAuthorisation {
-            action.blockingAuthorisation = Self
+            action.blockingAuthorisation =
+                Self
                 .normalizedBlockingAuthorisation(blockingAuthorisation)
         }
 
@@ -509,7 +512,8 @@ extension KeepTalkingClient {
         }
 
         if let blockingAuthorisation {
-            action.blockingAuthorisation = Self
+            action.blockingAuthorisation =
+                Self
                 .normalizedBlockingAuthorisation(blockingAuthorisation)
         }
 
@@ -828,7 +832,8 @@ extension KeepTalkingClient {
                 ?? .mcpBundle(
                     virtualRemoteMCPBundle(
                         actionID: actionID,
-                        name: "remote_\(actionID.uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(8))",
+                        name:
+                            "remote_\(actionID.uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(8))",
                         description: fallbackDescription
                     )
                 )

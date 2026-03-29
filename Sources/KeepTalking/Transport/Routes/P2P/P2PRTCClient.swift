@@ -41,12 +41,16 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         .chat, .blob, .actionCall,
     ]
 
-    var onEnvelope: (@Sendable (KeepTalkingP2PEnvelope) -> Void)?
+    var onEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
     var onLog: (@Sendable (String) -> Void)?
     var onTransportDegraded: (@Sendable (String) -> Void)?
+    /// Called when ICE transitions to `.connected` or `.completed`.
+    var onIceConnected: (@Sendable () -> Void)?
+    /// Called when ICE transitions to `.disconnected` (may recover on its own).
+    var onIceDisconnected: (@Sendable () -> Void)?
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider?
 
     private let config: KeepTalkingConfig
@@ -169,7 +173,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         .p2p
     }
 
-    func sendEnvelope(_ envelope: KeepTalkingP2PEnvelope) throws {
+    func sendEnvelope(_ envelope: any KeepTalkingEnvelope) throws {
         let kind = envelope.channel
         guard kind != .signaling else {
             throw P2PError.signalingInP2P
@@ -187,7 +191,8 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             throw P2PError.dataChannelNotOpen(dataChannel.label)
         }
 
-        let payload = try KeepTalkingPacketTransportCrypto
+        let payload =
+            try KeepTalkingPacketTransportCrypto
             .outboundPayload(
                 for: envelope,
                 localNodeID: localNodeID,
@@ -205,7 +210,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
 
     func sendBlobData(
         _ data: Data,
-        via route: KeepTalkingTransportRoute?
+        targetPeerNodeID: UUID?
     ) throws {
         guard let dataChannel = channels.preferred(for: .blob) else {
             let summary = channels.stateSummary(for: Self.requiredChannels)
@@ -301,7 +306,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
                 throw P2PError.dataChannelCreateFailed(label)
             }
             channel.delegate = self
-            // When using pre-negotiated channels, the same LKRTCDataChannel instance 
+            // When using pre-negotiated channels, the same LKRTCDataChannel instance
             // handles both sending and receiving immediately upon connection.
             channels.setOutbound(channel, for: kind)
             debug("created negotiated data channel kind=\(kind) label=\(label) id=\(id)")
@@ -570,6 +575,10 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     ) {
         debug("ice connection state=\(newState.rawValue)")
         switch newState {
+            case .connected, .completed:
+                onIceConnected?()
+            case .disconnected:
+                onIceDisconnected?()
             case .failed:
                 reportTransportDegraded("ice failed")
             case .closed:
@@ -656,7 +665,8 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         guard isKnownChannel(dataChannel.label) else { return }
 
         do {
-            if let envelope = try KeepTalkingPacketTransportCrypto
+            if let envelope =
+                try KeepTalkingPacketTransportCrypto
                 .inboundEnvelope(
                     from: buffer.data,
                     contextSecretProvider: contextSecretProvider

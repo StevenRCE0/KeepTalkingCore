@@ -43,11 +43,13 @@ extension KeepTalkingClient {
             return
         }
 
-        let primary = existing.first ?? KeepTalkingMapping(
-            target: target,
-            kind: .alias,
-            value: value
-        )
+        let primary =
+            existing.first
+            ?? KeepTalkingMapping(
+                target: target,
+                kind: .alias,
+                value: value
+            )
         primary.namespace = nil
         primary.value = value
         primary.normalizedValue = KeepTalkingMapping.normalizeLookupValue(value)
@@ -79,13 +81,15 @@ extension KeepTalkingClient {
             normalizedValue: normalizedValue
         )
 
-        let mapping = existing ?? KeepTalkingMapping(
-            target: target,
-            kind: .tag,
-            namespace: normalizedNamespace,
-            value: storedValue,
-            colorHex: colorHex
-        )
+        let mapping =
+            existing
+            ?? KeepTalkingMapping(
+                target: target,
+                kind: .tag,
+                namespace: normalizedNamespace,
+                value: storedValue,
+                colorHex: colorHex
+            )
         mapping.namespace = normalizedNamespace
         if existing == nil || mapping.deletedAt != nil {
             mapping.value = storedValue

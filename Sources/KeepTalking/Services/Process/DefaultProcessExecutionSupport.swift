@@ -58,12 +58,10 @@ enum DefaultProcessExecutionSupport {
         command: [String],
         environment: [String: String]
     ) -> String {
-        var components = (
-            environment["PATH"] ?? ProcessInfo.processInfo.environment["PATH"] ?? ""
-        )
-        .split(separator: ":")
-        .map(String.init)
-        .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        var components = (environment["PATH"] ?? ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
         let defaults = [
             "/opt/homebrew/bin",

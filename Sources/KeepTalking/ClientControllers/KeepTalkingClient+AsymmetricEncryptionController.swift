@@ -18,6 +18,158 @@ extension KeepTalkingClient {
         let publicKey: Curve25519.KeyAgreement.PublicKey
     }
 
+    func trustedEnvelopeCryptorSource() -> KeepTalkingTrustedEnvelopeCryptorSource {
+        { [weak self] envelope in
+            guard let self else {
+                throw KeepTalkingTrustedEnvelopeCryptorError.ownerUnavailable
+            }
+            return self.trustedEnvelopeCryptor(for: envelope)
+        }
+    }
+
+    func trustedEnvelopeCryptor(for envelope: any KeepTalkingEnvelope)
+        -> KeepTalkingTrustedEnvelopeCryptor?
+    {
+        switch envelope.kind {
+            case .actionCallRequest, .encryptedActionCallRequest:
+                return makeTrustedEnvelopeCryptor(
+                    plaintext: { $0.actionCallRequest },
+                    encrypted: { $0.encryptedActionCallRequest },
+                    wrapPlaintext: { $0 },
+                    wrapEncrypted: KeepTalkingEncryptedActionCallRequestEnvelope.init,
+                    encrypt: { [weak self] request in
+                        guard let self else {
+                            throw KeepTalkingTrustedEnvelopeCryptorError
+                                .ownerUnavailable
+                        }
+                        return
+                            try await self
+                            .encryptActionCallRequestEnvelope(request)
+                    },
+                    decrypt: { [weak self] envelope in
+                        guard let self else {
+                            throw KeepTalkingTrustedEnvelopeCryptorError
+                                .ownerUnavailable
+                        }
+                        return
+                            try await self
+                            .decryptActionCallRequestEnvelope(envelope)
+                    }
+                )
+            case .requestAck, .encryptedRequestAck:
+                return makeTrustedEnvelopeCryptor(
+                    plaintext: { $0.requestAck },
+                    encrypted: { $0.encryptedRequestAck },
+                    wrapPlaintext: { $0 },
+                    wrapEncrypted: KeepTalkingEncryptedRequestAckEnvelope.init,
+                    encrypt: { [weak self] acknowledgement in
+                        guard let self else {
+                            throw KeepTalkingTrustedEnvelopeCryptorError
+                                .ownerUnavailable
+                        }
+                        return
+                            try await self
+                            .encryptRequestAckEnvelope(acknowledgement)
+                    },
+                    decrypt: { [weak self] envelope in
+                        guard let self else {
+                            throw KeepTalkingTrustedEnvelopeCryptorError
+                                .ownerUnavailable
+                        }
+                        return try await self.decryptRequestAckEnvelope(envelope)
+                    }
+                )
+            case .actionCallResult, .encryptedActionCallResult:
+                return makeTrustedEnvelopeCryptor(
+                    plaintext: { $0.actionCallResult },
+                    encrypted: { $0.encryptedActionCallResult },
+                    wrapPlaintext: { $0 },
+                    wrapEncrypted: KeepTalkingEncryptedActionCallResultEnvelope.init,
+                    encrypt: { [weak self] result in
+                        guard let self else {
+                            throw KeepTalkingTrustedEnvelopeCryptorError
+                                .ownerUnavailable
+                        }
+                        return
+                            try await self
+                            .encryptActionCallResultEnvelope(result)
+                    },
+                    decrypt: { [weak self] envelope in
+                        guard let self else {
+                            throw KeepTalkingTrustedEnvelopeCryptorError
+                                .ownerUnavailable
+                        }
+                        return
+                            try await self
+                            .decryptActionCallResultEnvelope(envelope)
+                    }
+                )
+            case .actionCatalogRequest, .encryptedActionCatalogRequest:
+                return makeTrustedEnvelopeCryptor(
+                    plaintext: { $0.actionCatalogRequest },
+                    encrypted: { $0.encryptedActionCatalogRequest },
+                    wrapPlaintext: { $0 },
+                    wrapEncrypted: KeepTalkingEncryptedActionCatalogRequestEnvelope.init,
+                    encrypt: { [weak self] request in
+                        guard let self else {
+                            throw KeepTalkingTrustedEnvelopeCryptorError
+                                .ownerUnavailable
+                        }
+                        return
+                            try await self
+                            .encryptActionCatalogRequestEnvelope(request)
+                    },
+                    decrypt: { [weak self] envelope in
+                        guard let self else {
+                            throw KeepTalkingTrustedEnvelopeCryptorError
+                                .ownerUnavailable
+                        }
+                        return
+                            try await self
+                            .decryptActionCatalogRequestEnvelope(envelope)
+                    }
+                )
+            case .actionCatalogResult, .encryptedActionCatalogResult:
+                return makeTrustedEnvelopeCryptor(
+                    plaintext: { $0.actionCatalogResult },
+                    encrypted: { $0.encryptedActionCatalogResult },
+                    wrapPlaintext: { $0 },
+                    wrapEncrypted: KeepTalkingEncryptedActionCatalogResultEnvelope.init,
+                    encrypt: { [weak self] result in
+                        guard let self else {
+                            throw KeepTalkingTrustedEnvelopeCryptorError
+                                .ownerUnavailable
+                        }
+                        return
+                            try await self
+                            .encryptActionCatalogResultEnvelope(result)
+                    },
+                    decrypt: { [weak self] envelope in
+                        guard let self else {
+                            throw KeepTalkingTrustedEnvelopeCryptorError
+                                .ownerUnavailable
+                        }
+                        return
+                            try await self
+                            .decryptActionCatalogResultEnvelope(envelope)
+                    }
+                )
+            default:
+                return nil
+        }
+    }
+
+    func decryptTrustedEnvelope(
+        _ envelope: any KeepTalkingEnvelope
+    ) async throws -> any KeepTalkingEnvelope {
+        guard let cryptor = trustedEnvelopeCryptor(for: envelope) else {
+            throw
+                KeepTalkingTrustedEnvelopeCryptorError
+                .missingCryptor(envelope.kind)
+        }
+        return try await cryptor.decrypt(envelope)
+    }
+
     func encryptActionCallRequestEnvelope(
         _ request: KeepTalkingActionCallRequest
     ) async throws -> KeepTalkingAsymmetricCipherEnvelope {
@@ -429,5 +581,33 @@ extension KeepTalkingClient {
             throw KeepTalkingClientError.remoteIdentityPublicKeyInvalid(nodeID)
         }
         return sorted
+    }
+
+    private func makeTrustedEnvelopeCryptor<Plaintext: KeepTalkingEnvelope>(
+        plaintext: @escaping @Sendable (any KeepTalkingEnvelope) -> Plaintext?,
+        encrypted: @escaping @Sendable (any KeepTalkingEnvelope) -> KeepTalkingAsymmetricCipherEnvelope?,
+        wrapPlaintext: @escaping @Sendable (Plaintext) -> any KeepTalkingEnvelope,
+        wrapEncrypted: @escaping @Sendable (KeepTalkingAsymmetricCipherEnvelope) -> any KeepTalkingEnvelope,
+        encrypt: @escaping @Sendable (Plaintext) async throws -> KeepTalkingAsymmetricCipherEnvelope,
+        decrypt: @escaping @Sendable (KeepTalkingAsymmetricCipherEnvelope) async throws -> Plaintext
+    ) -> KeepTalkingTrustedEnvelopeCryptor {
+        KeepTalkingTrustedEnvelopeCryptor(
+            encrypt: { envelope in
+                guard let payload = plaintext(envelope) else {
+                    throw
+                        KeepTalkingTrustedEnvelopeCryptorError
+                        .unsupportedEnvelope(envelope.kind)
+                }
+                return wrapEncrypted(try await encrypt(payload))
+            },
+            decrypt: { envelope in
+                guard let payload = encrypted(envelope) else {
+                    throw
+                        KeepTalkingTrustedEnvelopeCryptorError
+                        .unsupportedEnvelope(envelope.kind)
+                }
+                return wrapPlaintext(try await decrypt(payload))
+            }
+        )
     }
 }

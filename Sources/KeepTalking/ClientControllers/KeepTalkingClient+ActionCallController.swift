@@ -38,36 +38,53 @@ extension KeepTalkingClient {
         return isNodeOnline(deliveryNodeID)
     }
 
+    fileprivate func enqueueIncomingActionCallRequest(
+        _ request: KeepTalkingActionCallRequest
+    ) {
+        guard request.targetNodeID == config.node else {
+            return
+        }
+        Task { [weak self] in
+            do {
+                try await self?.handleIncomingActionCallRequest(request)
+            } catch {
+                self?.onLog?(
+                    "[action-call/request] failed request=\(request.id.uuidString.lowercased()) action=\(request.call.action.uuidString.lowercased()) error=\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
     private static func deliveryNodeID(
         forRemoteOwnerNodeID ownerNodeID: UUID,
         on database: any Database,
         visited: Set<UUID> = []
     ) async throws -> UUID {
         return ownerNodeID
-// TODO: Very interesting walking logic, leave it for another day...Not hopping now.
-//        if visited.contains(ownerNodeID) {
-//            return ownerNodeID
-//        }
-//
-//        let ownerRelations = try await KeepTalkingNodeRelation.query(on: database)
-//            .filter(\.$to.$id, .equal, ownerNodeID)
-//            .all()
-//            .filter { $0.relationship == .owner }
-//            .sorted { lhs, rhs in
-//                lhs.$from.id.uuidString < rhs.$from.id.uuidString
-//            }
-//
-//        guard let ownerRelation = ownerRelations.first else {
-//            return ownerNodeID
-//        }
-//
-//        var nextVisited = visited
-//        nextVisited.insert(ownerNodeID)
-//        return try await deliveryNodeID(
-//            forRemoteOwnerNodeID: ownerRelation.$from.id,
-//            on: database,
-//            visited: nextVisited
-//        )
+        // TODO: Very interesting walking logic, leave it for another day...Not hopping now.
+        //        if visited.contains(ownerNodeID) {
+        //            return ownerNodeID
+        //        }
+        //
+        //        let ownerRelations = try await KeepTalkingNodeRelation.query(on: database)
+        //            .filter(\.$to.$id, .equal, ownerNodeID)
+        //            .all()
+        //            .filter { $0.relationship == .owner }
+        //            .sorted { lhs, rhs in
+        //                lhs.$from.id.uuidString < rhs.$from.id.uuidString
+        //            }
+        //
+        //        guard let ownerRelation = ownerRelations.first else {
+        //            return ownerNodeID
+        //        }
+        //
+        //        var nextVisited = visited
+        //        nextVisited.insert(ownerNodeID)
+        //        return try await deliveryNodeID(
+        //            forRemoteOwnerNodeID: ownerRelation.$from.id,
+        //            on: database,
+        //            visited: nextVisited
+        //        )
     }
 
     func executeActionCallRequest(
@@ -339,8 +356,10 @@ extension KeepTalkingClient {
             "[action-call/result] returning request=\(requestID) action=\(actionID) is_error=\(result.isError)"
         )
 
-        let encryptedResult = try await encryptActionCallResultEnvelope(result)
-        try rtcClient.sendEnvelope(.encryptedActionCallResult(encryptedResult))
+        try await rtcClient.sendTrustedEnvelope(
+            result,
+            cryptorSource: trustedEnvelopeCryptorSource()
+        )
     }
 
     private func sendActionCallAcknowledgementBestEffort(
@@ -366,11 +385,9 @@ extension KeepTalkingClient {
         )
 
         do {
-            let encryptedAcknowledgement = try await encryptRequestAckEnvelope(
-                acknowledgement
-            )
-            try rtcClient.sendEnvelope(
-                .encryptedRequestAck(encryptedAcknowledgement)
+            try await rtcClient.sendTrustedEnvelope(
+                acknowledgement,
+                cryptorSource: trustedEnvelopeCryptorSource()
             )
         } catch {
             onLog?(
@@ -492,12 +509,8 @@ extension KeepTalkingClient {
             await waitForNodeToComeOnline(deliveryNodeID)
         }
 
-        let encryptedRequest = try await encryptActionCallRequestEnvelope(
-            request
-        )
         try await sendRemoteActionCallRequest(
             request,
-            encryptedRequest: encryptedRequest,
             deliveryDescription: deliveryDescription
         )
 
@@ -509,7 +522,6 @@ extension KeepTalkingClient {
 
     private func sendRemoteActionCallRequest(
         _ request: KeepTalkingActionCallRequest,
-        encryptedRequest: KeepTalkingAsymmetricCipherEnvelope,
         deliveryDescription: String
     ) async throws {
         let requestID = request.id.uuidString.lowercased()
@@ -519,8 +531,9 @@ extension KeepTalkingClient {
             onLog?(
                 "[action-call/request] sending request=\(requestID) action=\(actionID) attempt=\(attempt) delivery=\(deliveryDescription)"
             )
-            try rtcClient.sendEnvelope(
-                .encryptedActionCallRequest(encryptedRequest)
+            try await rtcClient.sendTrustedEnvelope(
+                request,
+                cryptorSource: trustedEnvelopeCryptorSource()
             )
 
             let acknowledgement = try await waitForActionCallAcknowledgement(
@@ -1053,7 +1066,7 @@ extension KeepTalkingClient {
     private func renderToolContentForDebug(_ content: Tool.Content) -> String {
         switch content {
             case .text(let text):
-                return text
+                return text.text
             default:
                 if let data = try? JSONEncoder().encode(content),
                     let json = String(data: data, encoding: .utf8)
@@ -1072,4 +1085,51 @@ extension KeepTalkingClient {
         return String(payload.prefix(maxCharacters)) + "...[truncated]"
     }
 
+}
+
+extension KeepTalkingEnvelopeAsyncHandlers {
+    mutating func registerActionCallHandlers(for client: KeepTalkingClient) {
+        onActionCallRequest { request in
+            client.enqueueIncomingActionCallRequest(request)
+        }
+        onRequestAck { acknowledgement in
+            guard acknowledgement.callerNodeID == client.config.node else {
+                return
+            }
+            client.handleIncomingRequestAck(acknowledgement)
+        }
+        onActionCallResult { result in
+            _ = client.resolvePendingActionCall(result)
+        }
+        onEncryptedActionCallRequest { encryptedRequest in
+            let decrypted = try await client.decryptTrustedEnvelope(
+                KeepTalkingEncryptedActionCallRequestEnvelope(encryptedRequest)
+            )
+            guard let request = decrypted.actionCallRequest else {
+                return
+            }
+            client.enqueueIncomingActionCallRequest(request)
+        }
+        onEncryptedRequestAck { encryptedAcknowledgement in
+            let decrypted = try await client.decryptTrustedEnvelope(
+                KeepTalkingEncryptedRequestAckEnvelope(encryptedAcknowledgement)
+            )
+            guard
+                let acknowledgement = decrypted.requestAck,
+                acknowledgement.callerNodeID == client.config.node
+            else {
+                return
+            }
+            client.handleIncomingRequestAck(acknowledgement)
+        }
+        onEncryptedActionCallResult { encryptedResult in
+            let decrypted = try await client.decryptTrustedEnvelope(
+                KeepTalkingEncryptedActionCallResultEnvelope(encryptedResult)
+            )
+            guard let result = decrypted.actionCallResult else {
+                return
+            }
+            _ = client.resolvePendingActionCall(result)
+        }
+    }
 }

@@ -27,11 +27,12 @@ public enum KeepTalkingPushWakePreviewResolver {
             return nil
         }
 
-        let decryptedPayload = try KeepTalkingPreviewCrypto
+        let decryptedPayload =
+            try KeepTalkingPreviewCrypto
             .decryptStringIfNeeded(
-            envelope.ciphertext,
-            secret: secret
-        )
+                envelope.ciphertext,
+                secret: secret
+            )
         let preview = try JSONDecoder().decode(
             KeepTalkingPushWakeMessagePreview.self,
             from: Data(decryptedPayload.utf8)

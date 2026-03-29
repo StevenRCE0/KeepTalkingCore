@@ -11,13 +11,11 @@ struct PacketTransportCryptoTests {
             uuidString: "22222222-2222-2222-2222-222222222222"
         )!
         let secret = Data("transport-secret-32-bytes-length!!".utf8)
-        let envelope = KeepTalkingP2PEnvelope.message(
-            KeepTalkingContextMessage(
-                id: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
-                context: KeepTalkingContext(id: contextID),
-                sender: .node(node: senderNodeID),
-                content: "hello cryptor"
-            )
+        let envelope = KeepTalkingContextMessage(
+            id: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
+            context: KeepTalkingContext(id: contextID),
+            sender: .node(node: senderNodeID),
+            content: "hello cryptor"
         )
 
         let payload = try KeepTalkingPacketTransportCrypto
@@ -29,7 +27,7 @@ struct PacketTransportCryptoTests {
                 }
             )
 
-        let plaintext = try JSONEncoder().encode(envelope)
+        let plaintext = try JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope))
         #expect(payload != plaintext)
 
         let decoded = try KeepTalkingPacketTransportCrypto
@@ -41,7 +39,7 @@ struct PacketTransportCryptoTests {
             )
 
         let messageEnvelope = try #require(decoded)
-        guard case .message(let message) = messageEnvelope else {
+        guard let message = messageEnvelope.message else {
             Issue.record("Expected decrypted envelope to be a message")
             return
         }
@@ -53,7 +51,7 @@ struct PacketTransportCryptoTests {
     @Test("non-message envelopes stay plaintext")
     func nonMessageEnvelopeBypassesTransportCrypto() throws {
         let nodeID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
-        let envelope = KeepTalkingP2PEnvelope.node(KeepTalkingNode(id: nodeID))
+        let envelope = KeepTalkingNode(id: nodeID)
 
         let payload = try KeepTalkingPacketTransportCrypto
             .outboundPayload(
@@ -62,8 +60,12 @@ struct PacketTransportCryptoTests {
                 contextSecretProvider: nil
             )
 
-        let plaintext = try JSONEncoder().encode(envelope)
-        #expect(payload == plaintext)
+        #expect(
+            (try? JSONDecoder().decode(
+                KeepTalkingEncryptedPacketTransportEnvelope.self,
+                from: payload
+            )) == nil
+        )
 
         let decoded = try KeepTalkingPacketTransportCrypto
             .inboundEnvelope(
@@ -71,7 +73,7 @@ struct PacketTransportCryptoTests {
                 contextSecretProvider: nil
             )
         let nodeEnvelope = try #require(decoded)
-        guard case .node(let decodedNode) = nodeEnvelope else {
+        guard let decodedNode = nodeEnvelope.node else {
             Issue.record("Expected plaintext envelope to remain a node payload")
             return
         }
@@ -91,11 +93,9 @@ struct PacketTransportCryptoTests {
             sender: .node(node: senderNodeID),
             content: "embedded context message"
         )
-        let envelope = KeepTalkingP2PEnvelope.context(
-            KeepTalkingContext(
-                id: contextID,
-                messages: [message]
-            )
+        let envelope = KeepTalkingContext(
+            id: contextID,
+            messages: [message]
         )
 
         let payload = try KeepTalkingPacketTransportCrypto
@@ -107,7 +107,7 @@ struct PacketTransportCryptoTests {
                 }
             )
 
-        let plaintext = try JSONEncoder().encode(envelope)
+        let plaintext = try JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope))
         #expect(payload != plaintext)
 
         let decoded = try KeepTalkingPacketTransportCrypto
@@ -119,7 +119,7 @@ struct PacketTransportCryptoTests {
             )
 
         let contextEnvelope = try #require(decoded)
-        guard case .context(let context) = contextEnvelope else {
+        guard let context = contextEnvelope.context else {
             Issue.record("Expected decrypted envelope to be a context payload")
             return
         }
@@ -135,13 +135,11 @@ struct PacketTransportCryptoTests {
         let requester = UUID(uuidString: "88888888-8888-8888-8888-888888888888")!
         let recipient = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
         let secret = Data("transport-secret-32-bytes-length!!".utf8)
-        let envelope = KeepTalkingP2PEnvelope.contextSync(
-            .summaryRequest(
-                KeepTalkingContextSyncSummaryRequest(
-                    context: contextID,
-                    requester: requester,
-                    recipient: recipient
-                )
+        let envelope = KeepTalkingContextSyncEnvelope.summaryRequest(
+            KeepTalkingContextSyncSummaryRequest(
+                context: contextID,
+                requester: requester,
+                recipient: recipient
             )
         )
 
@@ -154,7 +152,7 @@ struct PacketTransportCryptoTests {
                 }
             )
 
-        let plaintext = try JSONEncoder().encode(envelope)
+        let plaintext = try JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope))
         #expect(payload != plaintext)
 
         let decoded = try KeepTalkingPacketTransportCrypto
@@ -165,7 +163,7 @@ struct PacketTransportCryptoTests {
                 }
             )
         let syncEnvelope = try #require(decoded)
-        guard case .contextSync(let contextSyncEnvelope) = syncEnvelope else {
+        guard let contextSyncEnvelope = syncEnvelope.contextSync else {
             Issue.record("Expected decrypted envelope to be a context-sync payload")
             return
         }

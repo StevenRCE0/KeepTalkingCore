@@ -359,16 +359,16 @@ extension KeepTalkingClient {
             }
             let actionWakeRoutes: [KeepTalkingActionWakeRoute] =
                 outgoingActions.compactMap { action in
-                guard
-                    let wakeHandles = wakeHandlesByActionID[action.actionID]
-                else {
-                    return nil
+                    guard
+                        let wakeHandles = wakeHandlesByActionID[action.actionID]
+                    else {
+                        return nil
+                    }
+                    return KeepTalkingActionWakeRoute(
+                        actionID: action.actionID,
+                        wakeHandles: wakeHandles
+                    )
                 }
-                return KeepTalkingActionWakeRoute(
-                    actionID: action.actionID,
-                    wakeHandles: wakeHandles
-                )
-            }
 
             relationStatuses.append(
                 KeepTalkingNodeRelationStatus(
@@ -395,7 +395,7 @@ extension KeepTalkingClient {
         try blocking {
             try await node.save(on: self.localStore.database)
         }
-        try rtcClient.sendEnvelope(.node(node))
+        try rtcClient.sendEnvelope(node)
     }
 
     // TODO: Add online filter
@@ -432,7 +432,7 @@ extension KeepTalkingClient {
                     recipientNodeID: recipientNodeID
                 )
                 try rtcClient.sendEnvelope(
-                    .encryptedNodeStatus(encryptedEnvelope)
+                    KeepTalkingEncryptedNodeStatusEnvelope(encryptedEnvelope)
                 )
             } catch {
                 rtcClient.debug(
@@ -923,5 +923,45 @@ extension KeepTalkingClient {
 
         try await keypair.save(on: localStore.database)
         return keypair
+    }
+
+    fileprivate func handleIncomingP2PPresence(
+        _ presence: KeepTalkingP2PPresencePayload
+    ) async throws {
+        let nodeIDText = presence.node.uuidString.lowercased()
+        do {
+            try await markNodeDiscovered(presence.node)
+        } catch {
+            rtcClient.debug(
+                "mark node discovered failed node=\(nodeIDText) error=\(error.localizedDescription)"
+            )
+        }
+        scheduleDebouncedNodeStateBroadcast(
+            reason: "p2pPresence node=\(nodeIDText)"
+        )
+    }
+}
+
+extension KeepTalkingEnvelopeAsyncHandlers {
+    mutating func registerNodeHandlers(for client: KeepTalkingClient) {
+        onNode { node in
+            try await client.mergeDiscoveredNode(node)
+        }
+        onNodeStatus { status in
+            try await client.mergeDiscoveredNodeStatus(status)
+        }
+        onEncryptedNodeStatus { payload in
+            guard payload.recipientNodeID == client.config.node else {
+                return
+            }
+            let status = try await client.decryptNodeStatusEnvelope(payload)
+            try await client.mergeDiscoveredNodeStatus(status)
+        }
+        onP2PPresence { presence in
+            guard presence.node != client.config.node else {
+                return
+            }
+            try await client.handleIncomingP2PPresence(presence)
+        }
     }
 }
