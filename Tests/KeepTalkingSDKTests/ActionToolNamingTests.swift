@@ -13,12 +13,12 @@ struct ActionToolNamingTests {
         let first = KeepTalkingActionToolDefinition.normalizedFunctionName(
             ownerNodeID: ownerNodeID,
             actionID: actionID,
-            mcpToolName: "get-weather"
+            targetName: "get-weather"
         )
         let second = KeepTalkingActionToolDefinition.normalizedFunctionName(
             ownerNodeID: ownerNodeID,
             actionID: actionID,
-            mcpToolName: "get-weather"
+            targetName: "get-weather"
         )
 
         #expect(first == second)

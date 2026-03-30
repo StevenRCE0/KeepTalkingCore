@@ -519,6 +519,7 @@ extension KeepTalkingClient {
         guard let contextID = context.id else {
             return "No prior messages in this context."
         }
+        let aliasLookup = try await aliasLookup()
 
         let recentMessages = try await KeepTalkingContextMessage.query(
             on: localStore.database
@@ -538,7 +539,12 @@ extension KeepTalkingClient {
                 .map { message in
                     let sender =
                         KeepTalkingActionToolDefinition
-                        .conversationSenderTag(message.sender)
+                        .conversationSenderTag(
+                            message.sender,
+                            nodeAliasResolver: {
+                                aliasLookup.alias(for: .node($0))
+                            }
+                        )
                     return "[\(sender)] \(message.content)"
                 }.joined(separator: "\n")
         }
@@ -574,14 +580,22 @@ extension KeepTalkingClient {
             attachmentSummary = ""
         }
 
-        let skillSummary = renderSkillContextSummary(skillSummaries)
-        return [conversationTranscript, attachmentSummary, skillSummary]
+        let nodeNameSummary = renderNodeNameSummary(
+            recentMessages: recentMessages,
+            aliasLookup: aliasLookup
+        )
+        let skillSummary = renderSkillContextSummary(
+            skillSummaries,
+            aliasLookup: aliasLookup
+        )
+        return [nodeNameSummary, conversationTranscript, attachmentSummary, skillSummary]
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
     }
 
     func renderSkillContextSummary(
-        _ skillSummaries: [KeepTalkingSkillSummaryEntry]
+        _ skillSummaries: [KeepTalkingSkillSummaryEntry],
+        aliasLookup: KeepTalkingAliasLookup
     ) -> String {
         guard !skillSummaries.isEmpty else {
             return ""
@@ -600,6 +614,8 @@ extension KeepTalkingClient {
             return """
                 - action_id: \(actionID)
                   owner_node_id: \(context.ownerNodeID.uuidString.lowercased())
+                  owner_node_name: \(KeepTalkingClient.resolve(node: context.ownerNodeID, aliasLookup: aliasLookup).primary(uppercaseID: true))
+                  is_current_node: \(context.ownerNodeID == config.node)
                   skill_name: \(context.skillName)
                   manifest_path: \(context.manifestPath)
                   metadata_json: \(metadataJSON)
@@ -613,6 +629,36 @@ extension KeepTalkingClient {
         return """
             Skill bundle metadata summary:
             \(sections.joined(separator: "\n"))
+            """
+    }
+
+    func renderNodeNameSummary(
+        recentMessages: [KeepTalkingContextMessage],
+        aliasLookup: KeepTalkingAliasLookup
+    ) -> String {
+        var nodeIDs = Set(
+            recentMessages.compactMap { message -> UUID? in
+                guard case .node(let nodeID) = message.sender else {
+                    return nil
+                }
+                return nodeID
+            }
+        )
+        nodeIDs.insert(config.node)
+
+        let sortedNodeIDs = nodeIDs.sorted { $0.uuidString < $1.uuidString }
+        let lines = sortedNodeIDs.map { nodeID in
+            let name = KeepTalkingClient.resolve(
+                node: nodeID,
+                aliasLookup: aliasLookup
+            ).primary(uppercaseID: true)
+            let prefix = nodeID == config.node ? "current_node" : "node"
+            return "- \(prefix): \(name)"
+        }
+
+        return """
+            Known node names in this context (mapping aliases with uppercase UUID fallback):
+            \(lines.joined(separator: "\n"))
             """
     }
 

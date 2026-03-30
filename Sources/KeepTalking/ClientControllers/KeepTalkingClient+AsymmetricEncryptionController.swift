@@ -374,7 +374,9 @@ extension KeepTalkingClient {
         let sharedSecret = try localKeyMaterial.privateKey.sharedSecretFromKeyAgreement(
             with: recipientCandidate.publicKey
         )
-        let symmetricKey = asymmetricEnvelopeSymmetricKey(from: sharedSecret)
+        let symmetricKey = Self.asymmetricEnvelopeSymmetricKey(
+            from: sharedSecret
+        )
         let sealed = try AES.GCM.seal(payload, using: symmetricKey)
         guard let ciphertext = sealed.combined else {
             throw KeepTalkingClientError.malformedEncryptedActionCall
@@ -391,44 +393,72 @@ extension KeepTalkingClient {
         expectedSenderNodeID: UUID,
         purpose: String
     ) async throws -> Data {
-        guard envelope.recipientNodeID == config.node else {
+        try await Self.decryptAsymmetricPayload(
+            envelope,
+            expectedSenderNodeID: expectedSenderNodeID,
+            localNodeID: config.node,
+            remoteNodeID: envelope.senderNodeID,
+            on: localStore.database,
+            purpose: purpose,
+            debug: { [rtcClient] message in
+                rtcClient.debug(message)
+            }
+        )
+    }
+
+    static func decryptAsymmetricPayload(
+        _ envelope: KeepTalkingAsymmetricCipherEnvelope,
+        expectedSenderNodeID: UUID,
+        localNodeID: UUID,
+        remoteNodeID: UUID,
+        on database: any Database,
+        purpose: String,
+        debug: ((String) -> Void)? = nil
+    ) async throws -> Data {
+        guard envelope.recipientNodeID == localNodeID else {
             throw KeepTalkingClientError.malformedEncryptedActionCall
         }
-        guard envelope.senderNodeID == expectedSenderNodeID else {
+        guard
+            envelope.senderNodeID == expectedSenderNodeID,
+            envelope.senderNodeID == remoteNodeID
+        else {
             throw KeepTalkingClientError.malformedEncryptedActionCall
         }
 
         let localKeyMaterial = try await localKeyAgreementMaterial(
-            to: ensure(envelope.senderNodeID, for: KeepTalkingNode.self)
+            localNodeID: localNodeID,
+            remoteNodeID: remoteNodeID,
+            on: database
         )
         let senderPublicKeys = try await remoteKeyAgreementPublicKeys(
-            nodeID: envelope.senderNodeID
+            nodeID: remoteNodeID,
+            localNodeID: localNodeID,
+            on: database
         )
         let sealed = try AES.GCM.SealedBox(combined: envelope.ciphertext)
 
         for (index, senderCandidate) in senderPublicKeys.enumerated() {
-            rtcClient.debug(
+            debug?(
                 "[asym.decrypt] purpose=\(purpose) sender=\(envelope.senderNodeID.uuidString.lowercased()) recipient=\(envelope.recipientNodeID.uuidString.lowercased()) localPublicKey=\(localKeyMaterial.publicKeyBase64) localPrivateKey=\(localKeyMaterial.privateKeyBase64) remotePublicKey=\(senderCandidate.publicKeyBase64) relation=\(senderCandidate.relationID.uuidString.lowercased()) candidate=\(index + 1)/\(senderPublicKeys.count) cipherBytes=\(envelope.ciphertext.count)"
             )
 
-            let sharedSecret = try localKeyMaterial.privateKey.sharedSecretFromKeyAgreement(
-                with: senderCandidate.publicKey
+            let sharedSecret = try localKeyMaterial.privateKey
+                .sharedSecretFromKeyAgreement(with: senderCandidate.publicKey)
+            let symmetricKey = asymmetricEnvelopeSymmetricKey(
+                from: sharedSecret
             )
-            let symmetricKey = asymmetricEnvelopeSymmetricKey(from: sharedSecret)
             if let decrypted = try? AES.GCM.open(sealed, using: symmetricKey) {
-                rtcClient.debug(
+                debug?(
                     "[asym.decrypt] success purpose=\(purpose) sender=\(envelope.senderNodeID.uuidString.lowercased()) relation=\(senderCandidate.relationID.uuidString.lowercased())"
                 )
                 return decrypted
             }
         }
 
-        throw KeepTalkingClientError.remoteIdentityPublicKeyInvalid(
-            envelope.senderNodeID
-        )
+        throw KeepTalkingClientError.remoteIdentityPublicKeyInvalid(remoteNodeID)
     }
 
-    private func asymmetricEnvelopeSymmetricKey(
+    private static func asymmetricEnvelopeSymmetricKey(
         from sharedSecret: SharedSecret
     ) -> SymmetricKey {
         derivedSymmetricKey(
@@ -438,7 +468,7 @@ extension KeepTalkingClient {
         )
     }
 
-    func derivedSymmetricKey(
+    static func derivedSymmetricKey(
         from sharedSecret: SharedSecret,
         salt: Data,
         sharedInfo: Data
@@ -454,11 +484,14 @@ extension KeepTalkingClient {
     func localKeyAgreementMaterial(to node: KeepTalkingNode) async throws
         -> LocalKeyAgreementMaterial
     {
-        guard let material = try await localKeyAgreementMaterials(to: node).first
-        else {
-            throw KeepTalkingClientError.localIdentityPrivateKeyMissing
+        guard let nodeID = node.id else {
+            throw KeepTalkingClientError.missingNode
         }
-        return material
+        return try await Self.localKeyAgreementMaterial(
+            localNodeID: config.node,
+            remoteNodeID: nodeID,
+            on: localStore.database
+        )
     }
 
     func localKeyAgreementMaterials(to node: KeepTalkingNode) async throws
@@ -467,12 +500,48 @@ extension KeepTalkingClient {
         guard let nodeID = node.id else {
             throw KeepTalkingClientError.missingNode
         }
+        return try await Self.localKeyAgreementMaterials(
+            localNodeID: config.node,
+            remoteNodeID: nodeID,
+            on: localStore.database
+        )
+    }
 
-        _ = try await ensureLocalNodeSigningKeypair(to: node)
+    static func localKeyAgreementMaterial(
+        localNodeID: UUID,
+        remoteNodeID: UUID,
+        on database: any Database
+    ) async throws -> LocalKeyAgreementMaterial {
+        guard
+            let material = try await localKeyAgreementMaterials(
+                localNodeID: localNodeID,
+                remoteNodeID: remoteNodeID,
+                on: database
+            ).first
+        else {
+            throw KeepTalkingClientError.localIdentityPrivateKeyMissing
+        }
+        return material
+    }
 
-        let relations = try await getCurrentNodeInstance().$outgoingNodeRelations
-            .query(on: localStore.database)
-            .filter(\.$to.$id == nodeID)
+    func remoteKeyAgreementPublicKeys(nodeID: UUID) async throws
+        -> [RemotePublicKeyCandidate]
+    {
+        try await Self.remoteKeyAgreementPublicKeys(
+            nodeID: nodeID,
+            localNodeID: config.node,
+            on: localStore.database
+        )
+    }
+
+    static func localKeyAgreementMaterials(
+        localNodeID: UUID,
+        remoteNodeID: UUID,
+        on database: any Database
+    ) async throws -> [LocalKeyAgreementMaterial] {
+        let relations = try await KeepTalkingNodeRelation.query(on: database)
+            .filter(\.$from.$id, .equal, localNodeID)
+            .filter(\.$to.$id, .equal, remoteNodeID)
             .all()
 
         guard !relations.isEmpty else {
@@ -484,12 +553,10 @@ extension KeepTalkingClient {
             guard let relationID = relation.id else {
                 continue
             }
-            let keypairs = try await KeepTalkingNodeIdentityKey.query(
-                on: localStore.database
-            )
-            .filter(\.$relation.$id, .equal, relationID)
-            .sort(\.$createdAt, .descending)
-            .all()
+            let keypairs = try await KeepTalkingNodeIdentityKey.query(on: database)
+                .filter(\.$relation.$id, .equal, relationID)
+                .sort(\.$createdAt, .descending)
+                .all()
 
             for key in keypairs {
                 guard
@@ -504,8 +571,7 @@ extension KeepTalkingClient {
                 let privateKeyBase64 = privateKeyData.base64EncodedString()
                 let derivedPublicKeyBase64 = Data(
                     privateKey.publicKey.rawRepresentation
-                )
-                .base64EncodedString()
+                ).base64EncodedString()
                 materials.append(
                     LocalKeyAgreementMaterial(
                         relationID: relationID,
@@ -528,14 +594,14 @@ extension KeepTalkingClient {
         return materials
     }
 
-    func remoteKeyAgreementPublicKeys(nodeID: UUID) async throws
-        -> [RemotePublicKeyCandidate]
-    {
-        let relations = try await KeepTalkingNodeRelation.query(
-            on: localStore.database
-        )
+    static func remoteKeyAgreementPublicKeys(
+        nodeID: UUID,
+        localNodeID: UUID,
+        on database: any Database
+    ) async throws -> [RemotePublicKeyCandidate] {
+        let relations = try await KeepTalkingNodeRelation.query(on: database)
         .filter(\.$from.$id, .equal, nodeID)
-        .filter(\.$to.$id, .equal, config.node)
+        .filter(\.$to.$id, .equal, localNodeID)
         .all()
         let relationIDs = relations.compactMap(\.id)
         guard !relationIDs.isEmpty else {
@@ -545,9 +611,7 @@ extension KeepTalkingClient {
         var orderedCandidates: [RemotePublicKeyCandidate] = []
 
         for relationID in relationIDs {
-            let keys = try await KeepTalkingNodeIdentityKey.query(
-                on: localStore.database
-            )
+            let keys = try await KeepTalkingNodeIdentityKey.query(on: database)
             .filter(\.$relation.$id, .equal, relationID)
             .sort(\.$createdAt, .descending)
             .all()

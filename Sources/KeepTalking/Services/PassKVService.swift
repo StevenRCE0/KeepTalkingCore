@@ -225,7 +225,7 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
     public func sendPushWake(
         handle: KeepTalkingPushWakeHandle,
         contextEnvelope: KeepTalkingPushWakeContextEnvelope? = nil,
-        actionEnvelope: KeepTalkingPushWakeActionEnvelope? = nil
+        actionEnvelope: KeepTalkingAsymmetricCipherEnvelope? = nil
     ) async throws -> KeepTalkingPushWakeSendResponse {
         try await postJSON(
             path: "/api/apn/send",

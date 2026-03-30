@@ -71,30 +71,10 @@ public enum KeepTalkingPushWakePreviewResolver {
 }
 
 public enum KeepTalkingPushWakeActionResolver {
-    public static func resolvePayload(
-        _ envelope: KeepTalkingPushWakeActionEnvelope,
-        on database: any Database
-    ) async throws -> KeepTalkingPushWakeActionPayload? {
-        guard
-            let secret = try await KeepTalkingContextGroupSecret.query(on: database)
-                .filter(\.$id, .equal, envelope.contextID)
-                .first()?
-                .secret
-        else {
-            return nil
-        }
-
-        return try envelope.decrypt(secret: secret)
-    }
-
     public static func resolveNotification(
-        _ envelope: KeepTalkingPushWakeActionEnvelope,
+        _ payload: KeepTalkingPushWakeActionPayload,
         on database: any Database
     ) async throws -> KeepTalkingResolvedPushWakeAction? {
-        guard let payload = try await resolvePayload(envelope, on: database) else {
-            return nil
-        }
-
         let mappings = try await KeepTalkingMapping.query(on: database)
             .filter(\.$deletedAt == nil)
             .all()

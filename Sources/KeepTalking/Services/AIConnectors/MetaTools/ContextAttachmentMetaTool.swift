@@ -15,10 +15,14 @@ extension KeepTalkingClient {
         let contextID = try context.requireID()
         let attachments = try await contextAttachments(in: contextID)
         let blobRecords = try await blobRecordsByBlobID(attachments.map(\.blobID))
+        let aliasLookup = try await aliasLookup()
         let rows = attachments.map { attachment in
             contextAttachmentJSONObject(
                 attachment,
-                blobRecord: blobRecords[attachment.blobID]
+                blobRecord: blobRecords[attachment.blobID],
+                nodeAliasResolver: {
+                    aliasLookup.alias(for: .node($0))
+                }
             )
         }
 
@@ -116,9 +120,13 @@ extension KeepTalkingClient {
         )
         .filter(\.$id, .equal, attachment.blobID)
         .first()
+        let aliasLookup = try await aliasLookup()
         let attachmentJSON = contextAttachmentJSONObject(
             attachment,
-            blobRecord: blobRecord
+            blobRecord: blobRecord,
+            nodeAliasResolver: {
+                aliasLookup.alias(for: .node($0))
+            }
         )
 
         switch mode {
@@ -307,7 +315,8 @@ extension KeepTalkingClient {
 
     func contextAttachmentJSONObject(
         _ attachment: KeepTalkingContextAttachment,
-        blobRecord: KeepTalkingBlobRecord?
+        blobRecord: KeepTalkingBlobRecord?,
+        nodeAliasResolver: ((UUID) -> String?)? = nil
     ) -> [String: Any] {
         [
             "attachment_id": attachment.id?.uuidString.lowercased() ?? "",
@@ -315,7 +324,8 @@ extension KeepTalkingClient {
                 attachment.$parentMessage.id?.uuidString.lowercased()
                 ?? NSNull(),
             "sender": KeepTalkingActionToolDefinition.conversationSenderTag(
-                attachment.sender
+                attachment.sender,
+                nodeAliasResolver: nodeAliasResolver
             ),
             "blob_id": attachment.blobID,
             "filename": attachment.filename,

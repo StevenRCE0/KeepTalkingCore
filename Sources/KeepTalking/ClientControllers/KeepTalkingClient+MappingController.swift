@@ -2,6 +2,70 @@ import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
+    public func aliasLookup() async throws -> KeepTalkingAliasLookup {
+        KeepTalkingClient.aliasLookup(
+            mappings: try await KeepTalkingMapping.query(on: localStore.database)
+                .all()
+        )
+    }
+
+    public static func aliasLookup(mappings: [KeepTalkingMapping])
+        -> KeepTalkingAliasLookup
+    {
+        KeepTalkingAliasLookup(mappings: mappings)
+    }
+
+    public static func displayName(
+        for node: KeepTalkingNode,
+        aliasLookup: KeepTalkingAliasLookup,
+        fallback: String? = nil
+    ) -> String {
+        guard let nodeID = node.id else {
+            return "Unknown"
+        }
+        return resolve(
+            node: nodeID,
+            aliasLookup: aliasLookup,
+            fallback: fallback
+        ).primary(uppercaseID: true)
+    }
+
+    public static func displayName(
+        for context: UUID,
+        aliasLookup: KeepTalkingAliasLookup,
+        fallback: String? = nil
+    ) -> String {
+        resolve(
+            context: context,
+            aliasLookup: aliasLookup,
+            fallback: fallback
+        ).primary(uppercaseID: true)
+    }
+
+    public static func resolve(
+        node: UUID,
+        aliasLookup: KeepTalkingAliasLookup,
+        fallback: String? = nil
+    ) -> KeepTalkingAliasResolution {
+        aliasLookup.resolve(node: node, fallback: fallback)
+    }
+
+    public static func resolve(
+        context: UUID,
+        aliasLookup: KeepTalkingAliasLookup,
+        fallback: String? = nil
+    ) -> KeepTalkingAliasResolution {
+        aliasLookup.resolve(context: context, fallback: fallback)
+    }
+
+    public static func resolve(
+        sender: KeepTalkingContextMessage.Sender,
+        aliasLookup: KeepTalkingAliasLookup,
+        fallback: String? = nil
+    ) -> KeepTalkingAliasResolution {
+        aliasLookup.resolve(sender: sender, fallback: fallback)
+    }
+
     public func mappings(
         for target: KeepTalkingMappingTarget,
         includeDeleted: Bool = false

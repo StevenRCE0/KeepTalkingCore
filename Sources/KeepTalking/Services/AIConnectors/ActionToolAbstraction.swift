@@ -12,7 +12,8 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
     public let actionID: UUID
     public let ownerNodeID: UUID
     public let source: Source
-    public let mcpToolName: String?
+    public let targetName: String?
+    public let displayName: String?
     public let supportsWakeAssist: Bool
     public let description: String
     public let parameters: JSONSchema
@@ -22,7 +23,8 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         actionID: UUID,
         ownerNodeID: UUID,
         source: Source,
-        mcpToolName: String? = nil,
+        targetName: String? = nil,
+        displayName: String? = nil,
         supportsWakeAssist: Bool = false,
         description: String,
         parameters: JSONSchema
@@ -31,7 +33,8 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         self.actionID = actionID
         self.ownerNodeID = ownerNodeID
         self.source = source
-        self.mcpToolName = mcpToolName
+        self.targetName = targetName
+        self.displayName = displayName
         self.supportsWakeAssist = supportsWakeAssist
         self.description = description
         self.parameters = parameters
@@ -51,7 +54,7 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
     public static func normalizedFunctionName(
         ownerNodeID: UUID,
         actionID: UUID,
-        mcpToolName: String? = nil
+        targetName: String? = nil
     ) -> String {
         // Keep deterministic and compact while still carrying an explicit
         // action tag so names remain consistent across catalog rebuilds.
@@ -60,16 +63,16 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         let shortAction = shortActionID(actionID)
         var normalized = "kt_\(owner.prefix(20))_\(action.prefix(20))_\(shortAction)"
 
-        if let mcpToolName {
+        if let targetName {
             let cleaned =
-                mcpToolName
+                targetName
                 .lowercased()
                 .map { $0.isLetter || $0.isNumber ? $0 : "_" }
             let prefix = String(cleaned.prefix(5))
                 .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
             let checksum = String(
                 format: "%04x",
-                mcpToolName.utf8.reduce(UInt32(2_166_136_261)) { partial, byte in
+                targetName.utf8.reduce(UInt32(2_166_136_261)) { partial, byte in
                     (partial ^ UInt32(byte)) &* 16_777_619
                 } & 0xffff
             )
@@ -169,7 +172,7 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
                 "tool": JSONSchema(
                     .type(.string),
                     .description(
-                        "Target MCP tool name on the server. If omitted, defaults to action name."
+                        "Optional underlying tool name for this proxy. This selects the wrapped MCP or skill tool and is not the target node name. If omitted, the proxy uses its default mapped tool."
                     )
                 ),
                 "arguments": JSONSchema(

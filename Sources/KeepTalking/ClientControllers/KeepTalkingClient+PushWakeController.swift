@@ -111,7 +111,10 @@ extension KeepTalkingClient {
             actionID: call.action
         )
         guard
-            let envelope = try? await encryptPushWakeActionPayload(payload)
+            let envelope = try? await encryptPushWakeActionPayload(
+                payload,
+                recipientNodeID: actionOwner
+            )
         else {
             return
         }
@@ -157,22 +160,45 @@ extension KeepTalkingClient {
     }
 
     func encryptPushWakeActionPayload(
-        _ payload: KeepTalkingPushWakeActionPayload
-    ) async throws -> KeepTalkingPushWakeActionEnvelope {
-        let secret = try await ensureGroupChatSecret(for: payload.contextID)
-        return try KeepTalkingPushWakeActionEnvelope.encrypt(
-            payload,
-            secret: secret
+        _ payload: KeepTalkingPushWakeActionPayload,
+        recipientNodeID: UUID
+    ) async throws -> KeepTalkingAsymmetricCipherEnvelope {
+        let encoded = try JSONEncoder().encode(payload)
+        return try await encryptAsymmetricPayload(
+            encoded,
+            recipientNodeID: recipientNodeID,
+            purpose: "push-wake-action"
         )
     }
 
     public func decryptPushWakeActionPayload(
-        _ envelope: KeepTalkingPushWakeActionEnvelope
+        _ envelope: KeepTalkingAsymmetricCipherEnvelope
     ) async throws -> KeepTalkingPushWakeActionPayload {
-        guard let secret = try await loadGroupChatSecret(for: envelope.contextID)
-        else {
-            throw KeepTalkingClientError.missingContextSecret(envelope.contextID)
-        }
-        return try envelope.decrypt(secret: secret)
+        try await Self.decryptPushWakeActionPayload(
+            envelope,
+            localNodeID: config.node,
+            remoteNodeID: envelope.senderNodeID,
+            on: localStore.database
+        )
+    }
+
+    public static func decryptPushWakeActionPayload(
+        _ envelope: KeepTalkingAsymmetricCipherEnvelope,
+        localNodeID: UUID,
+        remoteNodeID: UUID,
+        on database: any Database
+    ) async throws -> KeepTalkingPushWakeActionPayload {
+        let payload = try await decryptAsymmetricPayload(
+            envelope,
+            expectedSenderNodeID: remoteNodeID,
+            localNodeID: localNodeID,
+            remoteNodeID: remoteNodeID,
+            on: database,
+            purpose: "push-wake-action"
+        )
+        return try JSONDecoder().decode(
+            KeepTalkingPushWakeActionPayload.self,
+            from: payload
+        )
     }
 }

@@ -47,9 +47,9 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle {
             action: .askForFile
         ),
         KeepTalkingPrimitiveBundle(
-            name: "get-currently-playing-music",
+            name: "get-or-play-music",
             indexDescription:
-                "Get metadata about the currently playing music on the action host.",
+                "Get metadata about currently playing music on the action host, or play an Apple Music song by URL or store ID.",
             action: .getCurrentlyPlayingMusic
         ),
     ]

@@ -6,7 +6,8 @@ extension KeepTalkingClient {
         _ toolCall: ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
             .ToolCallParam,
         routesByFunctionName: [String: KeepTalkingAgentToolRoute],
-        skillNameByActionID: [UUID: String]
+        skillNameByActionID: [UUID: String],
+        nodeAliasResolver: ((UUID) -> String?)? = nil
     ) -> String {
         let functionName = toolCall.function.name
         guard functionName != Self.listingToolFunctionName else {
@@ -65,28 +66,32 @@ extension KeepTalkingClient {
                     toolName: routedToolName,
                     ownerNodeID: definition.ownerNodeID,
                     actionID: definition.actionID,
-                    supportsWakeAssist: definition.supportsWakeAssist
+                    supportsWakeAssist: definition.supportsWakeAssist,
+                    nodeAliasResolver: nodeAliasResolver
                 )
             case .skillMetadata(let context):
                 return friendlyToolCallPhrase(
                     toolName: "skill metadata \(context.bundle.name)",
                     ownerNodeID: context.ownerNodeID,
                     actionID: context.actionID,
-                    supportsWakeAssist: false
+                    supportsWakeAssist: false,
+                    nodeAliasResolver: nodeAliasResolver
                 )
             case .skillFileLocal(let context):
                 return friendlyToolCallPhrase(
                     toolName: "skill file \(context.bundle.name)",
                     ownerNodeID: context.ownerNodeID,
                     actionID: context.actionID,
-                    supportsWakeAssist: false
+                    supportsWakeAssist: false,
+                    nodeAliasResolver: nodeAliasResolver
                 )
             case .skillFileRemote(let actionID, _, let skillName):
                 return friendlyToolCallPhrase(
                     toolName: "skill file \(skillName)",
                     ownerNodeID: nil,
                     actionID: actionID,
-                    supportsWakeAssist: false
+                    supportsWakeAssist: false,
+                    nodeAliasResolver: nodeAliasResolver
                 )
         }
     }
@@ -95,7 +100,8 @@ extension KeepTalkingClient {
         toolName: String,
         ownerNodeID: UUID?,
         actionID: UUID?,
-        supportsWakeAssist: Bool
+        supportsWakeAssist: Bool,
+        nodeAliasResolver: ((UUID) -> String?)? = nil
     ) -> String {
         let unroutedName: String
         if let actionID {
@@ -128,8 +134,12 @@ extension KeepTalkingClient {
             return collapsed
         }
 
+        let ownerName = nodeDisplayName(
+            ownerNodeID,
+            nodeAliasResolver: nodeAliasResolver
+        )
         if ownerNodeID == config.node {
-            return "\(collapsed) on local node"
+            return "\(collapsed) on current node \(ownerName)"
         }
         let wakeSuffix: String
         if supportsWakeAssist && !onlineNodeIDs().contains(ownerNodeID) {
@@ -137,14 +147,14 @@ extension KeepTalkingClient {
         } else {
             wakeSuffix = ""
         }
-        return
-            "\(collapsed) on node \(KeepTalkingActionToolDefinition.shortNodeID(ownerNodeID))\(wakeSuffix)"
+        return "\(collapsed) on node \(ownerName)\(wakeSuffix)"
     }
 
     func renderCatalogListing(
         _ catalog: KeepTalkingActionToolCatalog,
         routesByFunctionName: [String: KeepTalkingAgentToolRoute],
-        contextID: UUID
+        contextID: UUID,
+        nodeAliasResolver: ((UUID) -> String?)? = nil
     ) -> String {
         let skillNameByActionID = skillNamesByActionID(
             routesByFunctionName: routesByFunctionName
@@ -158,13 +168,21 @@ extension KeepTalkingClient {
                 route: route,
                 skillNameByActionID: skillNameByActionID
             )
+            let ownerNodeName = nodeDisplayName(
+                definition.ownerNodeID,
+                nodeAliasResolver: nodeAliasResolver
+            )
             return [
                 "function_name": definition.functionName,
                 "route_kind": routeKind(route),
                 "source": definition.source.rawValue,
                 "action_id": definition.actionID.uuidString.lowercased(),
                 "owner_node_id": definition.ownerNodeID.uuidString.lowercased(),
+                "owner_node_name": ownerNodeName,
+                "is_current_node": definition.ownerNodeID == config.node,
                 "tool_name": taggedToolName,
+                "display_name": taggedToolName,
+                "target_name": ownerNodeName,
                 "description": definition.description,
             ]
         }
@@ -196,12 +214,12 @@ extension KeepTalkingClient {
         route: KeepTalkingAgentToolRoute?,
         skillNameByActionID: [UUID: String]
     ) -> String {
-        if let mcpToolName = definition.mcpToolName?
+        if let displayName = definition.displayName?
             .trimmingCharacters(in: .whitespacesAndNewlines),
-            !mcpToolName.isEmpty
+            !displayName.isEmpty
         {
             return KeepTalkingActionToolDefinition.routedActionName(
-                mcpToolName,
+                displayName,
                 actionID: definition.actionID
             )
         }
@@ -241,6 +259,16 @@ extension KeepTalkingClient {
                     fallbackPrefix: "action"
                 )
         }
+    }
+
+    func nodeDisplayName(
+        _ nodeID: UUID,
+        nodeAliasResolver: ((UUID) -> String?)? = nil
+    ) -> String {
+        KeepTalkingAliasResolution(
+            alias: nodeAliasResolver?(nodeID),
+            id: nodeID
+        ).primary(uppercaseID: true)
     }
 
     func skillNamesByActionID(

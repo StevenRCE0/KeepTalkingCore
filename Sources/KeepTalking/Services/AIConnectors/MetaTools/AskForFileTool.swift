@@ -51,7 +51,7 @@ extension KeepTalkingClient {
                 continue
             }
             guard definition.source == .primitive,
-                definition.mcpToolName
+                definition.targetName
                     == KeepTalkingPrimitiveActionKind.askForFile.rawValue
             else {
                 continue

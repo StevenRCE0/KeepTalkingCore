@@ -52,6 +52,7 @@ extension KeepTalkingClient {
         let skillNameByActionID = skillNamesByActionID(
             routesByFunctionName: runtimeCatalog.routesByFunctionName
         )
+        let aliasLookup = try await aliasLookup()
         let contextTranscript = try await agentContextTranscript(
             persistedContext,
             skillSummaries: runtimeCatalog.skillSummaries
@@ -132,7 +133,10 @@ extension KeepTalkingClient {
                         toolCall,
                         routesByFunctionName: runtimeCatalog
                             .routesByFunctionName,
-                        skillNameByActionID: skillNameByActionID
+                        skillNameByActionID: skillNameByActionID,
+                        nodeAliasResolver: {
+                            aliasLookup.alias(for: .node($0))
+                        }
                     )
                 }
             ),
@@ -590,7 +594,7 @@ extension KeepTalkingClient {
                     .flatMap { String(data: $0, encoding: .utf8) }
                     ?? "<schema-encode-failed>"
                 onLog?(
-                    "[ai/tools] name=\(definition.functionName) action_name=\(actionName) source=\(definition.source.rawValue) route=\(routeKind(route)) action=\(definition.actionID.uuidString.lowercased()) owner=\(definition.ownerNodeID.uuidString.lowercased()) mcp_tool=\(definition.mcpToolName ?? "") schema=\(schemaText)"
+                    "[ai/tools] name=\(definition.functionName) action_name=\(actionName) source=\(definition.source.rawValue) route=\(routeKind(route)) action=\(definition.actionID.uuidString.lowercased()) owner=\(definition.ownerNodeID.uuidString.lowercased()) target=\(definition.targetName ?? "") display=\(definition.displayName ?? "") schema=\(schemaText)"
                 )
             }
         }

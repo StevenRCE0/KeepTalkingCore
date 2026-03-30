@@ -36,12 +36,13 @@ extension KeepTalkingClient {
                         KeepTalkingActionToolDefinition.normalizedFunctionName(
                             ownerNodeID: ownerNodeID,
                             actionID: actionID,
-                            mcpToolName: bundle.name
+                            targetName: bundle.name
                         ),
                     actionID: actionID,
                     ownerNodeID: ownerNodeID,
                     source: .mcp,
-                    mcpToolName: bundle.name,
+                    targetName: bundle.name,
+                    displayName: bundle.name,
                     supportsWakeAssist: action.blockingAuthorisation == true,
                     description: mcpProxyToolDescription(
                         originalToolName: bundle.name,
@@ -64,18 +65,19 @@ extension KeepTalkingClient {
             )
             return KeepTalkingActionToolDefinition(
                 functionName:
-                    KeepTalkingActionToolDefinition.normalizedFunctionName(
-                        ownerNodeID: ownerNodeID,
-                        actionID: actionID,
-                        mcpToolName: selectedToolName.isEmpty
-                            ? nil
-                            : selectedToolName
-                    ),
-                actionID: actionID,
-                ownerNodeID: ownerNodeID,
-                source: .mcp,
-                mcpToolName: selectedToolName.isEmpty ? nil : selectedToolName,
-                supportsWakeAssist: action.blockingAuthorisation == true,
+                        KeepTalkingActionToolDefinition.normalizedFunctionName(
+                            ownerNodeID: ownerNodeID,
+                            actionID: actionID,
+                            targetName: selectedToolName.isEmpty
+                                ? nil
+                                : selectedToolName
+                        ),
+                    actionID: actionID,
+                    ownerNodeID: ownerNodeID,
+                    source: .mcp,
+                    targetName: selectedToolName.isEmpty ? nil : selectedToolName,
+                    displayName: selectedToolName.isEmpty ? bundle.name : selectedToolName,
+                    supportsWakeAssist: action.blockingAuthorisation == true,
                 description: mcpProxyToolDescription(
                     originalToolName: selectedToolName.isEmpty
                         ? bundle.name
@@ -107,12 +109,13 @@ extension KeepTalkingClient {
                         KeepTalkingActionToolDefinition.normalizedFunctionName(
                             ownerNodeID: ownerNodeID,
                             actionID: actionID,
-                            mcpToolName: bundle.name
+                            targetName: bundle.name
                         ),
                     actionID: actionID,
                     ownerNodeID: ownerNodeID,
                     source: .mcp,
-                    mcpToolName: bundle.name,
+                    targetName: bundle.name,
+                    displayName: bundle.name,
                     supportsWakeAssist: action.blockingAuthorisation == true,
                     description: mcpProxyToolDescription(
                         originalToolName: bundle.name,
@@ -131,18 +134,19 @@ extension KeepTalkingClient {
             )
             return KeepTalkingActionToolDefinition(
                 functionName:
-                    KeepTalkingActionToolDefinition.normalizedFunctionName(
-                        ownerNodeID: ownerNodeID,
-                        actionID: actionID,
-                        mcpToolName: selectedToolName.isEmpty
-                            ? nil
-                            : selectedToolName
-                    ),
-                actionID: actionID,
-                ownerNodeID: ownerNodeID,
-                source: .mcp,
-                mcpToolName: selectedToolName.isEmpty ? nil : selectedToolName,
-                supportsWakeAssist: action.blockingAuthorisation == true,
+                        KeepTalkingActionToolDefinition.normalizedFunctionName(
+                            ownerNodeID: ownerNodeID,
+                            actionID: actionID,
+                            targetName: selectedToolName.isEmpty
+                                ? nil
+                                : selectedToolName
+                        ),
+                    actionID: actionID,
+                    ownerNodeID: ownerNodeID,
+                    source: .mcp,
+                    targetName: selectedToolName.isEmpty ? nil : selectedToolName,
+                    displayName: selectedToolName.isEmpty ? bundle.name : selectedToolName,
+                    supportsWakeAssist: action.blockingAuthorisation == true,
                 description: mcpProxyToolDescription(
                     originalToolName: selectedToolName.isEmpty
                         ? bundle.name
@@ -195,12 +199,13 @@ extension KeepTalkingClient {
             functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
                 ownerNodeID: ownerNodeID,
                 actionID: actionID,
-                mcpToolName: nil
+                targetName: nil
             ),
             actionID: actionID,
             ownerNodeID: ownerNodeID,
             source: .skill,
-            mcpToolName: nil,
+            targetName: bundle.name,
+            displayName: bundle.name,
             supportsWakeAssist: supportsWakeAssist,
             description: description,
             parameters: KeepTalkingActionToolDefinition.permissiveObjectParameters
@@ -221,12 +226,13 @@ extension KeepTalkingClient {
             functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
                 ownerNodeID: ownerNodeID,
                 actionID: actionID,
-                mcpToolName: nil
+                targetName: bundle.action.rawValue
             ),
             actionID: actionID,
             ownerNodeID: ownerNodeID,
             source: .primitive,
-            mcpToolName: bundle.name,
+            targetName: bundle.action.rawValue,
+            displayName: bundle.name,
             supportsWakeAssist: supportsWakeAssist,
             description: description,
             parameters: primitiveActionParameters(for: bundle.action)
@@ -242,12 +248,13 @@ extension KeepTalkingClient {
             functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
                 ownerNodeID: ownerNodeID,
                 actionID: actionID,
-                mcpToolName: "skill_metadata"
+                targetName: "skill_metadata"
             ),
             actionID: actionID,
             ownerNodeID: ownerNodeID,
             source: .skill,
-            mcpToolName: nil,
+            targetName: "skill_metadata",
+            displayName: bundle.name,
             description:
                 "Read skill metadata for \(bundle.name), including manifest metadata and indexed directories.",
             parameters: JSONSchema(
@@ -267,12 +274,13 @@ extension KeepTalkingClient {
             functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
                 ownerNodeID: ownerNodeID,
                 actionID: actionID,
-                mcpToolName: "skill_file"
+                targetName: "skill_file"
             ),
             actionID: actionID,
             ownerNodeID: ownerNodeID,
             source: .skill,
-            mcpToolName: nil,
+            targetName: "skill_file",
+            displayName: bundle.name,
             description:
                 "Read a file from skill bundle \(bundle.name). Paths must stay within the skill directory.",
             parameters: JSONSchema(
@@ -302,7 +310,7 @@ extension KeepTalkingClient {
                 .init(
                     name: Self.listingToolFunctionName,
                     description:
-                        "List KeepTalking action proxies available in the current context. Use this only when you need to discover or confirm which KeepTalking action proxy to call. Use route_kind and action_id to match skill_metadata/skill_file with skill action_proxy calls.",
+                        "List KeepTalking action proxies available in the current context. Use this only when you need to discover or confirm which KeepTalking action proxy to call. Match the requested target node against owner_node_name or target_name. Those names come from mappings aliases and fall back to the node's uppercase UUID when no alias exists. Use is_current_node when the user means the current or local node. Use route_kind and action_id to match skill_metadata or skill_file with skill action_proxy calls.",
                     parameters: JSONSchema(
                         .type(.object),
                         .properties([:]),
@@ -456,7 +464,20 @@ extension KeepTalkingClient {
             case .getCurrentlyPlayingMusic:
                 return JSONSchema(
                     .type(.object),
-                    .properties([:]),
+                    .properties([
+                        "storeID": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "Optional Apple Music song store ID to play. If omitted, the tool returns the currently playing music metadata."
+                            )
+                        ),
+                        "url": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "Optional Apple Music song URL to play. The song store ID will be extracted from the URL. If omitted, the tool returns the currently playing music metadata."
+                            )
+                        ),
+                    ]),
                     .additionalProperties(.boolean(false))
                 )
         }

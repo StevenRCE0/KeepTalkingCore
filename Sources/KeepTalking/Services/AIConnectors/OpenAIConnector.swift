@@ -59,6 +59,13 @@ public actor OpenAIConnector {
             A file or image injected immediately after ask-for-file is the user-provided attachment you requested. Treat it as authoritative for that request and do not call \(attachmentListingToolFunctionName) or \(attachmentReaderToolFunctionName) for the same file unless you truly need a different earlier context attachment.
             \(currentPromptGuidance)
 
+            Node targeting policy:
+            1) When the user specifies a target node, match it against listing rows using owner_node_name or target_name.
+            2) owner_node_name and target_name come from mappings aliases. If no alias exists they fall back to the node's uppercase UUID.
+            3) Treat is_current_node=true as the current or local node.
+            4) Use the transcript, especially the "Known node names in this context" section, to match the user's wording to the correct node name before choosing a tool.
+            5) Do not reinterpret the proxy arguments field named tool as a node target. It selects the wrapped underlying tool only.
+
             Skill execution policy (mandatory):
             1) If you will use any tool where listing output shows source=skill and route_kind=action_proxy, first call the matching source=skill route_kind=skill_metadata tool for that same action_id.
             2) Then call the matching source=skill route_kind=skill_file tool at least once for that same action_id to inspect concrete file content.

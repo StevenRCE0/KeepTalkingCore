@@ -110,64 +110,6 @@ public struct KeepTalkingPushWakeActionPayload: Codable, Sendable, Hashable {
     }
 }
 
-public struct KeepTalkingPushWakeActionEnvelope: Codable, Sendable, Hashable {
-    public var contextID: UUID
-    public var ciphertext: String
-
-    public init(contextID: UUID, ciphertext: String) {
-        self.contextID = contextID
-        self.ciphertext = ciphertext
-    }
-
-    public static func encrypt(
-        _ payload: KeepTalkingPushWakeActionPayload,
-        secret: Data
-    ) throws -> Self {
-        let encoded = try JSONEncoder().encode(payload)
-        return Self(
-            contextID: payload.contextID,
-            ciphertext: try KeepTalkingPreviewCrypto.encryptString(
-                String(decoding: encoded, as: UTF8.self),
-                secret: secret
-            )
-        )
-    }
-
-    public func decrypt(secret: Data) throws -> KeepTalkingPushWakeActionPayload {
-        let decrypted = try KeepTalkingPreviewCrypto.decryptStringIfNeeded(
-            ciphertext,
-            secret: secret
-        )
-        let payload = try JSONDecoder().decode(
-            KeepTalkingPushWakeActionPayload.self,
-            from: Data(decrypted.utf8)
-        )
-        guard payload.contextID == contextID else {
-            throw KeepTalkingKVServiceError.invalidStoredValue
-        }
-        return payload
-    }
-
-    public static func decode(
-        from userInfo: [AnyHashable: Any]
-    ) -> KeepTalkingPushWakeActionEnvelope? {
-        if let json = userInfo["kt_action_wake"] as? String,
-            let data = json.data(using: .utf8)
-        {
-            return try? JSONDecoder().decode(Self.self, from: data)
-        }
-
-        if let object = userInfo["kt_action_wake"],
-            JSONSerialization.isValidJSONObject(object),
-            let data = try? JSONSerialization.data(withJSONObject: object)
-        {
-            return try? JSONDecoder().decode(Self.self, from: data)
-        }
-
-        return nil
-    }
-}
-
 extension KeepTalkingAsymmetricCipherEnvelope {
     public static func decodePushWakeActionEnvelope(
         from userInfo: [AnyHashable: Any]
@@ -238,12 +180,12 @@ public struct KeepTalkingPushWakeMintResponse: Codable, Sendable {
 public struct KeepTalkingPushWakeSendRequest: Codable, Sendable {
     public var handle: KeepTalkingPushWakeHandle
     public var contextEnvelope: KeepTalkingPushWakeContextEnvelope?
-    public var actionEnvelope: KeepTalkingPushWakeActionEnvelope?
+    public var actionEnvelope: KeepTalkingAsymmetricCipherEnvelope?
 
     public init(
         handle: KeepTalkingPushWakeHandle,
         contextEnvelope: KeepTalkingPushWakeContextEnvelope? = nil,
-        actionEnvelope: KeepTalkingPushWakeActionEnvelope? = nil
+        actionEnvelope: KeepTalkingAsymmetricCipherEnvelope? = nil
     ) {
         self.handle = handle
         self.contextEnvelope = contextEnvelope

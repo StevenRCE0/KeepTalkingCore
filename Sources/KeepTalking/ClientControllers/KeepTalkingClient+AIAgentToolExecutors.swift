@@ -30,6 +30,7 @@ extension KeepTalkingClient {
     ) async throws -> [AIOrchestrator.ToolExecution] {
         var executions: [AIOrchestrator.ToolExecution] = []
         let contextID = try context.requireID()
+        let aliasLookup = try await aliasLookup()
 
         for toolCall in toolCalls {
             let toolCallID =
@@ -49,7 +50,10 @@ extension KeepTalkingClient {
                                         runtimeCatalog.catalog,
                                         routesByFunctionName: runtimeCatalog
                                             .routesByFunctionName,
-                                        contextID: contextID
+                                        contextID: contextID,
+                                        nodeAliasResolver: {
+                                            aliasLookup.alias(for: .node($0))
+                                        }
                                     ),
                                     toolCallID: toolCallID
                                 )
@@ -208,6 +212,18 @@ extension KeepTalkingClient {
             contextID.uuidString.lowercased()
         )
         metadata.fields["tool_name"] = .string(functionName)
+        if let targetName = definition.targetName?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !targetName.isEmpty
+        {
+            metadata.fields["action_target_name"] = .string(targetName)
+        }
+        if let displayName = definition.displayName?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !displayName.isEmpty
+        {
+            metadata.fields["display_name"] = .string(displayName)
+        }
 
         let actionCall = KeepTalkingActionCall(
             action: definition.actionID,
@@ -232,11 +248,11 @@ extension KeepTalkingClient {
     ) throws -> [String: Value] {
         var arguments = try decodeToolArguments(rawArguments)
         if definition.source == .mcp,
-            let mcpToolName = definition.mcpToolName,
+            let targetName = definition.targetName,
             arguments["tool"] == nil
         {
             arguments = [
-                "tool": .string(mcpToolName),
+                "tool": .string(targetName),
                 "arguments": .object(arguments),
             ]
         }
