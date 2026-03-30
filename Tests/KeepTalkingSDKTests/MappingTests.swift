@@ -113,3 +113,40 @@ struct MappingTests {
         #expect(contextColor.count == 7)
     }
 }
+
+@Test("static mapping helpers behave like instance wrappers")
+  func staticMappingHelpersWork() async throws {
+      let localStore = KeepTalkingInMemoryStore()
+      let node = KeepTalkingNode(id: UUID())
+      try await node.save(on: localStore.database)
+
+      let target = KeepTalkingMappingTarget.node(try #require(node.id))
+
+      try await KeepTalkingClient.setAlias(
+          "  Home Node  ",
+          for: target,
+          on: localStore.database
+      )
+
+      #expect(
+          try await KeepTalkingClient.alias(
+              for: target,
+              on: localStore.database
+          ) == "Home Node"
+      )
+
+      try await KeepTalkingClient.addTag(
+          " Tenant ",
+          namespace: "tenant",
+          to: target,
+          on: localStore.database
+      )
+
+      let tags = try await KeepTalkingClient.tags(
+          for: target,
+          namespace: "tenant",
+          on: localStore.database
+      )
+      #expect(tags.count == 1)
+      #expect(tags.first?.value == "Tenant")
+  }
