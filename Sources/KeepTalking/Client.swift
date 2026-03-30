@@ -145,6 +145,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let rtcClient: any KeepTalkingTransportClient
     let kvService: (any KeepTalkingKVService)?
     public let localStore: any KeepTalkingLocalStore
+    let openAIAPIMode: OpenAIAPIMode
     let livenessState: KeepTalkingContextLivenessState
     let mcpManager: MCPManager
     let skillManager: SkillManager
@@ -224,6 +225,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.kvService = kvService
         self.localStore = localStore
         self.logon = logon
+        self.openAIAPIMode = openAIAPIMode
         self.blobStore = KeepTalkingBlobStore.makeDefault(for: localStore)
         livenessState = KeepTalkingContextLivenessState(
             localNode: config.node

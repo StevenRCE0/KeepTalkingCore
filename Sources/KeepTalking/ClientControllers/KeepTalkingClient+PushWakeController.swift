@@ -111,10 +111,7 @@ extension KeepTalkingClient {
             actionID: call.action
         )
         guard
-            let envelope = try? await encryptPushWakeActionPayload(
-                payload,
-                recipientNodeID: actionOwner
-            )
+            let envelope = try? await encryptPushWakeActionPayload(payload)
         else {
             return
         }
@@ -160,28 +157,22 @@ extension KeepTalkingClient {
     }
 
     func encryptPushWakeActionPayload(
-        _ payload: KeepTalkingPushWakeActionPayload,
-        recipientNodeID: UUID
-    ) async throws -> KeepTalkingAsymmetricCipherEnvelope {
-        let encoded = try JSONEncoder().encode(payload)
-        return try await encryptAsymmetricPayload(
-            encoded,
-            recipientNodeID: recipientNodeID,
-            purpose: "push-wake-action"
+        _ payload: KeepTalkingPushWakeActionPayload
+    ) async throws -> KeepTalkingPushWakeActionEnvelope {
+        let secret = try await ensureGroupChatSecret(for: payload.contextID)
+        return try KeepTalkingPushWakeActionEnvelope.encrypt(
+            payload,
+            secret: secret
         )
     }
 
     public func decryptPushWakeActionPayload(
-        _ envelope: KeepTalkingAsymmetricCipherEnvelope
+        _ envelope: KeepTalkingPushWakeActionEnvelope
     ) async throws -> KeepTalkingPushWakeActionPayload {
-        let payload = try await decryptAsymmetricPayload(
-            envelope,
-            expectedSenderNodeID: envelope.senderNodeID,
-            purpose: "push-wake-action"
-        )
-        return try JSONDecoder().decode(
-            KeepTalkingPushWakeActionPayload.self,
-            from: payload
-        )
+        guard let secret = try await loadGroupChatSecret(for: envelope.contextID)
+        else {
+            throw KeepTalkingClientError.missingContextSecret(envelope.contextID)
+        }
+        return try envelope.decrypt(secret: secret)
     }
 }

@@ -387,7 +387,8 @@ extension KeepTalkingClient {
         bundle: KeepTalkingMCPBundle? = nil,
         descriptor: KeepTalkingActionDescriptor? = nil,
         remoteAuthorisable: Bool? = nil,
-        blockingAuthorisation: Bool? = nil
+        blockingAuthorisation: Bool? = nil,
+        disabled: Bool? = nil
     ) async throws -> KeepTalkingAction {
         guard
             let action = try await KeepTalkingAction.query(
@@ -421,6 +422,10 @@ extension KeepTalkingClient {
                 .normalizedBlockingAuthorisation(blockingAuthorisation)
         }
 
+        if let disabled {
+            action.disabled = disabled
+        }
+
         try await action.save(on: localStore.database)
         try await mcpManager.refreshMCPAction(action)
         await invalidateActionToolCatalog(
@@ -435,7 +440,8 @@ extension KeepTalkingClient {
         bundle: KeepTalkingSkillBundle? = nil,
         descriptor: KeepTalkingActionDescriptor? = nil,
         remoteAuthorisable: Bool? = nil,
-        blockingAuthorisation: Bool? = nil
+        blockingAuthorisation: Bool? = nil,
+        disabled: Bool? = nil
     ) async throws -> KeepTalkingAction {
         guard
             let action = try await KeepTalkingAction.query(
@@ -469,6 +475,10 @@ extension KeepTalkingClient {
                 .normalizedBlockingAuthorisation(blockingAuthorisation)
         }
 
+        if let disabled {
+            action.disabled = disabled
+        }
+
         try await action.save(on: localStore.database)
         try await skillManager.refreshSkillAction(action)
         await invalidateActionToolCatalog(
@@ -483,7 +493,8 @@ extension KeepTalkingClient {
         bundle: KeepTalkingPrimitiveBundle? = nil,
         descriptor: KeepTalkingActionDescriptor? = nil,
         remoteAuthorisable: Bool? = nil,
-        blockingAuthorisation: Bool? = nil
+        blockingAuthorisation: Bool? = nil,
+        disabled: Bool? = nil
     ) async throws -> KeepTalkingAction {
         guard
             let action = try await KeepTalkingAction.query(
@@ -515,6 +526,10 @@ extension KeepTalkingClient {
             action.blockingAuthorisation =
                 Self
                 .normalizedBlockingAuthorisation(blockingAuthorisation)
+        }
+
+        if let disabled {
+            action.disabled = disabled
         }
 
         try await action.save(on: localStore.database)
@@ -778,6 +793,65 @@ extension KeepTalkingClient {
             actionID: actionID,
             toNodeID: toNodeID,
             scope: scope,
+            node: selfNode,
+            on: localStore.database,
+            callbackForBroadcasting: {
+                await self.broadcastLocalNodeState(reason: $0)
+            }
+        )
+    }
+
+    static public func revokeActionPermission(
+        actionID: UUID,
+        fromNodeID: UUID,
+        node: KeepTalkingNode,
+        on database: any Database,
+        callbackForBroadcasting: ((String) async -> Void)? = nil
+    ) async throws {
+        let hostNode = try await resolveGrantHostNode(
+            for: try await KeepTalkingAction.find(actionID, on: database)
+                ?? { throw KeepTalkingClientError.actionNotHostedLocally(actionID) }(),
+            authorizingNode: node,
+            on: database
+        )
+
+        guard
+            let hostNodeID = hostNode.id,
+            let relation = try await preferredTrustedRelation(
+                from: hostNodeID,
+                to: fromNodeID,
+                on: database
+            )
+        else {
+            throw KeepTalkingClientError.relationNotTrustedOrOwned(fromNodeID)
+        }
+
+        let actionRelations = try await relation.$actionRelations.query(
+            on: database
+        ).filter(\.$action.$id == actionID).all()
+
+        for actionRelation in actionRelations {
+            try await actionRelation.delete(on: database)
+        }
+
+        await callbackForBroadcasting?(
+            "revoke action=\(actionID.uuidString.lowercased()) from=\(fromNodeID.uuidString.lowercased())"
+        )
+    }
+
+    public func revokeActionPermission(
+        actionID: UUID,
+        fromNodeID: UUID
+    ) async throws {
+        let selfNode = try await ensure(
+            config.node,
+            for: KeepTalkingNode.self,
+            strict: true
+        )
+
+        try await Self.revokeActionPermission(
+            actionID: actionID,
+            fromNodeID: fromNodeID,
             node: selfNode,
             on: localStore.database,
             callbackForBroadcasting: {

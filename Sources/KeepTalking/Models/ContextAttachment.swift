@@ -183,4 +183,8 @@ extension KeepTalkingContextAttachment {
     public var isImage: Bool {
         mimeType.hasPrefix("image/")
     }
+
+    public var isAudio: Bool {
+        mimeType.hasPrefix("audio/")
+    }
 }

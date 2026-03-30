@@ -13,6 +13,18 @@ public struct KeepTalkingResolvedPushWakePreview: Sendable, Hashable {
     }
 }
 
+public struct KeepTalkingResolvedPushWakeAction: Sendable, Hashable {
+    public var title: String
+    public var body: String
+    public var contextID: UUID
+
+    public init(title: String, body: String, contextID: UUID) {
+        self.title = title
+        self.body = body
+        self.contextID = contextID
+    }
+}
+
 public enum KeepTalkingPushWakePreviewResolver {
     public static func resolve(
         _ envelope: KeepTalkingPushWakeContextEnvelope,
@@ -54,6 +66,54 @@ public enum KeepTalkingPushWakePreviewResolver {
             title: senderLabel,
             body: body,
             contextID: envelope.contextID
+        )
+    }
+}
+
+public enum KeepTalkingPushWakeActionResolver {
+    public static func resolvePayload(
+        _ envelope: KeepTalkingPushWakeActionEnvelope,
+        on database: any Database
+    ) async throws -> KeepTalkingPushWakeActionPayload? {
+        guard
+            let secret = try await KeepTalkingContextGroupSecret.query(on: database)
+                .filter(\.$id, .equal, envelope.contextID)
+                .first()?
+                .secret
+        else {
+            return nil
+        }
+
+        return try envelope.decrypt(secret: secret)
+    }
+
+    public static func resolveNotification(
+        _ envelope: KeepTalkingPushWakeActionEnvelope,
+        on database: any Database
+    ) async throws -> KeepTalkingResolvedPushWakeAction? {
+        guard let payload = try await resolvePayload(envelope, on: database) else {
+            return nil
+        }
+
+        let mappings = try await KeepTalkingMapping.query(on: database)
+            .filter(\.$deletedAt == nil)
+            .all()
+        let callerLabel = KeepTalkingAliasLookup(mappings: mappings)
+            .resolve(sender: .node(node: payload.senderNodeID))
+            .combined(uppercaseID: true)
+        let actionDescription =
+            try await KeepTalkingAction.query(on: database)
+            .filter(\.$id, .equal, payload.actionID)
+            .first()?
+            .descriptor?
+            .action?
+            .description
+            ?? payload.actionID.uuidString.lowercased()
+
+        return KeepTalkingResolvedPushWakeAction(
+            title: callerLabel,
+            body: actionDescription,
+            contextID: payload.contextID
         )
     }
 }

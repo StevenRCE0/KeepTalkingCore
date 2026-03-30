@@ -317,8 +317,13 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
 
     private func handleParticipantJoined(_ nodeID: UUID) {
         guard nodeID != config.node else { return }
-        let alreadyExists = stateQueue.sync { directChannels[nodeID] != nil }
-        guard !alreadyExists else { return }
+        if let existing = stateQueue.sync(execute: { directChannels[nodeID] }) {
+            guard !existing.isReady else { return }
+            existing.requestRetrial()
+            existing.attemptUpgrade()
+            debug("participant retrying direct node=\(nodeID.uuidString.prefix(8))")
+            return
+        }
 
         let direct = directChannelFactory(nodeID)
         direct.onReceive = { [weak self] sequenced in

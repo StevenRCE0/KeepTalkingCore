@@ -61,6 +61,9 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
     @Field(key: "blocking_authorisation")
     public var blockingAuthorisation: Bool?
 
+    @Field(key: "disabled")
+    public var disabled: Bool?
+
     @Timestamp(key: "created_at", on: .create)
     public var createdAt: Date?
 

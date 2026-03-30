@@ -63,7 +63,8 @@ extension KeepTalkingClient {
         )
         let userMessage = try currentPromptUserMessage(
             prompt: prompt,
-            attachments: currentPromptAttachments
+            attachments: currentPromptAttachments,
+            apiMode: openAIConnector.apiMode
         )
 
         logInjectedAITools(
@@ -106,6 +107,13 @@ extension KeepTalkingClient {
                 toolExecutor: { [self] toolCalls in
                     try await executeAgentToolCalls(
                         toolCalls,
+                        runtimeCatalog: runtimeCatalog,
+                        context: persistedContext
+                    )
+                },
+                toolTranscriptAdapter: { [self] executions in
+                    try await adaptMidTurnInjectionMessages(
+                        executions,
                         runtimeCatalog: runtimeCatalog,
                         context: persistedContext
                     )
@@ -193,7 +201,8 @@ extension KeepTalkingClient {
 
     func currentPromptUserMessage(
         prompt: String,
-        attachments: [KeepTalkingLocalAttachmentInput]
+        attachments: [KeepTalkingLocalAttachmentInput],
+        apiMode: OpenAIAPIMode
     ) throws -> ChatQuery.ChatCompletionMessageParam {
         guard !attachments.isEmpty else {
             return .user(.init(content: .string(prompt)))
@@ -229,30 +238,14 @@ extension KeepTalkingClient {
                 continue
             }
 
-            if mimeType.hasPrefix("image/") {
-                contentParts.append(
-                    .image(
-                        .init(
-                            imageUrl: .init(
-                                url:
-                                    "data:\(mimeType);base64,\(data.base64EncodedString())",
-                                detail: .auto
-                            )
-                        )
-                    )
+            contentParts.append(
+                contentsOf: attachmentContentParts(
+                    filename: filename,
+                    mimeType: mimeType,
+                    data: data,
+                    apiMode: apiMode
                 )
-            } else {
-                contentParts.append(
-                    .file(
-                        .init(
-                            file: .init(
-                                data: data,
-                                filename: filename
-                            )
-                        )
-                    )
-                )
-            }
+            )
         }
 
         if contentParts.isEmpty {
@@ -298,6 +291,121 @@ extension KeepTalkingClient {
             return mimeType
         }
         return "application/octet-stream"
+    }
+
+    func attachmentContentParts(
+        filename: String,
+        mimeType: String,
+        data: Data,
+        apiMode: OpenAIAPIMode,
+        leadText: String? = nil
+    ) -> [ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content.ContentPart]
+    {
+        if mimeType.hasPrefix("image/") {
+            var parts:
+                [ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content
+                    .ContentPart] = []
+            if let leadText = sanitizedAttachmentLeadText(leadText) {
+                parts.append(.text(.init(text: leadText)))
+            }
+            parts.append(
+                .image(
+                    .init(
+                        imageUrl: .init(
+                            url:
+                                "data:\(mimeType);base64,\(data.base64EncodedString())",
+                            detail: .auto
+                        )
+                    )
+                )
+            )
+            return parts
+        }
+
+        if apiMode == .responses, mimeType != "application/pdf" {
+            let summary = attachmentTextFallback(
+                filename: filename,
+                mimeType: mimeType,
+                data: data,
+                leadText: leadText
+            )
+            return [.text(.init(text: summary))]
+        }
+
+        var parts:
+            [ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content
+                .ContentPart] = []
+        if let leadText = sanitizedAttachmentLeadText(leadText) {
+            parts.append(.text(.init(text: leadText)))
+        }
+        parts.append(
+            .file(
+                .init(
+                    file: .init(
+                        data: data,
+                        filename: filename
+                    )
+                )
+            )
+        )
+        return parts
+    }
+
+    private func attachmentTextFallback(
+        filename: String,
+        mimeType: String,
+        data: Data,
+        leadText: String?
+    ) -> String {
+        let header = sanitizedAttachmentLeadText(leadText)
+            ?? "Attached file '\(filename)'."
+        if let preview = attachmentTextPreview(
+            filename: filename,
+            mimeType: mimeType,
+            data: data
+        ) {
+            return "\(header)\n\n\(preview)"
+        }
+        return
+            "\(header)\n\nBinary file '\(filename)' (\(mimeType), \(data.count) bytes) was not inlined as file_data for Responses API compatibility."
+    }
+
+    private func attachmentTextPreview(
+        filename: String,
+        mimeType: String,
+        data: Data
+    ) -> String? {
+        let pathExtension = URL(fileURLWithPath: filename).pathExtension
+            .lowercased()
+        let knownTextExtensions: Set<String> = [
+            "c", "cpp", "css", "csv", "go", "h", "hpp", "html", "java",
+            "js", "json", "log", "md", "mjs", "py", "sh", "sql",
+            "svelte", "swift", "toml", "ts", "txt", "xml", "yaml",
+            "yml",
+        ]
+        let isTextLike =
+            mimeType.hasPrefix("text/")
+            || mimeType == "application/json"
+            || mimeType == "application/xml"
+            || knownTextExtensions.contains(pathExtension)
+
+        guard isTextLike else {
+            return nil
+        }
+
+        let preview = String(decoding: data.prefix(4_000), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return preview.isEmpty ? nil : preview
+    }
+
+    private func sanitizedAttachmentLeadText(_ leadText: String?) -> String? {
+        let trimmed = leadText?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard let trimmed, !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 
     func registerLocalActionsInExecutors() async throws {

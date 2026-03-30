@@ -268,6 +268,21 @@ struct TransportRoutingTests {
         #expect(forwardedSignal.to == harness.config.node)
         #expect(forwardedSignal.data.kind == "sdp")
     }
+
+    @Test("request p2p trial retries an existing unavailable direct channel")
+    func requestP2PTrialRetriesExistingUnavailableDirectChannel() async throws {
+        let harness = makeHarness()
+        try await harness.transport.start()
+        defer { harness.transport.stop() }
+
+        let remote = UUID(uuidString: "83000000-0000-0000-0000-000000000000")!
+        let direct = harness.registerPeer(remote, isReady: false)
+
+        harness.transport.requestP2PTrial()
+
+        #expect(direct.retrialCount == 1)
+        #expect(direct.attemptUpgradeCount == 2)
+    }
 }
 
 struct ChannelStateMachineTests {
@@ -282,6 +297,18 @@ struct ChannelStateMachineTests {
         #expect(machine.handle(.reconnectFailed) == .startReconnect(attempt: 2))
         #expect(machine.state == .reconnecting(attempt: 2))
         #expect(machine.handle(.reconnectSucceeded) == .none)
+        #expect(machine.state == .ready)
+    }
+
+    @Test("broadcast state machine can recover after being stopped")
+    func broadcastRecoversAfterStop() {
+        var machine = BroadcastChannelStateMachine()
+
+        #expect(machine.handle(.channelsOpened) == .none)
+        #expect(machine.state == .ready)
+        #expect(machine.handle(.stopped) == .none)
+        #expect(machine.state == .failed)
+        #expect(machine.handle(.channelsOpened) == .none)
         #expect(machine.state == .ready)
     }
 
@@ -309,6 +336,19 @@ struct ChannelStateMachineTests {
             Issue.record("expected first failure to enter backingOff")
             return
         }
+    }
+
+    @Test("direct state machine allows forced retry during backoff")
+    func directRetryBreaksOutOfBackoff() {
+        var machine = DirectChannelStateMachine()
+
+        #expect(machine.handle(.upgradeRequested) == .beginHandshake)
+        #expect(machine.handle(.iceFailed) == .scheduleBackoff(seconds: 2))
+        #expect(machine.handle(.retryRequested) == .cleanup)
+        #expect(machine.state == .idle)
+        #expect(machine.failureCount == 0)
+        #expect(machine.handle(.upgradeRequested) == .beginHandshake)
+        #expect(machine.state == .negotiating)
     }
 }
 

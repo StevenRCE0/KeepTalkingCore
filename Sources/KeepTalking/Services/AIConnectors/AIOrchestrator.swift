@@ -7,7 +7,21 @@ public struct AIOrchestrator {
     public typealias Message = ChatQuery.ChatCompletionMessageParam
     public typealias AssistantMessageBuilder =
         (OpenAIConnector.ToolPlanningResult) -> Message?
-    public typealias ToolExecutor = ([ToolCall]) async throws -> [Message]
+    public struct ToolExecution {
+        public let toolCall: ToolCall
+        public let messages: [Message]
+
+        public init(
+            toolCall: ToolCall,
+            messages: [Message]
+        ) {
+            self.toolCall = toolCall
+            self.messages = messages
+        }
+    }
+    public typealias ToolExecutor = ([ToolCall]) async throws -> [ToolExecution]
+    public typealias ToolTranscriptAdapter =
+        ([ToolExecution]) async throws -> [Message]
     public typealias AssistantPublisher = ((String, KeepTalkingContextMessage.MessageType)) async throws -> Void
     public typealias ToolNameResolver = (ToolCall) -> String
 
@@ -23,6 +37,7 @@ public struct AIOrchestrator {
         public let openAIConnector: OpenAIConnector
         public let assistantMessageBuilder: AssistantMessageBuilder
         public let toolExecutor: ToolExecutor
+        public let toolTranscriptAdapter: ToolTranscriptAdapter
         public let assistantPublisher: AssistantPublisher
         public let toolNameResolver: ToolNameResolver
 
@@ -30,12 +45,14 @@ public struct AIOrchestrator {
             openAIConnector: OpenAIConnector,
             assistantMessageBuilder: @escaping AssistantMessageBuilder,
             toolExecutor: @escaping ToolExecutor,
+            toolTranscriptAdapter: @escaping ToolTranscriptAdapter = { _ in [] },
             assistantPublisher: @escaping AssistantPublisher,
             toolNameResolver: @escaping ToolNameResolver = { $0.function.name }
         ) {
             self.openAIConnector = openAIConnector
             self.assistantMessageBuilder = assistantMessageBuilder
             self.toolExecutor = toolExecutor
+            self.toolTranscriptAdapter = toolTranscriptAdapter
             self.assistantPublisher = assistantPublisher
             self.toolNameResolver = toolNameResolver
         }
@@ -96,8 +113,16 @@ public struct AIOrchestrator {
                 break
             }
 
+            let toolExecutions = try await dependencies.toolExecutor(
+                turn.toolCalls
+            )
+            for execution in toolExecutions {
+                transcript.append(contentsOf: execution.messages)
+            }
             transcript.append(
-                contentsOf: try await dependencies.toolExecutor(turn.toolCalls)
+                contentsOf: try await dependencies.toolTranscriptAdapter(
+                    toolExecutions
+                )
             )
         }
 

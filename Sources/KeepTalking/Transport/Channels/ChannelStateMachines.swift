@@ -40,6 +40,11 @@ public struct BroadcastChannelStateMachine: Sendable {
                 state = .ready
                 return .none
 
+            case (.failed, .channelsOpened),
+                (.failed, .reconnectSucceeded):
+                state = .ready
+                return .none
+
             case (.ready, .transportDegraded):
                 state = .reconnecting(attempt: 1)
                 return .startReconnect(attempt: 1)
@@ -139,9 +144,17 @@ public struct DirectChannelStateMachine: Sendable {
                 state = .negotiating
                 return .beginHandshake
 
-            case (.abandoned, .retryRequested):
+            case (.ready, .retryRequested),
+                (.negotiating, .retryRequested),
+                (.interrupted, .retryRequested),
+                (.backingOff, .retryRequested),
+                (.abandoned, .retryRequested):
                 failureCount = 0
                 state = .idle
+                return .cleanup
+
+            case (.idle, .retryRequested):
+                failureCount = 0
                 return .none
 
             case (_, .teardownRequested):

@@ -24,6 +24,7 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
     public let payloadSummary: PayloadSummary
     public let remoteAuthorisable: Bool
     public let blockingAuthorisation: Bool
+    public let disabled: Bool
     public let createdAt: Date?
     public let lastUsed: Date?
 
@@ -34,6 +35,7 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
         payloadSummary: PayloadSummary,
         remoteAuthorisable: Bool,
         blockingAuthorisation: Bool,
+        disabled: Bool = false,
         createdAt: Date? = nil,
         lastUsed: Date? = nil
     ) {
@@ -43,6 +45,7 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
         self.payloadSummary = payloadSummary
         self.remoteAuthorisable = remoteAuthorisable
         self.blockingAuthorisation = blockingAuthorisation
+        self.disabled = disabled
         self.createdAt = createdAt
         self.lastUsed = lastUsed
     }

@@ -302,7 +302,7 @@ extension KeepTalkingClient {
                 .init(
                     name: Self.listingToolFunctionName,
                     description:
-                        "List KeepTalking action proxies available in the current context. Always call this first. Use route_kind and action_id to match skill_metadata/skill_file with skill action_proxy calls.",
+                        "List KeepTalking action proxies available in the current context. Use this only when you need to discover or confirm which KeepTalking action proxy to call. Use route_kind and action_id to match skill_metadata/skill_file with skill action_proxy calls.",
                     parameters: JSONSchema(
                         .type(.object),
                         .properties([:]),
@@ -319,7 +319,7 @@ extension KeepTalkingClient {
                 .init(
                     name: Self.contextAttachmentListingToolFunctionName,
                     description:
-                        "List attachments already stored in the active KeepTalking context, including ids, filenames, mime types, availability, and derived metadata.",
+                        "List attachments already stored in the active KeepTalking context, including ids, filenames, mime types, availability, and derived metadata. Use this only when you need a different earlier attachment or need to confirm attachment identity or metadata that is not already present in the current turn. Do not call this just to verify a file or image that was already attached or injected into the same turn.",
                     parameters: JSONSchema(
                         .type(.object),
                         .properties([:]),
@@ -336,7 +336,7 @@ extension KeepTalkingClient {
                 .init(
                     name: Self.contextAttachmentReadToolFunctionName,
                     description:
-                        "Inspect a specific context attachment. Use mode metadata for attachment fields, preview_text for derived text/description, and native only when you need the actual file or image added to the next model turn.",
+                        "Inspect a specific context attachment after kt_list_context_attachments. Use this when you need a different earlier attachment or metadata that is not already present in the current turn. Do not call this for a file or image that is already attached or injected into the same turn unless you truly need a different earlier context attachment. Use mode metadata for attachment fields, preview_text for derived text or description, and native only when you need the actual file or image added to the next model turn.",
                     parameters: JSONSchema(
                         .type(.object),
                         .properties([
@@ -395,6 +395,68 @@ extension KeepTalkingClient {
                             .description("URL to open in the system browser.")
                         )
                     ]),
+                    .additionalProperties(.boolean(false))
+                )
+            case .addToReadingList:
+                return JSONSchema(
+                    .type(.object),
+                    .properties([
+                        "url": JSONSchema(
+                            .type(.string),
+                            .description("URL to add to the reading list.")
+                        ),
+                        "title": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "Optional title for the reading list entry.")
+                        ),
+                        "previewText": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "Optional preview text for the reading list entry."
+                            )
+                        ),
+                    ]),
+                    .required(["url"]),
+                    .additionalProperties(.boolean(false))
+                )
+            case .askForFile:
+                return JSONSchema(
+                    .type(.object),
+                    .properties([
+                        "picker": JSONSchema(
+                            .type(.string),
+                            .enumValues([
+                                "ask",
+                                "filePicker",
+                                "photoPicker",
+                            ]),
+                            .description(
+                                "Which picker UI to present. Use ask to let the host prompt for take photo, select photo, or pick file, photoPicker for the photo library, or filePicker for general files. Defaults to ask."
+                            )
+                        ),
+                        "allowedTypes": JSONSchema(
+                            .type(.array),
+                            .items(JSONSchema(
+                                .type(.string)
+                            )),
+                            .description(
+                                "Optional array of UTI strings to filter file types, e.g. [\"public.image\", \"public.plain-text\"]."
+                            )
+                        ),
+                        "allowMultiple": JSONSchema(
+                            .type(.boolean),
+                            .description(
+                                "Whether to allow selecting multiple files. Defaults to false."
+                            )
+                        ),
+                    ]),
+                    .additionalProperties(.boolean(false))
+                )
+            case .getCurrentlyPlayingMusic:
+                return JSONSchema(
+                    .type(.object),
+                    .properties([:]),
                     .additionalProperties(.boolean(false))
                 )
         }

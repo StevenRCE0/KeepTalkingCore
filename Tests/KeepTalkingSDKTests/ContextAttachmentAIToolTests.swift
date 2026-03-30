@@ -57,6 +57,214 @@ struct ContextAttachmentAIToolTests {
         #expect(payload["attachment_id"] as? String == fixture.hiddenAttachmentID.uuidString.lowercased())
     }
 
+    @Test("ask-for-file action appends synced files back into the same AI turn")
+    func askForFileActionInjectsNativeAttachmentMessage() async throws {
+        let localStore = KeepTalkingInMemoryStore()
+        let contextID = UUID(uuidString: "F0000000-0000-0000-0000-000000000006")!
+        let nodeID = UUID(uuidString: "A0000000-0000-0000-0000-000000000001")!
+        let attachmentData = Data("abc".utf8)
+        let blobID = String(repeating: "c", count: 64)
+
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(
+                signalURL: try #require(URL(string: "ws://127.0.0.1")),
+                contextID: contextID,
+                node: nodeID
+            ),
+            primitiveActionCallback: { _, _ in
+                KeepTalkingPrimitiveActionResponse(
+                    text: """
+                        {"status":"sent_to_context","context_id":"\(contextID.uuidString.lowercased())","attachments":[{"blob_id":"\(blobID)","size":3}]}
+                        """
+                )
+            },
+            localStore: localStore
+        )
+
+        let context = KeepTalkingContext(id: contextID)
+        try await context.save(on: localStore.database)
+
+        let stored = try client.blobStore.put(
+            data: attachmentData,
+            blobID: blobID,
+            pathExtension: "txt"
+        )
+        try await client.upsertBlobRecord(
+            blobID: blobID,
+            relativePath: stored.relativePath,
+            availability: .ready,
+            mimeType: "text/plain",
+            byteCount: attachmentData.count,
+            receivedBytes: attachmentData.count
+        )
+
+        let attachment = KeepTalkingContextAttachment(
+            id: UUID(uuidString: "D0000000-0000-0000-0000-000000000004")!,
+            context: context,
+            sender: .node(node: nodeID),
+            blobID: blobID,
+            filename: "picked.txt",
+            mimeType: "text/plain",
+            byteCount: attachmentData.count
+        )
+        try await attachment.save(on: localStore.database)
+
+        let bundle = KeepTalkingPrimitiveBundle(
+            name: "ask-for-file",
+            indexDescription: "Ask for a file",
+            action: .askForFile
+        )
+        let action = try await client.registerPrimitiveAction(
+            bundle: bundle,
+            remoteAuthorisable: false
+        )
+
+        let definition = client.makePrimitiveActionProxyDefinition(
+            actionID: try #require(action.id),
+            ownerNodeID: nodeID,
+            bundle: bundle,
+            descriptor: nil
+        )
+
+        let toolCall = toolCall(
+            name: definition.functionName,
+            arguments: "{}",
+            id: "tool-call-1"
+        )
+        let payload = try await client.executeActionProxyToolCall(
+            functionName: definition.functionName,
+            definition: definition,
+            rawArguments: toolCall.function.arguments,
+            context: context
+        )
+        let executions = [
+            AIOrchestrator.ToolExecution(
+                toolCall: toolCall,
+                messages: [
+                    client.toolMessage(
+                        payload: payload,
+                        toolCallID: toolCall.id
+                    )
+                ]
+            )
+        ]
+        let messages = try await client.adaptMidTurnInjectionMessages(
+            executions,
+            runtimeCatalog: runtimeCatalog(definition: definition),
+            context: context
+        )
+
+        #expect(messages.count == 1)
+        guard case .user(let message) = try #require(messages.first) else {
+            Issue.record("Expected a native user message for the picked file")
+            return
+        }
+        guard case .contentParts(let parts) = message.content else {
+            Issue.record("Expected content parts for injected file payload")
+            return
+        }
+        #expect(parts.count == 1)
+        if case .text(let textPart) = try #require(parts.first) {
+            #expect(
+                textPart.text
+                    == """
+                    Inspect the attached context file 'picked.txt'. This is the user-provided attachment you just requested, and it is already included in this turn. Use it directly. Do not call context attachment tools to verify this same file again; only call them if you truly need a different attachment or metadata not present here.
+
+                    abc
+                    """
+            )
+        } else {
+            Issue.record("Expected a leading text part for injected file prompt")
+        }
+    }
+
+    @Test("ask-for-file action waits for complete transfer receipt")
+    func askForFileActionRequiresReadyBlobBeforeContinuing() async throws {
+        let localStore = KeepTalkingInMemoryStore()
+        let contextID = UUID(uuidString: "F0000000-0000-0000-0000-000000000006")!
+        let nodeID = UUID(uuidString: "A0000000-0000-0000-0000-000000000001")!
+        let blobID = String(repeating: "d", count: 64)
+
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(
+                signalURL: try #require(URL(string: "ws://127.0.0.1")),
+                contextID: contextID,
+                node: nodeID
+            ),
+            primitiveActionCallback: { _, _ in
+                KeepTalkingPrimitiveActionResponse(
+                    text: """
+                        {"status":"sent_to_context","context_id":"\(contextID.uuidString.lowercased())","attachments":[{"blob_id":"\(blobID)","size":3}]}
+                        """
+                )
+            },
+            localStore: localStore
+        )
+
+        let context = KeepTalkingContext(id: contextID)
+        try await context.save(on: localStore.database)
+
+        let attachment = KeepTalkingContextAttachment(
+            id: UUID(uuidString: "D0000000-0000-0000-0000-000000000004")!,
+            context: context,
+            sender: .node(node: nodeID),
+            blobID: blobID,
+            filename: "picked.txt",
+            mimeType: "text/plain",
+            byteCount: 3
+        )
+        try await attachment.save(on: localStore.database)
+
+        let bundle = KeepTalkingPrimitiveBundle(
+            name: "ask-for-file",
+            indexDescription: "Ask for a file",
+            action: .askForFile
+        )
+        let action = try await client.registerPrimitiveAction(
+            bundle: bundle,
+            remoteAuthorisable: false
+        )
+
+        let definition = client.makePrimitiveActionProxyDefinition(
+            actionID: try #require(action.id),
+            ownerNodeID: nodeID,
+            bundle: bundle,
+            descriptor: nil
+        )
+
+        let toolCall = toolCall(
+            name: definition.functionName,
+            arguments: "{}",
+            id: "tool-call-1"
+        )
+        let payload = try await client.executeActionProxyToolCall(
+            functionName: definition.functionName,
+            definition: definition,
+            rawArguments: toolCall.function.arguments,
+            context: context
+        )
+        let executions = [
+            AIOrchestrator.ToolExecution(
+                toolCall: toolCall,
+                messages: [
+                    client.toolMessage(
+                        payload: payload,
+                        toolCallID: toolCall.id
+                    )
+                ]
+            )
+        ]
+
+        await #expect(throws: AskForFileToolError.self) {
+            try await client.adaptMidTurnInjectionMessages(
+                executions,
+                runtimeCatalog: runtimeCatalog(definition: definition),
+                context: context,
+                transferReceiptTimeout: .milliseconds(50)
+            )
+        }
+    }
+
     private func makeFixture() async throws -> (
         client: KeepTalkingClient,
         visibleContext: KeepTalkingContext,
@@ -123,6 +331,18 @@ struct ContextAttachmentAIToolTests {
         )
     }
 
+    private func runtimeCatalog(
+        definition: KeepTalkingActionToolDefinition
+    ) -> KeepTalkingActionRuntimeCatalog {
+        KeepTalkingActionRuntimeCatalog(
+            catalog: .init(definitions: [definition]),
+            routesByFunctionName: [
+                definition.functionName: .actionProxy(definition)
+            ],
+            skillSummaries: []
+        )
+    }
+
     private func toolCall(
         name: String,
         arguments: String,
@@ -137,6 +357,13 @@ struct ContextAttachmentAIToolTests {
                 name: name
             )
         )
+    }
+
+    private func toolPayload(
+        from executions: [AIOrchestrator.ToolExecution]
+    ) throws -> [String: Any] {
+        let firstExecution = try #require(executions.first)
+        return try toolPayload(from: firstExecution.messages)
     }
 
     private func toolPayload(

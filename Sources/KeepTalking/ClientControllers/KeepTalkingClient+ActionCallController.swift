@@ -38,7 +38,7 @@ extension KeepTalkingClient {
         return isNodeOnline(deliveryNodeID)
     }
 
-    fileprivate func enqueueIncomingActionCallRequest(
+    func enqueueIncomingActionCallRequest(
         _ request: KeepTalkingActionCallRequest
     ) {
         guard request.targetNodeID == config.node else {
@@ -201,6 +201,14 @@ extension KeepTalkingClient {
             request.callerNodeID,
             for: KeepTalkingNode.self
         )
+
+        if action.disabled == true {
+            throw KeepTalkingClientError.actionCallNotAuthorized(
+                action: request.call.action,
+                caller: request.callerNodeID,
+                context: request.contextID
+            )
+        }
 
         guard
             try await isNodeAuthorizedForAction(
@@ -1048,6 +1056,7 @@ extension KeepTalkingClient {
         allowed.reserveCapacity(actions.count)
 
         for action in actions {
+            if action.disabled == true { continue }
             guard
                 try await isNodeAuthorizedForAction(
                     node: node,
@@ -1085,51 +1094,4 @@ extension KeepTalkingClient {
         return String(payload.prefix(maxCharacters)) + "...[truncated]"
     }
 
-}
-
-extension KeepTalkingEnvelopeAsyncHandlers {
-    mutating func registerActionCallHandlers(for client: KeepTalkingClient) {
-        onActionCallRequest { request in
-            client.enqueueIncomingActionCallRequest(request)
-        }
-        onRequestAck { acknowledgement in
-            guard acknowledgement.callerNodeID == client.config.node else {
-                return
-            }
-            client.handleIncomingRequestAck(acknowledgement)
-        }
-        onActionCallResult { result in
-            _ = client.resolvePendingActionCall(result)
-        }
-        onEncryptedActionCallRequest { encryptedRequest in
-            let decrypted = try await client.decryptTrustedEnvelope(
-                KeepTalkingEncryptedActionCallRequestEnvelope(encryptedRequest)
-            )
-            guard let request = decrypted.actionCallRequest else {
-                return
-            }
-            client.enqueueIncomingActionCallRequest(request)
-        }
-        onEncryptedRequestAck { encryptedAcknowledgement in
-            let decrypted = try await client.decryptTrustedEnvelope(
-                KeepTalkingEncryptedRequestAckEnvelope(encryptedAcknowledgement)
-            )
-            guard
-                let acknowledgement = decrypted.requestAck,
-                acknowledgement.callerNodeID == client.config.node
-            else {
-                return
-            }
-            client.handleIncomingRequestAck(acknowledgement)
-        }
-        onEncryptedActionCallResult { encryptedResult in
-            let decrypted = try await client.decryptTrustedEnvelope(
-                KeepTalkingEncryptedActionCallResultEnvelope(encryptedResult)
-            )
-            guard let result = decrypted.actionCallResult else {
-                return
-            }
-            _ = client.resolvePendingActionCall(result)
-        }
-    }
 }

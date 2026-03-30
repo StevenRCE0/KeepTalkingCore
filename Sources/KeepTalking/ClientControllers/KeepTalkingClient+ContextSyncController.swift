@@ -426,11 +426,3 @@ extension KeepTalkingClient {
         )
     }
 }
-
-extension KeepTalkingEnvelopeAsyncHandlers {
-    mutating func registerContextSyncHandlers(for client: KeepTalkingClient) {
-        onContextSync { payload in
-            try await client.handleIncomingContextSyncEnvelope(payload)
-        }
-    }
-}

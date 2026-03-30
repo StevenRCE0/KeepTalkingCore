@@ -776,6 +776,7 @@ extension KeepTalkingClient {
             payloadSummary: payloadSummary,
             remoteAuthorisable: action.remoteAuthorisable ?? true,
             blockingAuthorisation: action.blockingAuthorisation ?? false,
+            disabled: action.disabled ?? false,
             createdAt: action.createdAt,
             lastUsed: action.lastUsed
         )
@@ -925,7 +926,7 @@ extension KeepTalkingClient {
         return keypair
     }
 
-    fileprivate func handleIncomingP2PPresence(
+    func handleIncomingP2PPresence(
         _ presence: KeepTalkingP2PPresencePayload
     ) async throws {
         let nodeIDText = presence.node.uuidString.lowercased()
@@ -939,29 +940,5 @@ extension KeepTalkingClient {
         scheduleDebouncedNodeStateBroadcast(
             reason: "p2pPresence node=\(nodeIDText)"
         )
-    }
-}
-
-extension KeepTalkingEnvelopeAsyncHandlers {
-    mutating func registerNodeHandlers(for client: KeepTalkingClient) {
-        onNode { node in
-            try await client.mergeDiscoveredNode(node)
-        }
-        onNodeStatus { status in
-            try await client.mergeDiscoveredNodeStatus(status)
-        }
-        onEncryptedNodeStatus { payload in
-            guard payload.recipientNodeID == client.config.node else {
-                return
-            }
-            let status = try await client.decryptNodeStatusEnvelope(payload)
-            try await client.mergeDiscoveredNodeStatus(status)
-        }
-        onP2PPresence { presence in
-            guard presence.node != client.config.node else {
-                return
-            }
-            try await client.handleIncomingP2PPresence(presence)
-        }
     }
 }

@@ -28,12 +28,16 @@ public actor OpenAIConnector {
                 currentPromptShouldAvoidAutomaticToolUse
                 ? """
                 The current user turn already includes its newly attached files natively.
+                Use those provided files or images directly before considering any tool call.
                 Do not call attachment tools, the action listing tool, or any other tool just to inspect those current attachments.
+                Do not call \(attachmentListingToolFunctionName) or \(attachmentReaderToolFunctionName) to verify a file that is already included in the current turn.
                 Only call a tool if the user explicitly asks for tool/action use, web lookup, or inspection of a different context file that is not already included in the current turn.
                 """
                 : """
                 The current user turn already includes its newly attached files natively.
+                Use those provided files or images directly before considering attachment tools.
                 Do not call attachment tools just to inspect those current attachments.
+                Do not call \(attachmentListingToolFunctionName) or \(attachmentReaderToolFunctionName) to verify a file that is already included in the current turn.
                 """
         } else {
             currentPromptGuidance = ""
@@ -45,11 +49,14 @@ public actor OpenAIConnector {
             Use tools only when they are relevant to the user's request.
             If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
             Do not fabricate tool outputs.
-            Call \(listingToolFunctionName) before deciding any KeepTalking action plan, but notice that you might also have built-in tools
-            like web search and context attachment access outside of the listed action tool output.
+            Call \(listingToolFunctionName) only when you need to discover or confirm which KeepTalking action proxy to use.
+            Do not call it when you can already answer directly, when the needed file or image is already present in the current turn, or when the transcript already contains a newly injected attachment you can inspect directly.
+            Notice that you might also have built-in tools like web search and context attachment access outside of the listed action tool output.
             You do not have general filesystem access. Attachment tools expose only files that are already attached to the active context.
-            If the user asks about a file already attached to this context, call \(attachmentListingToolFunctionName) to inspect the available attachments.
+            If the user needs a different earlier attachment from the active context, call \(attachmentListingToolFunctionName) to inspect the available attachments.
             Prefer \(attachmentReaderToolFunctionName) with mode=metadata or mode=preview_text first, and use mode=native only when you need the actual file or image content added to the next model turn.
+            When a file or image is already present in the current turn, or was just injected into the transcript after a tool call, inspect that provided content directly instead of listing or re-reading the same attachment.
+            A file or image injected immediately after ask-for-file is the user-provided attachment you requested. Treat it as authoritative for that request and do not call \(attachmentListingToolFunctionName) or \(attachmentReaderToolFunctionName) for the same file unless you truly need a different earlier context attachment.
             \(currentPromptGuidance)
 
             Skill execution policy (mandatory):
@@ -351,7 +358,7 @@ public actor OpenAIConnector {
                                         callId: toolCall.id,
                                         name: toolCall.function.name,
                                         arguments: toolCall.function.arguments,
-                                        status: nil
+                                        status: .completed
                                     )
                                 )
                             )

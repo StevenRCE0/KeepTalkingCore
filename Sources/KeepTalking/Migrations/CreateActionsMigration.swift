@@ -13,6 +13,7 @@ struct CreateKeepTalkingActionsMigration: AsyncMigration {
             .field("descriptor", .json, .required)
             .field("remote_authorisable", .bool, .required)
             .field("blocking_authorisation", .bool, .required)
+            .field("disabled", .bool)
             .field("created_at", .datetime, .required)
             .field("last_used", .datetime)
             .create()
