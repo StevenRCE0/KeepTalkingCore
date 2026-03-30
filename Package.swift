@@ -33,7 +33,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/MacPaw/OpenAI.git",
-            .upToNextMajor(from: "0.4.7")
+            .upToNextMajor(from: "0.4.8")
         ),
     ],
     targets: [

@@ -197,7 +197,7 @@ extension KeepTalkingClient {
         let action = try await resolveLocalActionForExecution(
             actionID: request.call.action
         )
-        let remoteNode = try await ensure(
+        let callerNode = try await ensure(
             request.callerNodeID,
             for: KeepTalkingNode.self
         )
@@ -211,8 +211,8 @@ extension KeepTalkingClient {
         }
 
         guard
-            try await isNodeAuthorizedForAction(
-                node: remoteNode,
+            try await isActionGrantedToNode(
+                node: callerNode,
                 action: action,
                 context: context
             )
@@ -919,42 +919,6 @@ extension KeepTalkingClient {
         return action
     }
 
-    public static func isNodeAuthorizedForAction(
-        node: KeepTalkingNode,
-        action: KeepTalkingAction,
-        context: KeepTalkingContext?,
-        on database: any Database
-    ) async throws -> Bool {
-        let nodeID = try node.requireID()
-        guard let ownerNodeID = action.$node.id else {
-            return false
-        }
-        if nodeID == ownerNodeID {
-            return true
-        }
-
-        let actionID = try action.requireID()
-        guard
-            let relation = try await preferredTrustedRelation(
-                from: ownerNodeID,
-                to: nodeID,
-                allowing: context,
-                on: database
-            )
-        else {
-            return false
-        }
-
-        let approvals = try await relation.$actionRelations
-            .query(on: database)
-            .filter(\.$action.$id == actionID)
-            .all()
-
-        return approvals.contains { approval in
-            approval.applicable(in: context)
-        }
-    }
-
     public static func isActionGrantedToNode(
         node: KeepTalkingNode,
         action: KeepTalkingAction,
@@ -1001,19 +965,6 @@ extension KeepTalkingClient {
         }
     }
 
-    public func isNodeAuthorizedForAction(
-        node: KeepTalkingNode,
-        action: KeepTalkingAction,
-        context: KeepTalkingContext?
-    ) async throws -> Bool {
-        try await Self.isNodeAuthorizedForAction(
-            node: node,
-            action: action,
-            context: context,
-            on: localStore.database
-        )
-    }
-
     public func isActionGrantedToNode(
         node: KeepTalkingNode,
         action: KeepTalkingAction,
@@ -1027,7 +978,7 @@ extension KeepTalkingClient {
         )
     }
 
-    public func isNodeAuthorizedToAuthorizeAction(
+    public func isNodeAuthorizedToGrantAction(
         node: KeepTalkingNode,
         context: KeepTalkingContext?
     ) async throws -> Bool {
@@ -1047,7 +998,7 @@ extension KeepTalkingClient {
         }
     }
 
-    func authorizedActions(
+    func grantedActions(
         _ actions: [KeepTalkingAction],
         for node: KeepTalkingNode,
         context: KeepTalkingContext?
@@ -1058,7 +1009,7 @@ extension KeepTalkingClient {
         for action in actions {
             if action.disabled == true { continue }
             guard
-                try await isNodeAuthorizedForAction(
+                try await isActionGrantedToNode(
                     node: node,
                     action: action,
                     context: context

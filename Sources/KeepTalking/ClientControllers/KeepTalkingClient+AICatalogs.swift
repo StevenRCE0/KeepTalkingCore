@@ -124,7 +124,7 @@ extension KeepTalkingClient {
         let localActions = try await selfNode.$actions.query(
             on: localStore.database
         ).all()
-        let authorizedLocalActions = try await authorizedActions(
+        let authorizedLocalActions = try await grantedActions(
             localActions,
             for: selfNode,
             context: context
@@ -149,6 +149,7 @@ extension KeepTalkingClient {
                     for actionRelation in actionRelations
                     where actionRelation.applicable(in: context) {
                         let action = actionRelation.action
+                        if action.disabled == true { continue }
                         guard let ownerNodeID = action.$node.id else {
                             continue
                         }

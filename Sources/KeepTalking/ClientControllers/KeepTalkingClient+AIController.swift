@@ -427,13 +427,13 @@ extension KeepTalkingClient {
         let localActions = try await selfNode.$actions.query(
             on: localStore.database
         ).all()
-        let authorizedLocalActions = try await authorizedActions(
+        let grantedLocalActions = try await grantedActions(
             localActions,
             for: selfNode,
             context: context
         )
 
-        for action in authorizedLocalActions {
+        for action in grantedLocalActions {
             try await registerLocalExecutor(action)
         }
 

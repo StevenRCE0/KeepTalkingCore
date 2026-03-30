@@ -322,7 +322,7 @@ extension KeepTalkingClient {
             }
 
             let relationActions = deduplicatedAndSortedActions(
-                try await authorizedActions(
+                try await grantedActions(
                     sortedLocalActions,
                     for: KeepTalkingNode(id: relatedNodeID),
                     context: currentContext

@@ -245,7 +245,7 @@ extension KeepTalkingClient {
                 actionID: query.actionID
             )
             guard
-                try await isNodeAuthorizedForAction(
+                try await isActionGrantedToNode(
                     node: remoteNode,
                     action: action,
                     context: context
