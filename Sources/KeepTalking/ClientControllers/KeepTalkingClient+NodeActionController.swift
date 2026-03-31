@@ -26,6 +26,7 @@ extension KeepTalkingClient {
         from fromNodeID: UUID,
         to toNodeID: UUID,
         allowing context: KeepTalkingContext? = nil,
+        allowPending: Bool = false,
         on database: any Database
     ) async throws -> KeepTalkingNodeRelation? {
         try await KeepTalkingNodeRelation
@@ -38,8 +39,13 @@ extension KeepTalkingClient {
                     > relationPriority($1.relationship)
             })
             .first(where: { relation in
-                relation.relationship.isTrustedOrOwner
-                    && (context == nil || relation.relationship.allows(context: context))
+                if relation.relationship.isTrustedOrOwner {
+                    return relation.relationship.allows(context: context)
+                } else if allowPending {
+                    return true
+                }
+                
+                return false
             })
     }
 

@@ -130,7 +130,7 @@ extension KeepTalkingClient {
             context: context
         )
 
-        let outgoingRelations = try await selfNode.$outgoingNodeRelations
+        let incomingRelations = try await selfNode.$incomingNodeRelations
             .query(on: localStore.database)
             .all()
 
@@ -138,7 +138,10 @@ extension KeepTalkingClient {
             of: [KeepTalkingAction].self,
             returning: [KeepTalkingAction].self
         ) { group in
-            for relation in outgoingRelations where relation.allows(context: context) {
+            for relation in incomingRelations
+            where relation.allows(
+                context: context
+            ) {
                 group.addTask {
                     let actionRelations = try await relation.$actionRelations
                         .query(on: self.localStore.database)

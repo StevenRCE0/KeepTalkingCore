@@ -29,7 +29,7 @@ public enum KeepTalkingRelationship: Codable, Sendable, Equatable {
                 return true
             case .trusted(let contexts):
                 guard let context else { return false }
-                return contexts.contains(context)
+                return context != nil && contexts.contains(context)
             case .pending:
                 return false
         }

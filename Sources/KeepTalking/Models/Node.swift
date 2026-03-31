@@ -22,6 +22,9 @@ public final class KeepTalkingNode: Model, @unchecked Sendable {
     @Children(for: \.$from)
     public var outgoingNodeRelations: [KeepTalkingNodeRelation]
 
+    @Children(for: \.$to)
+    public var incomingNodeRelations: [KeepTalkingNodeRelation]
+
     public init() {}
 
     public init(

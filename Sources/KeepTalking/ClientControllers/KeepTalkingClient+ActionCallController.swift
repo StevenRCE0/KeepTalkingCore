@@ -923,40 +923,38 @@ extension KeepTalkingClient {
         node: KeepTalkingNode,
         action: KeepTalkingAction,
         context: KeepTalkingContext?,
+        selfNode: KeepTalkingNode,
         on database: any Database
     ) async throws -> Bool {
         let nodeID = try node.requireID()
+        let actionID = try action.requireID()
+        let selfNodeID = try selfNode.requireID()
         guard let ownerNodeID = action.$node.id else {
             return false
         }
 
-        let relation = try await preferredTrustedRelation(
-            from: nodeID,
-            to: ownerNodeID,
-            allowing: context,
-            on: database
+        print(
+            "[ooo] node: \(nodeID), action: \(action.descriptor?.action?.description ?? "??"), owner: \(ownerNodeID), allowPending: \(ownerNodeID != selfNodeID)"
         )
 
-        let actionID = try action.requireID()
-        let relationIDs =
-            try await KeepTalkingNodeRelation
-            .query(on: database)
-            .filter(\.$from.$id, .equal, nodeID)
-            .all()
-            .filter { relation in
-                relation.relationship.isTrustedOrOwner
-                    && relation.relationship.allows(context: context)
-            }
-            .compactMap(\.id)
-
-        guard !relationIDs.isEmpty else {
+        guard
+            let relationID = try await preferredTrustedRelation(
+                from: ownerNodeID,
+                to: nodeID,
+                allowing: context,
+                allowPending: ownerNodeID != selfNodeID,
+                on: database
+            )?.requireID()
+        else {
             return false
         }
+
+        print("[ooo] relation: \(relationID)")
 
         let approvals =
             try await KeepTalkingNodeRelationActionRelation
             .query(on: database)
-            .filter(\.$relation.$id ~~ relationIDs)
+            .filter(\.$relation.$id == relationID)
             .filter(\.$action.$id, .equal, actionID)
             .all()
 
@@ -974,6 +972,7 @@ extension KeepTalkingClient {
             node: node,
             action: action,
             context: context,
+            selfNode: getCurrentNodeInstance(),
             on: localStore.database
         )
     }
