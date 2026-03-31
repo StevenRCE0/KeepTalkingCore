@@ -85,8 +85,8 @@ extension KeepTalkingClient {
         let relation = try? await KeepTalkingNodeRelation.query(
             on: localStore.database
         )
-        .filter(\.$from.$id, .equal, config.node)
-        .filter(\.$to.$id, .equal, actionOwner)
+        .filter(\.$from.$id, .equal, actionOwner)
+        .filter(\.$to.$id, .equal, config.node)
         .first()
         guard let relationID = relation?.id else {
             return

@@ -402,7 +402,7 @@ extension KeepTalkingClient {
 
         return KeepTalkingNodeStatus(
             node: node,
-            context: currentContext,
+            contextID: try currentContext.requireID(),
             nodeRelations: relationStatuses.sorted {
                 $0.toNodeID.uuidString < $1.toNodeID.uuidString
             }
@@ -496,6 +496,7 @@ extension KeepTalkingClient {
             return
         }
 
+        let statusContext = try await ensure(status.contextID, for: KeepTalkingContext.self)
         let grantsForLocal = status.nodeRelations.filter {
             $0.toNodeID == config.node
                 && $0.relationship.isTrustedOrOwner
@@ -524,7 +525,7 @@ extension KeepTalkingClient {
             let incomingRelation = try await Self.preferredTrustedRelation(
                 from: remoteNodeID,
                 to: config.node,
-                allowing: status.context,
+                allowing: statusContext,
                 allowPending: true,
                 on: localStore.database
             ),
@@ -535,12 +536,12 @@ extension KeepTalkingClient {
 
         switch incomingRelation.relationship {
             case .pending:
-                incomingRelation.relationship = .trusted([status.context])
+                incomingRelation.relationship = .trusted([statusContext])
                 try await incomingRelation.save(on: localStore.database)
             case .trusted(let existingContexts):
-                if !existingContexts.contains(status.context) {
+                if !existingContexts.contains(statusContext) {
                     incomingRelation.relationship = .trusted(
-                        existingContexts + [status.context]
+                        existingContexts + [statusContext]
                     )
                     try await incomingRelation.save(on: localStore.database)
                 }
@@ -549,11 +550,7 @@ extension KeepTalkingClient {
         }
 
         let approvingContext =
-            KeepTalkingNodeRelationActionRelation.ApprovingContext.contexts(
-                [
-                    status.context
-                ]
-            )
+            KeepTalkingNodeRelationActionRelation.ApprovingContext.contexts([statusContext])
 
         for actionID in grantedActionIDs {
             guard advertisedActionIDs.contains(actionID) else {

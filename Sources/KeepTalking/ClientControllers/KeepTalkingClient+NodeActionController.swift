@@ -44,7 +44,7 @@ extension KeepTalkingClient {
                 } else if allowPending {
                     return true
                 }
-                
+
                 return false
             })
     }

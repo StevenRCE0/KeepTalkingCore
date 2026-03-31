@@ -7,18 +7,19 @@
 
 import Foundation
 
+// TODO: make this opaque DTO
 public struct KeepTalkingNodeStatus: Codable, Sendable {
     public let node: KeepTalkingNode
-    public let context: KeepTalkingContext
+    public let contextID: UUID
     public let nodeRelations: [KeepTalkingNodeRelationStatus]
 
     public init(
         node: KeepTalkingNode,
-        context: KeepTalkingContext,
+        contextID: UUID,
         nodeRelations: [KeepTalkingNodeRelationStatus]
     ) {
         self.node = node
-        self.context = context
+        self.contextID = contextID
         self.nodeRelations = nodeRelations
     }
 }

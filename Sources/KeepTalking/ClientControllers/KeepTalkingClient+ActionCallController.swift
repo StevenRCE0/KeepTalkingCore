@@ -933,10 +933,6 @@ extension KeepTalkingClient {
             return false
         }
 
-        print(
-            "[ooo] node: \(nodeID), action: \(action.descriptor?.action?.description ?? "??"), owner: \(ownerNodeID), allowPending: \(ownerNodeID != selfNodeID)"
-        )
-
         guard
             let relationID = try await preferredTrustedRelation(
                 from: ownerNodeID,
@@ -948,8 +944,6 @@ extension KeepTalkingClient {
         else {
             return false
         }
-
-        print("[ooo] relation: \(relationID)")
 
         let approvals =
             try await KeepTalkingNodeRelationActionRelation
