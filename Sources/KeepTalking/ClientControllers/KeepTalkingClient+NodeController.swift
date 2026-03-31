@@ -124,8 +124,22 @@ extension KeepTalkingClient {
         return try await ensureOutgoingIdentityKeypair(for: relation).publicKey
     }
 
-    /// Records a remote node's public key so it can complete a pending trust handshake.
     public func lure(node sourceNodeID: UUID, publicKey: String) async throws {
+        try await Self.lure(
+            node: sourceNodeID,
+            publicKey: publicKey,
+            localNodeID: config.node,
+            on: localStore.database
+        )
+    }
+    
+    /// Records a remote node's public key so it can complete a pending trust handshake.
+    public static func lure(
+        node sourceNodeID: UUID,
+        publicKey: String,
+        localNodeID: UUID,
+        on database: any Database
+    ) async throws {
         let trimmedPublicKey = publicKey.trimmingCharacters(
             in: .whitespacesAndNewlines
         )
@@ -140,32 +154,29 @@ extension KeepTalkingClient {
         else {
             throw KeepTalkingKVServiceError.invalidStoredValue
         }
-        guard sourceNodeID != config.node else {
+        guard sourceNodeID != localNodeID else {
             return
         }
-
-        let localNode = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
-        let localNodeID = try localNode.requireID()
+        
+        guard let localNode = try await KeepTalkingNode.find(localNodeID, on: database) else {
+              throw KeepTalkingClientError.missingNode
+        }
 
         let remoteNode: KeepTalkingNode
         if let existing = try await KeepTalkingNode.query(
-            on: localStore.database
+            on: database
         )
         .filter(\.$id, .equal, sourceNodeID)
         .first() {
             remoteNode = existing
         } else {
             remoteNode = KeepTalkingNode(id: sourceNodeID)
-            try await remoteNode.save(on: localStore.database)
+            try await remoteNode.save(on: database)
         }
 
         let relation: KeepTalkingNodeRelation
         if let existingRelation = try await KeepTalkingNodeRelation.query(
-            on: localStore.database
+            on: database
         )
         .filter(\.$from.$id, .equal, sourceNodeID)
         .filter(\.$to.$id, .equal, localNodeID)
@@ -177,7 +188,7 @@ extension KeepTalkingClient {
                 to: localNode,
                 relationship: .pending
             )
-            try await relation.save(on: localStore.database)
+            try await relation.save(on: database)
         }
 
         guard relation.id != nil else {
@@ -185,7 +196,7 @@ extension KeepTalkingClient {
         }
 
         let existingKeys = try await relation.$identityKeys.get(
-            on: localStore.database
+            on: database
         )
 
         if existingKeys.contains(where: {
@@ -200,7 +211,7 @@ extension KeepTalkingClient {
             publicKey: trimmedPublicKey,
             privateKey: Data()
         )
-        try await identityKey.save(on: localStore.database)
+        try await identityKey.save(on: database)
     }
 
     public func eraseRemoteNodeRelationsAndNonLocalActionRelations()
