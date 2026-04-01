@@ -169,10 +169,8 @@ extension KeepTalkingClient {
                 },
                 toolHintResolver: { toolCall in
                     switch toolCall.function.name {
-                        case Self.markTurningPointToolFunctionName:
-                            return .markTurningPoint
-                        case Self.markChitterChatterToolFunctionName:
-                            return .markChitterChatter
+                        case Self.markTurningPointToolFunctionName, Self.markChitterChatterToolFunctionName:
+                            return nil
                         default:
                             return .toolUse
                     }
@@ -341,8 +339,7 @@ extension KeepTalkingClient {
         data: Data,
         apiMode: OpenAIAPIMode,
         leadText: String? = nil
-    ) -> [ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content.ContentPart]
-    {
+    ) -> [ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content.ContentPart] {
         if mimeType.hasPrefix("image/") {
             var parts:
                 [ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content
@@ -399,7 +396,8 @@ extension KeepTalkingClient {
         data: Data,
         leadText: String?
     ) -> String {
-        let header = sanitizedAttachmentLeadText(leadText)
+        let header =
+            sanitizedAttachmentLeadText(leadText)
             ?? "Attached file '\(filename)'."
         if let preview = attachmentTextPreview(
             filename: filename,

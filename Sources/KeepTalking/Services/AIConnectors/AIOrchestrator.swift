@@ -24,7 +24,7 @@ public struct AIOrchestrator {
         ([ToolExecution]) async throws -> [Message]
     public typealias AssistantPublisher = ((String, KeepTalkingContextMessage.MessageType)) async throws -> Void
     public typealias ToolNameResolver = (ToolCall) -> String
-    public typealias ToolHintResolver = (ToolCall) -> IntermediateMessageHints
+    public typealias ToolHintResolver = (ToolCall) -> IntermediateMessageHints?
 
     public struct Configuration: Sendable {
         public let maxTurns: Int
@@ -152,7 +152,7 @@ public struct AIOrchestrator {
             turn.toolCalls.map(toolNameResolver)
         )
         // Use a specific hint if all calls in this turn share one.
-        let hints = turn.toolCalls.map(toolHintResolver)
+        let hints = turn.toolCalls.compactMap(toolHintResolver)
         let hint: IntermediateMessageHints =
             hints.allSatisfy({ $0 == hints[0] }) ? hints[0] : .toolUse
         if toolNames.count == 1, let name = toolNames.first {
@@ -182,7 +182,5 @@ extension AIOrchestrator {
     public enum IntermediateMessageHints: String {
         case toolUse = "Using tool"
         case reasoning = "Reasoning"
-        case markTurningPoint = "Turning the page"
-        case markChitterChatter = "Shushing the noise"
     }
 }

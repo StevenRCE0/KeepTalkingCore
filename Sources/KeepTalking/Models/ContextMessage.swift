@@ -50,6 +50,12 @@ extension KeepTalkingContextMessage {
     public enum MessageType: Codable, Sendable, Hashable {
         case message
         case intermediate(hint: String)
+        /// Stored by an AI agent to signal a topic shift. Consumed locally to
+        /// create a thread boundary and alias the frozen thread.
+        case markTurningPoint(messageID: UUID, previousTopicName: String)
+        /// Stored by an AI agent to flag a message as noise. Consumed locally
+        /// to set chitter-chatter on the referenced message.
+        case markChitterChatter(messageID: UUID)
     }
 }
 

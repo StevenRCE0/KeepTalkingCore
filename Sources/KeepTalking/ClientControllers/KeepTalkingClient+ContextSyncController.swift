@@ -417,12 +417,13 @@ extension KeepTalkingClient {
         let savedAttachments = try await saveIncomingAttachments(
             result.attachments
         )
-        guard !savedAttachments.isEmpty else {
-            return
+        if !savedAttachments.isEmpty {
+            try await requestAttachmentBlobsIfNeeded(
+                for: savedAttachments,
+                in: result.context
+            )
         }
-        try await requestAttachmentBlobsIfNeeded(
-            for: savedAttachments,
-            in: result.context
-        )
+        // Apply any mark messages that arrived from remote nodes.
+        try await consumePendingMarks(in: result.context)
     }
 }

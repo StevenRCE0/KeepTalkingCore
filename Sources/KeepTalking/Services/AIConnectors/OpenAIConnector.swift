@@ -90,7 +90,7 @@ public actor OpenAIConnector {
             Step 3 — decide:
             • If the topics are related, connected, or a natural continuation → do nothing. This includes follow-ups, clarifications, deeper dives, or any tangent that still touches the same subject. Err strongly on the side of doing nothing.
             • If the topics are clearly unrelated and represent a genuine fresh start on a different subject → call \(markTurningPointToolFunctionName). Always supply previous_topic_name — a 2–5 word label for the topic that just ended.
-            • If the message carries zero informational content (pure greetings, single-word acks like "ok"/"thanks"/"got it", format-only instructions, off-topic small-talk) → call \(markChitterChatterToolFunctionName). It toggles, so calling it again unmarks.
+            • If the message carries zero informational content (pure greetings, single-word acks like "ok"/"thanks"/"got it", format-only instructions, off-topic small-talk) → call \(markChitterChatterToolFunctionName) to mark it as noise.
             When in doubt, do not call either tool. Over-splitting threads is worse than under-splitting.
             """
     }

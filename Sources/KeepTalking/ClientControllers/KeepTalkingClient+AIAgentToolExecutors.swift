@@ -520,25 +520,19 @@ extension KeepTalkingClient {
     ) async throws -> String {
         let contextID = try context.requireID()
         guard let messageID = promptMessageID else {
-            return jsonString([
-                "ok": false,
-                "error": "no_prompt_message",
-            ])
+            return jsonString(["ok": false, "error": "no_prompt_message"])
         }
         let args = try decodeToolArguments(rawArguments)
         let name = args["previous_topic_name"]?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !name.isEmpty else {
-            return jsonString([
-                "ok": false,
-                "error": "missing_previous_topic_name",
-            ])
+            return jsonString(["ok": false, "error": "missing_previous_topic_name"])
         }
-        let storedThread = try await markTurningPoint(at: messageID, in: contextID)
-        if let threadID = storedThread.id {
-            try await setAlias(name, for: .thread(threadID))
-            onMappingsChanged?()
-        }
+        try await storeContextMark(
+            .markTurningPoint(messageID: messageID, previousTopicName: name),
+            in: context
+        )
+        try await consumePendingMarks(in: contextID)
         return jsonString(["ok": true])
     }
 
@@ -548,20 +542,13 @@ extension KeepTalkingClient {
     ) async throws -> String {
         let contextID = try context.requireID()
         guard let messageID = promptMessageID else {
-            return jsonString([
-                "ok": false,
-                "error": "no_prompt_message",
-            ])
+            return jsonString(["ok": false, "error": "no_prompt_message"])
         }
-        guard
-            let thread = try await owningThread(for: messageID, in: contextID)
-        else {
-            return jsonString([
-                "ok": false,
-                "error": "no_owning_thread",
-            ])
-        }
-        try await toggleChitterChatter(messageID: messageID, in: thread.requireID())
+        try await storeContextMark(
+            .markChitterChatter(messageID: messageID),
+            in: context
+        )
+        try await consumePendingMarks(in: contextID)
         return jsonString(["ok": true])
     }
 

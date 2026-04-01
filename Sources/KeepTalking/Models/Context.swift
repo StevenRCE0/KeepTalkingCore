@@ -56,6 +56,11 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     @OptionalField(key: "sync_metadata")
     public var syncMetadata: KeepTalkingContextSyncMetadata?
 
+    /// IDs of mark messages (type markTurningPoint / markChitterChatter) that
+    /// this node has already consumed. Local-only — not propagated by sync.
+    @OptionalField(key: "consumed_marks")
+    public var consumedMarks: [UUID]?
+
     @Children(for: \.$context)
     public var messages: [KeepTalkingContextMessage]
 
