@@ -11,18 +11,18 @@ public struct KeepTalkingAliasResolution: Sendable, Hashable {
         self.fallback = fallback
     }
 
-    public func idText(uppercase: Bool = false) -> String? {
+    public func idText(uppercase: Bool = true) -> String? {
         guard let id else {
             return nil
         }
         return uppercase ? id.uuidString.uppercased() : id.uuidString.lowercased()
     }
 
-    public func primary(uppercaseID: Bool = false) -> String {
+    public func primary(uppercaseID: Bool = true) -> String {
         alias ?? fallback ?? idText(uppercase: uppercaseID) ?? "Unknown"
     }
 
-    public func secondary(uppercaseID: Bool = false) -> String? {
+    public func secondary(uppercaseID: Bool = true) -> String? {
         guard alias != nil else {
             return nil
         }
@@ -64,18 +64,10 @@ public struct KeepTalkingAliasLookup: Sendable {
         aliases[target]
     }
 
-    public func resolve(node: UUID, fallback: String? = nil) -> KeepTalkingAliasResolution {
+    public func resolve(_ target: KeepTalkingMappingTarget, fallback: String? = nil) -> KeepTalkingAliasResolution {
         KeepTalkingAliasResolution(
-            alias: alias(for: .node(node)),
-            id: node,
-            fallback: fallback
-        )
-    }
-
-    public func resolve(context: UUID, fallback: String? = nil) -> KeepTalkingAliasResolution {
-        KeepTalkingAliasResolution(
-            alias: alias(for: .context(context)),
-            id: context,
+            alias: alias(for: target),
+            id: target.id,
             fallback: fallback
         )
     }
@@ -85,7 +77,7 @@ public struct KeepTalkingAliasLookup: Sendable {
     {
         switch sender {
             case .node(let node):
-                return resolve(node: node, fallback: fallback)
+                return resolve(.node(node), fallback: fallback)
             case .autonomous(let name):
                 return KeepTalkingAliasResolution(
                     alias: nil,

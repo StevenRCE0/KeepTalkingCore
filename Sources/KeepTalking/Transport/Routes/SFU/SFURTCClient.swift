@@ -87,6 +87,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     func start() async throws {
         notifiedConnectedPeers.removeAll()
         didReportDegrade = false
+        RTCShared.configureForDataOnlyTransport()
         debug(
             "starting session=\(config.scopedSessionID) id=\(config.node.uuidString) context=\(config.contextID.uuidString.lowercased()) chat=\(config.chatChannelLabel) blob=\(config.blobChannelLabel) action=\(config.actionCallChannelLabel)"
         )

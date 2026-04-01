@@ -618,7 +618,7 @@ extension KeepTalkingClient {
             return """
                 - action_id: \(actionID)
                   owner_node_id: \(context.ownerNodeID.uuidString.lowercased())
-                  owner_node_name: \(KeepTalkingClient.resolve(node: context.ownerNodeID, aliasLookup: aliasLookup).primary(uppercaseID: true))
+                  owner_node_name: \(aliasLookup.resolve(.node(context.ownerNodeID)).primary())
                   is_current_node: \(context.ownerNodeID == config.node)
                   skill_name: \(context.skillName)
                   manifest_path: \(context.manifestPath)
@@ -652,10 +652,10 @@ extension KeepTalkingClient {
 
         let sortedNodeIDs = nodeIDs.sorted { $0.uuidString < $1.uuidString }
         let lines = sortedNodeIDs.map { nodeID in
-            let name = KeepTalkingClient.resolve(
-                node: nodeID,
-                aliasLookup: aliasLookup
-            ).primary(uppercaseID: true)
+            let name =
+                aliasLookup
+                .resolve(.node(nodeID))
+                .primary(uppercaseID: true)
             let prefix = nodeID == config.node ? "current_node" : "node"
             return "- \(prefix): \(name)"
         }

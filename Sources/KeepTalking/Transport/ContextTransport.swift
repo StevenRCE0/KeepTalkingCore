@@ -231,10 +231,16 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
             self?.handleIncoming(sequenced)
         }
         broadcast.onStateChange = { [weak self] in
+            if self?.broadcast.isReady ?? false {
+                self?.bindBroadcastBlobCallback()
+            }
             self?.debug("broadcast state changed to \(self?.broadcast.state.description ?? "?")")
         }
         broadcast.onLog = onLog
         broadcast.contextSecretProvider = contextSecretProvider
+    }
+
+    private func bindBroadcastBlobCallback() {
         broadcast.onBlobData = { [weak self] data in
             self?.onBlobData?(data)
         }

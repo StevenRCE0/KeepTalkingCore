@@ -99,6 +99,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         isStopping = false
         didReportDegrade = false
         notifiedConnectedPeers.removeAll()
+        RTCShared.configureForDataOnlyTransport()
         debug(
             "starting localPeer=\(localNodeID.uuidString.lowercased()) timeout=\(config.p2pAttemptTimeoutSeconds)s"
         )

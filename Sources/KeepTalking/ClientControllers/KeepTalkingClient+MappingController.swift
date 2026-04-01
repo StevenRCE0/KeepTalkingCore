@@ -15,80 +15,29 @@ extension KeepTalkingClient {
         KeepTalkingAliasLookup(mappings: mappings)
     }
 
-    public static func displayName(
-        for node: KeepTalkingNode,
-        aliasLookup: KeepTalkingAliasLookup,
-        fallback: String? = nil
-    ) -> String {
-        guard let nodeID = node.id else {
-            return "Unknown"
-        }
-        return resolve(
-            node: nodeID,
-            aliasLookup: aliasLookup,
-            fallback: fallback
-        ).primary(uppercaseID: true)
-    }
-
-    public static func displayName(
-        for context: UUID,
-        aliasLookup: KeepTalkingAliasLookup,
-        fallback: String? = nil
-    ) -> String {
-        resolve(
-            context: context,
-            aliasLookup: aliasLookup,
-            fallback: fallback
-        ).primary(uppercaseID: true)
-    }
-
-    public static func resolve(
-        node: UUID,
-        aliasLookup: KeepTalkingAliasLookup,
-        fallback: String? = nil
-    ) -> KeepTalkingAliasResolution {
-        aliasLookup.resolve(node: node, fallback: fallback)
-    }
-
-    public static func resolve(
-        context: UUID,
-        aliasLookup: KeepTalkingAliasLookup,
-        fallback: String? = nil
-    ) -> KeepTalkingAliasResolution {
-        aliasLookup.resolve(context: context, fallback: fallback)
-    }
-
-    public static func resolve(
-        sender: KeepTalkingContextMessage.Sender,
-        aliasLookup: KeepTalkingAliasLookup,
-        fallback: String? = nil
-    ) -> KeepTalkingAliasResolution {
-        aliasLookup.resolve(sender: sender, fallback: fallback)
-    }
-    
     public static func mappings(
         for target: KeepTalkingMappingTarget,
         includeDeleted: Bool = false,
         on database: any Database
     ) async throws -> [KeepTalkingMapping] {
         try await queryMappings(
-                  for: target,
-                  includeDeleted: includeDeleted,
-                  on: database
-              )
-              .sort(\.$value, .ascending)
-              .all()
+            for: target,
+            includeDeleted: includeDeleted,
+            on: database
+        )
+        .sort(\.$value, .ascending)
+        .all()
     }
-    
+
     public func mappings(
         for target: KeepTalkingMappingTarget,
         includeDeleted: Bool = false
     ) async throws -> [KeepTalkingMapping] {
         try await Self.mappings(
-                  for: target,
-                  includeDeleted: includeDeleted,
-                  on: localStore.database
-              )
+            for: target,
+            includeDeleted: includeDeleted,
+            on: localStore.database
+        )
     }
 
     public static func alias(
@@ -97,20 +46,21 @@ extension KeepTalkingClient {
     ) async throws -> String? {
         try await queryMappings(
             for: target,
-            on: database)
-            .filter(\.$kind, .equal, .alias)
-            .first()?
-            .value
+            on: database
+        )
+        .filter(\.$kind, .equal, .alias)
+        .first()?
+        .value
 
     }
-    
+
     public func alias(for target: KeepTalkingMappingTarget) async throws -> String? {
         try await Self.alias(
             for: target,
             on: localStore.database
         )
     }
-    
+
     public static func tags(
         for target: KeepTalkingMappingTarget,
         namespace: String? = nil,
@@ -118,11 +68,12 @@ extension KeepTalkingClient {
     ) async throws -> [KeepTalkingMapping] {
         try await queryMappings(
             for: target,
-            on: database)
-            .filter(\.$kind, .equal, .tag)
-            .filter(\.$namespace == KeepTalkingMapping.normalizeOptional(namespace))
-            .sort(\.$value, .ascending)
-            .all()
+            on: database
+        )
+        .filter(\.$kind, .equal, .tag)
+        .filter(\.$namespace == KeepTalkingMapping.normalizeOptional(namespace))
+        .sort(\.$value, .ascending)
+        .all()
     }
 
     public func tags(
@@ -168,7 +119,7 @@ extension KeepTalkingClient {
 
         try await softDeleteMappings(Array(existing.dropFirst()), on: database)
     }
-    
+
     public func setAlias(
         _ alias: String?,
         for target: KeepTalkingMappingTarget
@@ -196,11 +147,12 @@ extension KeepTalkingClient {
         let existing = try await queryMappings(
             for: target,
             includeDeleted: true,
-            on: database)
-            .filter(\.$kind, .equal, .tag)
-            .filter(\.$namespace == normalizedNamespace)
-            .filter(\.$normalizedValue == normalizedValue)
-            .first()
+            on: database
+        )
+        .filter(\.$kind, .equal, .tag)
+        .filter(\.$namespace == normalizedNamespace)
+        .filter(\.$normalizedValue == normalizedValue)
+        .first()
         let colorHex = try await tagColorHex(
             namespace: normalizedNamespace,
             normalizedValue: normalizedValue,
@@ -227,7 +179,7 @@ extension KeepTalkingClient {
         mapping.deletedAt = nil
         try await mapping.save(on: database)
     }
-    
+
     public func addTag(
         _ value: String,
         namespace: String? = nil,
@@ -261,19 +213,19 @@ extension KeepTalkingClient {
 
         try await softDeleteMappings(existing, on: database)
     }
-    
+
     public func removeTag(
-          _ value: String,
-          namespace: String? = nil,
-          from target: KeepTalkingMappingTarget
-      ) async throws {
-          try await Self.removeTag(
-              value,
-              namespace: namespace,
-              from: target,
-              on: localStore.database
-          )
-      }
+        _ value: String,
+        namespace: String? = nil,
+        from target: KeepTalkingMappingTarget
+    ) async throws {
+        try await Self.removeTag(
+            value,
+            namespace: namespace,
+            from: target,
+            on: localStore.database
+        )
+    }
 
     private static func queryMappings(
         for target: KeepTalkingMappingTarget,
@@ -291,6 +243,11 @@ extension KeepTalkingClient {
                     query
                         .filter(\.$context.$id == context)
                         .filter(\.$node.$id == nil)
+                case .thread(let thread):
+                    query
+                        .filter(\.$thread == thread)
+                        .filter(\.$node.$id == nil)
+                        .filter(\.$context.$id == nil)
             }
 
         guard !includeDeleted else {

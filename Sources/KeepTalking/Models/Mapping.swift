@@ -20,6 +20,18 @@ public enum KeepTalkingMappingKind: String, Codable, Sendable, CaseIterable {
 public enum KeepTalkingMappingTarget: Sendable, Hashable {
     case node(UUID)
     case context(UUID)
+    case thread(UUID)
+
+    var id: UUID {
+        switch self {
+            case .node(let id):
+                return id
+            case .context(let id):
+                return id
+            case .thread(let id):
+                return id
+        }
+    }
 }
 
 public final class KeepTalkingMapping: Model, @unchecked Sendable {
@@ -33,6 +45,9 @@ public final class KeepTalkingMapping: Model, @unchecked Sendable {
 
     @OptionalParent(key: "context")
     public var context: KeepTalkingContext?
+
+    @OptionalField(key: "thread")
+    public var thread: UUID?
 
     @Field(key: "kind")
     public var kind: KeepTalkingMappingKind
@@ -75,6 +90,8 @@ public final class KeepTalkingMapping: Model, @unchecked Sendable {
                 self.$node.id = node
             case .context(let context):
                 self.$context.id = context
+            case .thread(let thread):
+                self.thread = thread
         }
         self.kind = kind
         self.namespace = Self.normalizeOptional(namespace)
@@ -92,6 +109,9 @@ extension KeepTalkingMapping {
         }
         if let context = $context.id {
             return .context(context)
+        }
+        if let thread {
+            return .thread(thread)
         }
         return nil
     }

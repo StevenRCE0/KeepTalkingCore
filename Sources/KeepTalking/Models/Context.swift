@@ -62,6 +62,9 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     @Children(for: \.$context)
     public var attachments: [KeepTalkingContextAttachment]
 
+    @Children(for: \.$context)
+    public var threads: [KeepTalkingThread]
+
     public init() {}
 
     public init(

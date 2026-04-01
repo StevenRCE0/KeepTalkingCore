@@ -268,7 +268,7 @@ extension KeepTalkingClient {
         KeepTalkingAliasResolution(
             alias: nodeAliasResolver?(nodeID),
             id: nodeID
-        ).primary(uppercaseID: true)
+        ).primary()
     }
 
     func skillNamesByActionID(

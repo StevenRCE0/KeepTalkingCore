@@ -4,6 +4,17 @@ import LiveKitWebRTC
 enum RTCShared {
     private static let defaultPollIntervalNanos: UInt64 = 200_000_000
 
+    static func configureForDataOnlyTransport() {
+        #if os(iOS)
+            // Keep WebRTC from auto-activating the app audio session for today's
+            // data-only chat transport. When we add realtime audio/video chat,
+            // this is the hook to revisit and enable WebRTC-managed media.
+            let audioSession = LKRTCAudioSession.sharedInstance()
+            audioSession.useManualAudio = true
+            audioSession.isAudioEnabled = false
+        #endif
+    }
+
     static func makeRTCConfiguration(iceServerURLs: [String]) -> LKRTCConfiguration {
         let config = LKRTCConfiguration()
         config.sdpSemantics = .unifiedPlan
