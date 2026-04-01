@@ -1,3 +1,4 @@
+import FluentKit
 import Foundation
 import MCP
 import OpenAI
@@ -26,6 +27,7 @@ extension KeepTalkingClient {
         _ toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
             .ToolCallParam],
         runtimeCatalog: KeepTalkingActionRuntimeCatalog,
+        promptMessageID: UUID?,
         context: KeepTalkingContext
     ) async throws -> [AIOrchestrator.ToolExecution] {
         var executions: [AIOrchestrator.ToolExecution] = []
@@ -89,6 +91,39 @@ extension KeepTalkingClient {
                                 rawArguments: toolCall.function.arguments,
                                 context: context
                             )
+                        )
+                    )
+                    continue
+                } else if functionName == Self.markTurningPointToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: try await executeMarkTurningPointToolCall(
+                                        rawArguments: toolCall.function.arguments,
+                                        promptMessageID: promptMessageID,
+                                        context: context
+                                    ),
+                                    toolCallID: toolCallID
+                                )
+                            ]
+                        )
+                    )
+                    continue
+                } else if functionName == Self.markChitterChatterToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: try await executeMarkChitterChatterToolCall(
+                                        promptMessageID: promptMessageID,
+                                        context: context
+                                    ),
+                                    toolCallID: toolCallID
+                                )
+                            ]
                         )
                     )
                     continue
@@ -476,6 +511,58 @@ extension KeepTalkingClient {
             "truncated": skillFile.truncated,
             "content": skillFile.content,
         ])
+    }
+
+    func executeMarkTurningPointToolCall(
+        rawArguments: String,
+        promptMessageID: UUID?,
+        context: KeepTalkingContext
+    ) async throws -> String {
+        let contextID = try context.requireID()
+        guard let messageID = promptMessageID else {
+            return jsonString([
+                "ok": false,
+                "error": "no_prompt_message",
+            ])
+        }
+        let args = try decodeToolArguments(rawArguments)
+        let name = args["previous_topic_name"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !name.isEmpty else {
+            return jsonString([
+                "ok": false,
+                "error": "missing_previous_topic_name",
+            ])
+        }
+        let storedThread = try await markTurningPoint(at: messageID, in: contextID)
+        if let threadID = storedThread.id {
+            try await setAlias(name, for: .thread(threadID))
+            onMappingsChanged?()
+        }
+        return jsonString(["ok": true])
+    }
+
+    func executeMarkChitterChatterToolCall(
+        promptMessageID: UUID?,
+        context: KeepTalkingContext
+    ) async throws -> String {
+        let contextID = try context.requireID()
+        guard let messageID = promptMessageID else {
+            return jsonString([
+                "ok": false,
+                "error": "no_prompt_message",
+            ])
+        }
+        guard
+            let thread = try await owningThread(for: messageID, in: contextID)
+        else {
+            return jsonString([
+                "ok": false,
+                "error": "no_owning_thread",
+            ])
+        }
+        try await toggleChitterChatter(messageID: messageID, in: thread.requireID())
+        return jsonString(["ok": true])
     }
 
     func decodeToolArguments(_ raw: String) throws -> [String: Value] {

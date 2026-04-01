@@ -380,6 +380,46 @@ extension KeepTalkingClient {
             )
     }
 
+    func makeMarkTurningPointTool() -> OpenAITool {
+        OpenAITool.functionTool(
+            .init(
+                name: Self.markTurningPointToolFunctionName,
+                description:
+                    "Mark the current user request as a turning point, splitting the conversation into a new thread starting here. Use this proactively when the conversation meaningfully shifts topic, goal, or mode. You MUST always provide previous_topic_name.",
+                parameters: JSONSchema(
+                    .type(.object),
+                    .properties([
+                        "previous_topic_name": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "Required. A short label (2–5 words) for the topic that just ended, e.g. \"Paris trip planning\" or \"Docker setup\". Shown as the thread name in the sidebar. Never omit this."
+                            )
+                        )
+                    ]),
+                    .required(["previous_topic_name"]),
+                    .additionalProperties(.boolean(false))
+                ),
+                strict: false
+            )
+        )
+    }
+
+    func makeMarkChitterChatterTool() -> OpenAITool {
+        OpenAITool.functionTool(
+            .init(
+                name: Self.markChitterChatterToolFunctionName,
+                description:
+                    "Toggle the current user request as chitter-chatter — noise, small-talk, greetings, acknowledgements with no new information, or off-topic asides. Chitter-chatter is de-emphasised in the thread view but never deleted. Use proactively.",
+                parameters: JSONSchema(
+                    .type(.object),
+                    .properties([:]),
+                    .additionalProperties(.boolean(false))
+                ),
+                strict: false
+            )
+        )
+    }
+
     func makeWebSearchTool() -> OpenAITool {
         OpenAITool
             .webSearchTool(

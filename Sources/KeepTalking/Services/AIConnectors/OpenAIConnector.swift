@@ -18,6 +18,8 @@ public actor OpenAIConnector {
         listingToolFunctionName: String,
         attachmentListingToolFunctionName: String,
         attachmentReaderToolFunctionName: String,
+        markTurningPointToolFunctionName: String,
+        markChitterChatterToolFunctionName: String,
         currentPromptIncludesAttachments: Bool,
         currentPromptShouldAvoidAutomaticToolUse: Bool,
         contextTranscript: String
@@ -80,6 +82,16 @@ public actor OpenAIConnector {
 
             Conversation context:
             \(contextTranscript)
+
+            MANDATORY THREAD ANNOTATION — perform this silently on every response turn without mentioning it to the user:
+            After composing your response text, apply this check exactly once — then call at most one of the two tools below, or neither. Never call both.
+            Step 1 — extract the topic of the current user message in 3–6 words.
+            Step 2 — compare it to the topic of the ongoing thread (inferred from recent conversation context).
+            Step 3 — decide:
+            • If the topics are related, connected, or a natural continuation → do nothing. This includes follow-ups, clarifications, deeper dives, or any tangent that still touches the same subject. Err strongly on the side of doing nothing.
+            • If the topics are clearly unrelated and represent a genuine fresh start on a different subject → call \(markTurningPointToolFunctionName). Always supply previous_topic_name — a 2–5 word label for the topic that just ended.
+            • If the message carries zero informational content (pure greetings, single-word acks like "ok"/"thanks"/"got it", format-only instructions, off-topic small-talk) → call \(markChitterChatterToolFunctionName). It toggles, so calling it again unmarks.
+            When in doubt, do not call either tool. Over-splitting threads is worse than under-splitting.
             """
     }
 

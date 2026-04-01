@@ -36,6 +36,8 @@ public enum KeepTalkingClientError: LocalizedError {
     case unsupportedActionPayload
     case missingRelation
     case missingContextSecret(UUID)
+    case missingContext(UUID)
+    case invalidTurningPoint(UUID)
 
     public var errorDescription: String? {
         switch self {
@@ -99,6 +101,10 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Missing relation."
             case .missingContextSecret(let contextID):
                 return "Missing context secret for context: \(contextID)"
+            case .missingContext(let contextID):
+                return "Context not found: \(contextID)"
+            case .invalidTurningPoint(let messageID):
+                return "Message cannot be used as a turning point (not found or is the first message): \(messageID)"
         }
     }
 }
@@ -126,6 +132,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public var onBlobAvailabilityChange: BlobAvailabilityHandler?
     public var onPeerConnect: PeerConnectHandler?
     public var onContextSync: ContextSyncHandler?
+    public var onThreadsChanged: (@Sendable () -> Void)?
+    public var onMappingsChanged: (@Sendable () -> Void)?
     public var onLog: LogHandler? {
         didSet {
             rtcClient.onLog = onLog

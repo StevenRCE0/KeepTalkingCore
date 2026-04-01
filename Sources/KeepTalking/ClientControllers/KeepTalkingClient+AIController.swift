@@ -10,6 +10,8 @@ extension KeepTalkingClient {
         "kt_list_context_attachments"
     static let contextAttachmentReadToolFunctionName =
         "kt_get_context_attachment"
+    static let markTurningPointToolFunctionName = "kt_mark_turning_point"
+    static let markChitterChatterToolFunctionName = "kt_mark_chitter_chatter"
     static let maxAgentTurns = 32
     static let maxAINativeAttachmentBytes = 8 * 1024 * 1024
     static let skillManifestPreviewMaxCharacters = 20_000
@@ -29,6 +31,16 @@ extension KeepTalkingClient {
         await ensureMCPToolChangeObserverInstalled()
 
         let persistedContext = try await upsertContext(context)
+
+        // Snapshot the latest message ID now (= user's prompt) before the AI
+        // publishes any response messages.  Passed into the tool executors so
+        // annotation tools act on the prompt, not the AI's own reply.
+        let promptMessageID: UUID? = try? await KeepTalkingContextMessage
+            .query(on: localStore.database)
+            .filter(\.$context.$id == (try persistedContext.requireID()))
+            .sort(\.$timestamp, .descending)
+            .first()?.id
+
         let runtimeCatalog = try await resolveActionRuntimeCatalog(
             in: persistedContext
         )
@@ -41,6 +53,8 @@ extension KeepTalkingClient {
         let listingTool = makeListingTool()
         let attachmentListingTool = makeContextAttachmentListingTool()
         let attachmentReadTool = makeContextAttachmentReadTool()
+        let markTurningPointTool = makeMarkTurningPointTool()
+        let markChitterChatterTool = makeMarkChitterChatterTool()
 
         let allTools: [OpenAITool] =
             [
@@ -48,6 +62,8 @@ extension KeepTalkingClient {
                 attachmentListingTool,
                 attachmentReadTool,
                 webSearchTool,
+                markTurningPointTool,
+                markChitterChatterTool,
             ] + runtimeCatalog.catalog.openAITools
         let skillNameByActionID = skillNamesByActionID(
             routesByFunctionName: runtimeCatalog.routesByFunctionName
@@ -86,6 +102,10 @@ extension KeepTalkingClient {
                                 Self.contextAttachmentListingToolFunctionName,
                             attachmentReaderToolFunctionName:
                                 Self.contextAttachmentReadToolFunctionName,
+                            markTurningPointToolFunctionName:
+                                Self.markTurningPointToolFunctionName,
+                            markChitterChatterToolFunctionName:
+                                Self.markChitterChatterToolFunctionName,
                             currentPromptIncludesAttachments:
                                 hasCurrentPromptAttachments,
                             currentPromptShouldAvoidAutomaticToolUse:
@@ -109,6 +129,7 @@ extension KeepTalkingClient {
                     try await executeAgentToolCalls(
                         toolCalls,
                         runtimeCatalog: runtimeCatalog,
+                        promptMessageID: promptMessageID,
                         context: persistedContext
                     )
                 },
@@ -129,7 +150,14 @@ extension KeepTalkingClient {
                     )
                 },
                 toolNameResolver: { [self] toolCall in
-                    toolNameForChatText(
+                    let name = toolCall.function.name
+                    if name == Self.markTurningPointToolFunctionName
+                        || name == Self.markChitterChatterToolFunctionName
+                        || name == Self.listingToolFunctionName
+                    {
+                        return ""
+                    }
+                    return toolNameForChatText(
                         toolCall,
                         routesByFunctionName: runtimeCatalog
                             .routesByFunctionName,
@@ -138,6 +166,16 @@ extension KeepTalkingClient {
                             aliasLookup.alias(for: .node($0))
                         }
                     )
+                },
+                toolHintResolver: { toolCall in
+                    switch toolCall.function.name {
+                        case Self.markTurningPointToolFunctionName:
+                            return .markTurningPoint
+                        case Self.markChitterChatterToolFunctionName:
+                            return .markChitterChatter
+                        default:
+                            return .toolUse
+                    }
                 }
             ),
             configuration: .init(maxTurns: Self.maxAgentTurns)
@@ -600,7 +638,7 @@ extension KeepTalkingClient {
         }
 
         onLog?(
-            "[ai/tools] built_ins=\(Self.listingToolFunctionName),\(Self.contextAttachmentListingToolFunctionName),\(Self.contextAttachmentReadToolFunctionName),web_search_preview"
+            "[ai/tools] built_ins=\(Self.listingToolFunctionName),\(Self.contextAttachmentListingToolFunctionName),\(Self.contextAttachmentReadToolFunctionName),web_search_preview,\(Self.markTurningPointToolFunctionName),\(Self.markChitterChatterToolFunctionName)"
         )
         onLog?(
             "[ai/tools] listing_tool_name=\(Self.listingToolFunctionName) injected=true"

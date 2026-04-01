@@ -24,6 +24,7 @@ public struct AIOrchestrator {
         ([ToolExecution]) async throws -> [Message]
     public typealias AssistantPublisher = ((String, KeepTalkingContextMessage.MessageType)) async throws -> Void
     public typealias ToolNameResolver = (ToolCall) -> String
+    public typealias ToolHintResolver = (ToolCall) -> IntermediateMessageHints
 
     public struct Configuration: Sendable {
         public let maxTurns: Int
@@ -40,6 +41,7 @@ public struct AIOrchestrator {
         public let toolTranscriptAdapter: ToolTranscriptAdapter
         public let assistantPublisher: AssistantPublisher
         public let toolNameResolver: ToolNameResolver
+        public let toolHintResolver: ToolHintResolver
 
         public init(
             openAIConnector: OpenAIConnector,
@@ -47,7 +49,8 @@ public struct AIOrchestrator {
             toolExecutor: @escaping ToolExecutor,
             toolTranscriptAdapter: @escaping ToolTranscriptAdapter = { _ in [] },
             assistantPublisher: @escaping AssistantPublisher,
-            toolNameResolver: @escaping ToolNameResolver = { $0.function.name }
+            toolNameResolver: @escaping ToolNameResolver = { $0.function.name },
+            toolHintResolver: @escaping ToolHintResolver = { _ in .toolUse }
         ) {
             self.openAIConnector = openAIConnector
             self.assistantMessageBuilder = assistantMessageBuilder
@@ -55,6 +58,7 @@ public struct AIOrchestrator {
             self.toolTranscriptAdapter = toolTranscriptAdapter
             self.assistantPublisher = assistantPublisher
             self.toolNameResolver = toolNameResolver
+            self.toolHintResolver = toolHintResolver
         }
     }
 
@@ -100,7 +104,8 @@ public struct AIOrchestrator {
 
             if let chatText = Self.chatText(
                 for: turn,
-                toolNameResolver: dependencies.toolNameResolver
+                toolNameResolver: dependencies.toolNameResolver,
+                toolHintResolver: dependencies.toolHintResolver
             ) {
                 if latestAssistantText.isEmpty {
                     latestAssistantText = chatText.0
@@ -131,7 +136,8 @@ public struct AIOrchestrator {
 
     private static func chatText(
         for turn: OpenAIConnector.ToolPlanningResult,
-        toolNameResolver: ToolNameResolver
+        toolNameResolver: ToolNameResolver,
+        toolHintResolver: ToolHintResolver
     ) -> (String, KeepTalkingContextMessage.MessageType)? {
         if let assistantText = turn.assistantText?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -145,18 +151,14 @@ public struct AIOrchestrator {
         let toolNames = orderedUniqueToolNames(
             turn.toolCalls.map(toolNameResolver)
         )
+        // Use a specific hint if all calls in this turn share one.
+        let hints = turn.toolCalls.map(toolHintResolver)
+        let hint: IntermediateMessageHints =
+            hints.allSatisfy({ $0 == hints[0] }) ? hints[0] : .toolUse
         if toolNames.count == 1, let name = toolNames.first {
-            return (
-                name,
-                .intermediate(
-                    hint: IntermediateMessageHints.toolUse.rawValue
-                )
-            )
+            return (name, .intermediate(hint: hint.rawValue))
         }
-        return (
-            toolNames.joined(separator: ", "),
-            .intermediate(hint: IntermediateMessageHints.toolUse.rawValue)
-        )
+        return (toolNames.joined(separator: ", "), .intermediate(hint: hint.rawValue))
     }
 
     private static func orderedUniqueToolNames(_ rawNames: [String]) -> [String] {
@@ -180,5 +182,7 @@ extension AIOrchestrator {
     public enum IntermediateMessageHints: String {
         case toolUse = "Using tool"
         case reasoning = "Reasoning"
+        case markTurningPoint = "Turning the page"
+        case markChitterChatter = "Shushing the noise"
     }
 }

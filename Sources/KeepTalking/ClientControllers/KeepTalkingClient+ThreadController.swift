@@ -48,10 +48,12 @@ extension KeepTalkingClient {
     /// The current `.contextMain` thread is frozen as `.stored` with its range
     /// set to [contextMainStart ... turningMessage - 1].
     /// A new `.contextMain` is created starting at the turning-point message.
+    /// Returns the frozen stored thread representing the previous topic.
+    @discardableResult
     public func markTurningPoint(
         at messageID: UUID,
         in contextID: UUID
-    ) async throws {
+    ) async throws -> KeepTalkingThread {
         let db = localStore.database
 
         let messages = try await KeepTalkingContextMessage.query(on: db)
@@ -63,11 +65,11 @@ extension KeepTalkingClient {
             let turningIndex = messages.firstIndex(where: { $0.id == messageID }),
             turningIndex > 0
         else {
-            return
+            throw KeepTalkingClientError.invalidTurningPoint(messageID)
         }
 
         guard let context = try await KeepTalkingContext.find(contextID, on: db) else {
-            return
+            throw KeepTalkingClientError.missingContext(contextID)
         }
 
         let contextMain = try await ensureContextMainThread(for: contextID)
@@ -86,6 +88,8 @@ extension KeepTalkingClient {
             state: .contextMain
         )
         try await newMain.save(on: db)
+        onThreadsChanged?()
+        return contextMain
     }
 
     /// Toggles chitter-chatter status for a message within its thread.
@@ -104,6 +108,61 @@ extension KeepTalkingClient {
             thread.chitterChatter.append(messageID)
         }
         try await thread.save(on: localStore.database)
+        onThreadsChanged?()
+    }
+
+    /// Finds the thread that owns a given message within a context by testing each thread's
+    /// [startMessage, endMessage] range against the full sorted message list.
+    public func owningThread(for messageID: UUID, in contextID: UUID) async throws -> KeepTalkingThread? {
+        let db = localStore.database
+        let messages = try await KeepTalkingContextMessage.query(on: db)
+            .filter(\.$context.$id == contextID)
+            .sort(\.$timestamp)
+            .all()
+
+        guard let msgIdx = messages.firstIndex(where: { $0.id == messageID }) else {
+            return nil
+        }
+
+        let threads = try await KeepTalkingThread.query(on: db)
+            .filter(\.$context.$id == contextID)
+            .all()
+
+        return threads.first { thread in
+            let startIdx: Int
+            if let startID = thread.$startMessage.id {
+                guard let idx = messages.firstIndex(where: { $0.id == startID }) else { return false }
+                startIdx = idx
+            } else {
+                startIdx = 0
+            }
+            let endIdx: Int
+            if let endID = thread.$endMessage.id {
+                guard let idx = messages.firstIndex(where: { $0.id == endID }) else { return false }
+                endIdx = idx
+            } else {
+                endIdx = messages.count - 1
+            }
+            guard startIdx <= endIdx else { return false }
+            return (startIdx...endIdx).contains(msgIdx)
+        }
+    }
+
+    /// Explicitly marks or unmarks a message as chitter-chatter, locating its owning thread
+    /// within the context. A no-op if the message isn't found or already has the desired state.
+    public func setChitterChatter(messageID: UUID, in contextID: UUID, marked: Bool) async throws {
+        guard let thread = try await owningThread(for: messageID, in: contextID) else {
+            return
+        }
+        let isMarked = thread.chitterChatter.contains(messageID)
+        guard isMarked != marked else { return }
+        if marked {
+            thread.chitterChatter.append(messageID)
+        } else {
+            thread.chitterChatter.removeAll { $0 == messageID }
+        }
+        try await thread.save(on: localStore.database)
+        onThreadsChanged?()
     }
 
     public func archiveThread(_ threadID: UUID) async throws {
