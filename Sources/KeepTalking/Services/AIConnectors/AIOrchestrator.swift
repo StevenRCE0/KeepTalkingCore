@@ -151,8 +151,13 @@ public struct AIOrchestrator {
         let toolNames = orderedUniqueToolNames(
             turn.toolCalls.map(toolNameResolver)
         )
+        
         // Use a specific hint if all calls in this turn share one.
         let hints = turn.toolCalls.compactMap(toolHintResolver)
+        guard hints.count > 1 else {
+            return nil
+        }
+
         let hint: IntermediateMessageHints =
             hints.allSatisfy({ $0 == hints[0] }) ? hints[0] : .toolUse
         if toolNames.count == 1, let name = toolNames.first {

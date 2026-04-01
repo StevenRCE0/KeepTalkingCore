@@ -88,10 +88,10 @@ public actor OpenAIConnector {
             Step 1 — extract the topic of the current user message in 3–6 words.
             Step 2 — compare it to the topic of the ongoing thread (inferred from recent conversation context).
             Step 3 — decide:
-            • If the topics are related, connected, or a natural continuation → do nothing. This includes follow-ups, clarifications, deeper dives, or any tangent that still touches the same subject. Err strongly on the side of doing nothing.
-            • If the topics are clearly unrelated and represent a genuine fresh start on a different subject → call \(markTurningPointToolFunctionName). Always supply previous_topic_name — a 2–5 word label for the topic that just ended.
+            • If the current message opens a noticeably different subject, task, or domain from the ongoing thread — even if loosely connected — call \(markTurningPointToolFunctionName). A shift in what the user is trying to accomplish qualifies. Always supply previous_topic_name — a 2–5 word label for the topic that just ended.
             • If the message carries zero informational content (pure greetings, single-word acks like "ok"/"thanks"/"got it", format-only instructions, off-topic small-talk) → call \(markChitterChatterToolFunctionName) to mark it as noise.
-            When in doubt, do not call either tool. Over-splitting threads is worse than under-splitting.
+            • If the message is a direct follow-up, clarification, or deeper dive into the exact same task already underway → do nothing.
+            Default to calling \(markTurningPointToolFunctionName) when uncertain — a well-split thread history is more useful than a long undivided one.
             """
     }
 
