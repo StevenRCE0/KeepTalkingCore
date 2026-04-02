@@ -347,13 +347,15 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
             let peers = peersSnapshot().filter { $0 != localNodeID }
 
             if let preferred = config.p2pPreferredRemoteID,
-                let preferredID = UUID(uuidString: preferred),
-                peers.contains(preferredID)
+                let preferredID = UUID(uuidString: preferred)
             {
-                return preferredID
-            }
-
-            if let first = peers.sorted(by: {
+                // A specific peer is required — wait for it rather than grabbing any available peer.
+                // Falling back to an alphabetically-first peer in a multi-node mesh would cause
+                // this channel to negotiate with the wrong peer.
+                if peers.contains(preferredID) {
+                    return preferredID
+                }
+            } else if let first = peers.sorted(by: {
                 $0.uuidString.lowercased() < $1.uuidString.lowercased()
             }).first {
                 return first

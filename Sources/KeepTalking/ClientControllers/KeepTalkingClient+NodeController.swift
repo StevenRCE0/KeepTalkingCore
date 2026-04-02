@@ -487,6 +487,20 @@ extension KeepTalkingClient {
         )
     }
 
+    private func mergedApprovingContext(
+        existing: KeepTalkingNodeRelationActionRelation.ApprovingContext?,
+        adding context: KeepTalkingContext
+    ) -> KeepTalkingNodeRelationActionRelation.ApprovingContext {
+        switch existing {
+        case .all:
+            return .all
+        case .contexts(let prior):
+            return prior.contains(context) ? .contexts(prior) : .contexts(prior + [context])
+        case nil:
+            return .contexts([context])
+        }
+    }
+
     private func mergeIncomingActionAuthorisations(
         from status: KeepTalkingNodeStatus,
         advertisedActions: [KeepTalkingAdvertisedAction]
@@ -500,7 +514,7 @@ extension KeepTalkingClient {
         let grantsForLocal = status.nodeRelations.filter {
             $0.toNodeID == config.node
                 && $0.relationship.isTrustedOrOwner
-                && $0.relationship.allows(context: status.context)
+                && $0.relationship.allows(context: statusContext)
         }
         guard !grantsForLocal.isEmpty else {
             return
@@ -521,14 +535,23 @@ extension KeepTalkingClient {
             return
         }
 
+        // Find any existing A→B relation without filtering by context coverage.
+        // `preferredTrustedRelation(allowing:)` would exclude .trusted([甲]) when processing
+        // context 乙 (because allows(context:nil) is false for .trusted), causing the guard
+        // to fail and silently skip the auth merge for every context after the first.
         guard
-            let incomingRelation = try await Self.preferredTrustedRelation(
-                from: remoteNodeID,
-                to: config.node,
-                allowing: statusContext,
-                allowPending: true,
-                on: localStore.database
-            ),
+            let incomingRelation = try await KeepTalkingNodeRelation
+                .query(on: localStore.database)
+                .filter(\.$from.$id, .equal, remoteNodeID)
+                .filter(\.$to.$id, .equal, config.node)
+                .all()
+                .sorted(by: {
+                    Self.relationPriority($0.relationship)
+                        > Self.relationPriority($1.relationship)
+                })
+                .first(where: {
+                    $0.relationship.isTrustedOrOwner || $0.relationship == .pending
+                }),
             let incomingRelationID = incomingRelation.id
         else {
             return
@@ -577,7 +600,13 @@ extension KeepTalkingClient {
                 .filter(\.$action.$id, .equal, actionID)
                 .first()
             {
-                existingLink.approvingContext = approvingContext
+                // Merge the new context into the existing approving-context set
+                // instead of replacing it, so simultaneous active contexts don't
+                // keep overwriting each other.
+                existingLink.approvingContext = mergedApprovingContext(
+                    existing: existingLink.approvingContext,
+                    adding: statusContext
+                )
                 existingLink.wakeHandles = wakeRoutesByActionID[actionID]
                 try await existingLink.save(on: localStore.database)
             } else {

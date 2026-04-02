@@ -61,7 +61,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     private let sequenceLock = NSLock()
     private var heartbeatTask: Task<Void, Never>?
     private var discoveredPeers = Set<UUID>()
-    private var peerMissedWaves = 0
+    private var peerMissedWaves: [UUID: Int] = [:]
     private let stateQueue = DispatchQueue(label: "kt.context-transport.state")
 
     // MARK: - Init
@@ -104,7 +104,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     func start() async throws {
         stateQueue.sync {
             discoveredPeers.removeAll()
-            peerMissedWaves = 0
+            peerMissedWaves = [:]
         }
         livenessState.reset()
         dedup.reset()
@@ -129,7 +129,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         }
         stateQueue.sync {
             directChannels.removeAll()
-            peerMissedWaves = 0
+            peerMissedWaves = [:]
         }
 
         broadcast.stop()
@@ -430,16 +430,16 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
 
             if !isOnlineViaPresence && !isOnlineViaDirect {
                 let missed = stateQueue.sync { () -> Int in
-                    peerMissedWaves += 1
-                    return peerMissedWaves
+                    peerMissedWaves[nodeID, default: 0] += 1
+                    return peerMissedWaves[nodeID]!
                 }
                 if missed >= Self.peerOfflineWavesThreshold {
                     debug("peer offline node=\(nodeID.uuidString.prefix(8)) missedWaves=\(missed)")
                     handleParticipantLeft(nodeID)
-                    stateQueue.sync { peerMissedWaves = 0 }
+                    stateQueue.sync { peerMissedWaves.removeValue(forKey: nodeID) }
                 }
             } else {
-                stateQueue.sync { peerMissedWaves = 0 }
+                stateQueue.sync { peerMissedWaves.removeValue(forKey: nodeID) }
             }
         }
     }

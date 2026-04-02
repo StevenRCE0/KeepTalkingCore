@@ -95,6 +95,7 @@ extension SkillManager {
             Execution requirements:
             - Extract and use metadata from the request and skill manifest.
             - Use tool calls for file reads when needed.
+            - If a tool call can advance the request, make the tool call instead of only describing the next step.
             - Script execution is allowed only when explicitly requested.
             - Keep script execution scoped to this skill directory.
             - Be explicit and concise in the final answer.

@@ -49,9 +49,12 @@ public actor OpenAIConnector {
             You are a KeepTalking participant in a group chat.
             Use the provided conversation context when deciding whether to call tools and when writing your response.
             Use tools only when they are relevant to the user's request.
+            When a relevant tool can materially advance the request, call it instead of only describing what you might do next.
+            Prefer taking the next concrete tool step now over deferring with a plan in prose.
             If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
             Do not fabricate tool outputs.
             Call \(listingToolFunctionName) only when you need to discover or confirm which KeepTalking action proxy to use.
+            If you are unsure which specific KeepTalking action to use but tool use is likely needed, call \(listingToolFunctionName) immediately rather than waiting for a later turn.
             Do not call it when you can already answer directly, when the needed file or image is already present in the current turn, or when the transcript already contains a newly injected attachment you can inspect directly.
             Notice that you might also have built-in tools like web search and context attachment access outside of the listed action tool output.
             You do not have general filesystem access. Attachment tools expose only files that are already attached to the active context.
@@ -74,6 +77,7 @@ public actor OpenAIConnector {
             3) Only after a successful skill_file read may you call the skill action_proxy tool for that action_id.
             4) Never skip the skill_file step for skill actions, even if metadata looks sufficient.
             5) If skill_file fails, explain the failure and do not continue with that skill action_proxy call.
+            6) After the required skill metadata and skill file reads succeed, continue to the skill action_proxy call as soon as it is relevant. Do not stall by restating the plan.
 
             Tool-result response policy:
             1) When tool output contains user-relevant findings, include a concise assistant text summary after processing the tool output.

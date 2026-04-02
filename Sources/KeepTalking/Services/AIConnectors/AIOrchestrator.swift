@@ -5,6 +5,13 @@ public struct AIOrchestrator {
     public typealias ToolCall =
         ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam
     public typealias Message = ChatQuery.ChatCompletionMessageParam
+    public typealias TurnRunner =
+        (
+            [Message],
+            [OpenAITool],
+            OpenAIModel,
+            ChatQuery.ChatCompletionFunctionCallOptionParam
+        ) async throws -> OpenAIConnector.ToolPlanningResult
     public typealias AssistantMessageBuilder =
         (OpenAIConnector.ToolPlanningResult) -> Message?
     public struct ToolExecution {
@@ -28,37 +35,65 @@ public struct AIOrchestrator {
 
     public struct Configuration: Sendable {
         public let maxTurns: Int
+        /// Maximum number of retry attempts per tool-execution batch on failure.
+        public let maxToolRetries: Int
+        public let enforcePlanningStage: Bool
 
-        public init(maxTurns: Int = 32) {
+        public init(
+            maxTurns: Int = 32,
+            maxToolRetries: Int = 2,
+            enforcePlanningStage: Bool = true
+        ) {
             self.maxTurns = maxTurns
+            self.maxToolRetries = maxToolRetries
+            self.enforcePlanningStage = enforcePlanningStage
         }
     }
 
+    /// Called when a tool-execution batch fails and a retry is about to be attempted.
+    /// Receives `(attempt, maxAttempts, error)` so callers can surface progress in the UI.
+    public typealias ToolRetryObserver = @Sendable (Int, Int, any Error) async -> Void
+
     public struct Dependencies {
         public let openAIConnector: OpenAIConnector
+        public let turnRunner: TurnRunner
         public let assistantMessageBuilder: AssistantMessageBuilder
         public let toolExecutor: ToolExecutor
         public let toolTranscriptAdapter: ToolTranscriptAdapter
         public let assistantPublisher: AssistantPublisher
         public let toolNameResolver: ToolNameResolver
         public let toolHintResolver: ToolHintResolver
+        public let toolRetryObserver: ToolRetryObserver?
 
         public init(
             openAIConnector: OpenAIConnector,
+            turnRunner: TurnRunner? = nil,
             assistantMessageBuilder: @escaping AssistantMessageBuilder,
             toolExecutor: @escaping ToolExecutor,
             toolTranscriptAdapter: @escaping ToolTranscriptAdapter = { _ in [] },
             assistantPublisher: @escaping AssistantPublisher,
             toolNameResolver: @escaping ToolNameResolver = { $0.function.name },
-            toolHintResolver: @escaping ToolHintResolver = { _ in .toolUse }
+            toolHintResolver: @escaping ToolHintResolver = { _ in .toolUse },
+            toolRetryObserver: ToolRetryObserver? = nil
         ) {
             self.openAIConnector = openAIConnector
+            self.turnRunner =
+                turnRunner
+                ?? { messages, tools, model, toolChoice in
+                    try await openAIConnector.completeTurn(
+                        messages: messages,
+                        tools: tools,
+                        model: model,
+                        toolChoice: toolChoice
+                    )
+                }
             self.assistantMessageBuilder = assistantMessageBuilder
             self.toolExecutor = toolExecutor
             self.toolTranscriptAdapter = toolTranscriptAdapter
             self.assistantPublisher = assistantPublisher
             self.toolNameResolver = toolNameResolver
             self.toolHintResolver = toolHintResolver
+            self.toolRetryObserver = toolRetryObserver
         }
     }
 
@@ -83,11 +118,41 @@ public struct AIOrchestrator {
         var latestAssistantText = ""
 
         for _ in 0..<configuration.maxTurns {
-            let turn = try await dependencies.openAIConnector.completeTurn(
-                messages: transcript,
+            if shouldRunPlanningStage(
                 tools: tools,
-                model: model,
                 toolChoice: toolChoice
+            ) {
+                let planningTurn = try await dependencies.turnRunner(
+                    planningMessages(base: transcript),
+                    tools,
+                    model,
+                    .required
+                )
+                if let assistantMessage =
+                    dependencies.assistantMessageBuilder(planningTurn)
+                {
+                    transcript.append(assistantMessage)
+                }
+
+                let planningExecutions = try await executeWithRetry(
+                    toolCalls: planningTurn.toolCalls,
+                    maxRetries: configuration.maxToolRetries
+                )
+                for execution in planningExecutions {
+                    transcript.append(contentsOf: execution.messages)
+                }
+                transcript.append(
+                    contentsOf: try await dependencies.toolTranscriptAdapter(
+                        planningExecutions
+                    )
+                )
+            }
+
+            let turn = try await dependencies.turnRunner(
+                transcript,
+                tools,
+                model,
+                toolChoice
             )
 
             if let assistantMessage =
@@ -118,8 +183,9 @@ public struct AIOrchestrator {
                 break
             }
 
-            let toolExecutions = try await dependencies.toolExecutor(
-                turn.toolCalls
+            let toolExecutions = try await executeWithRetry(
+                toolCalls: turn.toolCalls,
+                maxRetries: configuration.maxToolRetries
             )
             for execution in toolExecutions {
                 transcript.append(contentsOf: execution.messages)
@@ -132,6 +198,50 @@ public struct AIOrchestrator {
         }
 
         return latestAssistantText
+    }
+
+    private func shouldRunPlanningStage(
+        tools: [OpenAITool],
+        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam
+    ) -> Bool {
+        configuration.enforcePlanningStage && !tools.isEmpty && toolChoice == .auto
+    }
+
+    private func planningMessages(base: [Message]) -> [Message] {
+        base + [
+            .developer(
+                .init(
+                    content: .textContent(
+                        """
+                        Planning stage.
+                        Decide the next concrete step before producing a user-facing answer.
+                        Call at least one relevant tool now.
+                        If a specific tool is already identifiable, call it directly.
+                        If you need discovery first, call the best discovery tool now.
+                        Do not stop at analysis, do not restate the request, and do not answer the user in this stage.
+                        """
+                    )
+                )
+            )
+        ]
+    }
+
+    private func executeWithRetry(
+        toolCalls: [ToolCall],
+        maxRetries: Int
+    ) async throws -> [ToolExecution] {
+        var lastError: (any Error)?
+        for attempt in 1...(maxRetries + 1) {
+            do {
+                return try await dependencies.toolExecutor(toolCalls)
+            } catch {
+                lastError = error
+                if attempt <= maxRetries {
+                    await dependencies.toolRetryObserver?(attempt, maxRetries, error)
+                }
+            }
+        }
+        throw lastError!
     }
 
     private static func chatText(
@@ -154,7 +264,7 @@ public struct AIOrchestrator {
         
         // Use a specific hint if all calls in this turn share one.
         let hints = turn.toolCalls.compactMap(toolHintResolver)
-        guard hints.count > 1 else {
+        guard !hints.isEmpty else {
             return nil
         }
 
