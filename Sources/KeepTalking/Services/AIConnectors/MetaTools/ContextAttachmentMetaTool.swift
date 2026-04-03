@@ -269,6 +269,67 @@ extension KeepTalkingClient {
         }
     }
 
+    func executeContextAttachmentUpdateMetadataToolCall(
+        toolCallID: String,
+        rawArguments: String,
+        context: KeepTalkingContext
+    ) async throws -> String {
+        let functionName = Self.contextAttachmentUpdateMetadataToolFunctionName
+        let arguments = try decodeToolArguments(rawArguments)
+
+        guard
+            let attachmentIDText = arguments["attachment_id"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !attachmentIDText.isEmpty,
+            let attachmentID = UUID(uuidString: attachmentIDText),
+            let contextID = context.id
+        else {
+            return jsonString([
+                "ok": false,
+                "function_name": functionName,
+                "error": "invalid_attachment_id",
+            ])
+        }
+
+        guard
+            let attachment = try await contextAttachment(
+                attachmentID, in: contextID)
+        else {
+            return jsonString([
+                "ok": false,
+                "function_name": functionName,
+                "attachment_id": attachmentIDText,
+                "error": "attachment_not_found",
+            ])
+        }
+
+        var metadata = attachment.metadata
+
+        if let imageDescription = arguments["image_description"]?.stringValue {
+            metadata.imageDescription =
+                imageDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let textPreview = arguments["text_preview"]?.stringValue {
+            metadata.textPreview =
+                textPreview.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let tagsValue = arguments["tags"] {
+            if let tags = tagsValue.arrayValue?.compactMap(\.stringValue) {
+                metadata.tags = tags
+            }
+        }
+
+        attachment.metadata = metadata
+        try await attachment.save(on: localStore.database)
+
+        return jsonString([
+            "ok": true,
+            "function_name": functionName,
+            "attachment_id": attachmentIDText,
+            "metadata": attachmentMetadataJSONObject(metadata),
+        ])
+    }
+
     func contextAttachments(
         in contextID: UUID
     ) async throws -> [KeepTalkingContextAttachment] {

@@ -12,6 +12,9 @@ extension KeepTalkingClient {
         "kt_get_context_attachment"
     static let markTurningPointToolFunctionName = "kt_mark_turning_point"
     static let markChitterChatterToolFunctionName = "kt_mark_chitter_chatter"
+    static let contextAttachmentUpdateMetadataToolFunctionName =
+        "kt_update_context_attachment_metadata"
+    static let searchThreadsToolFunctionName = "kt_search_threads"
     static let maxAgentTurns = 32
     static let maxAINativeAttachmentBytes = 8 * 1024 * 1024
     static let skillManifestPreviewMaxCharacters = 20_000
@@ -55,12 +58,17 @@ extension KeepTalkingClient {
         let attachmentReadTool = makeContextAttachmentReadTool()
         let markTurningPointTool = makeMarkTurningPointTool()
         let markChitterChatterTool = makeMarkChitterChatterTool()
+        let attachmentUpdateMetadataTool =
+            makeContextAttachmentUpdateMetadataTool()
+        let searchThreadsTool = makeSearchThreadsTool()
 
         let allTools: [OpenAITool] =
             [
                 listingTool,
                 attachmentListingTool,
                 attachmentReadTool,
+                attachmentUpdateMetadataTool,
+                searchThreadsTool,
                 webSearchTool,
                 markTurningPointTool,
                 markChitterChatterTool,
@@ -102,6 +110,8 @@ extension KeepTalkingClient {
                                 Self.contextAttachmentListingToolFunctionName,
                             attachmentReaderToolFunctionName:
                                 Self.contextAttachmentReadToolFunctionName,
+                            searchThreadsToolFunctionName:
+                                Self.searchThreadsToolFunctionName,
                             markTurningPointToolFunctionName:
                                 Self.markTurningPointToolFunctionName,
                             markChitterChatterToolFunctionName:
@@ -154,6 +164,8 @@ extension KeepTalkingClient {
                     if name == Self.markTurningPointToolFunctionName
                         || name == Self.markChitterChatterToolFunctionName
                         || name == Self.listingToolFunctionName
+                        || name == Self.contextAttachmentUpdateMetadataToolFunctionName
+                        || name == Self.searchThreadsToolFunctionName
                     {
                         return ""
                     }
@@ -361,7 +373,7 @@ extension KeepTalkingClient {
             return parts
         }
 
-        if apiMode == .responses, mimeType != "application/pdf" {
+        if apiMode != .responses || mimeType != "application/pdf" {
             let summary = attachmentTextFallback(
                 filename: filename,
                 mimeType: mimeType,
@@ -407,7 +419,7 @@ extension KeepTalkingClient {
             return "\(header)\n\n\(preview)"
         }
         return
-            "\(header)\n\nBinary file '\(filename)' (\(mimeType), \(data.count) bytes) was not inlined as file_data for Responses API compatibility."
+            "\(header)\n\nBinary file '\(filename)' (\(mimeType), \(data.count) bytes) was not inlined natively for API compatibility."
     }
 
     private func attachmentTextPreview(
@@ -491,8 +503,8 @@ extension KeepTalkingClient {
                     return ("skill", bundle.name)
                 case .primitive(let bundle):
                     return ("primitive", bundle.name)
-                case .none:
-                    return ("unknown", "unknown")
+                case .semanticRetrieval(let bundle):
+                    return ("semantic_retrieval", bundle.name)
             }
         }()
 
@@ -531,7 +543,8 @@ extension KeepTalkingClient {
                             onLog?(
                                 "[primitive] registered local action=\(actionID)"
                             )
-                        case .none:
+                        case .semanticRetrieval:
+                            // Handled app-side via semanticSearchCallback; no local executor.
                             return
                     }
                 }
@@ -636,7 +649,7 @@ extension KeepTalkingClient {
         }
 
         onLog?(
-            "[ai/tools] built_ins=\(Self.listingToolFunctionName),\(Self.contextAttachmentListingToolFunctionName),\(Self.contextAttachmentReadToolFunctionName),web_search_preview,\(Self.markTurningPointToolFunctionName),\(Self.markChitterChatterToolFunctionName)"
+            "[ai/tools] built_ins=\(Self.listingToolFunctionName),\(Self.contextAttachmentListingToolFunctionName),\(Self.contextAttachmentReadToolFunctionName),\(Self.contextAttachmentUpdateMetadataToolFunctionName),\(Self.searchThreadsToolFunctionName),web_search_preview,\(Self.markTurningPointToolFunctionName),\(Self.markChitterChatterToolFunctionName)"
         )
         onLog?(
             "[ai/tools] listing_tool_name=\(Self.listingToolFunctionName) injected=true"

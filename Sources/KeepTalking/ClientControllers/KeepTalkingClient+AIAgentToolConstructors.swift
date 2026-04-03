@@ -385,18 +385,24 @@ extension KeepTalkingClient {
             .init(
                 name: Self.markTurningPointToolFunctionName,
                 description:
-                    "Mark the current user request as a turning point, splitting the conversation into a new thread starting here. Use this proactively when the conversation meaningfully shifts topic, goal, or mode. You MUST always provide previous_topic_name.",
+                    "Mark or label the live thread topic at the current user message. Use this sparingly in exactly one of two cases: 1) the first meaningful non-noise message of an unlabeled live thread, to label the current thread with current_topic_name only; 2) a real topic shift, to end the previous thread and start a new live thread here by providing both previous_topic_name and current_topic_name. previous_topic_name always names the topic before this message and should usually match or refine the current live thread topic already shown in the transcript. Do not call this for small refinements, implementation continuation, or minor wording shifts. Do not repeat the same previous_topic_name across consecutive turns unless the live thread truly stayed on that topic until this message.",
                 parameters: JSONSchema(
                     .type(.object),
                     .properties([
                         "previous_topic_name": JSONSchema(
                             .type(.string),
                             .description(
-                                "Required. A short label (2–5 words) for the topic that just ended, e.g. \"Paris trip planning\" or \"Docker setup\". Shown as the thread name in the sidebar. Never omit this."
+                                "Optional only when this message is the first meaningful message of the live thread. Otherwise required. A short 2-5 word label for the topic that ends before this message."
+                            )
+                        ),
+                        "current_topic_name": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "Required. A short 2-5 word label for the live thread topic that starts at this message and should remain active after this tool call."
                             )
                         )
                     ]),
-                    .required(["previous_topic_name"]),
+                    .required(["current_topic_name"]),
                     .additionalProperties(.boolean(false))
                 ),
                 strict: false
@@ -413,6 +419,79 @@ extension KeepTalkingClient {
                 parameters: JSONSchema(
                     .type(.object),
                     .properties([:]),
+                    .additionalProperties(.boolean(false))
+                ),
+                strict: false
+            )
+        )
+    }
+
+    func makeContextAttachmentUpdateMetadataTool() -> OpenAITool {
+        OpenAITool.functionTool(
+            .init(
+                name: Self.contextAttachmentUpdateMetadataToolFunctionName,
+                description:
+                    "Update metadata on a context attachment — set an image description after inspecting an image, add a text preview for non-text files, or add tags. Fields you omit are left unchanged. Use this after inspecting an attachment with mode=native to persist your understanding of its content.",
+                parameters: JSONSchema(
+                    .type(.object),
+                    .properties([
+                        "attachment_id": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "Attachment identifier."
+                            )
+                        ),
+                        "image_description": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "A concise description of the image content. Set this after seeing the image via native mode."
+                            )
+                        ),
+                        "text_preview": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "A summary or text preview for non-text files (e.g. PDFs, audio transcripts)."
+                            )
+                        ),
+                        "tags": JSONSchema(
+                            .type(.array),
+                            .items(JSONSchema(.type(.string))),
+                            .description(
+                                "Tags to set on this attachment. Replaces existing tags."
+                            )
+                        ),
+                    ]),
+                    .required(["attachment_id"]),
+                    .additionalProperties(.boolean(false))
+                ),
+                strict: false
+            )
+        )
+    }
+
+    func makeSearchThreadsTool() -> OpenAITool {
+        OpenAITool.functionTool(
+            .init(
+                name: Self.searchThreadsToolFunctionName,
+                description:
+                    "Search thread memory in the current context. This is your conversation-memory retrieval tool for earlier threads, prior decisions, recalled facts, user preferences, and unfinished work that may not be visible in the current transcript window. Use it proactively before answering when the user refers to something discussed earlier. Returns the most relevant thread excerpts ranked by semantic similarity.",
+                parameters: JSONSchema(
+                    .type(.object),
+                    .properties([
+                        "query": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "Natural-language memory query, phrased as the fact, topic, task, or decision you want to recover from earlier conversation."
+                            )
+                        ),
+                        "top_k": JSONSchema(
+                            .type(.integer),
+                            .description(
+                                "Optional maximum number of memory hits to return. Defaults to 5."
+                            )
+                        ),
+                    ]),
+                    .required(["query"]),
                     .additionalProperties(.boolean(false))
                 ),
                 strict: false

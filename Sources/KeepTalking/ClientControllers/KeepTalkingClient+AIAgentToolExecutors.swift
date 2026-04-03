@@ -127,6 +127,41 @@ extension KeepTalkingClient {
                         )
                     )
                     continue
+                } else if functionName
+                    == Self.contextAttachmentUpdateMetadataToolFunctionName
+                {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: try await executeContextAttachmentUpdateMetadataToolCall(
+                                        toolCallID: toolCallID,
+                                        rawArguments: toolCall.function.arguments,
+                                        context: context
+                                    ),
+                                    toolCallID: toolCallID
+                                )
+                            ]
+                        )
+                    )
+                    continue
+                } else if functionName == Self.searchThreadsToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: try await executeSearchThreadsToolCall(
+                                        rawArguments: toolCall.function.arguments,
+                                        context: context
+                                    ),
+                                    toolCallID: toolCallID
+                                )
+                            ]
+                        )
+                    )
+                    continue
                 }
 
                 let payload: String
@@ -523,17 +558,32 @@ extension KeepTalkingClient {
             return jsonString(["ok": false, "error": "no_prompt_message"])
         }
         let args = try decodeToolArguments(rawArguments)
-        let name = args["previous_topic_name"]?.stringValue?
+        let previousTopicName = args["previous_topic_name"]?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !name.isEmpty else {
-            return jsonString(["ok": false, "error": "missing_previous_topic_name"])
+        let currentTopicName = args["current_topic_name"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !currentTopicName.isEmpty else {
+            return jsonString(["ok": false, "error": "missing_current_topic_name"])
         }
-        try await storeContextMark(
-            .markTurningPoint(messageID: messageID, previousTopicName: name),
+        let created = try await storeContextMark(
+            .markTurningPoint(
+                messageID: messageID,
+                previousTopicName: previousTopicName.isEmpty
+                    ? nil
+                    : previousTopicName,
+                currentTopicName: currentTopicName
+            ),
             in: context
         )
+        guard created else {
+            return jsonString([
+                "ok": true,
+                "created": false,
+                "reason": "duplicate_mark_message_id",
+            ])
+        }
         try await consumePendingMarks(in: contextID)
-        return jsonString(["ok": true])
+        return jsonString(["ok": true, "created": true])
     }
 
     func executeMarkChitterChatterToolCall(
@@ -544,12 +594,19 @@ extension KeepTalkingClient {
         guard let messageID = promptMessageID else {
             return jsonString(["ok": false, "error": "no_prompt_message"])
         }
-        try await storeContextMark(
+        let created = try await storeContextMark(
             .markChitterChatter(messageID: messageID),
             in: context
         )
+        guard created else {
+            return jsonString([
+                "ok": true,
+                "created": false,
+                "reason": "duplicate_mark_message_id",
+            ])
+        }
         try await consumePendingMarks(in: contextID)
-        return jsonString(["ok": true])
+        return jsonString(["ok": true, "created": true])
     }
 
     func decodeToolArguments(_ raw: String) throws -> [String: Value] {

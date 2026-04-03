@@ -27,6 +27,12 @@ extension KeepTalkingClient {
                     return "inspect context file metadata"
             }
         }
+        if functionName == Self.contextAttachmentUpdateMetadataToolFunctionName {
+            return "update context file metadata"
+        }
+        if functionName == Self.searchThreadsToolFunctionName {
+            return "search thread memory"
+        }
         guard let route = routesByFunctionName[functionName] else {
             return friendlyToolCallPhrase(
                 toolName: functionName,

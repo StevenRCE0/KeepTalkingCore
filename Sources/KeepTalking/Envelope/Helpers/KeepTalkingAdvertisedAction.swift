@@ -11,6 +11,7 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
     public enum PayloadSummary: Codable, Sendable {
         case mcpBundle(name: String, indexDescription: String)
         case skill(name: String, indexDescription: String)
+        case semanticRetrieval(name: String, indexDescription: String)
         case primitive(
             name: String,
             indexDescription: String,

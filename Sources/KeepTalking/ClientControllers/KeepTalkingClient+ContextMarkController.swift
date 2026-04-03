@@ -8,7 +8,22 @@ extension KeepTalkingClient {
     func storeContextMark(
         _ type: KeepTalkingContextMessage.MessageType,
         in context: KeepTalkingContext
-    ) async throws {
+    ) async throws -> Bool {
+        let contextID = try context.requireID()
+        if let targetMessageID = markedMessageID(for: type) {
+            let existingMarks = try await KeepTalkingContextMessage.query(
+                on: localStore.database
+            )
+            .filter(\.$context.$id == contextID)
+            .all()
+
+            if existingMarks.contains(where: {
+                markedMessageID(for: $0.type) == targetMessageID
+            }) {
+                return false
+            }
+        }
+
         let mark = KeepTalkingContextMessage(
             context: context,
             sender: .node(node: config.node),
@@ -16,6 +31,7 @@ extension KeepTalkingClient {
             type: type
         )
         try await mark.save(on: localStore.database)
+        return true
     }
 
     /// Finds all mark messages in the context that this node hasn't consumed yet,
@@ -30,9 +46,27 @@ extension KeepTalkingClient {
         }
         let consumed = Set(context.consumedMarks ?? [])
 
-        let marks = try await KeepTalkingContextMessage.query(on: db)
+        let allMarks = try await KeepTalkingContextMessage.query(on: db)
             .filter(\.$context.$id == contextID)
             .all()
+
+        let annotationMarks = allMarks.filter { msg in
+            switch msg.type {
+                case .markTurningPoint, .markChitterChatter: return true
+                default: return false
+            }
+        }
+
+        let consumedTargetMessageIDs = Set<UUID>(
+            annotationMarks.compactMap { msg in
+                guard let id = msg.id, consumed.contains(id) else {
+                    return nil
+                }
+                return markedMessageID(for: msg.type)
+            }
+        )
+
+        let marks = annotationMarks
             .filter { msg in
                 guard let id = msg.id else { return false }
                 guard !consumed.contains(id) else { return false }
@@ -41,24 +75,40 @@ extension KeepTalkingClient {
                     default: return false
                 }
             }
+            .sorted {
+                if $0.timestamp != $1.timestamp {
+                    return $0.timestamp < $1.timestamp
+                }
+                return ($0.id?.uuidString ?? "") < ($1.id?.uuidString ?? "")
+            }
 
         guard !marks.isEmpty else { return }
 
         var newlyConsumed: [UUID] = []
+        var seenTargetMessageIDs = consumedTargetMessageIDs
 
         for mark in marks {
             guard let markID = mark.id else { continue }
+            if let targetMessageID = markedMessageID(for: mark.type) {
+                guard !seenTargetMessageIDs.contains(targetMessageID) else {
+                    newlyConsumed.append(markID)
+                    continue
+                }
+                seenTargetMessageIDs.insert(targetMessageID)
+            }
             do {
                 switch mark.type {
-                    case .markTurningPoint(let messageID, let previousTopicName):
-                        let storedThread = try await markTurningPoint(
+                    case .markTurningPoint(
+                        let messageID,
+                        let previousTopicName,
+                        let currentTopicName
+                    ):
+                        try await applyTurningPointMark(
                             at: messageID,
-                            in: contextID
+                            in: contextID,
+                            previousTopicName: previousTopicName,
+                            currentTopicName: currentTopicName
                         )
-                        if let threadID = storedThread.id {
-                            try await setAlias(previousTopicName, for: .thread(threadID))
-                            onMappingsChanged?()
-                        }
                         onThreadsChanged?()
                     case .markChitterChatter(let messageID):
                         try await setChitterChatter(
@@ -80,5 +130,18 @@ extension KeepTalkingClient {
 
         context.consumedMarks = (context.consumedMarks ?? []) + newlyConsumed
         try await context.save(on: db)
+    }
+
+    private func markedMessageID(
+        for type: KeepTalkingContextMessage.MessageType
+    ) -> UUID? {
+        switch type {
+            case .markTurningPoint(let messageID, _, _):
+                return messageID
+            case .markChitterChatter(let messageID):
+                return messageID
+            default:
+                return nil
+        }
     }
 }

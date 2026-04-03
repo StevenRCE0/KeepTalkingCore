@@ -41,6 +41,21 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
         case mcpBundle(KeepTalkingMCPBundle)
         case skill(KeepTalkingSkillBundle)
         case primitive(KeepTalkingPrimitiveBundle)
+        case semanticRetrieval(KeepTalkingSemanticRetrievalBundle)
+
+        public var isSemanticRetrieval: Bool {
+            if case .semanticRetrieval = self { return true }
+            return false
+        }
+
+        public var semanticRetrievalBundle: KeepTalkingSemanticRetrievalBundle? {
+            if case .semanticRetrieval(let bundle) = self { return bundle }
+            return nil
+        }
+    }
+
+    public var isSemanticRetrieval: Bool {
+        payload.isSemanticRetrieval == true
     }
 
     @ID(key: .id)
@@ -53,7 +68,7 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
     public var descriptor: KeepTalkingActionDescriptor?
 
     @Field(key: "payload")
-    public var payload: Payload?
+    public var payload: Payload
 
     @Field(key: "remote_authorisable")
     public var remoteAuthorisable: Bool?
@@ -61,7 +76,7 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
     @Field(key: "blocking_authorisation")
     public var blockingAuthorisation: Bool?
 
-    @Field(key: "disabled")
+    @OptionalField(key: "disabled")
     public var disabled: Bool?
 
     @Timestamp(key: "created_at", on: .create)

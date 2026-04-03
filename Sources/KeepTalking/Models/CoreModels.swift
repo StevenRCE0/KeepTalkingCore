@@ -104,6 +104,7 @@ public protocol KeepTalkingKVService: Sendable {
 
 public protocol KeepTalkingLocalStore: Sendable {
     var database: any Database { get }
+    func reset() async throws
 }
 
 public struct KeepTalkingAsymmetricCipherEnvelope: Codable, Sendable {

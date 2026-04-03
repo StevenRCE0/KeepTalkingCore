@@ -18,6 +18,7 @@ public actor OpenAIConnector {
         listingToolFunctionName: String,
         attachmentListingToolFunctionName: String,
         attachmentReaderToolFunctionName: String,
+        searchThreadsToolFunctionName: String,
         markTurningPointToolFunctionName: String,
         markChitterChatterToolFunctionName: String,
         currentPromptIncludesAttachments: Bool,
@@ -62,6 +63,8 @@ public actor OpenAIConnector {
             Prefer \(attachmentReaderToolFunctionName) with mode=metadata or mode=preview_text first, and use mode=native only when you need the actual file or image content added to the next model turn.
             When a file or image is already present in the current turn, or was just injected into the transcript after a tool call, inspect that provided content directly instead of listing or re-reading the same attachment.
             A file or image injected immediately after ask-for-file is the user-provided attachment you requested. Treat it as authoritative for that request and do not call \(attachmentListingToolFunctionName) or \(attachmentReaderToolFunctionName) for the same file unless you truly need a different earlier context attachment.
+            \(searchThreadsToolFunctionName) is your thread-memory retrieval tool. Use it proactively when the user refers to something discussed earlier, when you need a prior decision or fact that may be outside the visible transcript, or when recovering unfinished work from older threads would materially improve the answer.
+            Prefer \(searchThreadsToolFunctionName) over guessing what happened in earlier conversation history.
             \(currentPromptGuidance)
 
             Node targeting policy:
@@ -90,12 +93,16 @@ public actor OpenAIConnector {
             MANDATORY THREAD ANNOTATION — perform this silently on every response turn without mentioning it to the user:
             After composing your response text, apply this check exactly once — then call at most one of the two tools below, or neither. Never call both.
             Step 1 — extract the topic of the current user message in 3–6 words.
-            Step 2 — compare it to the topic of the ongoing thread (inferred from recent conversation context).
+            Step 2 — compare it to the topic of the ongoing thread. If the transcript includes `Current live thread topic: "..."`, treat that as authoritative.
             Step 3 — decide:
-            • If the current message opens a noticeably different subject, task, or domain from the ongoing thread — even if loosely connected — call \(markTurningPointToolFunctionName). A shift in what the user is trying to accomplish qualifies. Always supply previous_topic_name — a 2–5 word label for the topic that just ended.
+            • Only if the live thread is still unlabeled and this is its first meaningful non-noise message, call \(markTurningPointToolFunctionName) with current_topic_name only. If the transcript already shows a current live thread topic, do not use this case.
+            • Only if the current message clearly starts a new user goal, topic, or task, call \(markTurningPointToolFunctionName) with both previous_topic_name and current_topic_name. previous_topic_name names the thread that ends before this message and should usually paraphrase the current live thread topic shown in the transcript. current_topic_name names the live thread that starts at this message.
             • If the message carries zero informational content (pure greetings, single-word acks like "ok"/"thanks"/"got it", format-only instructions, off-topic small-talk) → call \(markChitterChatterToolFunctionName) to mark it as noise.
             • If the message is a direct follow-up, clarification, or deeper dive into the exact same task already underway → do nothing.
-            Default to calling \(markTurningPointToolFunctionName) when uncertain — a well-split thread history is more useful than a long undivided one.
+            Do not call \(markTurningPointToolFunctionName) for small refinements, implementation continuation, or wording tweaks within the same task.
+            Do not call \(markTurningPointToolFunctionName) on consecutive user turns unless the later turn very clearly starts yet another unrelated task.
+            Do not reuse a stale previous_topic_name from an older frozen thread. previous_topic_name should describe the live thread that is ending now, not an earlier historical thread.
+            When uncertain whether this is a real topic shift, prefer keeping the current thread unchanged.
             """
     }
 

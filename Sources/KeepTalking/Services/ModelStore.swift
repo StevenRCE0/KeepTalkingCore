@@ -134,4 +134,9 @@ public final class KeepTalkingInMemoryStore: KeepTalkingLocalStore,
     public var database: any Database {
         manager.db(databaseID)
     }
+
+    public func reset() async throws {
+        try await manager.autoRevert()
+        try await manager.autoMigrate()
+    }
 }

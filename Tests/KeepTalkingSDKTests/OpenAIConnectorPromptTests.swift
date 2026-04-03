@@ -12,6 +12,12 @@ struct OpenAIConnectorPromptTests {
                 KeepTalkingClient.contextAttachmentListingToolFunctionName,
             attachmentReaderToolFunctionName:
                 KeepTalkingClient.contextAttachmentReadToolFunctionName,
+            searchThreadsToolFunctionName:
+                KeepTalkingClient.searchThreadsToolFunctionName,
+            markTurningPointToolFunctionName:
+                KeepTalkingClient.markTurningPointToolFunctionName,
+            markChitterChatterToolFunctionName:
+                KeepTalkingClient.markChitterChatterToolFunctionName,
             currentPromptIncludesAttachments: false,
             currentPromptShouldAvoidAutomaticToolUse: false,
             contextTranscript: ""
@@ -34,6 +40,12 @@ struct OpenAIConnectorPromptTests {
                 KeepTalkingClient.contextAttachmentListingToolFunctionName,
             attachmentReaderToolFunctionName:
                 KeepTalkingClient.contextAttachmentReadToolFunctionName,
+            searchThreadsToolFunctionName:
+                KeepTalkingClient.searchThreadsToolFunctionName,
+            markTurningPointToolFunctionName:
+                KeepTalkingClient.markTurningPointToolFunctionName,
+            markChitterChatterToolFunctionName:
+                KeepTalkingClient.markChitterChatterToolFunctionName,
             currentPromptIncludesAttachments: true,
             currentPromptShouldAvoidAutomaticToolUse: true,
             contextTranscript: ""

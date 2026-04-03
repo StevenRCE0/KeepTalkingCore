@@ -215,9 +215,7 @@ extension KeepTalkingClient {
     public func saveConstructedAction(
         _ action: KeepTalkingAction
     ) async throws -> KeepTalkingAction {
-        guard let payload = action.payload else {
-            throw KeepTalkingClientError.unsupportedActionPayload
-        }
+        let payload = action.payload
 
         if action.id == nil {
             action.id = UUID()
@@ -237,6 +235,8 @@ extension KeepTalkingClient {
                     action.descriptor = Self.defaultDescriptor(for: bundle)
                 case .primitive(let bundle):
                     action.descriptor = Self.defaultDescriptor(for: bundle)
+                case .semanticRetrieval(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
             }
         }
 
@@ -248,6 +248,9 @@ extension KeepTalkingClient {
                 try await skillManager.registerSkillAction(action)
             case .primitive:
                 try await primitiveActionManager.registerPrimitiveAction(action)
+            case .semanticRetrieval:
+                // Executed app-side via semanticSearchCallback — no local manager registration needed.
+                break
         }
         await invalidateActionToolCatalog(
             reason: "register_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
@@ -591,6 +594,20 @@ extension KeepTalkingClient {
         await invalidateActionToolCatalog(
             reason:
                 "remove_primitive_action action=\(actionID.uuidString.lowercased())"
+        )
+    }
+
+    /// Removes a semantic retrieval action and its grants. No executor to unregister.
+    public func removeSemanticRetrievalAction(actionID: UUID) async throws {
+        let node = try await getCurrentNodeInstance()
+        try await Self.removeMCPAction(
+            actionID: actionID,
+            node: node,
+            on: localStore.database,
+            callbackForUnregisteringAction: nil
+        )
+        await invalidateActionToolCatalog(
+            reason: "remove_semantic_retrieval_action action=\(actionID.uuidString.lowercased())"
         )
     }
 
@@ -1016,13 +1033,23 @@ extension KeepTalkingClient {
                 )
             case .primitive(let name, let indexDescription, let primitiveKind):
                 return .primitive(
-                    KeepTalkingPrimitiveBundle(
+                    .init(
                         id: action.actionID,
                         name: name,
                         indexDescription: indexDescription.isEmpty
                             ? fallbackDescription
                             : indexDescription,
                         action: primitiveKind
+                    )
+                )
+            case .semanticRetrieval(name: let name, let indexDescription):
+                return .semanticRetrieval(
+                    .init(
+                        id: action.actionID,
+                        name: name,
+                        indexDescription: indexDescription,
+                        contextIDs: [],
+                        tagTitles: []
                     )
                 )
         }
@@ -1062,5 +1089,60 @@ extension KeepTalkingClient {
             ),
             object: nil
         )
+    }
+
+    private static func defaultDescriptor(
+        for bundle: KeepTalkingSemanticRetrievalBundle
+    ) -> KeepTalkingActionDescriptor {
+        KeepTalkingActionDescriptor(
+            subject: nil,
+            action: KeepTalkingActionWithDescription(
+                description: bundle.indexDescription
+            ),
+            object: nil
+        )
+    }
+
+    // MARK: - Semantic Retrieval Action Registration
+
+    public func registerSemanticRetrievalAction(
+        bundle: KeepTalkingSemanticRetrievalBundle = .init(),
+        descriptor: KeepTalkingActionDescriptor? = nil,
+        remoteAuthorisable: Bool = true,
+        blockingAuthorisation: Bool = false
+    ) async throws -> KeepTalkingAction {
+        let node = try await getCurrentNodeInstance()
+        let action = try await Self.registerSemanticRetrievalAction(
+            bundle: bundle,
+            descriptor: descriptor,
+            remoteAuthorisable: remoteAuthorisable,
+            blockingAuthorisation: blockingAuthorisation,
+            node: node,
+            on: localStore.database
+        )
+        await invalidateActionToolCatalog(
+            reason:
+                "register_semantic_retrieval_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
+        )
+        return action
+    }
+
+    static public func registerSemanticRetrievalAction(
+        bundle: KeepTalkingSemanticRetrievalBundle = .init(),
+        descriptor: KeepTalkingActionDescriptor? = nil,
+        remoteAuthorisable: Bool = true,
+        blockingAuthorisation: Bool = false,
+        node: KeepTalkingNode,
+        on database: any Database
+    ) async throws -> KeepTalkingAction {
+        let action = KeepTalkingAction(
+            payload: .semanticRetrieval(bundle),
+            remoteAuthorisable: remoteAuthorisable,
+            blockingAuthorisation: normalizedBlockingAuthorisation(blockingAuthorisation)
+        )
+        action.$node.id = try node.requireID()
+        action.descriptor = descriptor ?? Self.defaultDescriptor(for: bundle)
+        try await action.save(on: database)
+        return action
     }
 }

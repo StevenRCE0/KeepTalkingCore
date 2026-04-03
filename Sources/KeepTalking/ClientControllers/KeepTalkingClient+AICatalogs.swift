@@ -516,6 +516,23 @@ extension KeepTalkingClient {
         )
     }
 
+    // MARK: - Decay constants
+
+    /// Exponential decay applied to messages inside the live (contextMain) thread.
+    /// A smaller value means messages reach further back before falling off.
+    private static let contextMainDecayLambda: Double = 0.05
+
+    /// Exponential decay applied to messages inside completed (stored/archived) threads.
+    private static let storedThreadDecayLambda: Double = 0.07
+
+    /// Maximum messages taken from the live thread  (= floor(1 / λ₀)).
+    private static let contextMainMessageBudget: Int = 20   // floor(1/0.05)
+
+    /// Shared message budget across all completed threads  (= floor(1 / λ₁) * 1.5, rounded).
+    private static let storedTotalMessageBudget: Int = 20
+
+    // MARK: - Context transcript
+
     func agentContextTranscript(
         _ context: KeepTalkingContext,
         skillSummaries: [KeepTalkingSkillSummaryEntry]
@@ -525,34 +542,74 @@ extension KeepTalkingClient {
         }
         let aliasLookup = try await aliasLookup()
 
-        let recentMessages = try await KeepTalkingContextMessage.query(
+        // --- Load all threads and messages for this context ---
+        let threads = try await KeepTalkingThread.query(on: localStore.database)
+            .filter(\.$context.$id, .equal, contextID)
+            .all()
+
+        let allMessages = try await KeepTalkingContextMessage.query(
             on: localStore.database
         )
         .filter(\.$context.$id, .equal, contextID)
-        .sort(\.$timestamp, .descending)
-        .limit(30)
+        .sort(\.$timestamp, .ascending)
         .all()
 
-        let conversationTranscript: String
-        if recentMessages.isEmpty {
-            conversationTranscript = "No prior messages in this context."
+        // --- Assign messages to threads using start/end boundaries ---
+        let threadedSegments = buildThreadedSegments(
+            threads: threads,
+            allMessages: allMessages
+        )
+
+        // --- Thread map: one-line topic summary (oldest → newest) ---
+        let threadMapSummary = renderThreadMapSummary(
+            segments: threadedSegments,
+            aliasLookup: aliasLookup
+        )
+
+        // --- Decay-weighted message selection ---
+        let selectedMessages: [(thread: KeepTalkingThread?, messages: [KeepTalkingContextMessage])]
+        if threadedSegments.isEmpty {
+            // No thread structure yet — fall back to plain recent-30 approach.
+            let recent = Array(allMessages.suffix(30))
+            selectedMessages = [(thread: nil, messages: recent)]
         } else {
-            conversationTranscript =
-                recentMessages
-                .reversed()
-                .map { message in
-                    let sender =
-                        KeepTalkingActionToolDefinition
-                        .conversationSenderTag(
-                            message.sender,
-                            nodeAliasResolver: {
-                                aliasLookup.alias(for: .node($0))
-                            }
-                        )
-                    return "[\(sender)] \(message.content)"
-                }.joined(separator: "\n")
+            selectedMessages = decayWeightedSelection(segments: threadedSegments)
         }
 
+        // --- Render conversation transcript with thread section headers ---
+        let senderTag: (KeepTalkingContextMessage) -> String = { message in
+            KeepTalkingActionToolDefinition.conversationSenderTag(
+                message.sender,
+                nodeAliasResolver: { aliasLookup.alias(for: .node($0)) }
+            )
+        }
+
+        var transcriptParts: [String] = []
+        for (thread, messages) in selectedMessages where !messages.isEmpty {
+            var lines: [String] = []
+            if let thread {
+                let label = threadLabel(
+                    for: thread,
+                    messages: messages,
+                    aliasLookup: aliasLookup
+                )
+                lines.append("[\(label)]")
+            }
+            for message in messages {
+                lines.append("[\(senderTag(message))] \(message.content)")
+            }
+            transcriptParts.append(lines.joined(separator: "\n"))
+        }
+
+        let allSelectedMessages = selectedMessages.flatMap(\.messages)
+        let conversationTranscript: String
+        if transcriptParts.isEmpty {
+            conversationTranscript = "No prior messages in this context."
+        } else {
+            conversationTranscript = transcriptParts.joined(separator: "\n\n")
+        }
+
+        // --- Attachment summary ---
         let attachmentCount = try await KeepTalkingContextAttachment.query(
             on: localStore.database
         )
@@ -571,10 +628,7 @@ extension KeepTalkingClient {
 
         let attachmentSummary: String
         if attachmentCount > 0 {
-            let preview = previewList(
-                Array(recentAttachmentNames),
-                maxItems: 8
-            )
+            let preview = previewList(Array(recentAttachmentNames), maxItems: 8)
             attachmentSummary = """
                 Context attachments: \(attachmentCount)
                 Recent attachment names: \(preview)
@@ -584,17 +638,209 @@ extension KeepTalkingClient {
             attachmentSummary = ""
         }
 
+        // --- Node name summary (derived from selected messages) ---
         let nodeNameSummary = renderNodeNameSummary(
-            recentMessages: recentMessages,
+            recentMessages: allSelectedMessages,
             aliasLookup: aliasLookup
         )
-        let skillSummary = renderSkillContextSummary(
-            skillSummaries,
-            aliasLookup: aliasLookup
-        )
-        return [nodeNameSummary, conversationTranscript, attachmentSummary, skillSummary]
+        let skillSummary = renderSkillContextSummary(skillSummaries, aliasLookup: aliasLookup)
+
+        return [threadMapSummary, nodeNameSummary, conversationTranscript, attachmentSummary, skillSummary]
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
+    }
+
+    // MARK: - Thread segmentation helpers
+
+    /// Groups all context messages into ordered (thread, [message]) pairs.
+    /// Threads without any messages are omitted.
+    private func buildThreadedSegments(
+        threads: [KeepTalkingThread],
+        allMessages: [KeepTalkingContextMessage]
+    ) -> [(thread: KeepTalkingThread, messages: [KeepTalkingContextMessage])] {
+        guard !threads.isEmpty, !allMessages.isEmpty else { return [] }
+
+        let sorted = threads
+            .compactMap { thread -> (thread: KeepTalkingThread, range: ClosedRange<Int>)? in
+                guard let range = thread.resolvedMessageRange(in: allMessages) else {
+                    return nil
+                }
+                return (thread: thread, range: range)
+            }
+            .sorted { $0.range.lowerBound < $1.range.lowerBound }
+
+        var result: [(thread: KeepTalkingThread, messages: [KeepTalkingContextMessage])] = []
+        for (thread, range) in sorted {
+            let slice = Array(allMessages[range])
+            // Exclude chitter-chatter messages from the prompt.
+            let chitterSet = Set(thread.chitterChatter)
+            let filtered = slice.filter { msg in
+                guard let id = msg.id else { return true }
+                return !chitterSet.contains(id)
+            }
+            if !filtered.isEmpty {
+                result.append((thread: thread, messages: filtered))
+            }
+        }
+        return result
+    }
+
+    /// Applies exponential decay to select messages from each thread segment.
+    ///
+    /// - contextMain: takes up to `contextMainMessageBudget` tail messages with λ₀ decay.
+    /// - stored/archived: all threads share `storedTotalMessageBudget` tail messages with λ₁ decay;
+    ///   each individual thread receives a proportional slice.
+    private func decayWeightedSelection(
+        segments: [(thread: KeepTalkingThread, messages: [KeepTalkingContextMessage])]
+    ) -> [(thread: KeepTalkingThread?, messages: [KeepTalkingContextMessage])] {
+        let λ₀ = Self.contextMainDecayLambda
+        let λ₁ = Self.storedThreadDecayLambda
+
+        /// Number of tail messages to keep for a thread with a given decay λ and budget cap.
+        /// Uses `ceil(-ln(0.01) / λ)` — the position at which the weight drops below 1 %.
+        func tailCount(lambda: Double, cap: Int, available: Int) -> Int {
+            let depth = Int(ceil(-log(0.01) / lambda)) // ~99 % of cumulative weight
+            return min(cap, min(depth, available))
+        }
+
+        var result: [(thread: KeepTalkingThread?, messages: [KeepTalkingContextMessage])] = []
+
+        let storedSegments = segments.filter { $0.thread.state != .contextMain }
+        let mainSegments   = segments.filter { $0.thread.state == .contextMain }
+
+        // --- Completed threads: share storedTotalMessageBudget ---
+        if !storedSegments.isEmpty {
+            let perThread = max(1, Self.storedTotalMessageBudget / storedSegments.count)
+            for seg in storedSegments {
+                let n = tailCount(lambda: λ₁, cap: perThread, available: seg.messages.count)
+                let selected = Array(seg.messages.suffix(n))
+                result.append((thread: seg.thread, messages: selected))
+            }
+        }
+
+        // --- Live thread (contextMain) ---
+        for seg in mainSegments {
+            let n = tailCount(lambda: λ₀, cap: Self.contextMainMessageBudget, available: seg.messages.count)
+            let selected = Array(seg.messages.suffix(n))
+            result.append((thread: seg.thread, messages: selected))
+        }
+
+        return result
+    }
+
+    // MARK: - Thread rendering helpers
+
+    private func threadTopicName(
+        for thread: KeepTalkingThread,
+        messages: [KeepTalkingContextMessage],
+        aliasLookup: KeepTalkingAliasLookup
+    ) -> String {
+        if let threadID = thread.id,
+            let alias = aliasLookup.alias(for: .thread(threadID)),
+            !alias.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return alias
+        }
+        if let summary = thread.summary?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !summary.isEmpty
+        {
+            return summary
+        }
+        return derivedThreadTopic(from: messages)
+    }
+
+    private func derivedThreadTopic(
+        from messages: [KeepTalkingContextMessage]
+    ) -> String {
+        for message in messages.reversed() where message.type == .message {
+            let normalized = normalizedTopicSnippet(message.content)
+            if !normalized.isEmpty {
+                return normalized
+            }
+        }
+        return "untitled"
+    }
+
+    private func normalizedTopicSnippet(_ raw: String) -> String {
+        let collapsedWhitespace = raw
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !collapsedWhitespace.isEmpty else {
+            return ""
+        }
+
+        let withoutURLs = collapsedWhitespace.replacingOccurrences(
+            of: #"https?://\S+"#,
+            with: "",
+            options: .regularExpression
+        )
+        let words = withoutURLs
+            .split(whereSeparator: \.isWhitespace)
+            .map { String($0).trimmingCharacters(in: .punctuationCharacters) }
+            .filter { !$0.isEmpty }
+        guard !words.isEmpty else {
+            return ""
+        }
+        return words.prefix(6).joined(separator: " ")
+    }
+
+    /// Returns a short human-readable label for a thread, used as section header.
+    private func threadLabel(
+        for thread: KeepTalkingThread,
+        messages: [KeepTalkingContextMessage],
+        aliasLookup: KeepTalkingAliasLookup
+    ) -> String {
+        let topic = threadTopicName(
+            for: thread,
+            messages: messages,
+            aliasLookup: aliasLookup
+        )
+        if thread.state == .contextMain {
+            return "Ongoing: \(topic)"
+        }
+        let stateTag = thread.state == .archived ? "archived" : "completed"
+        return "Thread (\(stateTag)): \"\(topic)\""
+    }
+
+    /// Renders a single-line thread topic map injected before the transcript.
+    private func renderThreadMapSummary(
+        segments: [(thread: KeepTalkingThread, messages: [KeepTalkingContextMessage])],
+        aliasLookup: KeepTalkingAliasLookup
+    ) -> String {
+        guard !segments.isEmpty else { return "" }
+
+        let labels = segments.map { seg -> String in
+            let topic = threadTopicName(
+                for: seg.thread,
+                messages: seg.messages,
+                aliasLookup: aliasLookup
+            )
+            if seg.thread.state == .contextMain {
+                return "● \"\(topic)\""
+            }
+            let mark = seg.thread.state == .archived ? "⊘" : "✓"
+            return "\(mark) \"\(topic)\""
+        }.joined(separator: " → ")
+
+        let currentLiveTopic = segments
+            .last(where: { $0.thread.state == .contextMain })
+            .map {
+                threadTopicName(
+                    for: $0.thread,
+                    messages: $0.messages,
+                    aliasLookup: aliasLookup
+                )
+            }
+
+        if let currentLiveTopic {
+            return """
+                Conversation thread topics (oldest→newest, last live): \(labels)
+                Current live thread topic: "\(currentLiveTopic)"
+                """
+        }
+
+        return "Conversation thread topics (oldest→newest): \(labels)"
     }
 
     func renderSkillContextSummary(

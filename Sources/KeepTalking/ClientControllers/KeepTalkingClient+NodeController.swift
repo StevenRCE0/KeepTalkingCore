@@ -492,12 +492,12 @@ extension KeepTalkingClient {
         adding context: KeepTalkingContext
     ) -> KeepTalkingNodeRelationActionRelation.ApprovingContext {
         switch existing {
-        case .all:
-            return .all
-        case .contexts(let prior):
-            return prior.contains(context) ? .contexts(prior) : .contexts(prior + [context])
-        case nil:
-            return .contexts([context])
+            case .all:
+                return .all
+            case .contexts(let prior):
+                return prior.contains(context) ? .contexts(prior) : .contexts(prior + [context])
+            case nil:
+                return .contexts([context])
         }
     }
 
@@ -540,7 +540,8 @@ extension KeepTalkingClient {
         // context 乙 (because allows(context:nil) is false for .trusted), causing the guard
         // to fail and silently skip the auth merge for every context after the first.
         guard
-            let incomingRelation = try await KeepTalkingNodeRelation
+            let incomingRelation =
+                try await KeepTalkingNodeRelation
                 .query(on: localStore.database)
                 .filter(\.$from.$id, .equal, remoteNodeID)
                 .filter(\.$to.$id, .equal, config.node)
@@ -807,7 +808,8 @@ extension KeepTalkingClient {
     private func advertisedAction(from action: KeepTalkingAction)
         -> KeepTalkingAdvertisedAction?
     {
-        guard let actionID = action.id, let payload = action.payload else {
+        let payload = action.payload
+        guard let actionID = action.id else {
             return nil
         }
 
@@ -829,6 +831,13 @@ extension KeepTalkingClient {
                     indexDescription: bundle.indexDescription,
                     action: bundle.action
                 )
+            case .semanticRetrieval(let bundle):
+                payloadSummary =
+                    .semanticRetrieval(
+                        name: bundle.name,
+                        indexDescription: bundle
+                            .indexDescription
+                    )
         }
 
         return KeepTalkingAdvertisedAction(

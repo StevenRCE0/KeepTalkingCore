@@ -119,6 +119,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
         @Sendable (KeepTalkingActionCallRequest, KeepTalkingAction, KeepTalkingContext) async -> Bool
     public typealias PrimitiveActionPostResultHandler =
         @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall) -> Void
+    /// Callback that executes semantic thread search. Injected by the app layer.
+    /// Parameters: query, topK, contextIDs filter, tagTitles filter.
+    public typealias SemanticSearchCallback =
+        @Sendable (String, Int, [UUID], [String]) async throws -> [KeepTalkingSemanticSearchResult]
 
     public typealias EnvelopeHandler = @Sendable (any KeepTalkingEnvelope) -> Void
     public typealias RawMessageHandler = @Sendable (String) -> Void
@@ -163,6 +167,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
     var actionApprovalHandler: ActionApprovalHandler?
     var primitiveActionPostResultHandler: PrimitiveActionPostResultHandler?
+    var semanticSearchCallback: SemanticSearchCallback?
 
     // MARK: NodeState Broadcast properties
     var nodeStateBroadcastDebounceTask: Task<Void, Never>?
@@ -334,6 +339,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
         _ handler: PrimitiveActionPostResultHandler?
     ) {
         primitiveActionPostResultHandler = handler
+    }
+
+    public func setSemanticSearchCallback(_ callback: SemanticSearchCallback?) {
+        semanticSearchCallback = callback
     }
 
     func notifyContextDidSync(_ context: UUID) {
