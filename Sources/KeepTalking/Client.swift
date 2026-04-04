@@ -120,9 +120,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public typealias PrimitiveActionPostResultHandler =
         @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall) -> Void
     /// Callback that executes semantic thread search. Injected by the app layer.
-    /// Parameters: query, topK, contextIDs filter, tagTitles filter.
+    /// Parameters: query, topK, contextIDs filter, tagIDs filter.
     public typealias SemanticSearchCallback =
-        @Sendable (String, Int, [UUID], [String]) async throws -> [KeepTalkingSemanticSearchResult]
+        @Sendable (String, Int, [UUID], [UUID]) async throws -> [KeepTalkingSemanticSearchResult]
 
     public typealias EnvelopeHandler = @Sendable (any KeepTalkingEnvelope) -> Void
     public typealias RawMessageHandler = @Sendable (String) -> Void

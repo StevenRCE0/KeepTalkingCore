@@ -28,11 +28,17 @@ extension KeepTalkingClient {
         let topK = args["top_k"]?.intValue ?? 5
         let contextID = try context.requireID()
 
+        let contextTagIDs: [UUID] = (try? await KeepTalkingMapping.query(on: localStore.database)
+            .filter(\.$context.$id == contextID)
+            .filter(\.$kind == .tag)
+            .all()
+            .compactMap(\.id)) ?? []
+
         let results: [KeepTalkingSemanticSearchResult]
         do {
             // Scope to the current context by default; other nodes granted a
             // narrower permission will have their contextIDs pre-set in the bundle.
-            results = try await callback(query, topK, [contextID], [])
+            results = try await callback(query, topK, [contextID], contextTagIDs)
         } catch {
             return jsonString([
                 "ok": false,
