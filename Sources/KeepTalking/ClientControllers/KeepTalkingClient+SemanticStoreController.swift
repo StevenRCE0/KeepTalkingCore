@@ -3,6 +3,49 @@ import Foundation
 
 extension KeepTalkingClient {
 
+    /// Re-indexes all threads for `contextID` and prunes any store entries that no
+    /// longer correspond to a known thread. Fire-and-forget.
+    public static func autoEmbedContext(
+        _ contextID: UUID,
+        on database: any Database,
+        semanticStore: any KeepTalkingSemanticStore
+    ) {
+        Task.detached(priority: .background) {
+            let contextThreads = (try? await KeepTalkingThread.query(on: database)
+                .filter(\.$context.$id == contextID)
+                .all()) ?? []
+            let knownIDs = Set(
+                ((try? await KeepTalkingThread.query(on: database).all()) ?? []).compactMap(\.id)
+            )
+            let indexed = (try? await semanticStore.allDocuments()) ?? []
+            let indexedIDs = Set(indexed.map(\.id))
+
+            for staleID in indexedIDs.subtracting(knownIDs) {
+                try? await semanticStore.removeThread(id: staleID)
+            }
+            for thread in contextThreads {
+                guard let threadID = thread.id else { continue }
+                let text = (try? await threadDocumentText(for: thread, on: database)) ?? ""
+                guard !text.isEmpty else { continue }
+                if indexedIDs.contains(threadID) {
+                    try? await semanticStore.updateThread(id: threadID, text: text)
+                } else {
+                    try? await semanticStore.indexThread(id: threadID, text: text)
+                }
+            }
+        }
+    }
+
+    /// Removes a single thread from the semantic store. Fire-and-forget.
+    public static func autoDeindex(
+        _ threadID: UUID,
+        semanticStore: any KeepTalkingSemanticStore
+    ) {
+        Task.detached(priority: .background) {
+            try? await semanticStore.removeThread(id: threadID)
+        }
+    }
+
     /// Builds the indexable text content for a thread.
     /// Prefers the summary if available; otherwise concatenates
     /// non-chitter-chatter message content within the thread's range,
