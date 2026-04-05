@@ -20,7 +20,9 @@ struct OpenAIConnectorPromptTests {
                 KeepTalkingClient.markChitterChatterToolFunctionName,
             currentPromptIncludesAttachments: false,
             currentPromptShouldAvoidAutomaticToolUse: false,
-            contextTranscript: ""
+            contextTranscript: "",
+            currentDate: "2024-01-15T10:00:00Z",
+            platform: "macOS"
         )
 
         #expect(
@@ -48,7 +50,9 @@ struct OpenAIConnectorPromptTests {
                 KeepTalkingClient.markChitterChatterToolFunctionName,
             currentPromptIncludesAttachments: true,
             currentPromptShouldAvoidAutomaticToolUse: true,
-            contextTranscript: ""
+            contextTranscript: "",
+            currentDate: "2024-01-15T10:00:00Z",
+            platform: "macOS"
         )
 
         #expect(

@@ -211,16 +211,7 @@ public struct AIOrchestrator {
         base + [
             .developer(
                 .init(
-                    content: .textContent(
-                        """
-                        Planning stage.
-                        Decide the next concrete step before producing a user-facing answer.
-                        Call at least one relevant tool now.
-                        If a specific tool is already identifiable, call it directly.
-                        If you need discovery first, call the best discovery tool now.
-                        Do not stop at analysis, do not restate the request, and do not answer the user in this stage.
-                        """
-                    )
+                    content: .textContent(AIPromptPresets.planningStageInstruction)
                 )
             )
         ]

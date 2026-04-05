@@ -154,6 +154,7 @@ extension KeepTalkingClient {
                                 toolMessage(
                                     payload: try await executeSearchThreadsToolCall(
                                         rawArguments: toolCall.function.arguments,
+                                        runtimeCatalog: runtimeCatalog,
                                         context: context
                                     ),
                                     toolCallID: toolCallID
@@ -335,9 +336,9 @@ extension KeepTalkingClient {
     ) -> String {
         let renderedContent = result.content.map { content -> String in
             switch content {
-                case .text(let text):
+                case .text(let text, _, _):
                     // TODO: we'll probably add metadata support here
-                    return text.text
+                    return text
                 default:
                     if let data = try? JSONEncoder().encode(content),
                         let json = String(data: data, encoding: .utf8)
@@ -558,9 +559,11 @@ extension KeepTalkingClient {
             return jsonString(["ok": false, "error": "no_prompt_message"])
         }
         let args = try decodeToolArguments(rawArguments)
-        let previousTopicName = args["previous_topic_name"]?.stringValue?
+        let previousTopicName =
+            args["previous_topic_name"]?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let currentTopicName = args["current_topic_name"]?.stringValue?
+        let currentTopicName =
+            args["current_topic_name"]?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !currentTopicName.isEmpty else {
             return jsonString(["ok": false, "error": "missing_current_topic_name"])

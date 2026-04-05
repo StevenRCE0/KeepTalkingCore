@@ -449,14 +449,10 @@ extension KeepTalkingClient {
         attachment: KeepTalkingContextAttachment,
         data: Data
     ) -> ChatQuery.ChatCompletionMessageParam {
-        let leadText: String
-        if attachment.isImage {
-            leadText =
-                "Inspect the attached context image '\(attachment.filename)'. This is the user-provided attachment you just requested, and it is already included in this turn. Use it directly. Do not call context attachment tools to verify this same file again; only call them if you truly need a different attachment or metadata not present here."
-        } else {
-            leadText =
-                "Inspect the attached context file '\(attachment.filename)'. This is the user-provided attachment you just requested, and it is already included in this turn. Use it directly. Do not call context attachment tools to verify this same file again; only call them if you truly need a different attachment or metadata not present here."
-        }
+        let leadText = AIPromptPresets.attachmentInjectionLeadText(
+            filename: attachment.filename,
+            isImage: attachment.isImage
+        )
 
         return .user(
             .init(

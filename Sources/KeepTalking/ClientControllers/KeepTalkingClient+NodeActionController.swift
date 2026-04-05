@@ -249,8 +249,7 @@ extension KeepTalkingClient {
             case .primitive:
                 try await primitiveActionManager.registerPrimitiveAction(action)
             case .semanticRetrieval:
-                // Executed app-side via semanticSearchCallback — no local manager registration needed.
-                break
+                try await semanticRetrievalActionManager.registerIfNeeded(action)
         }
         await invalidateActionToolCatalog(
             reason: "register_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
@@ -1048,8 +1047,7 @@ extension KeepTalkingClient {
                         id: action.actionID,
                         name: name,
                         indexDescription: indexDescription,
-                        contextIDs: [],
-                        tagTitles: []
+                        contextIDs: []
                     )
                 )
         }

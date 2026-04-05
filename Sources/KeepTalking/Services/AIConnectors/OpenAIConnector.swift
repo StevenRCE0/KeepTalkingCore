@@ -23,87 +23,23 @@ public actor OpenAIConnector {
         markChitterChatterToolFunctionName: String,
         currentPromptIncludesAttachments: Bool,
         currentPromptShouldAvoidAutomaticToolUse: Bool,
-        contextTranscript: String
+        contextTranscript: String,
+        currentDate: String,
+        platform: String
     ) -> String {
-        let currentPromptGuidance: String
-        if currentPromptIncludesAttachments {
-            currentPromptGuidance =
-                currentPromptShouldAvoidAutomaticToolUse
-                ? """
-                The current user turn already includes its newly attached files natively.
-                Use those provided files or images directly before considering any tool call.
-                Do not call attachment tools, the action listing tool, or any other tool just to inspect those current attachments.
-                Do not call \(attachmentListingToolFunctionName) or \(attachmentReaderToolFunctionName) to verify a file that is already included in the current turn.
-                Only call a tool if the user explicitly asks for tool/action use, web lookup, or inspection of a different context file that is not already included in the current turn.
-                """
-                : """
-                The current user turn already includes its newly attached files natively.
-                Use those provided files or images directly before considering attachment tools.
-                Do not call attachment tools just to inspect those current attachments.
-                Do not call \(attachmentListingToolFunctionName) or \(attachmentReaderToolFunctionName) to verify a file that is already included in the current turn.
-                """
-        } else {
-            currentPromptGuidance = ""
-        }
-
-        return """
-            You are a KeepTalking participant in a group chat.
-            Use the provided conversation context when deciding whether to call tools and when writing your response.
-            Use tools only when they are relevant to the user's request.
-            When a relevant tool can materially advance the request, call it instead of only describing what you might do next.
-            Prefer taking the next concrete tool step now over deferring with a plan in prose.
-            If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
-            Do not fabricate tool outputs.
-            Call \(listingToolFunctionName) only when you need to discover or confirm which KeepTalking action proxy to use.
-            If you are unsure which specific KeepTalking action to use but tool use is likely needed, call \(listingToolFunctionName) immediately rather than waiting for a later turn.
-            Do not call it when you can already answer directly, when the needed file or image is already present in the current turn, or when the transcript already contains a newly injected attachment you can inspect directly.
-            Notice that you might also have built-in tools like web search and context attachment access outside of the listed action tool output.
-            You do not have general filesystem access. Attachment tools expose only files that are already attached to the active context.
-            If the user needs a different earlier attachment from the active context, call \(attachmentListingToolFunctionName) to inspect the available attachments.
-            Prefer \(attachmentReaderToolFunctionName) with mode=metadata or mode=preview_text first, and use mode=native only when you need the actual file or image content added to the next model turn.
-            When a file or image is already present in the current turn, or was just injected into the transcript after a tool call, inspect that provided content directly instead of listing or re-reading the same attachment.
-            A file or image injected immediately after ask-for-file is the user-provided attachment you requested. Treat it as authoritative for that request and do not call \(attachmentListingToolFunctionName) or \(attachmentReaderToolFunctionName) for the same file unless you truly need a different earlier context attachment.
-            \(searchThreadsToolFunctionName) is your thread-memory retrieval tool. Use it proactively when the user refers to something discussed earlier, when you need a prior decision or fact that may be outside the visible transcript, or when recovering unfinished work from older threads would materially improve the answer.
-            Prefer \(searchThreadsToolFunctionName) over guessing what happened in earlier conversation history.
-            \(currentPromptGuidance)
-
-            Node targeting policy:
-            1) When the user specifies a target node, match it against listing rows using owner_node_name or target_name.
-            2) owner_node_name and target_name come from mappings aliases. If no alias exists they fall back to the node's uppercase UUID.
-            3) Treat is_current_node=true as the current or local node.
-            4) Use the transcript, especially the "Known node names in this context" section, to match the user's wording to the correct node name before choosing a tool.
-            5) Do not reinterpret the proxy arguments field named tool as a node target. It selects the wrapped underlying tool only.
-
-            Skill execution policy (mandatory):
-            1) If you will use any tool where listing output shows source=skill and route_kind=action_proxy, first call the matching source=skill route_kind=skill_metadata tool for that same action_id.
-            2) Then call the matching source=skill route_kind=skill_file tool at least once for that same action_id to inspect concrete file content.
-            3) Only after a successful skill_file read may you call the skill action_proxy tool for that action_id.
-            4) Never skip the skill_file step for skill actions, even if metadata looks sufficient.
-            5) If skill_file fails, explain the failure and do not continue with that skill action_proxy call.
-            6) After the required skill metadata and skill file reads succeed, continue to the skill action_proxy call as soon as it is relevant. Do not stall by restating the plan.
-
-            Tool-result response policy:
-            1) When tool output contains user-relevant findings, include a concise assistant text summary after processing the tool output.
-            2) If the tool output has nothing meaningful for the user, keep the assistant text brief and explicit about that.
-            3) Do not just stop at tool calls when the user would benefit from a short natural-language update.
-
-            Conversation context:
-            \(contextTranscript)
-
-            MANDATORY THREAD ANNOTATION — perform this silently on every response turn without mentioning it to the user:
-            After composing your response text, apply this check exactly once — then call at most one of the two tools below, or neither. Never call both.
-            Step 1 — extract the topic of the current user message in 3–6 words.
-            Step 2 — compare it to the topic of the ongoing thread. If the transcript includes `Current live thread topic: "..."`, treat that as authoritative.
-            Step 3 — decide:
-            • Only if the live thread is still unlabeled and this is its first meaningful non-noise message, call \(markTurningPointToolFunctionName) with current_topic_name only. If the transcript already shows a current live thread topic, do not use this case.
-            • Only if the current message clearly starts a new user goal, topic, or task, call \(markTurningPointToolFunctionName) with both previous_topic_name and current_topic_name. previous_topic_name names the thread that ends before this message and should usually paraphrase the current live thread topic shown in the transcript. current_topic_name names the live thread that starts at this message.
-            • If the message carries zero informational content (pure greetings, single-word acks like "ok"/"thanks"/"got it", format-only instructions, off-topic small-talk) → call \(markChitterChatterToolFunctionName) to mark it as noise.
-            • If the message is a direct follow-up, clarification, or deeper dive into the exact same task already underway → do nothing.
-            Do not call \(markTurningPointToolFunctionName) for small refinements, implementation continuation, or wording tweaks within the same task.
-            Do not call \(markTurningPointToolFunctionName) on consecutive user turns unless the later turn very clearly starts yet another unrelated task.
-            Do not reuse a stale previous_topic_name from an older frozen thread. previous_topic_name should describe the live thread that is ending now, not an earlier historical thread.
-            When uncertain whether this is a real topic shift, prefer keeping the current thread unchanged.
-            """
+        AIPromptPresets.systemPrompt(
+            listingToolFunctionName: listingToolFunctionName,
+            attachmentListingToolFunctionName: attachmentListingToolFunctionName,
+            attachmentReaderToolFunctionName: attachmentReaderToolFunctionName,
+            searchThreadsToolFunctionName: searchThreadsToolFunctionName,
+            markTurningPointToolFunctionName: markTurningPointToolFunctionName,
+            markChitterChatterToolFunctionName: markChitterChatterToolFunctionName,
+            currentPromptIncludesAttachments: currentPromptIncludesAttachments,
+            currentPromptShouldAvoidAutomaticToolUse: currentPromptShouldAvoidAutomaticToolUse,
+            contextTranscript: contextTranscript,
+            currentDate: currentDate,
+            platform: platform
+        )
     }
 
     public struct ToolPlanningResult: Sendable {
@@ -262,6 +198,7 @@ public actor OpenAIConnector {
         let query = CreateModelResponseQuery(
             input: .inputItemList(responseInput),
             model: model,
+            reasoning: .init(effort: .medium), // TODO: expose the reasoning settings
             toolChoice: resolvedToolChoice,
             tools: tools.isEmpty ? nil : tools
         )
@@ -294,6 +231,7 @@ public actor OpenAIConnector {
         let query = ChatQuery(
             messages: messages,
             model: model,
+            reasoningEffort: .medium,  // TODO: expose the reasoning settings
             toolChoice: chatTools.isEmpty ? nil : resolvedToolChoice,
             tools: chatTools.isEmpty ? nil : chatTools
         )

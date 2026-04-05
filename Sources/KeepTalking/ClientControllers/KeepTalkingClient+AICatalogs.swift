@@ -50,10 +50,17 @@ enum KeepTalkingAgentToolRoute: Sendable {
     )
 }
 
+struct KeepTalkingSemanticRetrievalCatalogEntry: Sendable {
+    let actionID: UUID
+    let ownerNodeID: UUID
+    let bundle: KeepTalkingSemanticRetrievalBundle
+}
+
 struct KeepTalkingActionRuntimeCatalog: Sendable {
     let catalog: KeepTalkingActionToolCatalog
     let routesByFunctionName: [String: KeepTalkingAgentToolRoute]
     let skillSummaries: [KeepTalkingSkillSummaryEntry]
+    let remoteSemanticRetrievalActions: [KeepTalkingSemanticRetrievalCatalogEntry]
 }
 
 actor KeepTalkingActionCatalogCache {
@@ -114,6 +121,7 @@ extension KeepTalkingClient {
         var definitionsByName: [String: KeepTalkingActionToolDefinition] = [:]
         var routesByFunctionName: [String: KeepTalkingAgentToolRoute] = [:]
         var skillSummaryByActionID: [UUID: KeepTalkingSkillSummaryEntry] = [:]
+        var remoteSemanticRetrievalEntries: [KeepTalkingSemanticRetrievalCatalogEntry] = []
 
         let selfNode = try await ensure(
             config.node,
@@ -315,8 +323,17 @@ extension KeepTalkingClient {
                     routesByFunctionName[primitiveActionDefinition.functionName] =
                         .actionProxy(primitiveActionDefinition)
 
-                default:
-                    continue
+                case .semanticRetrieval(let bundle):
+                    // Skip the local node's own semantic retrieval; it is served
+                    // transparently by the built-in kt_search_threads tool.
+                    guard ownerNodeID != config.node else { continue }
+                    remoteSemanticRetrievalEntries.append(
+                        KeepTalkingSemanticRetrievalCatalogEntry(
+                            actionID: actionID,
+                            ownerNodeID: ownerNodeID,
+                            bundle: bundle
+                        )
+                    )
             }
         }
 
@@ -328,6 +345,9 @@ extension KeepTalkingClient {
             ),
             routesByFunctionName: routesByFunctionName,
             skillSummaries: Array(skillSummaryByActionID.values).sorted {
+                $0.actionID.uuidString < $1.actionID.uuidString
+            },
+            remoteSemanticRetrievalActions: remoteSemanticRetrievalEntries.sorted {
                 $0.actionID.uuidString < $1.actionID.uuidString
             }
         )
@@ -523,7 +543,7 @@ extension KeepTalkingClient {
     private static let contextMainDecayLambda: Double = 0.05
 
     /// Exponential decay applied to messages inside completed (stored/archived) threads.
-    private static let storedThreadDecayLambda: Double = 0.07
+    private static let storedThreadDecayLambda: Double = 0.1
 
     /// Maximum messages taken from the live thread  (= floor(1 / λ₀)).
     private static let contextMainMessageBudget: Int = 20   // floor(1/0.05)

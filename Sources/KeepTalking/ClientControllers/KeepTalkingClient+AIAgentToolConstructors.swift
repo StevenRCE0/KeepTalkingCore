@@ -164,25 +164,11 @@ extension KeepTalkingClient {
         originalToolDescription: String?,
         fallbackDescription: String
     ) -> String {
-        let name = originalToolName.trimmingCharacters(
-            in: .whitespacesAndNewlines
+        AIPromptPresets.mcpProxyToolDescription(
+            originalToolName: originalToolName,
+            originalToolDescription: originalToolDescription,
+            fallbackDescription: fallbackDescription
         )
-        let trimmedOriginalDescription = originalToolDescription?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let description: String
-        if let trimmedOriginalDescription, !trimmedOriginalDescription.isEmpty {
-            description = trimmedOriginalDescription
-        } else {
-            description = fallbackDescription
-        }
-
-        if name.isEmpty {
-            return description
-        }
-        return """
-            Functional tool name: \(name)
-            Functional tool description: \(description)
-            """
     }
 
     func makeSkillActionProxyDefinition(
@@ -309,8 +295,7 @@ extension KeepTalkingClient {
             .functionTool(
                 .init(
                     name: Self.listingToolFunctionName,
-                    description:
-                        "List KeepTalking action proxies available in the current context. Use this only when you need to discover or confirm which KeepTalking action proxy to call. Match the requested target node against owner_node_name or target_name. Those names come from mappings aliases and fall back to the node's uppercase UUID when no alias exists. Use is_current_node when the user means the current or local node. Use route_kind and action_id to match skill_metadata or skill_file with skill action_proxy calls.",
+                    description: AIPromptPresets.ToolDescriptions.listingTool,
                     parameters: JSONSchema(
                         .type(.object),
                         .properties([:]),
@@ -326,8 +311,7 @@ extension KeepTalkingClient {
             .functionTool(
                 .init(
                     name: Self.contextAttachmentListingToolFunctionName,
-                    description:
-                        "List attachments already stored in the active KeepTalking context, including ids, filenames, mime types, availability, and derived metadata. Use this only when you need a different earlier attachment or need to confirm attachment identity or metadata that is not already present in the current turn. Do not call this just to verify a file or image that was already attached or injected into the same turn.",
+                    description: AIPromptPresets.ToolDescriptions.contextAttachmentListing,
                     parameters: JSONSchema(
                         .type(.object),
                         .properties([:]),
@@ -343,8 +327,7 @@ extension KeepTalkingClient {
             .functionTool(
                 .init(
                     name: Self.contextAttachmentReadToolFunctionName,
-                    description:
-                        "Inspect a specific context attachment after kt_list_context_attachments. Use this when you need a different earlier attachment or metadata that is not already present in the current turn. Do not call this for a file or image that is already attached or injected into the same turn unless you truly need a different earlier context attachment. Use mode metadata for attachment fields, preview_text for derived text or description, and native only when you need the actual file or image added to the next model turn.",
+                    description: AIPromptPresets.ToolDescriptions.contextAttachmentRead,
                     parameters: JSONSchema(
                         .type(.object),
                         .properties([
@@ -384,8 +367,7 @@ extension KeepTalkingClient {
         OpenAITool.functionTool(
             .init(
                 name: Self.markTurningPointToolFunctionName,
-                description:
-                    "Mark or label the live thread topic at the current user message. Use this sparingly in exactly one of two cases: 1) the first meaningful non-noise message of an unlabeled live thread, to label the current thread with current_topic_name only; 2) a real topic shift, to end the previous thread and start a new live thread here by providing both previous_topic_name and current_topic_name. previous_topic_name always names the topic before this message and should usually match or refine the current live thread topic already shown in the transcript. Do not call this for small refinements, implementation continuation, or minor wording shifts. Do not repeat the same previous_topic_name across consecutive turns unless the live thread truly stayed on that topic until this message.",
+                description: AIPromptPresets.ToolDescriptions.markTurningPoint,
                 parameters: JSONSchema(
                     .type(.object),
                     .properties([
@@ -414,8 +396,7 @@ extension KeepTalkingClient {
         OpenAITool.functionTool(
             .init(
                 name: Self.markChitterChatterToolFunctionName,
-                description:
-                    "Toggle the current user request as chitter-chatter — noise, small-talk, greetings, acknowledgements with no new information, or off-topic asides. Chitter-chatter is de-emphasised in the thread view but never deleted. Use proactively.",
+                description: AIPromptPresets.ToolDescriptions.markChitterChatter,
                 parameters: JSONSchema(
                     .type(.object),
                     .properties([:]),
@@ -430,8 +411,7 @@ extension KeepTalkingClient {
         OpenAITool.functionTool(
             .init(
                 name: Self.contextAttachmentUpdateMetadataToolFunctionName,
-                description:
-                    "Update metadata on a context attachment — set an image description after inspecting an image, add a text preview for non-text files, or add tags. Fields you omit are left unchanged. Use this after inspecting an attachment with mode=native to persist your understanding of its content.",
+                description: AIPromptPresets.ToolDescriptions.contextAttachmentUpdateMetadata,
                 parameters: JSONSchema(
                     .type(.object),
                     .properties([
@@ -473,8 +453,7 @@ extension KeepTalkingClient {
         OpenAITool.functionTool(
             .init(
                 name: Self.searchThreadsToolFunctionName,
-                description:
-                    "Search thread memory in the current context. This is your conversation-memory retrieval tool for earlier threads, prior decisions, recalled facts, user preferences, and unfinished work that may not be visible in the current transcript window. Use it proactively before answering when the user refers to something discussed earlier. Returns the most relevant thread excerpts ranked by semantic similarity.",
+                description: AIPromptPresets.ToolDescriptions.searchThreads,
                 parameters: JSONSchema(
                     .type(.object),
                     .properties([

@@ -14,7 +14,11 @@ struct CreateKeepTalkingMappingsMigration: AsyncMigration {
                 .uuid,
                 .references(KeepTalkingContext.schema, "id", onDelete: .cascade)
             )
-            .field("thread", .uuid)
+            .field(
+                "thread",
+                .uuid,
+                .references(KeepTalkingThread.schema, "id", onDelete: .cascade)
+            )
             .field("kind", .string, .required)
             .field("namespace", .string)
             .field("value", .string, .required)

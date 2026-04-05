@@ -99,6 +99,17 @@ extension KeepTalkingClient {
             model: model
         )
 
+        let currentDate = ISO8601DateFormatter().string(from: Date())
+        #if os(iOS)
+        let platform = "iOS"
+        #elseif os(macOS)
+        let platform = "macOS"
+        #elseif os(visionOS)
+        let platform = "visionOS"
+        #else
+        let platform = "unknown"
+        #endif
+
         let messages: [ChatQuery.ChatCompletionMessageParam] = [
             .system(
                 .init(
@@ -121,7 +132,9 @@ extension KeepTalkingClient {
                             currentPromptShouldAvoidAutomaticToolUse:
                                 hasCurrentPromptAttachments
                                 && !allowAutomaticToolUse,
-                            contextTranscript: contextTranscript
+                            contextTranscript: contextTranscript,
+                            currentDate: currentDate,
+                            platform: platform
                         )
                     )
                 )

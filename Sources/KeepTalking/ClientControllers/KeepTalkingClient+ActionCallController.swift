@@ -138,8 +138,12 @@ extension KeepTalkingClient {
                         action: action,
                         call: request.call
                     )
-                default:
-                    throw KeepTalkingClientError.unsupportedActionPayload
+                case .semanticRetrieval:
+                    callResult = try await semanticRetrievalActionManager.callAction(
+                        action: action,
+                        call: request.call,
+                        contextID: request.contextID
+                    )
             }
 
             let actionID = request.call.action.uuidString.lowercased()
@@ -151,8 +155,8 @@ extension KeepTalkingClient {
                         return "skill"
                     case .primitive:
                         return "primitive"
-                    default:
-                        return "unknown"
+                    case .semanticRetrieval:
+                        return "semantic_retrieval"
                 }
             }()
             let rendered = callResult.content.map {
@@ -1018,8 +1022,12 @@ extension KeepTalkingClient {
 
     private func renderToolContentForDebug(_ content: Tool.Content) -> String {
         switch content {
-            case .text(let text):
-                return text.text
+            case .text(let text, let annotations, let metadata):
+                return """
+                    text: \(text)
+                    annotations: \(annotations.debugDescription)
+                    metadata: \(metadata.debugDescription)
+                    """
             default:
                 if let data = try? JSONEncoder().encode(content),
                     let json = String(data: data, encoding: .utf8)

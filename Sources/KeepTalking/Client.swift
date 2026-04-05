@@ -162,6 +162,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let mcpManager: MCPManager
     let skillManager: SkillManager
     let primitiveActionManager: PrimitiveActionManager
+    let semanticRetrievalActionManager: SemanticRetrievalActionManager
     let openAIConnector: OpenAIConnector?
     let blobStore: KeepTalkingBlobStore
     private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
@@ -277,6 +278,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.primitiveActionManager = PrimitiveActionManager(
             callback: primitiveActionCallback
         )
+        self.semanticRetrievalActionManager = SemanticRetrievalActionManager(
+            database: localStore.database
+        )
 
         rtcClient.onLog = { [weak self] line in
             self?.onLog?(line)
@@ -343,6 +347,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     public func setSemanticSearchCallback(_ callback: SemanticSearchCallback?) {
         semanticSearchCallback = callback
+        Task { [weak self] in
+            await self?.semanticRetrievalActionManager.setSearchCallback(callback)
+        }
     }
 
     func notifyContextDidSync(_ context: UUID) {

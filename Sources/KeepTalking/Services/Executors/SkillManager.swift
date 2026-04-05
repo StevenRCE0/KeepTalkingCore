@@ -204,7 +204,7 @@ public actor SkillManager {
             ?? "Skill execution completed."
 
         return (
-            content: [.text(finalText)],
+            content: [.text(text: finalText, annotations: nil, _meta: nil)],
             isError: false
         )
     }

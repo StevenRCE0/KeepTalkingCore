@@ -436,10 +436,10 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
                 if missed >= Self.peerOfflineWavesThreshold {
                     debug("peer offline node=\(nodeID.uuidString.prefix(8)) missedWaves=\(missed)")
                     handleParticipantLeft(nodeID)
-                    stateQueue.sync { peerMissedWaves.removeValue(forKey: nodeID) }
+                    _ = stateQueue.sync { peerMissedWaves.removeValue(forKey: nodeID) }
                 }
             } else {
-                stateQueue.sync { peerMissedWaves.removeValue(forKey: nodeID) }
+                _ = stateQueue.sync { peerMissedWaves.removeValue(forKey: nodeID) }
             }
         }
     }
