@@ -81,6 +81,10 @@ extension KeepTalkingClient {
             persistedContext,
             skillSummaries: runtimeCatalog.skillSummaries
         )
+        let contextMessages = try await agentContextMessages(
+            persistedContext,
+            excludingMessageID: promptMessageID
+        )
         let hasCurrentPromptAttachments = !currentPromptAttachments.isEmpty
         let allowAutomaticToolUse = Self.shouldAllowAutomaticToolUse(
             prompt: prompt,
@@ -139,6 +143,7 @@ extension KeepTalkingClient {
                     )
                 )
             ),
+        ] + contextMessages + [
             userMessage,
         ]
 

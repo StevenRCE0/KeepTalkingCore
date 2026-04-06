@@ -10,7 +10,7 @@ public struct AIOrchestrator {
             [Message],
             [OpenAITool],
             OpenAIModel,
-            ChatQuery.ChatCompletionFunctionCallOptionParam
+            ChatQuery.ChatCompletionFunctionCallOptionParam?
         ) async throws -> OpenAIConnector.ToolPlanningResult
     public typealias AssistantMessageBuilder =
         (OpenAIConnector.ToolPlanningResult) -> Message?
@@ -126,8 +126,30 @@ public struct AIOrchestrator {
                     planningMessages(base: transcript),
                     tools,
                     model,
-                    .required
+                    nil  // TODO: might make this controllable
                 )
+
+                if let assistantText = planningTurn.assistantText,
+                    !assistantText.isEmpty
+                {
+                    latestAssistantText = assistantText
+                }
+
+                if let planningChatText = Self.chatText(
+                    for: planningTurn,
+                    toolNameResolver: dependencies.toolNameResolver,
+                    toolHintResolver: dependencies.toolHintResolver
+                ) {
+                    if latestAssistantText.isEmpty {
+                        latestAssistantText = planningChatText.0
+                    }
+                    try await dependencies.assistantPublisher(planningChatText)
+                }
+
+                guard !planningTurn.toolCalls.isEmpty else {
+                    break
+                }
+
                 if let assistantMessage =
                     dependencies.assistantMessageBuilder(planningTurn)
                 {
@@ -211,7 +233,9 @@ public struct AIOrchestrator {
         base + [
             .developer(
                 .init(
-                    content: .textContent(AIPromptPresets.planningStageInstruction)
+                    content: .contentParts([
+                        .init(text: AIPromptPresets.planningStageInstruction)
+                    ])
                 )
             )
         ]
@@ -252,7 +276,7 @@ public struct AIOrchestrator {
         let toolNames = orderedUniqueToolNames(
             turn.toolCalls.map(toolNameResolver)
         )
-        
+
         // Use a specific hint if all calls in this turn share one.
         let hints = turn.toolCalls.compactMap(toolHintResolver)
         guard !hints.isEmpty else {
