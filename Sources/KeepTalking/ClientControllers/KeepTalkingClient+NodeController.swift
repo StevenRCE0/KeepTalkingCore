@@ -143,11 +143,12 @@ extension KeepTalkingClient {
         ).publicKey
     }
 
-    public func lure(node sourceNodeID: UUID, publicKey: String) async throws {
+    public func lure(node sourceNodeID: UUID, publicKey: String, overwrite: Bool = false) async throws {
         try await Self.lure(
             node: sourceNodeID,
             publicKey: publicKey,
             localNodeID: config.node,
+            overwrite: overwrite,
             on: localStore.database
         )
     }
@@ -157,6 +158,7 @@ extension KeepTalkingClient {
         node sourceNodeID: UUID,
         publicKey: String,
         localNodeID: UUID,
+        overwrite: Bool = false,
         on database: any Database
     ) async throws {
         let trimmedPublicKey = publicKey.trimmingCharacters(
@@ -177,6 +179,40 @@ extension KeepTalkingClient {
             return
         }
 
+        let (relation, existingIdentityKey) = try await Self.identityKey(
+            for: sourceNodeID,
+            localNodeID: localNodeID,
+            on: database
+        )
+        guard let relation else {
+            throw KeepTalkingClientError.missingRelation
+        }
+
+        if !overwrite && existingIdentityKey != nil {
+            return
+        }
+
+        let identityKey = try KeepTalkingNodeIdentityKey(
+            relation: relation,
+            publicKey: trimmedPublicKey,
+            privateKey: Data()
+        )
+        try await identityKey.save(on: database)
+    }
+
+    public func identityKey(for sourceNodeID: UUID, localNodeID: UUID) async throws
+        -> (
+            relation: KeepTalkingNodeRelation?, identityKey: KeepTalkingNodeIdentityKey?
+        )
+    {
+        try await Self.identityKey(for: sourceNodeID, localNodeID: localNodeID, on: localStore.database)
+    }
+
+    static public func identityKey(for sourceNodeID: UUID, localNodeID: UUID, on database: any Database) async throws
+        -> (
+            relation: KeepTalkingNodeRelation?, identityKey: KeepTalkingNodeIdentityKey?
+        )
+    {
         guard let localNode = try await KeepTalkingNode.find(localNodeID, on: database) else {
             throw KeepTalkingClientError.missingNode
         }
@@ -211,26 +247,21 @@ extension KeepTalkingClient {
         }
 
         guard relation.id != nil else {
-            return
+            return (nil, nil)
         }
 
         let existingKeys = try await relation.$identityKeys.get(
             on: database
         )
 
-        if existingKeys.contains(where: {
+        if let existingKey = existingKeys.first(where: {
             guard let privateKey = $0.privateKey else { return true }
             return privateKey.isEmpty
         }) {
-            return
+            return (relation, existingKey)
+        } else {
+            return (relation, nil)
         }
-
-        let identityKey = try KeepTalkingNodeIdentityKey(
-            relation: relation,
-            publicKey: trimmedPublicKey,
-            privateKey: Data()
-        )
-        try await identityKey.save(on: database)
     }
 
     static public func eraseRemoteNodeRelationsAndNonLocalActionRelations(

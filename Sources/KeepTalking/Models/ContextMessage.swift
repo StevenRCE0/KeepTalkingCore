@@ -1,7 +1,23 @@
 import FluentKit
 import Foundation
 
-public final class KeepTalkingContextMessage: Model, @unchecked Sendable {
+public final class KeepTalkingContextMessage: Model, Hashable, @unchecked Sendable {
+    public static func == (lhs: KeepTalkingContextMessage, rhs: KeepTalkingContextMessage) -> Bool {
+        guard lhs.id != nil, rhs.id != nil else {
+            return false
+        }
+        return lhs.id == rhs.id && lhs.$context.id == rhs.$context.id && lhs.sender == rhs.sender
+            && lhs.content == rhs.content && lhs.timestamp == rhs.timestamp && lhs.type == rhs.type
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine($context.id)
+        hasher.combine(sender)
+        hasher.combine(type)
+        hasher.combine(content)
+    }
+
     public static let schema = "kt_context_messages"
 
     @ID(key: .id)
