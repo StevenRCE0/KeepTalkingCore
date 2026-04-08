@@ -7,6 +7,7 @@ public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     case addToReadingList = "add-to-reading-list"
     case askForFile = "ask-for-file"
     case getCurrentlyPlayingMusic = "get-currently-playing-music"
+    case runMacOSShortcut = "run-macos-shortcut"
 }
 
 public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle {
@@ -14,17 +15,35 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle {
     public var name: String
     public var indexDescription: String
     public var action: KeepTalkingPrimitiveActionKind
+    /// The name of the macOS Shortcut to run. Only used when `action == .runMacOSShortcut`.
+    public var shortcutName: String?
 
     public init(
         id: UUID = UUID(),
         name: String,
         indexDescription: String,
-        action: KeepTalkingPrimitiveActionKind
+        action: KeepTalkingPrimitiveActionKind,
+        shortcutName: String? = nil
     ) {
         self.id = id
         self.name = name
         self.indexDescription = indexDescription
         self.action = action
+        self.shortcutName = shortcutName
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, indexDescription, action, shortcutName
+    }
+
+    // Custom decoder so existing stored records without `shortcutName` decode cleanly.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        indexDescription = try container.decode(String.self, forKey: .indexDescription)
+        action = try container.decode(KeepTalkingPrimitiveActionKind.self, forKey: .action)
+        shortcutName = try container.decodeIfPresent(String.self, forKey: .shortcutName)
     }
 
     public static let availablePrimitiveActions: [KeepTalkingPrimitiveBundle] = [

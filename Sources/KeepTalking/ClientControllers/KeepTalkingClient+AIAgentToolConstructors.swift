@@ -578,6 +578,20 @@ extension KeepTalkingClient {
                     ]),
                     .additionalProperties(.boolean(false))
                 )
+            case .runMacOSShortcut:
+                return JSONSchema(
+                    .type(.object),
+                    .properties([
+                        "input": JSONSchema(
+                            .type(.array),
+                            .items(JSONSchema(.type(.string))),
+                            .description(
+                                "Optional list of string values to pass to the shortcut as input. Each item is sent as a separate line via stdin."
+                            )
+                        )
+                    ]),
+                    .additionalProperties(.boolean(false))
+                )
         }
     }
 
