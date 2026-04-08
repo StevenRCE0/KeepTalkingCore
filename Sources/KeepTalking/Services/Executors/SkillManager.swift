@@ -63,7 +63,7 @@ public actor SkillManager {
     static let fileReadMaxCharacters = 30_000
     static let scriptOutputMaxCharacters = 18_000
 
-    let openAIConnector: OpenAIConnector?
+    let aiConnector: (any AIConnector)?
     let scriptExecutor: (any SkillScriptExecuting)?
     let scriptTimeoutSeconds: TimeInterval
 
@@ -72,12 +72,12 @@ public actor SkillManager {
     /// Creates a skill manager for a node runtime.
     public init(
         nodeConfig _: KeepTalkingConfig,
-        openAIConnector: OpenAIConnector?,
+        aiConnector: (any AIConnector)?,
         scriptExecutor: (any SkillScriptExecuting)? =
             DefaultSkillScriptExecutor.current,
         scriptTimeoutSeconds: TimeInterval = 20
     ) {
-        self.openAIConnector = openAIConnector
+        self.aiConnector = aiConnector
         self.scriptExecutor = scriptExecutor
         self.scriptTimeoutSeconds = scriptTimeoutSeconds
     }
@@ -129,7 +129,7 @@ public actor SkillManager {
         guard case .skill(let skillBundle) = action.payload else {
             throw SkillManagerError.invalidAction
         }
-        guard let openAIConnector else {
+        guard let aiConnector else {
             throw SkillManagerError.missingAIConnector
         }
 
@@ -170,10 +170,20 @@ public actor SkillManager {
 
         var latestAssistantText: String?
         for _ in 0..<8 {
-            let turn = try await openAIConnector.completeTurn(
+            let turn = try await aiConnector.completeTurn(
                 messages: messages,
                 tools: OpenAIConnector.toResponseTools(tools: tools),
-                model: "gpt-5-codex"
+                model: "gpt-5-codex",
+                toolChoice: nil,
+                stage: .execution,
+                toolExecutor: { [weak self] toolCalls in
+                    guard let self = self else { return [] }
+                    return try await self.executeSkillToolCalls(
+                        toolCalls,
+                        actionID: actionID,
+                        skillDirectory: skillBundle.directory
+                    )
+                }
             )
 
             if let assistantMessage = assistantMessage(from: turn) {
@@ -195,7 +205,7 @@ public actor SkillManager {
                     turn.toolCalls,
                     actionID: actionID,
                     skillDirectory: skillBundle.directory
-                )
+                ).map { .tool($0) }
             )
         }
 

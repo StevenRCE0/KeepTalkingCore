@@ -4,7 +4,7 @@ import OpenAI
 
 extension SkillManager {
     func assistantMessage(
-        from turn: OpenAIConnector.ToolPlanningResult
+        from turn: AITurnResult
     ) -> ChatQuery.ChatCompletionMessageParam? {
         let text = turn.assistantText?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -27,8 +27,8 @@ extension SkillManager {
             .ToolCallParam],
         actionID: UUID,
         skillDirectory: URL
-    ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
-        var messages: [ChatQuery.ChatCompletionMessageParam] = []
+    ) async throws -> [ChatQuery.ChatCompletionMessageParam.ToolMessageParam] {
+        var messages: [ChatQuery.ChatCompletionMessageParam.ToolMessageParam] = []
         for toolCall in toolCalls {
             let toolCallID =
                 toolCall.id.isEmpty
@@ -57,11 +57,9 @@ extension SkillManager {
             }
 
             messages.append(
-                .tool(
-                    .init(
-                        content: .textContent(payload),
-                        toolCallId: toolCallID
-                    )
+                .init(
+                    content: .textContent(payload),
+                    toolCallId: toolCallID
                 )
             )
         }

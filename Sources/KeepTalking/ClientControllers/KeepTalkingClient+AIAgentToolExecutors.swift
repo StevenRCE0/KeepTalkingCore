@@ -5,7 +5,7 @@ import OpenAI
 
 extension KeepTalkingClient {
     func assistantMessage(
-        from turn: OpenAIConnector.ToolPlanningResult
+        from turn: AITurnResult
     ) -> ChatQuery.ChatCompletionMessageParam? {
         let text = turn.assistantText?
             .trimmingCharacters(in: .whitespacesAndNewlines)

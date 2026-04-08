@@ -37,7 +37,9 @@ final class ResponsesAPIToolTests: XCTestCase {
             let result = try await connector.completeTurn(
                 messages: messages,
                 tools: [tool],
-                model: .gpt4_o
+                model: .gpt4_o,
+                stage: .planning,
+                toolExecutor: nil
             )
             print("ASSISTANT TEXT:")
             print(result.assistantText ?? "nil")

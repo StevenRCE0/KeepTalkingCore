@@ -111,19 +111,21 @@ public enum AIPromptPresets {
             """
     }
 
-    // MARK: - Planning stage
+    // MARK: - On-device system prompt (Apple Intelligence / FoundationModels)
 
-    /// Developer-turn instruction injected before each planning pass in the
-    /// agentic loop. The model must call at least one tool before answering.
-    public static let planningStageInstruction: String =
+    /// A compact system prompt for the on-device ``SystemLanguageModel``.
+    public static func onDeviceSystemPrompt(
+        currentDate: String,
+        platform: String
+    ) -> String {
         """
-        Planning stage.
-        Decide the next concrete step before producing a user-facing answer.
-        Call at least one relevant tool now.
-        If a specific tool is already identifiable, call it directly.
-        If you need discovery first, call the best discovery tool now.
-        Do not stop at analysis, do not restate the request, and do not answer the user in this stage.
+        You are a KeepTalking participant in a group chat.
+        Current date: \(currentDate). Platform: \(platform).
+        Be concise and direct. Use tools only when clearly needed.
+        Call the listing tool first if you are unsure which action to use.
+        Summarise tool results briefly in your reply.
         """
+    }
 
     // MARK: - Built-in tool descriptions
 
@@ -163,7 +165,8 @@ public enum AIPromptPresets {
         isImage: Bool
     ) -> String {
         let kind = isImage ? "image" : "file"
-        return "Inspect the attached context \(kind) '\(filename)'. This is the user-provided attachment you just requested, and it is already included in this turn. Use it directly. Do not call context attachment tools to verify this same file again; only call them if you truly need a different attachment or metadata not present here."
+        return
+            "Inspect the attached context \(kind) '\(filename)'. This is the user-provided attachment you just requested, and it is already included in this turn. Use it directly. Do not call context attachment tools to verify this same file again; only call them if you truly need a different attachment or metadata not present here."
     }
 
     // MARK: - MCP proxy tool description

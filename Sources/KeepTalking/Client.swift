@@ -149,7 +149,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     }
 
     public var aiEnabled: Bool {
-        openAIConnector != nil
+        aiConnector != nil
     }
 
     public let logon: UUID
@@ -163,7 +163,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let skillManager: SkillManager
     let primitiveActionManager: PrimitiveActionManager
     let semanticRetrievalActionManager: SemanticRetrievalActionManager
-    let openAIConnector: OpenAIConnector?
+    let aiConnector: (any AIConnector)?
     let blobStore: KeepTalkingBlobStore
     private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
     var actionApprovalHandler: ActionApprovalHandler?
@@ -226,6 +226,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         openAIAPIKey: String? = nil,
         openAIEndpoint: String? = nil,
         openAIAPIMode: OpenAIAPIMode = .responses,
+        aiConnector: (any AIConnector)? = nil,
         stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
             DefaultMCPStdioTransportLauncher.current,
         skillScriptExecutor: (any SkillScriptExecuting)? =
@@ -253,26 +254,30 @@ public final class KeepTalkingClient: @unchecked Sendable {
             stdioTransportLauncher: stdioTransportLauncher
         )
 
-        let apiKey =
-            openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let endpoint =
-            openAIEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? ProcessInfo.processInfo.environment["OPENAI_ENDPOINT"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if let apiKey, !apiKey.isEmpty {
-            self.openAIConnector =
-                try? OpenAIConnector(apiKey: apiKey, endpoint: endpoint, apiMode: openAIAPIMode)
+        if let aiConnector {
+            self.aiConnector = aiConnector
         } else {
-            self.openAIConnector = nil
+            let apiKey =
+                openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let endpoint =
+                openAIEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? ProcessInfo.processInfo.environment["OPENAI_ENDPOINT"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if let apiKey, !apiKey.isEmpty {
+                self.aiConnector =
+                    try? OpenAIConnector(apiKey: apiKey, endpoint: endpoint, apiMode: openAIAPIMode)
+            } else {
+                self.aiConnector = nil
+            }
         }
         self.skillManager = SkillManager(
             nodeConfig: config,
-            openAIConnector: self.openAIConnector,
+            aiConnector: self.aiConnector,
             scriptExecutor: skillScriptExecutor
         )
         self.primitiveActionManager = PrimitiveActionManager(

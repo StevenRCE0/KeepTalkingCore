@@ -10,10 +10,11 @@ public struct AIOrchestrator {
             [Message],
             [OpenAITool],
             OpenAIModel,
-            ChatQuery.ChatCompletionFunctionCallOptionParam?
-        ) async throws -> OpenAIConnector.ToolPlanningResult
+            ChatQuery.ChatCompletionFunctionCallOptionParam?,
+            AIStage
+        ) async throws -> AITurnResult
     public typealias AssistantMessageBuilder =
-        (OpenAIConnector.ToolPlanningResult) -> Message?
+        (AITurnResult) -> Message?
     public struct ToolExecution {
         public let toolCall: ToolCall
         public let messages: [Message]
@@ -26,7 +27,7 @@ public struct AIOrchestrator {
             self.messages = messages
         }
     }
-    public typealias ToolExecutor = ([ToolCall]) async throws -> [ToolExecution]
+    public typealias ToolExecutor = @Sendable ([ToolCall]) async throws -> [ToolExecution]
     public typealias ToolTranscriptAdapter =
         ([ToolExecution]) async throws -> [Message]
     public typealias AssistantPublisher = ((String, KeepTalkingContextMessage.MessageType)) async throws -> Void
@@ -55,7 +56,7 @@ public struct AIOrchestrator {
     public typealias ToolRetryObserver = @Sendable (Int, Int, any Error) async -> Void
 
     public struct Dependencies {
-        public let openAIConnector: OpenAIConnector
+        public let aiConnector: any AIConnector
         public let turnRunner: TurnRunner
         public let assistantMessageBuilder: AssistantMessageBuilder
         public let toolExecutor: ToolExecutor
@@ -66,7 +67,7 @@ public struct AIOrchestrator {
         public let toolRetryObserver: ToolRetryObserver?
 
         public init(
-            openAIConnector: OpenAIConnector,
+            aiConnector: any AIConnector,
             turnRunner: TurnRunner? = nil,
             assistantMessageBuilder: @escaping AssistantMessageBuilder,
             toolExecutor: @escaping ToolExecutor,
@@ -76,15 +77,25 @@ public struct AIOrchestrator {
             toolHintResolver: @escaping ToolHintResolver = { _ in .toolUse },
             toolRetryObserver: ToolRetryObserver? = nil
         ) {
-            self.openAIConnector = openAIConnector
+            self.aiConnector = aiConnector
             self.turnRunner =
                 turnRunner
-                ?? { messages, tools, model, toolChoice in
-                    try await openAIConnector.completeTurn(
+                ?? { messages, tools, model, toolChoice, stage in
+                    return try await aiConnector.completeTurn(
                         messages: messages,
                         tools: tools,
                         model: model,
-                        toolChoice: toolChoice
+                        toolChoice: toolChoice,
+                        stage: stage,
+                        toolExecutor: { calls in
+                            let executions = try await toolExecutor(calls)
+                            return executions.flatMap { $0.messages }.compactMap { msg in
+                                if case .tool(let toolMsg) = msg {
+                                    return toolMsg
+                                }
+                                return nil
+                            }
+                        }
                     )
                 }
             self.assistantMessageBuilder = assistantMessageBuilder
@@ -126,7 +137,8 @@ public struct AIOrchestrator {
                     planningMessages(base: transcript),
                     tools,
                     model,
-                    nil  // TODO: might make this controllable
+                    nil,  // TODO: might make this controllable
+                    .planning
                 )
 
                 if let assistantText = planningTurn.assistantText,
@@ -174,7 +186,8 @@ public struct AIOrchestrator {
                 transcript,
                 tools,
                 model,
-                toolChoice
+                toolChoice,
+                .execution
             )
 
             if let assistantMessage =
@@ -230,15 +243,7 @@ public struct AIOrchestrator {
     }
 
     private func planningMessages(base: [Message]) -> [Message] {
-        base + [
-            .developer(
-                .init(
-                    content: .contentParts([
-                        .init(text: AIPromptPresets.planningStageInstruction)
-                    ])
-                )
-            )
-        ]
+        base
     }
 
     private func executeWithRetry(
@@ -260,7 +265,7 @@ public struct AIOrchestrator {
     }
 
     private static func chatText(
-        for turn: OpenAIConnector.ToolPlanningResult,
+        for turn: AITurnResult,
         toolNameResolver: ToolNameResolver,
         toolHintResolver: ToolHintResolver
     ) -> (String, KeepTalkingContextMessage.MessageType)? {

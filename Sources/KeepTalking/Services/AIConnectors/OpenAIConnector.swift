@@ -13,7 +13,7 @@ public enum OpenAIAPIMode: String, Codable, Sendable, CaseIterable {
     }
 }
 
-public actor OpenAIConnector {
+public actor OpenAIConnector: AIConnector {
     public static func keepTalkingSystemPrompt(
         listingToolFunctionName: String,
         attachmentListingToolFunctionName: String,
@@ -42,19 +42,6 @@ public actor OpenAIConnector {
         )
     }
 
-    public struct ToolPlanningResult: Sendable {
-        public let assistantText: String?
-        public let toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]
-
-        public init(
-            assistantText: String?,
-            toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]
-        ) {
-            self.assistantText = assistantText
-            self.toolCalls = toolCalls
-        }
-    }
-
     public enum ConnectorError: Error, LocalizedError {
         case missingAPIKey
         case invalidEndpoint(String)
@@ -78,7 +65,8 @@ public actor OpenAIConnector {
     private let client: OpenAI
     private let apiKey: String
     private let baseURL: URL
-    public let apiMode: OpenAIAPIMode
+    public nonisolated let apiMode: OpenAIAPIMode
+    public nonisolated let capabilities: AIConnectorCapabilities = .init(supportsNativeToolCalling: true)
 
     private static let defaultBaseURL = URL(string: "https://api.openai.com/v1")!
 
@@ -166,18 +154,22 @@ public actor OpenAIConnector {
         messages: [ChatQuery.ChatCompletionMessageParam],
         tools: [OpenAITool],
         model: OpenAIModel,
-        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam? = nil
-    ) async throws -> ToolPlanningResult {
+        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam? = nil,
+        stage: AIStage,
+        toolExecutor: (@Sendable ([ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]) async throws -> [ChatQuery.ChatCompletionMessageParam.ToolMessageParam])? = nil
+    ) async throws -> AITurnResult {
         switch apiMode {
             case .responses:
                 return try await completeTurnViaResponses(
                     messages: messages, tools: tools, model: model,
-                    toolChoice: toolChoice
+                    toolChoice: toolChoice,
+                    stage: stage
                 )
             case .chatCompletions:
                 return try await completeTurnViaChatCompletions(
                     messages: messages, tools: tools, model: model,
-                    toolChoice: toolChoice
+                    toolChoice: toolChoice,
+                    stage: stage
                 )
         }
     }
@@ -188,8 +180,9 @@ public actor OpenAIConnector {
         messages: [ChatQuery.ChatCompletionMessageParam],
         tools: [OpenAITool],
         model: OpenAIModel,
-        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam?
-    ) async throws -> ToolPlanningResult {
+        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam?,
+        stage: AIStage
+    ) async throws -> AITurnResult {
         let responseInput = toResponseInput(messages: messages)
         let resolvedToolChoice = toResponseToolChoice(
             toolChoice ?? (tools.isEmpty ? .none : .auto)
@@ -211,7 +204,7 @@ public actor OpenAIConnector {
             throw ConnectorError.emptyResponse
         }
 
-        return ToolPlanningResult(
+        return AITurnResult(
             assistantText: assistantText,
             toolCalls: toolCalls
         )
@@ -223,8 +216,9 @@ public actor OpenAIConnector {
         messages: [ChatQuery.ChatCompletionMessageParam],
         tools: [OpenAITool],
         model: OpenAIModel,
-        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam?
-    ) async throws -> ToolPlanningResult {
+        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam?,
+        stage: AIStage
+    ) async throws -> AITurnResult {
         let chatTools = tools.compactMap(Self.toChatCompletionTool)
         let resolvedToolChoice = toolChoice ?? (chatTools.isEmpty ? .none : .auto)
 
@@ -249,7 +243,7 @@ public actor OpenAIConnector {
             throw ConnectorError.emptyResponse
         }
 
-        return ToolPlanningResult(
+        return AITurnResult(
             assistantText: assistantText,
             toolCalls: toolCalls
         )

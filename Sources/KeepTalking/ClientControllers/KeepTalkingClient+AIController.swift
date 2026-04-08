@@ -27,7 +27,7 @@ extension KeepTalkingClient {
         roleName: String = "ai",
         currentPromptAttachments: [KeepTalkingLocalAttachmentInput] = []
     ) async throws -> String {
-        guard let openAIConnector = try await resolveOpenAIConnector() else {
+        guard let aiConnector = try await resolveAIConnector() else {
             throw KeepTalkingClientError.aiNotConfigured
         }
 
@@ -93,7 +93,7 @@ extension KeepTalkingClient {
         let userMessage = try currentPromptUserMessage(
             prompt: prompt,
             attachments: currentPromptAttachments,
-            apiMode: openAIConnector.apiMode
+            apiMode: aiConnector.apiMode
         )
 
         logInjectedAITools(
@@ -114,42 +114,43 @@ extension KeepTalkingClient {
         let platform = "unknown"
         #endif
 
-        let messages: [ChatQuery.ChatCompletionMessageParam] = [
-            .system(
-                .init(
-                    content: .textContent(
-                        OpenAIConnector.keepTalkingSystemPrompt(
-                            listingToolFunctionName:
-                                Self.listingToolFunctionName,
-                            attachmentListingToolFunctionName:
-                                Self.contextAttachmentListingToolFunctionName,
-                            attachmentReaderToolFunctionName:
-                                Self.contextAttachmentReadToolFunctionName,
-                            searchThreadsToolFunctionName:
-                                Self.searchThreadsToolFunctionName,
-                            markTurningPointToolFunctionName:
-                                Self.markTurningPointToolFunctionName,
-                            markChitterChatterToolFunctionName:
-                                Self.markChitterChatterToolFunctionName,
-                            currentPromptIncludesAttachments:
-                                hasCurrentPromptAttachments,
-                            currentPromptShouldAvoidAutomaticToolUse:
-                                hasCurrentPromptAttachments
-                                && !allowAutomaticToolUse,
-                            contextTranscript: contextTranscript,
-                            currentDate: currentDate,
-                            platform: platform
+        let messages: [ChatQuery.ChatCompletionMessageParam] =
+            [
+                .system(
+                    .init(
+                        content: .textContent(
+                            OpenAIConnector.keepTalkingSystemPrompt(
+                                listingToolFunctionName:
+                                    Self.listingToolFunctionName,
+                                attachmentListingToolFunctionName:
+                                    Self.contextAttachmentListingToolFunctionName,
+                                attachmentReaderToolFunctionName:
+                                    Self.contextAttachmentReadToolFunctionName,
+                                searchThreadsToolFunctionName:
+                                    Self.searchThreadsToolFunctionName,
+                                markTurningPointToolFunctionName:
+                                    Self.markTurningPointToolFunctionName,
+                                markChitterChatterToolFunctionName:
+                                    Self.markChitterChatterToolFunctionName,
+                                currentPromptIncludesAttachments:
+                                    hasCurrentPromptAttachments,
+                                currentPromptShouldAvoidAutomaticToolUse:
+                                    hasCurrentPromptAttachments
+                                    && !allowAutomaticToolUse,
+                                contextTranscript: contextTranscript,
+                                currentDate: currentDate,
+                                platform: platform
+                            )
                         )
                     )
                 )
-            ),
-        ] + contextMessages + [
-            userMessage,
-        ]
+            ] + contextMessages + [
+                userMessage
+            ]
 
         let orchestrator = AIOrchestrator(
             dependencies: .init(
-                openAIConnector: openAIConnector,
+                aiConnector: aiConnector,
                 assistantMessageBuilder: { [self] turn in
                     assistantMessage(from: turn)
                 },
@@ -617,8 +618,8 @@ extension KeepTalkingClient {
         try await resolveActionRuntimeCatalog(in: context).catalog
     }
 
-    func resolveOpenAIConnector() async throws -> OpenAIConnector? {
-        openAIConnector
+    func resolveAIConnector() async throws -> (any AIConnector)? {
+        aiConnector
     }
 
     func ensureMCPToolChangeObserverInstalled() async {
