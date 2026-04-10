@@ -30,9 +30,11 @@ public struct AIOrchestrator {
     public typealias ToolExecutor = @Sendable ([ToolCall]) async throws -> [ToolExecution]
     public typealias ToolTranscriptAdapter =
         ([ToolExecution]) async throws -> [Message]
+    public typealias ToolInjector =
+        @Sendable ([ToolExecution]) async throws -> [OpenAITool]
     public typealias AssistantPublisher = ((String, KeepTalkingContextMessage.MessageType)) async throws -> Void
     public typealias ToolNameResolver = (ToolCall) -> String
-    public typealias ToolHintResolver = (ToolCall) -> IntermediateMessageHints?
+    public typealias ToolHintResolver = (ToolCall, AIStage) -> IntermediateMessageHints?
 
     public struct Configuration: Sendable {
         public let maxTurns: Int
@@ -64,6 +66,7 @@ public struct AIOrchestrator {
         public let assistantPublisher: AssistantPublisher
         public let toolNameResolver: ToolNameResolver
         public let toolHintResolver: ToolHintResolver
+        public let toolInjector: ToolInjector?
         public let toolRetryObserver: ToolRetryObserver?
 
         public init(
@@ -72,9 +75,10 @@ public struct AIOrchestrator {
             assistantMessageBuilder: @escaping AssistantMessageBuilder,
             toolExecutor: @escaping ToolExecutor,
             toolTranscriptAdapter: @escaping ToolTranscriptAdapter = { _ in [] },
+            toolInjector: ToolInjector? = nil,
             assistantPublisher: @escaping AssistantPublisher,
             toolNameResolver: @escaping ToolNameResolver = { $0.function.name },
-            toolHintResolver: @escaping ToolHintResolver = { _ in .toolUse },
+            toolHintResolver: @escaping ToolHintResolver = { _, _ in .toolUse },
             toolRetryObserver: ToolRetryObserver? = nil
         ) {
             self.aiConnector = aiConnector
@@ -101,6 +105,7 @@ public struct AIOrchestrator {
             self.assistantMessageBuilder = assistantMessageBuilder
             self.toolExecutor = toolExecutor
             self.toolTranscriptAdapter = toolTranscriptAdapter
+            self.toolInjector = toolInjector
             self.assistantPublisher = assistantPublisher
             self.toolNameResolver = toolNameResolver
             self.toolHintResolver = toolHintResolver
@@ -121,11 +126,12 @@ public struct AIOrchestrator {
 
     public func run(
         messages: [Message],
-        tools: [OpenAITool],
+        tools initialTools: [OpenAITool],
         model: OpenAIModel,
         toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam = .auto
     ) async throws -> String {
         var transcript = messages
+        var tools = initialTools
         var latestAssistantText = ""
 
         for _ in 0..<configuration.maxTurns {
@@ -149,6 +155,7 @@ public struct AIOrchestrator {
 
                 if let planningChatText = Self.chatText(
                     for: planningTurn,
+                    stage: .planning,
                     toolNameResolver: dependencies.toolNameResolver,
                     toolHintResolver: dependencies.toolHintResolver
                 ) {
@@ -180,6 +187,11 @@ public struct AIOrchestrator {
                         planningExecutions
                     )
                 )
+                if let injected = try await dependencies.toolInjector?(planningExecutions),
+                    !injected.isEmpty
+                {
+                    tools = tools + injected
+                }
             }
 
             let turn = try await dependencies.turnRunner(
@@ -204,6 +216,7 @@ public struct AIOrchestrator {
 
             if let chatText = Self.chatText(
                 for: turn,
+                stage: .execution,
                 toolNameResolver: dependencies.toolNameResolver,
                 toolHintResolver: dependencies.toolHintResolver
             ) {
@@ -230,6 +243,11 @@ public struct AIOrchestrator {
                     toolExecutions
                 )
             )
+            if let injected = try await dependencies.toolInjector?(toolExecutions),
+                !injected.isEmpty
+            {
+                tools = tools + injected
+            }
         }
 
         return latestAssistantText
@@ -266,6 +284,7 @@ public struct AIOrchestrator {
 
     private static func chatText(
         for turn: AITurnResult,
+        stage: AIStage,
         toolNameResolver: ToolNameResolver,
         toolHintResolver: ToolHintResolver
     ) -> (String, KeepTalkingContextMessage.MessageType)? {
@@ -283,7 +302,7 @@ public struct AIOrchestrator {
         )
 
         // Use a specific hint if all calls in this turn share one.
-        let hints = turn.toolCalls.compactMap(toolHintResolver)
+        let hints = turn.toolCalls.compactMap { toolHintResolver($0, stage) }
         guard !hints.isEmpty else {
             return nil
         }
@@ -311,11 +330,11 @@ public struct AIOrchestrator {
 
         return names.isEmpty ? rawNames : names
     }
-}
 
-extension AIOrchestrator {
     public enum IntermediateMessageHints: String {
         case toolUse = "Using tool"
         case reasoning = "Reasoning"
+        case searchingMemory = "Searching memory"
+        case searchingWeb = "Searching web"
     }
 }

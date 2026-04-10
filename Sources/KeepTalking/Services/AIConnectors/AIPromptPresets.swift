@@ -11,7 +11,8 @@ public enum AIPromptPresets {
     // MARK: - System prompt
 
     public static func systemPrompt(
-        listingToolFunctionName: String,
+        ktCallActionToolFunctionName: String,
+        ktSkillMetainfoToolFunctionName: String,
         attachmentListingToolFunctionName: String,
         attachmentReaderToolFunctionName: String,
         searchThreadsToolFunctionName: String,
@@ -54,10 +55,10 @@ public enum AIPromptPresets {
             Prefer taking the next concrete tool step now over deferring with a plan in prose.
             If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
             Do not fabricate tool outputs.
-            Call \(listingToolFunctionName) only when you need to discover or confirm which KeepTalking action proxy to use.
-            If you are unsure which specific KeepTalking action to use but tool use is likely needed, call \(listingToolFunctionName) immediately rather than waiting for a later turn.
-            Do not call it when you can already answer directly, when the needed file or image is already present in the current turn, or when the transcript already contains a newly injected attachment you can inspect directly.
-            Notice that you might also have built-in tools like web search and context attachment access outside of the listed action tool output.
+            Available actions are listed in the conversation context under "Available actions". Use \(ktCallActionToolFunctionName) to invoke any action by action_id.
+            For skill actions, call \(ktSkillMetainfoToolFunctionName) first to read the manifest and discover file/metadata tools before invoking via \(ktCallActionToolFunctionName).
+            After calling \(ktCallActionToolFunctionName) for an MCP action, that action's specific tool schemas will be injected into the next turn — use them directly for follow-up calls.
+            Notice that you also have built-in tools like web search and context attachment access.
             You do not have general filesystem access. Attachment tools expose only files that are already attached to the active context.
             If the user needs a different earlier attachment from the active context, call \(attachmentListingToolFunctionName) to inspect the available attachments.
             Prefer \(attachmentReaderToolFunctionName) with mode=metadata or mode=preview_text first, and use mode=native only when you need the actual file or image content added to the next model turn.
@@ -73,19 +74,19 @@ public enum AIPromptPresets {
             Treat remote tool results as authoritative responses from that node's context.
 
             Node targeting policy:
-            1) When the user specifies a target node, match it against listing rows using owner_node_name or target_name.
-            2) owner_node_name and target_name come from mappings aliases. If no alias exists they fall back to the node's uppercase UUID.
-            3) Treat is_current_node=true as the current or local node.
-            4) Use the transcript, especially the "Known node names in this context" section, to match the user's wording to the correct node name before choosing a tool.
-            5) Do not reinterpret the proxy arguments field named tool as a node target. It selects the wrapped underlying tool only.
+            1) When the user specifies a target node, match it against the available actions list using the node name.
+            2) Node names come from mappings aliases. If no alias exists they fall back to the node's uppercase UUID.
+            3) Treat is_current_node=true entries as actions on the current or local node.
+            4) Use the transcript, especially the "Known node names in this context" section, to match the user's wording to the correct node name before choosing an action.
+            5) Do not reinterpret the tool argument as a node target. It selects the wrapped underlying MCP or skill sub-tool only.
 
             Skill execution policy (mandatory):
-            1) If you will use any tool where listing output shows source=skill and route_kind=action_proxy, first call the matching source=skill route_kind=skill_metadata tool for that same action_id.
-            2) Then call the matching source=skill route_kind=skill_file tool at least once for that same action_id to inspect concrete file content.
-            3) Only after a successful skill_file read may you call the skill action_proxy tool for that action_id.
+            1) Before invoking any skill action via \(ktCallActionToolFunctionName), first call \(ktSkillMetainfoToolFunctionName) with the same action_id to read the manifest.
+            2) Then use the injected skill_file tool for that action_id to inspect concrete file content at least once.
+            3) Only after a successful skill_file read may you call \(ktCallActionToolFunctionName) for that skill action_id.
             4) Never skip the skill_file step for skill actions, even if metadata looks sufficient.
-            5) If skill_file fails, explain the failure and do not continue with that skill action_proxy call.
-            6) After the required skill metadata and skill file reads succeed, continue to the skill action_proxy call as soon as it is relevant. Do not stall by restating the plan.
+            5) If skill_file fails, explain the failure and do not continue with that skill action call.
+            6) After the required skill metadata and skill file reads succeed, continue to the skill action call as soon as it is relevant. Do not stall by restating the plan.
 
             Tool-result response policy:
             1) When tool output contains user-relevant findings, include a concise assistant text summary after processing the tool output.
@@ -134,8 +135,11 @@ public enum AIPromptPresets {
     /// SDK's internal naming constants.
     public enum ToolDescriptions {
 
-        public static let listingTool =
-            "List KeepTalking action proxies available in the current context. Use this only when you need to discover or confirm which KeepTalking action proxy to call. Match the requested target node against owner_node_name or target_name. Those names come from mappings aliases and fall back to the node's uppercase UUID when no alias exists. Use is_current_node when the user means the current or local node. Use route_kind and action_id to match skill_metadata or skill_file with skill action_proxy calls."
+        public static let ktCallAction =
+            "Invoke a KeepTalking action by action_id. action_id comes from the available actions list in the conversation context. For MCP actions, provide tool (the MCP tool name) and arguments. For skill actions, provide tool (sub-command or omit for default) and arguments. For primitive actions, provide arguments directly. After the first call to an MCP action, that action's full tool schemas are injected into the next turn."
+
+        public static let ktSkillMetainfo =
+            "Read the manifest and file index for a skill action. Call this before invoking any skill action via kt_call_action. Returns the skill manifest metadata, references, scripts, and assets. Also injects the skill's file-reader and metadata tools into the next turn."
 
         public static let contextAttachmentListing =
             "List attachments already stored in the active KeepTalking context, including ids, filenames, mime types, availability, and derived metadata. Use this only when you need a different earlier attachment or need to confirm attachment identity or metadata that is not already present in the current turn. Do not call this just to verify a file or image that was already attached or injected into the same turn."

@@ -27,10 +27,6 @@ private struct AskForFileToolResultPayload: Decodable {
     }
 }
 
-private struct AgentToolPayloadEnvelope: Decodable {
-    let content: [String]
-}
-
 extension KeepTalkingClient {
     func adaptMidTurnInjectionMessages(
         _ executions: [AIOrchestrator.ToolExecution],
@@ -93,15 +89,13 @@ private extension KeepTalkingClient {
         for candidate in textContent {
             guard
                 let data = candidate.data(using: .utf8),
-                let envelope = try? JSONDecoder().decode(
-                    AgentToolPayloadEnvelope.self,
-                    from: data
-                )
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let contentArray = json["content"] as? [String]
             else {
                 continue
             }
 
-            for value in envelope.content {
+            for value in contentArray {
                 guard let payloadData = value.data(using: .utf8) else {
                     continue
                 }

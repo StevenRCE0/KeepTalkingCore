@@ -163,63 +163,83 @@ extension KeepTalkingClient {
                         )
                     )
                     continue
+                } else if functionName == Self.ktCallActionToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: try await executeKtCallToolCall(
+                                toolCallID: toolCallID,
+                                rawArguments: toolCall.function.arguments,
+                                runtimeCatalog: runtimeCatalog,
+                                context: context
+                            )
+                        )
+                    )
+                    continue
+                } else if functionName == Self.ktSkillMetainfoToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: try await executeKtSkillMetainfoToolCall(
+                                toolCallID: toolCallID,
+                                rawArguments: toolCall.function.arguments,
+                                runtimeCatalog: runtimeCatalog,
+                                context: context
+                            )
+                        )
+                    )
+                    continue
                 }
 
                 let payload: String
-                if let route = runtimeCatalog.routesByFunctionName[
-                    functionName
-                ] {
-                    switch route {
-                        case .actionProxy(let definition):
-                            payload = try await executeActionProxyToolCall(
-                                functionName: functionName,
-                                definition: definition,
-                                rawArguments: toolCall.function.arguments,
-                                context: context
-                            )
-                        case .skillMetadata(let skillContext):
-                            payload = renderSkillMetadataPayload(
-                                functionName: functionName,
-                                context: skillContext
-                            )
-                        case .skillFileLocal(let skillContext):
-                            let rawArguments = try decodeToolArguments(
-                                toolCall.function.arguments
-                            )
-                            let arguments = normalizedSkillFileArguments(
-                                rawArguments
-                            )
-                            payload = renderSkillFilePayload(
-                                functionName: functionName,
-                                context: skillContext,
-                                arguments: arguments
-                            )
-                        case .skillFileRemote(
-                            let actionID,
-                            let ownerNodeID,
-                            let skillName
-                        ):
-                            let rawArguments = try decodeToolArguments(
-                                toolCall.function.arguments
-                            )
-                            let arguments = normalizedSkillFileArguments(
-                                rawArguments
-                            )
-                            payload = try await renderRemoteSkillFilePayload(
-                                functionName: functionName,
-                                actionID: actionID,
-                                ownerNodeID: ownerNodeID,
-                                skillName: skillName,
-                                arguments: arguments,
-                                context: context
-                            )
-                    }
+                let route: KeepTalkingAgentToolRoute?
+                if let staticRoute = runtimeCatalog.routesByFunctionName[functionName] {
+                    route = staticRoute
                 } else {
-                    payload = jsonString([
-                        "ok": false,
-                        "error": "unknown_tool",
-                        "function_name": functionName,
-                    ])
+                    route = await runtimeCatalog.lazyRegistry.route(for: functionName)
+                }
+                switch route {
+                    case .actionProxy(let definition):
+                        payload = try await executeActionProxyToolCall(
+                            functionName: functionName,
+                            definition: definition,
+                            rawArguments: toolCall.function.arguments,
+                            context: context
+                        )
+                    case .skillMetadata(let skillContext):
+                        payload = renderSkillMetadataPayload(
+                            functionName: functionName,
+                            context: skillContext
+                        )
+                    case .skillFileLocal(let skillContext):
+                        let rawArguments = try decodeToolArguments(
+                            toolCall.function.arguments
+                        )
+                        let arguments = normalizedSkillFileArguments(rawArguments)
+                        payload = renderSkillFilePayload(
+                            functionName: functionName,
+                            context: skillContext,
+                            arguments: arguments
+                        )
+                    case .skillFileRemote(let actionID, let ownerNodeID, let skillName):
+                        let rawArguments = try decodeToolArguments(
+                            toolCall.function.arguments
+                        )
+                        let arguments = normalizedSkillFileArguments(rawArguments)
+                        payload = try await renderRemoteSkillFilePayload(
+                            functionName: functionName,
+                            actionID: actionID,
+                            ownerNodeID: ownerNodeID,
+                            skillName: skillName,
+                            arguments: arguments,
+                            context: context
+                        )
+                    case .none:
+                        payload = jsonString([
+                            "ok": false,
+                            "error": "unknown_tool",
+                            "function_name": functionName,
+                        ])
                 }
                 executions.append(
                     .init(
@@ -547,6 +567,366 @@ extension KeepTalkingClient {
             "truncated": skillFile.truncated,
             "content": skillFile.content,
         ])
+    }
+
+    func executeKtCallToolCall(
+        toolCallID: String,
+        rawArguments: String,
+        runtimeCatalog: KeepTalkingActionRuntimeCatalog,
+        context: KeepTalkingContext
+    ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
+        let args = try decodeToolArguments(rawArguments)
+        let contextID = try context.requireID()
+
+        guard let actionIDString = args["action_id"]?.stringValue,
+            let actionID = UUID(uuidString: actionIDString)
+        else {
+            return [
+                toolMessage(
+                    payload: jsonString([
+                        "ok": false,
+                        "error": "missing_or_invalid_action_id",
+                    ]),
+                    toolCallID: toolCallID
+                )
+            ]
+        }
+
+        guard
+            let stub = runtimeCatalog.actionStubs.first(where: {
+                $0.actionID == actionID
+            })
+        else {
+            return [
+                toolMessage(
+                    payload: jsonString([
+                        "ok": false,
+                        "error": "unknown_action_id",
+                        "action_id": actionIDString,
+                    ]),
+                    toolCallID: toolCallID
+                )
+            ]
+        }
+
+        // Lazy-init local MCP schemas on first call
+        if stub.kind == .mcp && stub.isCurrentNode {
+            await ensureLocalMCPToolsRegistered(
+                actionID: actionID,
+                stub: stub,
+                runtimeCatalog: runtimeCatalog
+            )
+        }
+
+        // Build call arguments: strip action_id, keep tool + arguments
+        let toolName = args["tool"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let innerArgs: [String: Value]
+        if let nested = args["arguments"]?.objectValue {
+            innerArgs = nested
+        } else {
+            var stripped = args
+            stripped.removeValue(forKey: "action_id")
+            stripped.removeValue(forKey: "tool")
+            innerArgs = stripped
+        }
+
+        var callArguments: [String: Value]
+        if stub.kind == .mcp {
+            if let tool = toolName, !tool.isEmpty {
+                callArguments = [
+                    "tool": .string(tool),
+                    "arguments": .object(innerArgs),
+                ]
+            } else {
+                callArguments = ["arguments": .object(innerArgs)]
+            }
+        } else {
+            callArguments = innerArgs
+            if let tool = toolName, !tool.isEmpty {
+                callArguments["tool"] = .string(tool)
+            }
+        }
+
+        var metadata = Metadata()
+        metadata.fields["context_id"] = .string(contextID.uuidString.lowercased())
+        metadata.fields["tool_name"] = .string(Self.ktCallActionToolFunctionName)
+        metadata.fields["display_name"] = .string(stub.name)
+
+        let actionCall = KeepTalkingActionCall(
+            action: actionID,
+            arguments: callArguments,
+            metadata: metadata
+        )
+
+        do {
+            let result = try await dispatchActionCall(
+                actionOwner: stub.ownerNodeID,
+                call: actionCall,
+                context: context
+            )
+            let payload = renderAgentToolPayload(
+                functionName: Self.ktCallActionToolFunctionName,
+                result: result
+            )
+            return [toolMessage(payload: payload, toolCallID: toolCallID)]
+        } catch {
+            return [
+                toolMessage(
+                    payload: jsonString([
+                        "ok": false,
+                        "function_name": Self.ktCallActionToolFunctionName,
+                        "action_id": actionIDString,
+                        "error": "action_dispatch_failed",
+                        "error_message": error.localizedDescription,
+                    ]),
+                    toolCallID: toolCallID
+                )
+            ]
+        }
+    }
+
+    func executeKtSkillMetainfoToolCall(
+        toolCallID: String,
+        rawArguments: String,
+        runtimeCatalog: KeepTalkingActionRuntimeCatalog,
+        context: KeepTalkingContext
+    ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
+        let args = try decodeToolArguments(rawArguments)
+
+        guard let actionIDString = args["action_id"]?.stringValue,
+            let actionID = UUID(uuidString: actionIDString)
+        else {
+            return [
+                toolMessage(
+                    payload: jsonString([
+                        "ok": false,
+                        "error": "missing_or_invalid_action_id",
+                    ]),
+                    toolCallID: toolCallID
+                )
+            ]
+        }
+
+        guard
+            let stub = runtimeCatalog.actionStubs.first(where: {
+                $0.actionID == actionID && $0.kind == .skill
+            })
+        else {
+            return [
+                toolMessage(
+                    payload: jsonString([
+                        "ok": false,
+                        "error": "action_not_found_or_not_a_skill",
+                        "action_id": actionIDString,
+                    ]),
+                    toolCallID: toolCallID
+                )
+            ]
+        }
+
+        if stub.isCurrentNode {
+            guard
+                let action = try? await KeepTalkingAction.find(
+                    actionID, on: localStore.database
+                ),
+                case .skill(let bundle) = action.payload
+            else {
+                return [
+                    toolMessage(
+                        payload: jsonString([
+                            "ok": false,
+                            "error": "skill_action_not_found",
+                            "action_id": actionIDString,
+                        ]),
+                        toolCallID: toolCallID
+                    )
+                ]
+            }
+
+            let skillContext = loadSkillCatalogContext(
+                actionID: actionID,
+                ownerNodeID: stub.ownerNodeID,
+                bundle: bundle
+            )
+
+            // Register file + metadata tools into lazy registry on first access
+            if await !runtimeCatalog.lazyRegistry.isInitialized(actionID) {
+                let fileToolDef = makeSkillFileReaderDefinition(
+                    actionID: actionID,
+                    ownerNodeID: stub.ownerNodeID,
+                    bundle: bundle
+                )
+                let metaToolDef = makeSkillMetadataDefinition(
+                    actionID: actionID,
+                    ownerNodeID: stub.ownerNodeID,
+                    bundle: bundle
+                )
+                await runtimeCatalog.lazyRegistry.register(
+                    tools: [fileToolDef.openAITool, metaToolDef.openAITool],
+                    routes: [
+                        fileToolDef.functionName: .skillFileLocal(skillContext),
+                        metaToolDef.functionName: .skillMetadata(skillContext),
+                    ],
+                    for: actionID
+                )
+            }
+
+            return [
+                toolMessage(
+                    payload: renderSkillMetadataPayload(
+                        functionName: Self.ktSkillMetainfoToolFunctionName,
+                        context: skillContext
+                    ),
+                    toolCallID: toolCallID
+                )
+            ]
+        } else {
+            // Remote skill: dispatch catalog request on demand
+            let result: KeepTalkingActionCatalogResult
+            do {
+                result = try await dispatchActionCatalogRequest(
+                    targetNodeID: stub.ownerNodeID,
+                    queries: [
+                        KeepTalkingActionCatalogQuery(
+                            actionID: actionID,
+                            kind: .skillMetadata
+                        )
+                    ],
+                    context: context
+                )
+            } catch {
+                return [
+                    toolMessage(
+                        payload: jsonString([
+                            "ok": false,
+                            "error": "remote_catalog_request_failed",
+                            "error_message": error.localizedDescription,
+                        ]),
+                        toolCallID: toolCallID
+                    )
+                ]
+            }
+
+            guard
+                let item = result.items.first(where: {
+                    $0.actionID == actionID && $0.kind == .skillMetadata
+                }),
+                !item.isError,
+                let metadata = item.skillMetadata
+            else {
+                return [
+                    toolMessage(
+                        payload: jsonString([
+                            "ok": false,
+                            "error": "remote_skill_metadata_unavailable",
+                            "action_id": actionIDString,
+                            "error_message": result.errorMessage ?? "no metadata returned",
+                        ]),
+                        toolCallID: toolCallID
+                    )
+                ]
+            }
+
+            // Register remote skill file tool into lazy registry on first access
+            if await !runtimeCatalog.lazyRegistry.isInitialized(actionID) {
+                let fileToolDef = KeepTalkingActionToolDefinition(
+                    functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
+                        ownerNodeID: stub.ownerNodeID,
+                        actionID: actionID,
+                        targetName: "skill_file"
+                    ),
+                    actionID: actionID,
+                    ownerNodeID: stub.ownerNodeID,
+                    source: .skill,
+                    targetName: "skill_file",
+                    displayName: metadata.name,
+                    description:
+                        "Read a file from skill bundle \(metadata.name). Paths must stay within the skill directory.",
+                    parameters: JSONSchema(
+                        .type(.object),
+                        .properties([
+                            "path": JSONSchema(
+                                .type(.string),
+                                .description("Relative path inside the skill bundle.")
+                            ),
+                            "max_characters": JSONSchema(
+                                .type(.integer),
+                                .description("Optional maximum characters to return.")
+                            ),
+                        ]),
+                        .additionalProperties(.boolean(true))
+                    )
+                )
+                await runtimeCatalog.lazyRegistry.register(
+                    tools: [fileToolDef.openAITool],
+                    routes: [
+                        fileToolDef.functionName: .skillFileRemote(
+                            actionID: actionID,
+                            ownerNodeID: stub.ownerNodeID,
+                            skillName: metadata.name
+                        ),
+                    ],
+                    for: actionID
+                )
+            }
+
+            return [
+                toolMessage(
+                    payload: jsonString([
+                        "ok": true,
+                        "function_name": Self.ktSkillMetainfoToolFunctionName,
+                        "route_kind": "skill_metadata",
+                        "action_id": actionID.uuidString.lowercased(),
+                        "owner_node_id": stub.ownerNodeID.uuidString.lowercased(),
+                        "skill_name": metadata.name,
+                        "manifest_path": metadata.manifestPath,
+                        "manifest_metadata": metadata.manifestMetadata,
+                        "references_files": metadata.referencesFiles,
+                        "scripts": metadata.scripts,
+                        "assets": metadata.assets,
+                    ]),
+                    toolCallID: toolCallID
+                )
+            ]
+        }
+    }
+
+    private func ensureLocalMCPToolsRegistered(
+        actionID: UUID,
+        stub: KeepTalkingActionStub,
+        runtimeCatalog: KeepTalkingActionRuntimeCatalog
+    ) async {
+        guard await !runtimeCatalog.lazyRegistry.isInitialized(actionID) else { return }
+        guard
+            let action = try? await KeepTalkingAction.find(
+                actionID, on: localStore.database
+            ),
+            case .mcpBundle(let bundle) = action.payload
+        else {
+            return
+        }
+        do {
+            let definitions = try await mcpProxyDefinitions(
+                for: action,
+                ownerNodeID: stub.ownerNodeID,
+                bundle: bundle,
+                remoteTools: []
+            )
+            var routes: [String: KeepTalkingAgentToolRoute] = [:]
+            for def in definitions {
+                routes[def.functionName] = .actionProxy(def)
+            }
+            await runtimeCatalog.lazyRegistry.register(
+                tools: definitions.map(\.openAITool),
+                routes: routes,
+                for: actionID
+            )
+        } catch {
+            onLog?(
+                "[ai] lazy MCP init failed action=\(actionID.uuidString.lowercased()) error=\(error.localizedDescription)"
+            )
+        }
     }
 
     func executeMarkTurningPointToolCall(

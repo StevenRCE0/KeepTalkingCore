@@ -290,20 +290,64 @@ extension KeepTalkingClient {
         )
     }
 
-    func makeListingTool() -> OpenAITool {
-        OpenAITool
-            .functionTool(
-                .init(
-                    name: Self.listingToolFunctionName,
-                    description: AIPromptPresets.ToolDescriptions.listingTool,
-                    parameters: JSONSchema(
-                        .type(.object),
-                        .properties([:]),
-                        .additionalProperties(.boolean(false))
-                    ),
-                    strict: false
-                )
+    func makeKtCallTool() -> OpenAITool {
+        OpenAITool.functionTool(
+            .init(
+                name: Self.ktCallActionToolFunctionName,
+                description: AIPromptPresets.ToolDescriptions.ktCallAction,
+                parameters: JSONSchema(
+                    .type(.object),
+                    .properties([
+                        "action_id": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "The action_id of the action to invoke, from the available actions list in the conversation context."
+                            )
+                        ),
+                        "tool": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "Optional tool name within the action. Required for MCP actions once tools are known. For skill actions, selects the sub-tool or command."
+                            )
+                        ),
+                        "arguments": JSONSchema(
+                            .type(.object),
+                            .description(
+                                "Arguments to pass to the action or tool."
+                            ),
+                            .properties([:]),
+                            .additionalProperties(.boolean(true))
+                        ),
+                    ]),
+                    .required(["action_id"]),
+                    .additionalProperties(.boolean(false))
+                ),
+                strict: false
             )
+        )
+    }
+
+    func makeKtSkillMetainfoTool() -> OpenAITool {
+        OpenAITool.functionTool(
+            .init(
+                name: Self.ktSkillMetainfoToolFunctionName,
+                description: AIPromptPresets.ToolDescriptions.ktSkillMetainfo,
+                parameters: JSONSchema(
+                    .type(.object),
+                    .properties([
+                        "action_id": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "The action_id of the skill action to inspect, from the available actions list."
+                            )
+                        ),
+                    ]),
+                    .required(["action_id"]),
+                    .additionalProperties(.boolean(false))
+                ),
+                strict: false
+            )
+        )
     }
 
     func makeContextAttachmentListingTool() -> OpenAITool {

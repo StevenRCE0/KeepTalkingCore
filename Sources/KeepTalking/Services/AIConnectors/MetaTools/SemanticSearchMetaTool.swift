@@ -11,17 +11,6 @@ private struct SemanticSearchItem: Sendable {
     let excerpt: String
     let nodeID: String
     let nodeLabel: String
-
-    func toDictionary() -> [String: Any] {
-        [
-            "thread_id": threadID,
-            "label": label,
-            "score": score,
-            "excerpt": excerpt,
-            "node_id": nodeID,
-            "node_label": nodeLabel,
-        ]
-    }
 }
 
 extension KeepTalkingClient {
@@ -121,7 +110,16 @@ extension KeepTalkingClient {
             "ok": true,
             "query": query,
             "count": allItems.count,
-            "results": allItems.map { $0.toDictionary() },
+            "results": allItems.map {
+                [
+                    "thread_id": $0.threadID,
+                    "label": $0.label,
+                    "score": $0.score,
+                    "excerpt": $0.excerpt,
+                    "node_id": $0.nodeID,
+                    "node_label": $0.nodeLabel,
+                ] as [String: Any]
+            },
         ])
     }
 

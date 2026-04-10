@@ -1,6 +1,62 @@
 import Foundation
 import OpenAI
 
+// MARK: - Action stub (lightweight, no server I/O)
+
+public struct KeepTalkingActionStub: Sendable {
+    public enum Kind: String, Sendable {
+        case mcp
+        case skill
+        case primitive
+        case semanticRetrieval
+    }
+
+    public let actionID: UUID
+    public let ownerNodeID: UUID
+    public let name: String
+    public let kind: Kind
+    public let description: String
+    public let supportsWakeAssist: Bool
+    public let isCurrentNode: Bool
+}
+
+// MARK: - Lazy tool registry
+
+actor KeepTalkingLazyToolRegistry {
+    private var pendingTools: [OpenAITool] = []
+    private var initializedActionIDs: Set<UUID> = []
+    private(set) var discoveredRoutes: [String: KeepTalkingAgentToolRoute] = [:]
+
+    func isInitialized(_ actionID: UUID) -> Bool {
+        initializedActionIDs.contains(actionID)
+    }
+
+    func register(
+        tools: [OpenAITool],
+        routes: [String: KeepTalkingAgentToolRoute],
+        for actionID: UUID
+    ) {
+        guard !initializedActionIDs.contains(actionID) else { return }
+        initializedActionIDs.insert(actionID)
+        pendingTools.append(contentsOf: tools)
+        for (name, route) in routes {
+            discoveredRoutes[name] = route
+        }
+    }
+
+    func drainPending() -> [OpenAITool] {
+        let drained = pendingTools
+        pendingTools = []
+        return drained
+    }
+
+    func route(for functionName: String) -> KeepTalkingAgentToolRoute? {
+        discoveredRoutes[functionName]
+    }
+}
+
+// MARK: - Tool definition
+
 public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
     public enum Source: String, Sendable, Hashable {
         case mcp
