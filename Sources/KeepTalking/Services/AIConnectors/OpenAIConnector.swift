@@ -15,7 +15,7 @@ public enum OpenAIAPIMode: String, Codable, Sendable, CaseIterable {
 
 public actor OpenAIConnector: AIConnector {
     public static func keepTalkingSystemPrompt(
-        ktCallActionToolFunctionName: String,
+        ktActionPrefetchToolFunctionName: String,
         ktSkillMetainfoToolFunctionName: String,
         attachmentListingToolFunctionName: String,
         attachmentReaderToolFunctionName: String,
@@ -29,7 +29,7 @@ public actor OpenAIConnector: AIConnector {
         platform: String
     ) -> String {
         AIPromptPresets.systemPrompt(
-            ktCallActionToolFunctionName: ktCallActionToolFunctionName,
+            ktActionPrefetchToolFunctionName: ktActionPrefetchToolFunctionName,
             ktSkillMetainfoToolFunctionName: ktSkillMetainfoToolFunctionName,
             attachmentListingToolFunctionName: attachmentListingToolFunctionName,
             attachmentReaderToolFunctionName: attachmentReaderToolFunctionName,

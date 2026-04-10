@@ -163,15 +163,14 @@ extension KeepTalkingClient {
                         )
                     )
                     continue
-                } else if functionName == Self.ktCallActionToolFunctionName {
+                } else if functionName == Self.ktActionPrefetchToolFunctionName {
                     executions.append(
                         .init(
                             toolCall: toolCall,
-                            messages: try await executeKtCallToolCall(
+                            messages: try await executeKtActionPrefetchToolCall(
                                 toolCallID: toolCallID,
                                 rawArguments: toolCall.function.arguments,
-                                runtimeCatalog: runtimeCatalog,
-                                context: context
+                                runtimeCatalog: runtimeCatalog
                             )
                         )
                     )
@@ -569,14 +568,12 @@ extension KeepTalkingClient {
         ])
     }
 
-    func executeKtCallToolCall(
+    func executeKtActionPrefetchToolCall(
         toolCallID: String,
         rawArguments: String,
-        runtimeCatalog: KeepTalkingActionRuntimeCatalog,
-        context: KeepTalkingContext
+        runtimeCatalog: KeepTalkingActionRuntimeCatalog
     ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
         let args = try decodeToolArguments(rawArguments)
-        let contextID = try context.requireID()
 
         guard let actionIDString = args["action_id"]?.stringValue,
             let actionID = UUID(uuidString: actionIDString)
@@ -618,72 +615,17 @@ extension KeepTalkingClient {
             )
         }
 
-        // Build call arguments: strip action_id, keep tool + arguments
-        let toolName = args["tool"]?.stringValue?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let innerArgs: [String: Value]
-        if let nested = args["arguments"]?.objectValue {
-            innerArgs = nested
-        } else {
-            var stripped = args
-            stripped.removeValue(forKey: "action_id")
-            stripped.removeValue(forKey: "tool")
-            innerArgs = stripped
-        }
-
-        var callArguments: [String: Value]
-        if stub.kind == .mcp {
-            if let tool = toolName, !tool.isEmpty {
-                callArguments = [
-                    "tool": .string(tool),
-                    "arguments": .object(innerArgs),
-                ]
-            } else {
-                callArguments = ["arguments": .object(innerArgs)]
-            }
-        } else {
-            callArguments = innerArgs
-            if let tool = toolName, !tool.isEmpty {
-                callArguments["tool"] = .string(tool)
-            }
-        }
-
-        var metadata = Metadata()
-        metadata.fields["context_id"] = .string(contextID.uuidString.lowercased())
-        metadata.fields["tool_name"] = .string(Self.ktCallActionToolFunctionName)
-        metadata.fields["display_name"] = .string(stub.name)
-
-        let actionCall = KeepTalkingActionCall(
-            action: actionID,
-            arguments: callArguments,
-            metadata: metadata
-        )
-
-        do {
-            let result = try await dispatchActionCall(
-                actionOwner: stub.ownerNodeID,
-                call: actionCall,
-                context: context
+        return [
+            toolMessage(
+                payload: jsonString([
+                    "ok": true,
+                    "function_name": Self.ktActionPrefetchToolFunctionName,
+                    "action_id": actionIDString,
+                    "message": "Action tools have been successfully fetched and will be available in the next turn."
+                ]),
+                toolCallID: toolCallID
             )
-            let payload = renderAgentToolPayload(
-                functionName: Self.ktCallActionToolFunctionName,
-                result: result
-            )
-            return [toolMessage(payload: payload, toolCallID: toolCallID)]
-        } catch {
-            return [
-                toolMessage(
-                    payload: jsonString([
-                        "ok": false,
-                        "function_name": Self.ktCallActionToolFunctionName,
-                        "action_id": actionIDString,
-                        "error": "action_dispatch_failed",
-                        "error_message": error.localizedDescription,
-                    ]),
-                    toolCallID: toolCallID
-                )
-            ]
-        }
+        ]
     }
 
     func executeKtSkillMetainfoToolCall(

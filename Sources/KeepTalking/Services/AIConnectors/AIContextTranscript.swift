@@ -346,7 +346,7 @@ extension KeepTalkingClient {
         }
 
         return """
-            Available actions (use \(Self.ktCallActionToolFunctionName) to invoke, \(Self.ktSkillMetainfoToolFunctionName) to inspect skill manifests):
+            Available actions (use \(Self.ktActionPrefetchToolFunctionName) to prefetch, \(Self.ktSkillMetainfoToolFunctionName) to inspect skill manifests):
             \(lines.joined(separator: "\n"))
             """
     }

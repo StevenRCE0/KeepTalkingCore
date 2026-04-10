@@ -290,34 +290,20 @@ extension KeepTalkingClient {
         )
     }
 
-    func makeKtCallTool() -> OpenAITool {
+    func makeKtActionPrefetchTool() -> OpenAITool {
         OpenAITool.functionTool(
             .init(
-                name: Self.ktCallActionToolFunctionName,
-                description: AIPromptPresets.ToolDescriptions.ktCallAction,
+                name: Self.ktActionPrefetchToolFunctionName,
+                description: AIPromptPresets.ToolDescriptions.ktActionPrefetch,
                 parameters: JSONSchema(
                     .type(.object),
                     .properties([
                         "action_id": JSONSchema(
                             .type(.string),
                             .description(
-                                "The action_id of the action to invoke, from the available actions list in the conversation context."
+                                "The action_id of the action to prefetch, from the available actions list."
                             )
-                        ),
-                        "tool": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "Optional tool name within the action. Required for MCP actions once tools are known. For skill actions, selects the sub-tool or command."
-                            )
-                        ),
-                        "arguments": JSONSchema(
-                            .type(.object),
-                            .description(
-                                "Arguments to pass to the action or tool."
-                            ),
-                            .properties([:]),
-                            .additionalProperties(.boolean(true))
-                        ),
+                        )
                     ]),
                     .required(["action_id"]),
                     .additionalProperties(.boolean(false))

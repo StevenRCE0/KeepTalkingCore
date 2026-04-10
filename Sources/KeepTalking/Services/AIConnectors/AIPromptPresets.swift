@@ -11,7 +11,7 @@ public enum AIPromptPresets {
     // MARK: - System prompt
 
     public static func systemPrompt(
-        ktCallActionToolFunctionName: String,
+        ktActionPrefetchToolFunctionName: String,
         ktSkillMetainfoToolFunctionName: String,
         attachmentListingToolFunctionName: String,
         attachmentReaderToolFunctionName: String,
@@ -55,9 +55,9 @@ public enum AIPromptPresets {
             Prefer taking the next concrete tool step now over deferring with a plan in prose.
             If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
             Do not fabricate tool outputs.
-            Available actions are listed in the conversation context under "Available actions". Use \(ktCallActionToolFunctionName) to invoke any action by action_id.
-            For skill actions, call \(ktSkillMetainfoToolFunctionName) first to read the manifest and discover file/metadata tools before invoking via \(ktCallActionToolFunctionName).
-            After calling \(ktCallActionToolFunctionName) for an MCP action, that action's specific tool schemas will be injected into the next turn — use them directly for follow-up calls.
+            Available actions are listed in the conversation context under "Available actions". Use \(ktActionPrefetchToolFunctionName) to prefetch an action by action_id to reveal its specific tools.
+            For skill actions, call \(ktSkillMetainfoToolFunctionName) first to read the manifest and discover file/metadata tools.
+            After prefetching an action or reading skill metadata, that action's specific tool schemas will be injected into the next turn — call those injected tools directly.
             Notice that you also have built-in tools like web search and context attachment access.
             You do not have general filesystem access. Attachment tools expose only files that are already attached to the active context.
             If the user needs a different earlier attachment from the active context, call \(attachmentListingToolFunctionName) to inspect the available attachments.
@@ -81,12 +81,12 @@ public enum AIPromptPresets {
             5) Do not reinterpret the tool argument as a node target. It selects the wrapped underlying MCP or skill sub-tool only.
 
             Skill execution policy (mandatory):
-            1) Before invoking any skill action via \(ktCallActionToolFunctionName), first call \(ktSkillMetainfoToolFunctionName) with the same action_id to read the manifest.
+            1) Before using any skill action, first call \(ktSkillMetainfoToolFunctionName) with the same action_id to read the manifest.
             2) Then use the injected skill_file tool for that action_id to inspect concrete file content at least once.
-            3) Only after a successful skill_file read may you call \(ktCallActionToolFunctionName) for that skill action_id.
+            3) Only after a successful skill_file read may you call the skill's specific injected proxy tool.
             4) Never skip the skill_file step for skill actions, even if metadata looks sufficient.
             5) If skill_file fails, explain the failure and do not continue with that skill action call.
-            6) After the required skill metadata and skill file reads succeed, continue to the skill action call as soon as it is relevant. Do not stall by restating the plan.
+            6) After the required skill metadata and skill file reads succeed, continue to the injected skill action call as soon as it is relevant. Do not stall by restating the plan.
 
             Tool-result response policy:
             1) When tool output contains user-relevant findings, include a concise assistant text summary after processing the tool output.
@@ -135,11 +135,11 @@ public enum AIPromptPresets {
     /// SDK's internal naming constants.
     public enum ToolDescriptions {
 
-        public static let ktCallAction =
-            "Invoke a KeepTalking action by action_id. action_id comes from the available actions list in the conversation context. For MCP actions, provide tool (the MCP tool name) and arguments. For skill actions, provide tool (sub-command or omit for default) and arguments. For primitive actions, provide arguments directly. After the first call to an MCP action, that action's full tool schemas are injected into the next turn."
+        public static let ktActionPrefetch =
+            "Prefetch a KeepTalking action by action_id to reveal its tools. action_id comes from the available actions list in the conversation context. This injects the action's full tool schemas into the next turn. Do not provide any arguments other than action_id. Call the injected tool directly in subsequent turns."
 
         public static let ktSkillMetainfo =
-            "Read the manifest and file index for a skill action. Call this before invoking any skill action via kt_call_action. Returns the skill manifest metadata, references, scripts, and assets. Also injects the skill's file-reader and metadata tools into the next turn."
+            "Read the manifest and file index for a skill action. Returns the skill manifest metadata, references, scripts, and assets. Also injects the skill's file-reader and metadata tools into the next turn."
 
         public static let contextAttachmentListing =
             "List attachments already stored in the active KeepTalking context, including ids, filenames, mime types, availability, and derived metadata. Use this only when you need a different earlier attachment or need to confirm attachment identity or metadata that is not already present in the current turn. Do not call this just to verify a file or image that was already attached or injected into the same turn."

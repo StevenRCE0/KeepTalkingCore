@@ -336,5 +336,6 @@ public struct AIOrchestrator {
         case reasoning = "Reasoning"
         case searchingMemory = "Searching memory"
         case searchingWeb = "Searching web"
+        case calling = "Calling action"
     }
 }
