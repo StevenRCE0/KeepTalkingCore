@@ -5,8 +5,6 @@ import OpenAI
 import UniformTypeIdentifiers
 
 extension KeepTalkingClient {
-    static let listingToolFunctionName = "kt_list_available_actions"
-    static let ktActionPrefetchToolFunctionName = "kt_action_prefetch"
     static let ktSkillMetainfoToolFunctionName = "kt_skill_metainfo"
     static let contextAttachmentListingToolFunctionName =
         "kt_list_context_attachments"
@@ -17,6 +15,9 @@ extension KeepTalkingClient {
     static let contextAttachmentUpdateMetadataToolFunctionName =
         "kt_update_context_attachment_metadata"
     static let searchThreadsToolFunctionName = "kt_search_threads"
+    /// Function name used for web search in chat-completions mode (e.g. OpenRouter).
+    /// In Responses API mode the built-in webSearchPreview tool is used instead.
+    static let webSearchFunctionName = "web_search"
     static let maxAgentTurns = 32
     static let maxAINativeAttachmentBytes = 8 * 1024 * 1024
     static let skillManifestPreviewMaxCharacters = 20_000
@@ -26,6 +27,7 @@ extension KeepTalkingClient {
         prompt: String,
         in context: KeepTalkingContext,
         model: OpenAIModel = "gpt-5-codex",
+        actModel: OpenAIModel? = nil,
         roleName: String = "ai",
         currentPromptAttachments: [KeepTalkingLocalAttachmentInput] = []
     ) async throws -> String {
@@ -54,8 +56,7 @@ extension KeepTalkingClient {
         )
 
         // TODO: be able to switch off in the configurations
-        let webSearchTool = makeWebSearchTool()
-        let ktActionPrefetchTool = makeKtActionPrefetchTool()
+        let webSearchTool = makeWebSearchTool(apiMode: aiConnector.apiMode)
         let ktSkillMetainfoTool = makeKtSkillMetainfoTool()
         let attachmentListingTool = makeContextAttachmentListingTool()
         let attachmentReadTool = makeContextAttachmentReadTool()
@@ -66,10 +67,12 @@ extension KeepTalkingClient {
         let searchThreadsTool = makeSearchThreadsTool()
 
         // Layer 0: meta tools + primitives (static schemas, no server I/O).
-        // MCP and skill tools are injected lazily via toolInjector after kt_call_action.
+        // kt_run_action is always available — the ACT agent handles action execution
+        // end-to-end (tool discovery, argument construction, execution, distillation).
+        // The primary loop does not receive direct action tools.
         let allTools: [OpenAITool] =
             [
-                ktActionPrefetchTool,
+                makeRunActionTool(),
                 ktSkillMetainfoTool,
                 attachmentListingTool,
                 attachmentReadTool,
@@ -78,7 +81,7 @@ extension KeepTalkingClient {
                 webSearchTool,
                 markTurningPointTool,
                 markChitterChatterTool,
-            ] + runtimeCatalog.catalog.openAITools
+            ].compactMap { $0 }
         let skillNameByActionID = skillNamesByActionID(
             routesByFunctionName: runtimeCatalog.routesByFunctionName
         )
@@ -126,8 +129,8 @@ extension KeepTalkingClient {
                     .init(
                         content: .textContent(
                             OpenAIConnector.keepTalkingSystemPrompt(
-                                ktActionPrefetchToolFunctionName:
-                                    Self.ktActionPrefetchToolFunctionName,
+                                ktRunActionToolFunctionName:
+                                    Self.runActionToolFunctionName,
                                 ktSkillMetainfoToolFunctionName:
                                     Self.ktSkillMetainfoToolFunctionName,
                                 attachmentListingToolFunctionName:
@@ -156,6 +159,45 @@ extension KeepTalkingClient {
                 userMessage
             ]
 
+        let assistantPublisher: AIOrchestrator.AssistantPublisher = { [self] payload in
+            let (assistantText, messageType) = payload
+            try await send(
+                assistantText,
+                in: persistedContext,
+                sender: .autonomous(name: roleName),
+                type: messageType,
+                emitLocalEnvelope: true
+            )
+        }
+
+        let actAgent = AIOrchestrator.ACTAgent(
+            canHandle: { $0.function.name == Self.runActionToolFunctionName },
+            execute: { [self] toolCalls, activeModel in
+                var executions: [AIOrchestrator.ToolExecution] = []
+                for toolCall in toolCalls {
+                    let toolCallID =
+                        toolCall.id.isEmpty
+                        ? UUID().uuidString.lowercased()
+                        : toolCall.id
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: try await executeRunActionToolCall(
+                                toolCallID: toolCallID,
+                                rawArguments: toolCall.function.arguments,
+                                runtimeCatalog: runtimeCatalog,
+                                context: persistedContext,
+                                actConnector: aiConnector,
+                                actModel: actModel ?? activeModel,
+                                publisher: assistantPublisher
+                            )
+                        )
+                    )
+                }
+                return executions
+            }
+        )
+
         let orchestrator = AIOrchestrator(
             dependencies: .init(
                 aiConnector: aiConnector,
@@ -177,96 +219,30 @@ extension KeepTalkingClient {
                         context: persistedContext
                     )
                 },
-                toolInjector: { [runtimeCatalog] _ in
-                    await runtimeCatalog.lazyRegistry.drainPending()
-                },
-                assistantPublisher: { [self] (assistantText, messageType) in
-                    try await send(
-                        assistantText,
-                        in: persistedContext,
-                        sender: .autonomous(name: roleName),
-                        type: messageType,
-                        emitLocalEnvelope: true
-                    )
-                },
+                actAgent: actAgent,
+                assistantPublisher: assistantPublisher,
                 toolNameResolver: { [self] toolCall in
-                    let name = toolCall.function.name
-                    if name == Self.markTurningPointToolFunctionName
-                        || name == Self.markChitterChatterToolFunctionName
-                        || name == Self.listingToolFunctionName
-                        || name == Self.contextAttachmentUpdateMetadataToolFunctionName
-                        || name == Self.ktSkillMetainfoToolFunctionName
-                    {
-                        return ""
-                    }
-                    if name == Self.ktActionPrefetchToolFunctionName {
-                        let args =
-                            (try? decodeToolArguments(toolCall.function.arguments)) ?? [:]
-                        if let actionIDString = args["action_id"]?.stringValue,
-                            let actionID = UUID(uuidString: actionIDString),
-                            let stub = runtimeCatalog.actionStubs.first(where: {
-                                $0.actionID == actionID
-                            })
-                        {
-                            return friendlyToolCallPhrase(
-                                toolName: stub.name,
-                                ownerNodeID: stub.ownerNodeID,
-                                actionID: stub.actionID,
-                                supportsWakeAssist: stub.supportsWakeAssist,
-                                nodeAliasResolver: {
-                                    aliasLookup.alias(for: .node($0))
-                                }
-                            )
-                        }
-                        return "calling action"
-                    }
-                    return toolNameForChatText(
-                        toolCall,
-                        routesByFunctionName: runtimeCatalog
-                            .routesByFunctionName,
+                    publishedToolName(
+                        for: toolCall,
+                        runtimeCatalog: runtimeCatalog,
                         skillNameByActionID: skillNameByActionID,
-                        nodeAliasResolver: {
-                            aliasLookup.alias(for: .node($0))
-                        }
+                        aliasLookup: aliasLookup
                     )
                 },
-                toolHintResolver: { toolCall, stage in
-                    let name = toolCall.function.name
-                    // Annotation tools are always silent — no intermediate message.
-                    if name == Self.markTurningPointToolFunctionName
-                        || name == Self.markChitterChatterToolFunctionName
-                    {
-                        return nil
-                    }
-                    // Background housekeeping tools are silent in both stages.
-                    if name == Self.ktSkillMetainfoToolFunctionName
-                        || name == Self.ktActionPrefetchToolFunctionName
-                        || name == Self.contextAttachmentUpdateMetadataToolFunctionName
-                        || name == Self.listingToolFunctionName
-                    {
-                        return nil
-                    }
-                    // Planning stage: the model is deciding what to do next —
-                    // every tool call here is a reasoning/prefetch step.
-                    if stage == .planning { return .reasoning }
-                    // Execution stage: injected proxy tools are
-                    // all real tool executions; map to the most descriptive hint.
-                    switch name {
-                        case Self.searchThreadsToolFunctionName:
-                            return .searchingMemory
-                        default:
-                            return .calling
-                    }
+                toolHintResolver: { [self] toolCall, stage in
+                    publishedToolHint(for: toolCall, stage: stage)
                 }
             ),
             configuration: .init(maxTurns: Self.maxAgentTurns)
         )
 
+        let resolvedToolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam =
+            allowAutomaticToolUse ? .auto : .none
         return try await orchestrator.run(
             messages: messages,
             tools: allTools,
             model: model,
-            toolChoice: allowAutomaticToolUse ? .auto : .none
+            toolChoice: resolvedToolChoice
         )
     }
 
@@ -320,6 +296,88 @@ extension KeepTalkingClient {
         ]
 
         return explicitToolHints.contains(where: normalizedPrompt.contains)
+    }
+
+    func publishedToolName(
+        for toolCall: ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
+            .ToolCallParam,
+        runtimeCatalog: KeepTalkingActionRuntimeCatalog,
+        skillNameByActionID: [UUID: String],
+        aliasLookup: KeepTalkingAliasLookup
+    ) -> String {
+        let name = toolCall.function.name
+        if name == Self.markTurningPointToolFunctionName
+            || name == Self.markChitterChatterToolFunctionName
+            || name == Self.contextAttachmentUpdateMetadataToolFunctionName
+            || name == Self.ktSkillMetainfoToolFunctionName
+        {
+            return ""
+        }
+        if name == Self.runActionToolFunctionName {
+            let args =
+                (try? decodeToolArguments(toolCall.function.arguments)) ?? [:]
+            if let actionIDString = args["action_id"]?.stringValue,
+                let actionID = UUID(uuidString: actionIDString),
+                let stub = runtimeCatalog.actionStubs.first(where: {
+                    $0.actionID == actionID
+                })
+            {
+                return friendlyToolCallPhrase(
+                    toolName: stub.name,
+                    ownerNodeID: stub.ownerNodeID,
+                    actionID: stub.actionID,
+                    supportsWakeAssist: stub.supportsWakeAssist,
+                    nodeAliasResolver: {
+                        aliasLookup.alias(for: .node($0))
+                    }
+                )
+            }
+            return "calling action"
+        }
+        return toolNameForChatText(
+            toolCall,
+            routesByFunctionName: runtimeCatalog.routesByFunctionName,
+            skillNameByActionID: skillNameByActionID,
+            nodeAliasResolver: {
+                aliasLookup.alias(for: .node($0))
+            }
+        )
+    }
+
+    func publishedToolHint(
+        for toolCall: ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
+            .ToolCallParam,
+        stage: AIStage
+    ) -> AIOrchestrator.IntermediateMessageHints? {
+        let name = toolCall.function.name
+        if name == Self.markTurningPointToolFunctionName
+            || name == Self.markChitterChatterToolFunctionName
+        {
+            return nil
+        }
+
+        if name == Self.runActionToolFunctionName {
+            return .inspecting
+        }
+
+        if name == Self.ktSkillMetainfoToolFunctionName
+            || name == Self.contextAttachmentUpdateMetadataToolFunctionName
+        {
+            return nil
+        }
+
+        if stage == .planning {
+            return .reasoning
+        }
+
+        switch name {
+            case Self.searchThreadsToolFunctionName:
+                return .searchingMemory
+            case Self.webSearchFunctionName:
+                return .searchingWeb
+            default:
+                return .toolUse
+        }
     }
 
     func currentPromptUserMessage(
@@ -720,7 +778,7 @@ extension KeepTalkingClient {
         }
 
         onLog?(
-            "[ai/tools] meta_tools=\(Self.ktActionPrefetchToolFunctionName),\(Self.ktSkillMetainfoToolFunctionName)"
+            "[ai/tools] meta_tools=\(Self.runActionToolFunctionName),\(Self.ktSkillMetainfoToolFunctionName)"
         )
         onLog?(
             "[ai/tools] built_ins=\(Self.contextAttachmentListingToolFunctionName),\(Self.contextAttachmentReadToolFunctionName),\(Self.contextAttachmentUpdateMetadataToolFunctionName),\(Self.searchThreadsToolFunctionName),web_search_preview,\(Self.markTurningPointToolFunctionName),\(Self.markChitterChatterToolFunctionName)"

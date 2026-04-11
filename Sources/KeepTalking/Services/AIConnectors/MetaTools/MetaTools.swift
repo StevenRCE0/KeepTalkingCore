@@ -10,9 +10,6 @@ extension KeepTalkingClient {
         nodeAliasResolver: ((UUID) -> String?)? = nil
     ) -> String {
         let functionName = toolCall.function.name
-        guard functionName != Self.listingToolFunctionName else {
-            return "list available actions"
-        }
         if functionName == Self.contextAttachmentListingToolFunctionName {
             return "list context files"
         }

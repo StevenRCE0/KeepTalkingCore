@@ -15,7 +15,7 @@ public enum OpenAIAPIMode: String, Codable, Sendable, CaseIterable {
 
 public actor OpenAIConnector: AIConnector {
     public static func keepTalkingSystemPrompt(
-        ktActionPrefetchToolFunctionName: String,
+        ktRunActionToolFunctionName: String,
         ktSkillMetainfoToolFunctionName: String,
         attachmentListingToolFunctionName: String,
         attachmentReaderToolFunctionName: String,
@@ -29,7 +29,7 @@ public actor OpenAIConnector: AIConnector {
         platform: String
     ) -> String {
         AIPromptPresets.systemPrompt(
-            ktActionPrefetchToolFunctionName: ktActionPrefetchToolFunctionName,
+            ktRunActionToolFunctionName: ktRunActionToolFunctionName,
             ktSkillMetainfoToolFunctionName: ktSkillMetainfoToolFunctionName,
             attachmentListingToolFunctionName: attachmentListingToolFunctionName,
             attachmentReaderToolFunctionName: attachmentReaderToolFunctionName,
@@ -158,7 +158,10 @@ public actor OpenAIConnector: AIConnector {
         model: OpenAIModel,
         toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam? = nil,
         stage: AIStage,
-        toolExecutor: (@Sendable ([ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]) async throws -> [ChatQuery.ChatCompletionMessageParam.ToolMessageParam])? = nil
+        toolExecutor: (
+            @Sendable ([ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]) async throws ->
+                [ChatQuery.ChatCompletionMessageParam.ToolMessageParam]
+        )? = nil
     ) async throws -> AITurnResult {
         switch apiMode {
             case .responses:
@@ -193,7 +196,7 @@ public actor OpenAIConnector: AIConnector {
         let query = CreateModelResponseQuery(
             input: .inputItemList(responseInput),
             model: model,
-            reasoning: .init(effort: .medium), // TODO: expose the reasoning settings
+            reasoning: .init(effort: .medium),  // TODO: expose the reasoning settings
             toolChoice: resolvedToolChoice,
             tools: tools.isEmpty ? nil : tools
         )
@@ -233,22 +236,22 @@ public actor OpenAIConnector: AIConnector {
         )
 
         let result = try await client.chats(query: query)
-        guard let choice = result.choices.first else {
-            throw ConnectorError.emptyResponse
+        var turnText: String? = nil
+        var turnToolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam] = []
+
+        for choice in result.choices {
+            if let assistantText = choice.message.content {
+                turnText = turnText == nil ? assistantText : turnText! + "\n" + assistantText
+            }
+            if let toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam] =
+                choice.message.toolCalls
+            {
+                turnToolCalls.append(contentsOf: toolCalls)
+            }
+
         }
 
-        let assistantText = choice.message.content
-        let toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam] =
-            choice.message.toolCalls ?? []
-
-        if assistantText == nil, toolCalls.isEmpty {
-            throw ConnectorError.emptyResponse
-        }
-
-        return AITurnResult(
-            assistantText: assistantText,
-            toolCalls: toolCalls
-        )
+        return .init(assistantText: turnText, toolCalls: turnToolCalls)
     }
 
     /// Convert a Responses API `Tool` to a Chat Completions `ChatCompletionToolParam`.

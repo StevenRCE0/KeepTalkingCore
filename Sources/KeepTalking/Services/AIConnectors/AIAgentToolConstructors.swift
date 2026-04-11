@@ -290,29 +290,6 @@ extension KeepTalkingClient {
         )
     }
 
-    func makeKtActionPrefetchTool() -> OpenAITool {
-        OpenAITool.functionTool(
-            .init(
-                name: Self.ktActionPrefetchToolFunctionName,
-                description: AIPromptPresets.ToolDescriptions.ktActionPrefetch,
-                parameters: JSONSchema(
-                    .type(.object),
-                    .properties([
-                        "action_id": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "The action_id of the action to prefetch, from the available actions list."
-                            )
-                        )
-                    ]),
-                    .required(["action_id"]),
-                    .additionalProperties(.boolean(false))
-                ),
-                strict: false
-            )
-        )
-    }
-
     func makeKtSkillMetainfoTool() -> OpenAITool {
         OpenAITool.functionTool(
             .init(
@@ -508,14 +485,33 @@ extension KeepTalkingClient {
         )
     }
 
-    func makeWebSearchTool() -> OpenAITool {
-        OpenAITool
-            .webSearchTool(
-                .init(
-                    _type: .webSearchPreview,
-                    searchContextSize: .medium
+    func makeWebSearchTool(apiMode: OpenAIAPIMode) -> OpenAITool {
+        switch apiMode {
+            case .responses:
+                return OpenAITool.webSearchTool(
+                    .init(_type: .webSearchPreview, searchContextSize: .medium)
                 )
-            )
+            case .chatCompletions:
+                return OpenAITool.functionTool(
+                    .init(
+                        name: Self.webSearchFunctionName,
+                        description:
+                            "Search the web for current information, recent events, or factual data not present in your training. Returns a text summary of relevant results.",
+                        parameters: JSONSchema(
+                            .type(.object),
+                            .properties([
+                                "query": JSONSchema(
+                                    .type(.string),
+                                    .description("The search query.")
+                                )
+                            ]),
+                            .required(["query"]),
+                            .additionalProperties(.boolean(false))
+                        ),
+                        strict: false
+                    )
+                )
+        }
     }
 
     func primitiveActionParameters(for action: KeepTalkingPrimitiveActionKind)

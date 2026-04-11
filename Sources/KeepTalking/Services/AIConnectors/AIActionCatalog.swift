@@ -38,12 +38,44 @@ struct KeepTalkingSemanticRetrievalCatalogEntry: Sendable {
     let bundle: KeepTalkingSemanticRetrievalBundle
 }
 
-struct KeepTalkingActionRuntimeCatalog: Sendable {
-    let catalog: KeepTalkingActionToolCatalog
-    let routesByFunctionName: [String: KeepTalkingAgentToolRoute]
+/// Mutable class so lazy-registered MCP/skill tools can be appended in-place.
+/// The shared cache holds a reference; mutations are visible across runAI calls
+/// on the same cached instance without requiring a cache invalidation.
+final class KeepTalkingActionRuntimeCatalog: @unchecked Sendable {
+    var catalog: KeepTalkingActionToolCatalog
+    var routesByFunctionName: [String: KeepTalkingAgentToolRoute]
     let actionStubs: [KeepTalkingActionStub]
     let remoteSemanticRetrievalActions: [KeepTalkingSemanticRetrievalCatalogEntry]
     let lazyRegistry: KeepTalkingLazyToolRegistry
+
+    init(
+        catalog: KeepTalkingActionToolCatalog,
+        routesByFunctionName: [String: KeepTalkingAgentToolRoute],
+        actionStubs: [KeepTalkingActionStub],
+        remoteSemanticRetrievalActions: [KeepTalkingSemanticRetrievalCatalogEntry],
+        lazyRegistry: KeepTalkingLazyToolRegistry
+    ) {
+        self.catalog = catalog
+        self.routesByFunctionName = routesByFunctionName
+        self.actionStubs = actionStubs
+        self.remoteSemanticRetrievalActions = remoteSemanticRetrievalActions
+        self.lazyRegistry = lazyRegistry
+    }
+
+    /// Appends lazily-discovered tool definitions and their routes into the catalog.
+    /// Called after MCP/skill schemas are fetched so subsequent runAI calls (with
+    /// this cached instance) already include these tools in allTools from the start.
+    func append(
+        definitions: [KeepTalkingActionToolDefinition],
+        routes: [String: KeepTalkingAgentToolRoute]
+    ) {
+        catalog = KeepTalkingActionToolCatalog(
+            definitions: catalog.definitions + definitions
+        )
+        for (name, route) in routes {
+            routesByFunctionName[name] = route
+        }
+    }
 }
 
 actor KeepTalkingActionCatalogCache {

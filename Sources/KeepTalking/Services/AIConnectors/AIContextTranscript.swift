@@ -342,11 +342,13 @@ extension KeepTalkingClient {
         let lines = stubs.map { stub in
             let nodeName = aliasLookup.resolve(.node(stub.ownerNodeID)).primary()
             let nodeTag = stub.isCurrentNode ? "\(nodeName) (current)" : nodeName
-            return "- action_id: \(stub.actionID.uuidString.lowercased())  name: \(stub.name)  type: \(stub.kind.rawValue)  node: \(nodeTag)"
+            let desc = stub.description.trimmingCharacters(in: .whitespacesAndNewlines)
+            let descSuffix = desc.isEmpty ? "" : "  description: \(desc)"
+            return "- action_id: \(stub.actionID.uuidString.lowercased())  name: \(stub.name)  type: \(stub.kind.rawValue)  node: \(nodeTag)\(descSuffix)"
         }
 
         return """
-            Available actions (use \(Self.ktActionPrefetchToolFunctionName) to prefetch, \(Self.ktSkillMetainfoToolFunctionName) to inspect skill manifests):
+            Available actions (use \(Self.runActionToolFunctionName) to execute, \(Self.ktSkillMetainfoToolFunctionName) to inspect skill manifests):
             \(lines.joined(separator: "\n"))
             """
     }

@@ -31,8 +31,6 @@ extension KeepTalkingClient {
         context: KeepTalkingContext
     ) async throws -> [AIOrchestrator.ToolExecution] {
         var executions: [AIOrchestrator.ToolExecution] = []
-        let contextID = try context.requireID()
-        let aliasLookup = try await aliasLookup()
 
         for toolCall in toolCalls {
             let toolCallID =
@@ -42,28 +40,7 @@ extension KeepTalkingClient {
             let functionName = toolCall.function.name
 
             do {
-                if functionName == Self.listingToolFunctionName {
-                    executions.append(
-                        .init(
-                            toolCall: toolCall,
-                            messages: [
-                                toolMessage(
-                                    payload: renderCatalogListing(
-                                        runtimeCatalog.catalog,
-                                        routesByFunctionName: runtimeCatalog
-                                            .routesByFunctionName,
-                                        contextID: contextID,
-                                        nodeAliasResolver: {
-                                            aliasLookup.alias(for: .node($0))
-                                        }
-                                    ),
-                                    toolCallID: toolCallID
-                                )
-                            ]
-                        )
-                    )
-                    continue
-                } else if functionName
+                if functionName
                     == Self.contextAttachmentListingToolFunctionName
                 {
                     executions.append(
@@ -163,15 +140,18 @@ extension KeepTalkingClient {
                         )
                     )
                     continue
-                } else if functionName == Self.ktActionPrefetchToolFunctionName {
+                } else if functionName == Self.webSearchFunctionName {
                     executions.append(
                         .init(
                             toolCall: toolCall,
-                            messages: try await executeKtActionPrefetchToolCall(
-                                toolCallID: toolCallID,
-                                rawArguments: toolCall.function.arguments,
-                                runtimeCatalog: runtimeCatalog
-                            )
+                            messages: [
+                                toolMessage(
+                                    payload: try await executeWebSearchToolCall(
+                                        rawArguments: toolCall.function.arguments
+                                    ),
+                                    toolCallID: toolCallID
+                                )
+                            ]
                         )
                     )
                     continue
@@ -568,66 +548,6 @@ extension KeepTalkingClient {
         ])
     }
 
-    func executeKtActionPrefetchToolCall(
-        toolCallID: String,
-        rawArguments: String,
-        runtimeCatalog: KeepTalkingActionRuntimeCatalog
-    ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
-        let args = try decodeToolArguments(rawArguments)
-
-        guard let actionIDString = args["action_id"]?.stringValue,
-            let actionID = UUID(uuidString: actionIDString)
-        else {
-            return [
-                toolMessage(
-                    payload: jsonString([
-                        "ok": false,
-                        "error": "missing_or_invalid_action_id",
-                    ]),
-                    toolCallID: toolCallID
-                )
-            ]
-        }
-
-        guard
-            let stub = runtimeCatalog.actionStubs.first(where: {
-                $0.actionID == actionID
-            })
-        else {
-            return [
-                toolMessage(
-                    payload: jsonString([
-                        "ok": false,
-                        "error": "unknown_action_id",
-                        "action_id": actionIDString,
-                    ]),
-                    toolCallID: toolCallID
-                )
-            ]
-        }
-
-        // Lazy-init local MCP schemas on first call
-        if stub.kind == .mcp && stub.isCurrentNode {
-            await ensureLocalMCPToolsRegistered(
-                actionID: actionID,
-                stub: stub,
-                runtimeCatalog: runtimeCatalog
-            )
-        }
-
-        return [
-            toolMessage(
-                payload: jsonString([
-                    "ok": true,
-                    "function_name": Self.ktActionPrefetchToolFunctionName,
-                    "action_id": actionIDString,
-                    "message": "Action tools have been successfully fetched and will be available in the next turn."
-                ]),
-                toolCallID: toolCallID
-            )
-        ]
-    }
-
     func executeKtSkillMetainfoToolCall(
         toolCallID: String,
         rawArguments: String,
@@ -704,13 +624,17 @@ extension KeepTalkingClient {
                     ownerNodeID: stub.ownerNodeID,
                     bundle: bundle
                 )
+                let skillRoutes: [String: KeepTalkingAgentToolRoute] = [
+                    fileToolDef.functionName: .skillFileLocal(skillContext),
+                    metaToolDef.functionName: .skillMetadata(skillContext),
+                ]
                 await runtimeCatalog.lazyRegistry.register(
-                    tools: [fileToolDef.openAITool, metaToolDef.openAITool],
-                    routes: [
-                        fileToolDef.functionName: .skillFileLocal(skillContext),
-                        metaToolDef.functionName: .skillMetadata(skillContext),
-                    ],
+                    routes: skillRoutes,
                     for: actionID
+                )
+                runtimeCatalog.append(
+                    definitions: [fileToolDef, metaToolDef],
+                    routes: skillRoutes
                 )
             }
 
@@ -800,17 +724,18 @@ extension KeepTalkingClient {
                         .additionalProperties(.boolean(true))
                     )
                 )
+                let remoteSkillRoutes: [String: KeepTalkingAgentToolRoute] = [
+                    fileToolDef.functionName: .skillFileRemote(
+                        actionID: actionID,
+                        ownerNodeID: stub.ownerNodeID,
+                        skillName: metadata.name
+                    ),
+                ]
                 await runtimeCatalog.lazyRegistry.register(
-                    tools: [fileToolDef.openAITool],
-                    routes: [
-                        fileToolDef.functionName: .skillFileRemote(
-                            actionID: actionID,
-                            ownerNodeID: stub.ownerNodeID,
-                            skillName: metadata.name
-                        ),
-                    ],
+                    routes: remoteSkillRoutes,
                     for: actionID
                 )
+                runtimeCatalog.append(definitions: [fileToolDef], routes: remoteSkillRoutes)
             }
 
             return [
@@ -834,21 +759,23 @@ extension KeepTalkingClient {
         }
     }
 
-    private func ensureLocalMCPToolsRegistered(
+    @discardableResult
+    func ensureLocalMCPToolsRegistered(
         actionID: UUID,
         stub: KeepTalkingActionStub,
         runtimeCatalog: KeepTalkingActionRuntimeCatalog
-    ) async {
-        guard await !runtimeCatalog.lazyRegistry.isInitialized(actionID) else { return }
+    ) async -> [KeepTalkingActionToolDefinition] {
+        guard await !runtimeCatalog.lazyRegistry.isInitialized(actionID) else { return [] }
         guard
             let action = try? await KeepTalkingAction.find(
                 actionID, on: localStore.database
             ),
             case .mcpBundle(let bundle) = action.payload
         else {
-            return
+            return []
         }
         do {
+            try await preflightHTTPMCPAuthentication(action: action)
             let definitions = try await mcpProxyDefinitions(
                 for: action,
                 ownerNodeID: stub.ownerNodeID,
@@ -860,14 +787,16 @@ extension KeepTalkingClient {
                 routes[def.functionName] = .actionProxy(def)
             }
             await runtimeCatalog.lazyRegistry.register(
-                tools: definitions.map(\.openAITool),
                 routes: routes,
                 for: actionID
             )
+            runtimeCatalog.append(definitions: definitions, routes: routes)
+            return definitions
         } catch {
             onLog?(
                 "[ai] lazy MCP init failed action=\(actionID.uuidString.lowercased()) error=\(error.localizedDescription)"
             )
+            return []
         }
     }
 
@@ -932,6 +861,25 @@ extension KeepTalkingClient {
         }
         try await consumePendingMarks(in: contextID)
         return jsonString(["ok": true, "created": true])
+    }
+
+    func executeWebSearchToolCall(rawArguments: String) async throws -> String {
+        let args = try decodeToolArguments(rawArguments)
+        guard let query = args["query"]?.stringValue,
+            !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return jsonString(["ok": false, "error": "missing_query"])
+        }
+        guard let provider = webSearchProvider else {
+            return jsonString([
+                "ok": false,
+                "error": "web_search_not_configured",
+                "message":
+                    "No web search provider is set. Call setWebSearchProvider(_:) on the KeepTalkingClient.",
+            ])
+        }
+        let result = try await provider(query)
+        return result
     }
 
     func decodeToolArguments(_ raw: String) throws -> [String: Value] {

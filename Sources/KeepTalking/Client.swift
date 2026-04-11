@@ -123,6 +123,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// Parameters: query, topK, contextIDs filter, tagIDs filter.
     public typealias SemanticSearchCallback =
         @Sendable (String, Int, [UUID], [UUID]) async throws -> [KeepTalkingSemanticSearchResult]
+    /// Callback that performs a web search. Used when the connector is in chat-completions
+    /// mode (e.g. OpenRouter) where web search is a client-side function call rather than
+    /// a built-in Responses API tool. Parameter: query string. Returns raw result text.
+    public typealias WebSearchProvider = @Sendable (String) async throws -> String
 
     public typealias EnvelopeHandler = @Sendable (any KeepTalkingEnvelope) -> Void
     public typealias RawMessageHandler = @Sendable (String) -> Void
@@ -169,6 +173,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     var actionApprovalHandler: ActionApprovalHandler?
     var primitiveActionPostResultHandler: PrimitiveActionPostResultHandler?
     var semanticSearchCallback: SemanticSearchCallback?
+    var webSearchProvider: WebSearchProvider?
 
     // MARK: NodeState Broadcast properties
     var nodeStateBroadcastDebounceTask: Task<Void, Never>?
@@ -355,6 +360,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
         Task { [weak self] in
             await self?.semanticRetrievalActionManager.setSearchCallback(callback)
         }
+    }
+
+    public func setWebSearchProvider(_ provider: WebSearchProvider?) {
+        webSearchProvider = provider
     }
 
     func notifyContextDidSync(_ context: UUID) {

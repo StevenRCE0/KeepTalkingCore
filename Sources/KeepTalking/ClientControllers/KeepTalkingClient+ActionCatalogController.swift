@@ -263,6 +263,7 @@ extension KeepTalkingClient {
                     guard case .mcpBundle = action.payload else {
                         throw KeepTalkingClientError.unsupportedActionPayload
                     }
+                    try await preflightHTTPMCPAuthentication(action: action)
                     let tools = try await mcpManager.listActionTools(
                         action: action
                     )

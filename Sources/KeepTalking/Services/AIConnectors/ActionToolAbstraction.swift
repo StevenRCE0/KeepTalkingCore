@@ -23,7 +23,6 @@ public struct KeepTalkingActionStub: Sendable {
 // MARK: - Lazy tool registry
 
 actor KeepTalkingLazyToolRegistry {
-    private var pendingTools: [OpenAITool] = []
     private var initializedActionIDs: Set<UUID> = []
     private(set) var discoveredRoutes: [String: KeepTalkingAgentToolRoute] = [:]
 
@@ -32,22 +31,14 @@ actor KeepTalkingLazyToolRegistry {
     }
 
     func register(
-        tools: [OpenAITool],
         routes: [String: KeepTalkingAgentToolRoute],
         for actionID: UUID
     ) {
         guard !initializedActionIDs.contains(actionID) else { return }
         initializedActionIDs.insert(actionID)
-        pendingTools.append(contentsOf: tools)
         for (name, route) in routes {
             discoveredRoutes[name] = route
         }
-    }
-
-    func drainPending() -> [OpenAITool] {
-        let drained = pendingTools
-        pendingTools = []
-        return drained
     }
 
     func route(for functionName: String) -> KeepTalkingAgentToolRoute? {

@@ -30,26 +30,40 @@ public struct AIOrchestrator {
     public typealias ToolExecutor = @Sendable ([ToolCall]) async throws -> [ToolExecution]
     public typealias ToolTranscriptAdapter =
         ([ToolExecution]) async throws -> [Message]
-    public typealias ToolInjector =
-        @Sendable ([ToolExecution]) async throws -> [OpenAITool]
-    public typealias AssistantPublisher = ((String, KeepTalkingContextMessage.MessageType)) async throws -> Void
+    public typealias AssistantPublisher =
+        @Sendable ((String, KeepTalkingContextMessage.MessageType)) async throws ->
+            Void
     public typealias ToolNameResolver = (ToolCall) -> String
     public typealias ToolHintResolver = (ToolCall, AIStage) -> IntermediateMessageHints?
+
+    public struct ACTAgent: Sendable {
+        public typealias CanHandle = @Sendable (ToolCall) -> Bool
+        public typealias Executor =
+            @Sendable ([ToolCall], OpenAIModel) async throws -> [ToolExecution]
+
+        public let canHandle: CanHandle
+        public let execute: Executor
+
+        public init(
+            canHandle: @escaping CanHandle,
+            execute: @escaping Executor
+        ) {
+            self.canHandle = canHandle
+            self.execute = execute
+        }
+    }
 
     public struct Configuration: Sendable {
         public let maxTurns: Int
         /// Maximum number of retry attempts per tool-execution batch on failure.
         public let maxToolRetries: Int
-        public let enforcePlanningStage: Bool
 
         public init(
             maxTurns: Int = 32,
-            maxToolRetries: Int = 2,
-            enforcePlanningStage: Bool = true
+            maxToolRetries: Int = 2
         ) {
             self.maxTurns = maxTurns
             self.maxToolRetries = maxToolRetries
-            self.enforcePlanningStage = enforcePlanningStage
         }
     }
 
@@ -66,7 +80,7 @@ public struct AIOrchestrator {
         public let assistantPublisher: AssistantPublisher
         public let toolNameResolver: ToolNameResolver
         public let toolHintResolver: ToolHintResolver
-        public let toolInjector: ToolInjector?
+        public let actAgent: ACTAgent?
         public let toolRetryObserver: ToolRetryObserver?
 
         public init(
@@ -75,7 +89,7 @@ public struct AIOrchestrator {
             assistantMessageBuilder: @escaping AssistantMessageBuilder,
             toolExecutor: @escaping ToolExecutor,
             toolTranscriptAdapter: @escaping ToolTranscriptAdapter = { _ in [] },
-            toolInjector: ToolInjector? = nil,
+            actAgent: ACTAgent? = nil,
             assistantPublisher: @escaping AssistantPublisher,
             toolNameResolver: @escaping ToolNameResolver = { $0.function.name },
             toolHintResolver: @escaping ToolHintResolver = { _, _ in .toolUse },
@@ -105,7 +119,7 @@ public struct AIOrchestrator {
             self.assistantMessageBuilder = assistantMessageBuilder
             self.toolExecutor = toolExecutor
             self.toolTranscriptAdapter = toolTranscriptAdapter
-            self.toolInjector = toolInjector
+            self.actAgent = actAgent
             self.assistantPublisher = assistantPublisher
             self.toolNameResolver = toolNameResolver
             self.toolHintResolver = toolHintResolver
@@ -131,72 +145,12 @@ public struct AIOrchestrator {
         toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam = .auto
     ) async throws -> String {
         var transcript = messages
-        var tools = initialTools
         var latestAssistantText = ""
 
         for _ in 0..<configuration.maxTurns {
-            if shouldRunPlanningStage(
-                tools: tools,
-                toolChoice: toolChoice
-            ) {
-                let planningTurn = try await dependencies.turnRunner(
-                    planningMessages(base: transcript),
-                    tools,
-                    model,
-                    nil,  // TODO: might make this controllable
-                    .planning
-                )
-
-                if let assistantText = planningTurn.assistantText,
-                    !assistantText.isEmpty
-                {
-                    latestAssistantText = assistantText
-                }
-
-                if let planningChatText = Self.chatText(
-                    for: planningTurn,
-                    stage: .planning,
-                    toolNameResolver: dependencies.toolNameResolver,
-                    toolHintResolver: dependencies.toolHintResolver
-                ) {
-                    if latestAssistantText.isEmpty {
-                        latestAssistantText = planningChatText.0
-                    }
-                    try await dependencies.assistantPublisher(planningChatText)
-                }
-
-                guard !planningTurn.toolCalls.isEmpty else {
-                    break
-                }
-
-                if let assistantMessage =
-                    dependencies.assistantMessageBuilder(planningTurn)
-                {
-                    transcript.append(assistantMessage)
-                }
-
-                let planningExecutions = try await executeWithRetry(
-                    toolCalls: planningTurn.toolCalls,
-                    maxRetries: configuration.maxToolRetries
-                )
-                for execution in planningExecutions {
-                    transcript.append(contentsOf: execution.messages)
-                }
-                transcript.append(
-                    contentsOf: try await dependencies.toolTranscriptAdapter(
-                        planningExecutions
-                    )
-                )
-                if let injected = try await dependencies.toolInjector?(planningExecutions),
-                    !injected.isEmpty
-                {
-                    tools = tools + injected
-                }
-            }
-
             let turn = try await dependencies.turnRunner(
                 transcript,
-                tools,
+                initialTools,
                 model,
                 toolChoice,
                 .execution
@@ -233,6 +187,7 @@ public struct AIOrchestrator {
 
             let toolExecutions = try await executeWithRetry(
                 toolCalls: turn.toolCalls,
+                model: model,
                 maxRetries: configuration.maxToolRetries
             )
             for execution in toolExecutions {
@@ -243,35 +198,23 @@ public struct AIOrchestrator {
                     toolExecutions
                 )
             )
-            if let injected = try await dependencies.toolInjector?(toolExecutions),
-                !injected.isEmpty
-            {
-                tools = tools + injected
-            }
         }
 
         return latestAssistantText
     }
 
-    private func shouldRunPlanningStage(
-        tools: [OpenAITool],
-        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam
-    ) -> Bool {
-        configuration.enforcePlanningStage && !tools.isEmpty && toolChoice == .auto
-    }
-
-    private func planningMessages(base: [Message]) -> [Message] {
-        base
-    }
-
     private func executeWithRetry(
         toolCalls: [ToolCall],
+        model: OpenAIModel,
         maxRetries: Int
     ) async throws -> [ToolExecution] {
         var lastError: (any Error)?
         for attempt in 1...(maxRetries + 1) {
             do {
-                return try await dependencies.toolExecutor(toolCalls)
+                return try await executeToolCalls(
+                    toolCalls,
+                    model: model
+                )
             } catch {
                 lastError = error
                 if attempt <= maxRetries {
@@ -282,7 +225,48 @@ public struct AIOrchestrator {
         throw lastError!
     }
 
-    private static func chatText(
+    private func executeToolCalls(
+        _ toolCalls: [ToolCall],
+        model: OpenAIModel
+    ) async throws -> [ToolExecution] {
+        guard let actAgent = dependencies.actAgent else {
+            return try await dependencies.toolExecutor(toolCalls)
+        }
+
+        var executions: [ToolExecution] = []
+        var batch: [ToolCall] = []
+        var batchUsesACT = false
+
+        func flush() async throws {
+            guard !batch.isEmpty else { return }
+            if batchUsesACT {
+                executions.append(
+                    contentsOf: try await actAgent.execute(batch, model)
+                )
+            } else {
+                executions.append(
+                    contentsOf: try await dependencies.toolExecutor(batch)
+                )
+            }
+            batch.removeAll(keepingCapacity: true)
+        }
+
+        for toolCall in toolCalls {
+            let shouldUseACT = actAgent.canHandle(toolCall)
+            if !batch.isEmpty && shouldUseACT != batchUsesACT {
+                try await flush()
+            }
+            if batch.isEmpty {
+                batchUsesACT = shouldUseACT
+            }
+            batch.append(toolCall)
+        }
+
+        try await flush()
+        return executions
+    }
+
+    static func chatText(
         for turn: AITurnResult,
         stage: AIStage,
         toolNameResolver: ToolNameResolver,
@@ -336,6 +320,6 @@ public struct AIOrchestrator {
         case reasoning = "Reasoning"
         case searchingMemory = "Searching memory"
         case searchingWeb = "Searching web"
-        case calling = "Calling action"
+        case inspecting = "Inspecting"
     }
 }

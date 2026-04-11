@@ -11,7 +11,7 @@ public enum AIPromptPresets {
     // MARK: - System prompt
 
     public static func systemPrompt(
-        ktActionPrefetchToolFunctionName: String,
+        ktRunActionToolFunctionName: String,
         ktSkillMetainfoToolFunctionName: String,
         attachmentListingToolFunctionName: String,
         attachmentReaderToolFunctionName: String,
@@ -55,9 +55,9 @@ public enum AIPromptPresets {
             Prefer taking the next concrete tool step now over deferring with a plan in prose.
             If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
             Do not fabricate tool outputs.
-            Available actions are listed in the conversation context under "Available actions". Use \(ktActionPrefetchToolFunctionName) to prefetch an action by action_id to reveal its specific tools.
+            Available actions are listed in the conversation context under "Available actions". Call \(ktRunActionToolFunctionName)(action_id, task) to execute an action end-to-end — the ACT agent will handle tool discovery, argument construction, and execution, then return a concise result.
             For skill actions, call \(ktSkillMetainfoToolFunctionName) first to read the manifest and discover file/metadata tools.
-            After prefetching an action or reading skill metadata, that action's specific tool schemas will be injected into the next turn — call those injected tools directly.
+            After reading skill metadata, that skill's specific tool schemas will be injected into the next turn — call those injected tools directly.
             Notice that you also have built-in tools like web search and context attachment access.
             You do not have general filesystem access. Attachment tools expose only files that are already attached to the active context.
             If the user needs a different earlier attachment from the active context, call \(attachmentListingToolFunctionName) to inspect the available attachments.
@@ -96,19 +96,45 @@ public enum AIPromptPresets {
             Conversation context:
             \(contextTranscript)
 
-            MANDATORY THREAD ANNOTATION — perform this silently on every response turn without mentioning it to the user:
-            After composing your response text, apply this check exactly once — then call at most one of the two tools below, or neither. Never call both.
-            Step 1 — extract the topic of the current user message in 3–6 words.
-            Step 2 — compare it to the topic of the ongoing thread. If the transcript includes `Current live thread topic: "..."`, treat that as authoritative.
-            Step 3 — decide:
-            • Only if the live thread is still unlabeled and this is its first meaningful non-noise message, call \(markTurningPointToolFunctionName) with current_topic_name only. If the transcript already shows a current live thread topic, do not use this case.
-            • Only if the current message clearly starts a new user goal, topic, or task, call \(markTurningPointToolFunctionName) with both previous_topic_name and current_topic_name. previous_topic_name names the thread that ends before this message and should usually paraphrase the current live thread topic shown in the transcript. current_topic_name names the live thread that starts at this message.
-            • If the message carries zero informational content (pure greetings, single-word acks like "ok"/"thanks"/"got it", format-only instructions, off-topic small-talk) → call \(markChitterChatterToolFunctionName) to mark it as noise. Short messages that set up the next exchange, express implicit continuation ("I know what you mean", "exactly", "right"), or signal agreement with ongoing work are not noise — leave those unmarked.
-            • If the message is a direct follow-up, clarification, or deeper dive into the exact same task already underway → do nothing.
-            Do not call \(markTurningPointToolFunctionName) for small refinements, implementation continuation, or wording tweaks within the same task.
-            Do not call \(markTurningPointToolFunctionName) on consecutive user turns unless the later turn very clearly starts yet another unrelated task.
-            Do not reuse a stale previous_topic_name from an older frozen thread. previous_topic_name should describe the live thread that is ending now, not an earlier historical thread.
-            When uncertain whether this is a real topic shift, prefer keeping the current thread unchanged.
+            THREAD ANNOTATION SKILL — run this silently on every turn, never mention it:
+            This is a mandatory background routine separate from your main response or tool calls.
+            Run it once per turn by following these steps exactly.
+
+            Step 1 · Summarise the current user message as a topic phrase (3–6 words).
+
+            Step 2 · Look up the live thread topic.
+            Find the line `Current live thread topic: "..."` in the conversation context above.
+            If no such line exists, the thread is unlabeled.
+
+            Step 3 · Choose exactly one of the four cases below and act on it.
+            Never call both tools. Never call either tool more than once per turn.
+
+            ┌─ CASE A · LABEL (unlabeled thread, first real message)
+            │  Condition: no current live thread topic exists AND this message has real content.
+            │  Action: call \(markTurningPointToolFunctionName)(current_topic_name="<topic>")
+            │  Do not use this case if a live thread topic is already shown in the transcript.
+
+            ├─ CASE B · SHIFT (message starts a new unrelated goal)
+            │  Condition: a live thread topic exists AND the user is now pursuing a clearly
+            │  different goal, topic, or task — not a refinement of the current one.
+            │  Action: call \(markTurningPointToolFunctionName)(
+            │      previous_topic_name="<current live topic, verbatim or close paraphrase>",
+            │      current_topic_name="<new topic>")
+            │  previous_topic_name must name the thread ending NOW, not an older frozen thread.
+
+            ├─ CASE C · NOISE (zero informational content)
+            │  Condition: pure greeting, single-word ack ("ok", "thanks", "got it"),
+            │  format-only instruction, or off-topic filler with no new intent.
+            │  Action: call \(markChitterChatterToolFunctionName)()
+            │  NOT noise: short messages that set up the next step, express agreement with
+            │  ongoing work ("exactly", "right", "I know what you mean"), or continue context.
+
+            └─ CASE D · CONTINUE (same topic, no annotation needed)
+               Condition: follow-up, clarification, deeper dive, wording tweak, or any
+               refinement of the task already underway.
+               Action: do nothing — call neither tool.
+
+            When in doubt between SHIFT and CONTINUE, choose CONTINUE.
             """
     }
 
@@ -134,9 +160,6 @@ public enum AIPromptPresets {
     /// than function name so the App can reference them independently of the
     /// SDK's internal naming constants.
     public enum ToolDescriptions {
-
-        public static let ktActionPrefetch =
-            "Prefetch a KeepTalking action by action_id to reveal its tools. action_id comes from the available actions list in the conversation context. This injects the action's full tool schemas into the next turn. Do not provide any arguments other than action_id. Call the injected tool directly in subsequent turns."
 
         public static let ktSkillMetainfo =
             "Read the manifest and file index for a skill action. Returns the skill manifest metadata, references, scripts, and assets. Also injects the skill's file-reader and metadata tools into the next turn."
