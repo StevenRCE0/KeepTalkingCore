@@ -3,11 +3,13 @@ import Testing
 @testable import KeepTalkingSDK
 
 struct OpenAIConnectorPromptTests {
-    @Test("system prompt makes KeepTalking action listing conditional")
-    func actionListingIsConditional() {
+    @Test("system prompt routes actions through ACT")
+    func actionsUseACTTool() {
         let prompt = OpenAIConnector.keepTalkingSystemPrompt(
-            listingToolFunctionName:
-                KeepTalkingClient.listingToolFunctionName,
+            ktRunActionToolFunctionName:
+                KeepTalkingClient.runActionToolFunctionName,
+            ktSkillMetainfoToolFunctionName:
+                KeepTalkingClient.ktSkillMetainfoToolFunctionName,
             attachmentListingToolFunctionName:
                 KeepTalkingClient.contextAttachmentListingToolFunctionName,
             attachmentReaderToolFunctionName:
@@ -27,17 +29,20 @@ struct OpenAIConnectorPromptTests {
 
         #expect(
             prompt.contains(
-                "Call \(KeepTalkingClient.listingToolFunctionName) only when you need to discover or confirm which KeepTalking action proxy to use."
+                "Call \(KeepTalkingClient.runActionToolFunctionName)(action_id, task) to execute an action end-to-end"
             )
         )
-        #expect(prompt.contains("Do not call it when you can already answer directly"))
+        #expect(prompt.contains("ACT agent will handle tool discovery"))
+        #expect(!prompt.contains("listing tool"))
     }
 
     @Test("system prompt prefers already provided attachments over attachment tools")
     func currentTurnAttachmentsArePreferred() {
         let prompt = OpenAIConnector.keepTalkingSystemPrompt(
-            listingToolFunctionName:
-                KeepTalkingClient.listingToolFunctionName,
+            ktRunActionToolFunctionName:
+                KeepTalkingClient.runActionToolFunctionName,
+            ktSkillMetainfoToolFunctionName:
+                KeepTalkingClient.ktSkillMetainfoToolFunctionName,
             attachmentListingToolFunctionName:
                 KeepTalkingClient.contextAttachmentListingToolFunctionName,
             attachmentReaderToolFunctionName:

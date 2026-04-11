@@ -3,14 +3,14 @@ import XCTest
 import OpenAI
 
 final class AIOrchestratorTests: XCTestCase {
-    func testPlanningStageRunsBeforeNormalTurn() async throws {
+    func testRunExecutesToolCallsInOrder() async throws {
         let connector = try XCTUnwrap(
             OpenAIConnector(apiKey: "test", apiMode: .responses)
         )
-        let planningToolCall =
+        let toolCall =
             ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
             .ToolCallParam(
-                id: "plan-call",
+                id: "call-1",
                 function: .init(
                     arguments: "{}",
                     name: "lookup_weather"
@@ -29,21 +29,21 @@ final class AIOrchestratorTests: XCTestCase {
             )
         )
 
-        var recordedChoices: [ChatQuery.ChatCompletionFunctionCallOptionParam] = []
         var turnIndex = 0
         var executedToolNames: [[String]] = []
 
         let orchestrator = AIOrchestrator(
             dependencies: .init(
-                openAIConnector: connector,
-                turnRunner: { _, _, _, toolChoice in
-                    recordedChoices.append(toolChoice)
+                aiConnector: connector,
+                turnRunner: { _, _, _, toolChoice, stage in
+                    XCTAssertEqual(toolChoice, .auto)
+                    XCTAssertEqual(stage, .execution)
                     defer { turnIndex += 1 }
                     switch turnIndex {
                         case 0:
                             return .init(
                                 assistantText: nil,
-                                toolCalls: [planningToolCall]
+                                toolCalls: [toolCall]
                             )
                         case 1:
                             return .init(
@@ -79,8 +79,7 @@ final class AIOrchestratorTests: XCTestCase {
             ),
             configuration: .init(
                 maxTurns: 4,
-                maxToolRetries: 0,
-                enforcePlanningStage: true
+                maxToolRetries: 0
             )
         )
 
@@ -93,34 +92,21 @@ final class AIOrchestratorTests: XCTestCase {
             toolChoice: .auto
         )
 
-        XCTAssertEqual(recordedChoices, [.required, .auto])
         XCTAssertEqual(executedToolNames, [["lookup_weather"]])
         XCTAssertEqual(result, "Final answer")
     }
 
-    func testPlanningStageSkipsWhenToolChoiceDisablesTools() async throws {
+    func testRunSkipsToolExecutorWhenNoToolCallsExist() async throws {
         let connector = try XCTUnwrap(
             OpenAIConnector(apiKey: "test", apiMode: .responses)
         )
-        let tool = Tool.functionTool(
-            .init(
-                name: "lookup_weather",
-                description: "Look up weather",
-                parameters: JSONSchema(
-                    .type(.object),
-                    .properties([:])
-                ),
-                strict: false
-            )
-        )
-
-        var recordedChoices: [ChatQuery.ChatCompletionFunctionCallOptionParam] = []
 
         let orchestrator = AIOrchestrator(
             dependencies: .init(
-                openAIConnector: connector,
-                turnRunner: { _, _, _, toolChoice in
-                    recordedChoices.append(toolChoice)
+                aiConnector: connector,
+                turnRunner: { _, _, _, toolChoice, stage in
+                    XCTAssertEqual(toolChoice, .none)
+                    XCTAssertEqual(stage, .execution)
                     return .init(
                         assistantText: "No tools",
                         toolCalls: []
@@ -135,8 +121,7 @@ final class AIOrchestratorTests: XCTestCase {
             ),
             configuration: .init(
                 maxTurns: 2,
-                maxToolRetries: 0,
-                enforcePlanningStage: true
+                maxToolRetries: 0
             )
         )
 
@@ -144,12 +129,11 @@ final class AIOrchestratorTests: XCTestCase {
             messages: [
                 .user(.init(content: .string("Just answer directly")))
             ],
-            tools: [tool],
+            tools: [],
             model: .gpt4_o,
             toolChoice: .none
         )
 
-        XCTAssertEqual(recordedChoices, [.none])
         XCTAssertEqual(result, "No tools")
     }
 }

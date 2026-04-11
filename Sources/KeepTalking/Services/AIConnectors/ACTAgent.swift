@@ -5,9 +5,10 @@ import OpenAI
 //
 // The ACT agent is invoked exclusively through the `kt_run_action` tool.
 // The primary model calls `kt_run_action(action_id:, task:)` and the ACT
-// agent handles the full prefetch → call → distil cycle autonomously using
-// the configured model. The main orchestrator loop only routes those tool
-// calls into the ACT executor and otherwise stays meta-tool only.
+// agent handles the full schema-resolution → call → distil cycle
+// autonomously using the configured model. The main orchestrator loop only
+// routes those tool calls into the ACT executor and otherwise stays
+// meta-tool only.
 
 extension KeepTalkingClient {
 
@@ -74,26 +75,33 @@ extension KeepTalkingClient {
             let actionIDString = args["action_id"]?.stringValue,
             let actionID = UUID(uuidString: actionIDString)
         else {
-            return [toolMessage(
-                payload: jsonString(["ok": false, "error": "missing_or_invalid_action_id"]),
-                toolCallID: toolCallID
-            )]
+            return [
+                toolMessage(
+                    payload: jsonString(["ok": false, "error": "missing_or_invalid_action_id"]),
+                    toolCallID: toolCallID
+                )
+            ]
         }
 
         guard
             let stub = runtimeCatalog.actionStubs.first(where: { $0.actionID == actionID })
         else {
-            return [toolMessage(
-                payload: jsonString([
-                    "ok": false,
-                    "error": "unknown_action_id",
-                    "action_id": actionIDString,
-                ]),
-                toolCallID: toolCallID
-            )]
+            return [
+                toolMessage(
+                    payload: jsonString([
+                        "ok": false,
+                        "error": "unknown_action_id",
+                        "action_id": actionIDString,
+                    ]),
+                    toolCallID: toolCallID
+                )
+            ]
         }
 
         let task = args["task"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        actLog(
+            "start action=\(actionID.uuidString.lowercased()) kind=\(stub.kind.rawValue) node=\(stub.ownerNodeID.uuidString.lowercased()) task=\(clipped(task.isEmpty ? "(empty)" : task, maxCharacters: 160))"
+        )
 
         return try await runACTMiniLoop(
             actionID: actionID,
@@ -130,16 +138,18 @@ extension KeepTalkingClient {
         let actionTools = resolvedAction.tools
 
         guard !actionTools.isEmpty else {
-            return [toolMessage(
-                payload: jsonString([
-                    "ok": false,
-                    "action_id": actionID.uuidString.lowercased(),
-                    "error": "act_agent_no_tools",
-                    "message":
-                        "ACT agent could not resolve tools for this action.",
-                ]),
-                toolCallID: toolCallID
-            )]
+            return [
+                toolMessage(
+                    payload: jsonString([
+                        "ok": false,
+                        "action_id": actionID.uuidString.lowercased(),
+                        "error": "act_agent_no_tools",
+                        "message":
+                            "ACT agent could not resolve tools for this action.",
+                    ]),
+                    toolCallID: toolCallID
+                )
+            ]
         }
 
         let contextID = (try? context.requireID())?.uuidString.lowercased() ?? "unknown"
@@ -170,9 +180,11 @@ extension KeepTalkingClient {
 
         var actTranscript: [ChatQuery.ChatCompletionMessageParam] = [
             .system(.init(content: .textContent(systemPrompt))),
-            .user(.init(content: .string(
-                task.isEmpty ? "Please execute the action." : task
-            ))),
+            .user(
+                .init(
+                    content: .string(
+                        task.isEmpty ? "Please execute the action." : task
+                    ))),
         ]
 
         var summary = ""
@@ -213,7 +225,7 @@ extension KeepTalkingClient {
             }
 
             if let text = turn.assistantText?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !text.isEmpty
+                !text.isEmpty
             {
                 summary = text
             }
@@ -227,6 +239,9 @@ extension KeepTalkingClient {
                 promptMessageID: nil,
                 context: context
             )
+            actLog(
+                "action-result action=\(actionID.uuidString.lowercased()) calls=\(turn.toolCalls.map(\.function.name).joined(separator: ",")) payload=\(actExecutionPreview(executions, source: stub.kind))"
+            )
             for exec in executions {
                 actTranscript.append(contentsOf: exec.messages)
             }
@@ -235,15 +250,20 @@ extension KeepTalkingClient {
         if summary.isEmpty {
             summary = "Action executed successfully. No specific output to report."
         }
+        actLog(
+            "final-result action=\(actionID.uuidString.lowercased()) summary=\(clipped(summary, maxCharacters: 240))"
+        )
 
-        return [toolMessage(
-            payload: jsonString([
-                "ok": true,
-                "action_id": actionID.uuidString.lowercased(),
-                "act_result": summary,
-            ]),
-            toolCallID: toolCallID
-        )]
+        return [
+            toolMessage(
+                payload: jsonString([
+                    "ok": true,
+                    "action_id": actionID.uuidString.lowercased(),
+                    "act_result": summary,
+                ]),
+                toolCallID: toolCallID
+            )
+        ]
     }
 
     // MARK: - Helpers
@@ -316,7 +336,13 @@ extension KeepTalkingClient {
                 stub: stub,
                 runtimeCatalog: runtimeCatalog
             )
+            actLog(
+                "incoming-schema action=\(actionID.uuidString.lowercased()) source=local_mcp definitions=\(definitions.count)"
+            )
         } else {
+            actLog(
+                "outgoing-request action=\(actionID.uuidString.lowercased()) kind=mcp_tools target=\(stub.ownerNodeID.uuidString.lowercased())"
+            )
             let result = try await dispatchActionCatalogRequest(
                 targetNodeID: stub.ownerNodeID,
                 queries: [
@@ -335,6 +361,9 @@ extension KeepTalkingClient {
             else {
                 return .init(tools: [], promptContext: "")
             }
+            actLog(
+                "incoming-schema action=\(actionID.uuidString.lowercased()) source=remote_mcp tools=\(item.mcpTools.count)"
+            )
 
             definitions = mcpProxyDefinitionsForRemoteAction(
                 actionID: actionID,
@@ -350,7 +379,8 @@ extension KeepTalkingClient {
             )
         }
 
-        let hydratedDefinitions = definitions.isEmpty
+        let hydratedDefinitions =
+            definitions.isEmpty
             ? runtimeCatalog.catalog.definitions.filter { $0.actionID == actionID }
             : definitions
         return .init(
@@ -378,6 +408,9 @@ extension KeepTalkingClient {
             for: actionID
         )
         runtimeCatalog.append(definitions: definitions, routes: routes)
+        actLog(
+            "runtime-catalog action=\(actionID.uuidString.lowercased()) injected=\(definitions.count)"
+        )
     }
 
     private func resolvedACTSkillAction(
@@ -428,6 +461,9 @@ extension KeepTalkingClient {
                 fileRoute: .skillFileLocal(skillContext),
                 runtimeCatalog: runtimeCatalog
             )
+            actLog(
+                "incoming-schema action=\(actionID.uuidString.lowercased()) source=local_skill definitions=3 skill=\(bundle.name)"
+            )
 
             let tools = runtimeCatalog.catalog.definitions
                 .filter { $0.actionID == actionID }
@@ -444,6 +480,9 @@ extension KeepTalkingClient {
         let remoteAction = try await KeepTalkingAction.find(
             actionID,
             on: localStore.database
+        )
+        actLog(
+            "outgoing-request action=\(actionID.uuidString.lowercased()) kind=skill_metadata target=\(stub.ownerNodeID.uuidString.lowercased())"
         )
         let result = try await dispatchActionCatalogRequest(
             targetNodeID: stub.ownerNodeID,
@@ -464,6 +503,9 @@ extension KeepTalkingClient {
         else {
             return .init(tools: [], promptContext: "")
         }
+        actLog(
+            "incoming-schema action=\(actionID.uuidString.lowercased()) source=remote_skill skill=\(metadata.name) manifest=\(metadata.manifestPath)"
+        )
 
         let bundle = KeepTalkingSkillBundle(
             name: metadata.name,
@@ -560,5 +602,36 @@ extension KeepTalkingClient {
             definitions: [actionToolDef, metadataToolDef, fileToolDef],
             routes: routes
         )
+        actLog(
+            "runtime-catalog action=\(actionID.uuidString.lowercased()) injected=3"
+        )
+    }
+
+    private func actExecutionPreview(
+        _ executions: [AIOrchestrator.ToolExecution],
+        source: KeepTalkingActionStub.Kind
+    ) -> String {
+        let payloads = executions.flatMap(\.messages).compactMap { message -> String? in
+            guard case .tool(let toolMessage) = message else {
+                return nil
+            }
+            switch toolMessage.content {
+                case .textContent(let text):
+                    return text
+                default:
+                    return nil
+            }
+        }
+        guard !payloads.isEmpty else {
+            return "<no-tool-payload>"
+        }
+        if source == .skill {
+            return "<skill-result-redacted>"
+        }
+        return clipped(payloads.joined(separator: " | "), maxCharacters: 320)
+    }
+
+    private func actLog(_ message: String) {
+        onLog?("[ACT] \(message)")
     }
 }
