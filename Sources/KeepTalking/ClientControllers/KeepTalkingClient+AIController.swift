@@ -23,6 +23,58 @@ extension KeepTalkingClient {
     static let skillManifestPreviewMaxCharacters = 20_000
     static let skillFileMaxCharacters = 30_000
 
+    // MARK: - Queued entry point
+
+    /// Enqueues an AI prompt for `contextID`.  The prompt message is sent to
+    /// chat only when the run actually starts (dequeues), so queued prompts
+    /// are invisible in chat until it is their turn.
+    ///
+    /// Returns the stable run ID that can be passed to `cancelAgentRun(_:)`.
+    @discardableResult
+    public func enqueueAIPrompt(
+        _ prompt: String,
+        attachments: [KeepTalkingLocalAttachmentInput] = [],
+        in contextID: UUID,
+        model: OpenAIModel = "gpt-5-codex",
+        actModel: OpenAIModel? = nil,
+        roleName: String = "ai",
+        prefix: String = "@AI "
+    ) async -> UUID {
+        let context = KeepTalkingContext(id: contextID)
+        let preview = String(prompt.prefix(120))
+
+        let work: @Sendable () async throws -> Void = { [self] in
+            try Task.checkCancellation()
+            let outgoingPrompt = prefix + prompt.trimmingPrefix(prefix)
+            try await send(outgoingPrompt, attachments: attachments, in: context)
+            try Task.checkCancellation()
+            _ = try await runAI(
+                prompt: prompt,
+                in: context,
+                model: model,
+                actModel: actModel,
+                roleName: roleName,
+                currentPromptAttachments: attachments
+            )
+        }
+
+        return await agentRunQueue.enqueue(
+            contextID: contextID,
+            promptPreview: preview,
+            work: work,
+            onCompleted: { [self] error in
+                onAgentRunCompleted?(contextID, error)
+            }
+        )
+    }
+
+    /// Cancels a queued or running agent run by ID.
+    public func cancelAgentRun(_ runID: UUID) {
+        Task { await agentRunQueue.cancel(runID: runID) }
+    }
+
+    // MARK: - Direct execution (CLI / internal)
+
     public func runAI(
         prompt: String,
         in context: KeepTalkingContext,

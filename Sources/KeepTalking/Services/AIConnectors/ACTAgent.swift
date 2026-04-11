@@ -176,6 +176,7 @@ extension KeepTalkingClient {
             \(resolvedAction.promptContext.isEmpty ? "" : "\nAction metadata:\n\(resolvedAction.promptContext)\n")
 
             Be factual and direct. Only report what the tool returned. Do not speculate.
+            Your job is to get the user's task done — not to ask for clarification or request more information. Make your best judgment and execute.
             """
 
         var actTranscript: [ChatQuery.ChatCompletionMessageParam] = [
@@ -304,6 +305,26 @@ extension KeepTalkingClient {
         }
     }
 
+    /// Returns an `OpenAITool` for use inside the ACT mini-loop.
+    /// Uses the original MCP `targetName` as the callable function name so the
+    /// model can call tools by their real name (e.g. "XcodeListWindows") rather
+    /// than the opaque normalized ID.
+    private static func actMCPOpenAITool(
+        from definition: KeepTalkingActionToolDefinition
+    ) -> OpenAITool {
+        guard let targetName = definition.targetName, !targetName.isEmpty else {
+            return definition.openAITool
+        }
+        return .functionTool(
+            .init(
+                name: targetName,
+                description: definition.description,
+                parameters: definition.parameters,
+                strict: false
+            )
+        )
+    }
+
     private func resolvedACTMCPAction(
         actionID: UUID,
         stub: KeepTalkingActionStub,
@@ -314,7 +335,7 @@ extension KeepTalkingClient {
             .filter { $0.actionID == actionID }
         if !existingDefinitions.isEmpty {
             return .init(
-                tools: existingDefinitions.map(\.openAITool),
+                tools: existingDefinitions.map(Self.actMCPOpenAITool),
                 promptContext: ""
             )
         }
@@ -384,7 +405,7 @@ extension KeepTalkingClient {
             ? runtimeCatalog.catalog.definitions.filter { $0.actionID == actionID }
             : definitions
         return .init(
-            tools: hydratedDefinitions.map(\.openAITool),
+            tools: hydratedDefinitions.map(Self.actMCPOpenAITool),
             promptContext: ""
         )
     }
@@ -395,14 +416,14 @@ extension KeepTalkingClient {
         runtimeCatalog: KeepTalkingActionRuntimeCatalog
     ) async {
         guard !definitions.isEmpty else { return }
-        let routes = Dictionary(
-            uniqueKeysWithValues: definitions.map { definition in
-                (
-                    definition.functionName,
-                    KeepTalkingAgentToolRoute.actionProxy(definition)
-                )
+        var routes: [String: KeepTalkingAgentToolRoute] = [:]
+        for definition in definitions {
+            routes[definition.functionName] = .actionProxy(definition)
+            // Also register the original MCP tool name as a route alias.
+            if let targetName = definition.targetName, !targetName.isEmpty {
+                routes[targetName] = .actionProxy(definition)
             }
-        )
+        }
         await runtimeCatalog.lazyRegistry.register(
             routes: routes,
             for: actionID

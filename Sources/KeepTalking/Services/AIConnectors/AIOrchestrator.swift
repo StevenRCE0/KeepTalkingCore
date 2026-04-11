@@ -148,6 +148,8 @@ public struct AIOrchestrator {
         var latestAssistantText = ""
 
         for _ in 0..<configuration.maxTurns {
+            try Task.checkCancellation()
+
             let turn = try await dependencies.turnRunner(
                 transcript,
                 initialTools,
@@ -177,6 +179,7 @@ public struct AIOrchestrator {
                 if latestAssistantText.isEmpty {
                     latestAssistantText = chatText.0
                 }
+                try Task.checkCancellation()
                 try await dependencies
                     .assistantPublisher(chatText)
             }
@@ -185,6 +188,7 @@ public struct AIOrchestrator {
                 break
             }
 
+            try Task.checkCancellation()
             let toolExecutions = try await executeWithRetry(
                 toolCalls: turn.toolCalls,
                 model: model,

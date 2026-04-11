@@ -142,6 +142,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public var onContextSync: ContextSyncHandler?
     public var onThreadsChanged: (@Sendable () -> Void)?
     public var onMappingsChanged: (@Sendable () -> Void)?
+    public var onAgentRunsChanged: (@Sendable ([KeepTalkingAgentRunSnapshot]) -> Void)? {
+        didSet { agentRunQueue.onChanged = onAgentRunsChanged }
+    }
+    /// Called when an agent run finishes (normally, with error, or after cancellation).
+    /// Receives the context ID and the error if the run failed, or nil on success/cancel.
+    public var onAgentRunCompleted: (@Sendable (UUID, (any Error)?) -> Void)?
     public var onLog: LogHandler? {
         didSet {
             rtcClient.onLog = onLog
@@ -174,6 +180,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     var primitiveActionPostResultHandler: PrimitiveActionPostResultHandler?
     var semanticSearchCallback: SemanticSearchCallback?
     var webSearchProvider: WebSearchProvider?
+
+    // MARK: Agent Run Queue
+    let agentRunQueue = AgentRunQueue()
 
     // MARK: NodeState Broadcast properties
     var nodeStateBroadcastDebounceTask: Task<Void, Never>?

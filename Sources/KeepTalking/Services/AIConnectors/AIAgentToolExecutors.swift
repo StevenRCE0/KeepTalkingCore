@@ -785,6 +785,12 @@ extension KeepTalkingClient {
             var routes: [String: KeepTalkingAgentToolRoute] = [:]
             for def in definitions {
                 routes[def.functionName] = .actionProxy(def)
+                // Also register the original MCP tool name so the ACT model
+                // can call it by its real name (e.g. "XcodeListWindows") rather
+                // than the opaque normalized ID.
+                if let targetName = def.targetName, !targetName.isEmpty {
+                    routes[targetName] = .actionProxy(def)
+                }
             }
             await runtimeCatalog.lazyRegistry.register(
                 routes: routes,
