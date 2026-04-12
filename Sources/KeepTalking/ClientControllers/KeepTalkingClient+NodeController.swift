@@ -15,6 +15,8 @@ public enum KeepTalkingNodeTrustScope: Sendable {
 public struct KeepTalkingActionGrantSummary: Sendable {
     public let toNodeID: UUID
     public let approvingContext: KeepTalkingNodeRelationActionRelation.ApprovingContext?
+    /// Permission constraint for this grant. `nil` means full access.
+    public let permission: KeepTalkingGrantPermission?
 }
 
 public struct KeepTalkingActionSummary: Sendable {
@@ -23,6 +25,7 @@ public struct KeepTalkingActionSummary: Sendable {
     public let isMCP: Bool
     public let isSkill: Bool
     public let isPrimitive: Bool
+    public let isFilesystem: Bool
     public let name: String
     public let description: String
     public let hostedLocally: Bool
@@ -869,6 +872,11 @@ extension KeepTalkingClient {
                         indexDescription: bundle
                             .indexDescription
                     )
+            case .filesystem(let bundle):
+                payloadSummary = .filesystem(
+                    name: bundle.name,
+                    indexDescription: bundle.indexDescription
+                )
         }
 
         return KeepTalkingAdvertisedAction(

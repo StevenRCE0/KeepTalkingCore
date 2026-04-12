@@ -777,6 +777,46 @@ extension KeepTalkingClient {
         return normalized
     }
 
+    /// Builds one `KeepTalkingActionToolDefinition` per filesystem operation
+    /// that the caller is allowed to use (filtered by `allowedTools`).
+    func makeFilesystemToolDefinitions(
+        actionID: UUID,
+        ownerNodeID: UUID,
+        bundle: KeepTalkingFilesystemBundle,
+        supportsWakeAssist: Bool,
+        allowedTools: [KeepTalkingFilesystemTool]
+    ) -> [KeepTalkingActionToolDefinition] {
+        allowedTools.map { tool in
+            let opName = tool.operation.rawValue
+            let props = tool.operation.inputSchemaProperties.mapValues { propInfo -> JSONSchema in
+                JSONSchema(
+                    .type(.string),
+                    .description(propInfo["description"] ?? "")
+                )
+            }
+            return KeepTalkingActionToolDefinition(
+                functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
+                    ownerNodeID: ownerNodeID,
+                    actionID: actionID,
+                    targetName: opName
+                ),
+                actionID: actionID,
+                ownerNodeID: ownerNodeID,
+                source: .filesystem,
+                targetName: opName,
+                displayName: opName,
+                supportsWakeAssist: supportsWakeAssist,
+                description: tool.description,
+                parameters: JSONSchema(
+                    .type(.object),
+                    .properties(props),
+                    .required(tool.operation.requiredInputProperties),
+                    .additionalProperties(.boolean(false))
+                )
+            )
+        }
+    }
+
     private func schemaExpectation(for key: String) -> SchemaExpectation {
         switch key {
             case "items", "contains", "not", "if", "then", "else",

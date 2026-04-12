@@ -122,6 +122,7 @@ public enum KeepTalkingActionCatalogQueryKind: String, Codable, Sendable {
     case mcpTools
     case skillMetadata
     case skillFile
+    case filesystemTools
 }
 
 public struct KeepTalkingActionCatalogQuery: Codable, Sendable {
@@ -234,6 +235,7 @@ public struct KeepTalkingActionCatalogItemResult: Codable, Sendable {
     public var mcpTools: [KeepTalkingActionCatalogMCPTool]
     public var skillMetadata: KeepTalkingActionCatalogSkillMetadata?
     public var skillFile: KeepTalkingActionCatalogSkillFile?
+    public var filesystemTools: [KeepTalkingFilesystemTool]
     public var isError: Bool
     public var errorMessage: String?
 
@@ -243,6 +245,7 @@ public struct KeepTalkingActionCatalogItemResult: Codable, Sendable {
         mcpTools: [KeepTalkingActionCatalogMCPTool] = [],
         skillMetadata: KeepTalkingActionCatalogSkillMetadata? = nil,
         skillFile: KeepTalkingActionCatalogSkillFile? = nil,
+        filesystemTools: [KeepTalkingFilesystemTool] = [],
         isError: Bool = false,
         errorMessage: String? = nil
     ) {
@@ -251,6 +254,7 @@ public struct KeepTalkingActionCatalogItemResult: Codable, Sendable {
         self.mcpTools = mcpTools
         self.skillMetadata = skillMetadata
         self.skillFile = skillFile
+        self.filesystemTools = filesystemTools
         self.isError = isError
         self.errorMessage = errorMessage
     }

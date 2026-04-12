@@ -57,18 +57,28 @@ public struct KeepTalkingMCPBundle: KeepTalkingActionBundle {
     public var service: KeepTalkingMCPService
     public var oauthRegistration: KeepTalkingMCPOAuthRegistration?
 
+    /// Per-tool permission requirements for this MCP server.
+    ///
+    /// When a remote node requests the tool list the grant mask is intersected
+    /// with each tool's declared requirements: tools whose required bits are
+    /// not all present in the grant mask are stripped from the response.
+    /// Tools absent from this map default to `.read`.
+    public var toolPermissions: [String: KeepTalkingActionPermissionMask]?
+
     public init(
         id: UUID = UUID(),
         name: String,
         indexDescription: String,
         service: KeepTalkingMCPService,
-        oauthRegistration: KeepTalkingMCPOAuthRegistration? = nil
+        oauthRegistration: KeepTalkingMCPOAuthRegistration? = nil,
+        toolPermissions: [String: KeepTalkingActionPermissionMask]? = nil
     ) {
         self.id = id
         self.name = name
         self.indexDescription = indexDescription
         self.service = service
         self.oauthRegistration = oauthRegistration
+        self.toolPermissions = toolPermissions
     }
 }
 

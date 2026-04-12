@@ -302,6 +302,14 @@ extension KeepTalkingClient {
 
             case .semanticRetrieval:
                 return .init(tools: [], promptContext: "")
+
+            case .filesystem:
+                return try await resolvedACTFilesystemAction(
+                    actionID: actionID,
+                    stub: stub,
+                    runtimeCatalog: runtimeCatalog,
+                    context: context
+                )
         }
     }
 
@@ -432,6 +440,16 @@ extension KeepTalkingClient {
         actLog(
             "runtime-catalog action=\(actionID.uuidString.lowercased()) injected=\(definitions.count)"
         )
+
+        // Persist the resolved tool names into the action row so the grant UI
+        // can display them without a live MCP round-trip.
+        let toolNames = definitions.compactMap(\.targetName).filter { !$0.isEmpty }
+        if !toolNames.isEmpty,
+            let action = try? await KeepTalkingAction.find(actionID, on: localStore.database)
+        {
+            action.cachedMCPTools = toolNames.sorted()
+            try? await action.save(on: localStore.database)
+        }
     }
 
     private func resolvedACTSkillAction(
@@ -626,6 +644,78 @@ extension KeepTalkingClient {
         actLog(
             "runtime-catalog action=\(actionID.uuidString.lowercased()) injected=3"
         )
+    }
+
+    private func resolvedACTFilesystemAction(
+        actionID: UUID,
+        stub: KeepTalkingActionStub,
+        runtimeCatalog: KeepTalkingActionRuntimeCatalog,
+        context: KeepTalkingContext
+    ) async throws -> ACTResolvedAction {
+        let existingDefinitions = runtimeCatalog.catalog.definitions
+            .filter { $0.actionID == actionID }
+        if !existingDefinitions.isEmpty {
+            return .init(tools: existingDefinitions.map(\.openAITool), promptContext: "")
+        }
+
+        guard
+            let action = try await KeepTalkingAction.find(actionID, on: localStore.database),
+            case .filesystem(let bundle) = action.payload
+        else {
+            return .init(tools: [], promptContext: "")
+        }
+
+        let tools: [KeepTalkingFilesystemTool]
+        if stub.isCurrentNode {
+            tools = await filesystemActionManager.availableTools(bundle: bundle, mask: .all)
+            actLog(
+                "incoming-schema action=\(actionID.uuidString.lowercased()) source=local_filesystem tools=\(tools.count)"
+            )
+        } else {
+            actLog(
+                "outgoing-request action=\(actionID.uuidString.lowercased()) kind=filesystem_tools target=\(stub.ownerNodeID.uuidString.lowercased())"
+            )
+            let result = try await dispatchActionCatalogRequest(
+                targetNodeID: stub.ownerNodeID,
+                queries: [
+                    KeepTalkingActionCatalogQuery(actionID: actionID, kind: .filesystemTools)
+                ],
+                context: context
+            )
+            guard
+                let item = result.items.first(where: {
+                    $0.actionID == actionID && $0.kind == .filesystemTools
+                }),
+                !item.isError
+            else {
+                return .init(tools: [], promptContext: "")
+            }
+            tools = item.filesystemTools
+            actLog(
+                "incoming-schema action=\(actionID.uuidString.lowercased()) source=remote_filesystem tools=\(tools.count)"
+            )
+        }
+
+        let definitions = makeFilesystemToolDefinitions(
+            actionID: actionID,
+            ownerNodeID: stub.ownerNodeID,
+            bundle: bundle,
+            supportsWakeAssist: stub.supportsWakeAssist,
+            allowedTools: tools
+        )
+        var routes: [String: KeepTalkingAgentToolRoute] = [:]
+        for definition in definitions {
+            routes[definition.functionName] = .actionProxy(definition)
+        }
+        guard !definitions.isEmpty else {
+            return .init(tools: [], promptContext: "")
+        }
+        await runtimeCatalog.lazyRegistry.register(routes: routes, for: actionID)
+        runtimeCatalog.append(definitions: definitions, routes: routes)
+        actLog(
+            "runtime-catalog action=\(actionID.uuidString.lowercased()) injected=\(definitions.count)"
+        )
+        return .init(tools: definitions.map(\.openAITool), promptContext: "")
     }
 
     private func actExecutionPreview(

@@ -686,6 +686,8 @@ extension KeepTalkingClient {
                     return ("primitive", bundle.name)
                 case .semanticRetrieval(let bundle):
                     return ("semantic_retrieval", bundle.name)
+                case .filesystem(let bundle):
+                    return ("filesystem", bundle.name)
             }
         }()
 
@@ -727,6 +729,13 @@ extension KeepTalkingClient {
                         case .semanticRetrieval:
                             // Handled app-side via semanticSearchCallback; no local executor.
                             return
+                        case .filesystem:
+                            let actionID =
+                                action.id?.uuidString.lowercased()
+                                ?? "unknown"
+                            onLog?("[filesystem] registering local action=\(actionID)")
+                            try await filesystemActionManager.registerIfNeeded(action)
+                            onLog?("[filesystem] registered local action=\(actionID)")
                     }
                 }
                 group.addTask { [self] in

@@ -42,6 +42,7 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
         case skill(KeepTalkingSkillBundle)
         case primitive(KeepTalkingPrimitiveBundle)
         case semanticRetrieval(KeepTalkingSemanticRetrievalBundle)
+        case filesystem(KeepTalkingFilesystemBundle)
 
         public var isSemanticRetrieval: Bool {
             if case .semanticRetrieval = self { return true }
@@ -52,10 +53,39 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
             if case .semanticRetrieval(let bundle) = self { return bundle }
             return nil
         }
+
+        public var filesystemBundle: KeepTalkingFilesystemBundle? {
+            if case .filesystem(let bundle) = self { return bundle }
+            return nil
+        }
     }
 
     public var isSemanticRetrieval: Bool {
         payload.isSemanticRetrieval == true
+    }
+
+    public var actionLabel: String {
+        if case .mcpBundle(let bundle) = payload {
+            return bundle.name
+        }
+        if case .skill(let bundle) = payload {
+            return bundle.name
+        }
+        if case .primitive(let bundle) = payload {
+            return bundle.name
+        }
+        if case .filesystem(let bundle) = payload {
+            return bundle.name
+        }
+
+        return id?.uuidString.uppercased() ?? "Unknown Action"
+    }
+
+    public var beautifulLabel: String {
+        actionLabel
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .capitalized(with: .autoupdatingCurrent)
     }
 
     @ID(key: .id)
@@ -78,6 +108,12 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
 
     @OptionalField(key: "disabled")
     public var disabled: Bool?
+
+    /// Locally cached MCP tool names for this action.
+    /// Populated when tools are first fetched (registration, edit, or catalog resolution).
+    /// Not synced via node-status or grants — remote tool availability is always requested live.
+    @OptionalField(key: "cached_mcp_tools")
+    public var cachedMCPTools: [String]?
 
     @Timestamp(key: "created_at", on: .create)
     public var createdAt: Date?

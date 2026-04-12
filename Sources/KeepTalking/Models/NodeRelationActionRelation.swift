@@ -33,19 +33,26 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
     @OptionalField(key: "wake_handles")
     public var wakeHandles: [KeepTalkingPushWakeHandle]?
 
+    /// Per-grant permission constraint — filesystem R/W/X mask or MCP tool allowlist.
+    /// `nil` means no restriction (full access for the applicable action type).
+    @OptionalField(key: "permission")
+    public var permission: KeepTalkingGrantPermission?
+
     public init() {}
 
     init(
         id: UUID = UUID(),
         relation: KeepTalkingNodeRelation,
         action: KeepTalkingAction,
-        approvingContext: ApprovingContext
+        approvingContext: ApprovingContext,
+        permission: KeepTalkingGrantPermission? = nil
     ) throws {
         self.id = id
         self.$relation.id = try relation.requireID()
         self.$action.id = try action.requireID()
         self.approvingContext = approvingContext
         self.wakeHandles = nil
+        self.permission = permission
     }
 
     public func applicable(in context: KeepTalkingContext?) -> Bool {
@@ -57,5 +64,17 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
             case nil:
                 return false
         }
+    }
+
+    /// Effective filesystem R/W/X mask. Falls back to `.all` when no permission is set.
+    public var effectiveFilesystemMask: KeepTalkingActionPermissionMask {
+        if case .filesystem(let mask) = permission { return mask }
+        return .all
+    }
+
+    /// Effective MCP tool allowlist. `nil` means all tools are permitted.
+    public var effectiveMCPAllowedTools: [String]? {
+        if case .mcp(let tools) = permission { return tools }
+        return nil
     }
 }

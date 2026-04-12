@@ -317,7 +317,7 @@ extension KeepTalkingClient {
         rawArguments: String
     ) throws -> [String: Value] {
         var arguments = try decodeToolArguments(rawArguments)
-        if definition.source == .mcp,
+        if (definition.source == .mcp || definition.source == .filesystem),
             let targetName = definition.targetName,
             arguments["tool"] == nil
         {

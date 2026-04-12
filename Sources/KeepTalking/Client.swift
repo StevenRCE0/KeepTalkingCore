@@ -173,6 +173,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let skillManager: SkillManager
     let primitiveActionManager: PrimitiveActionManager
     let semanticRetrievalActionManager: SemanticRetrievalActionManager
+    let filesystemActionManager: FilesystemActionManager
     let aiConnector: (any AIConnector)?
     let blobStore: KeepTalkingBlobStore
     private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
@@ -300,6 +301,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.semanticRetrievalActionManager = SemanticRetrievalActionManager(
             database: localStore.database
         )
+        self.filesystemActionManager = FilesystemActionManager()
 
         rtcClient.onLog = { [weak self] line in
             self?.onLog?(line)

@@ -17,6 +17,7 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
             indexDescription: String,
             action: KeepTalkingPrimitiveActionKind
         )
+        case filesystem(name: String, indexDescription: String)
     }
 
     public let actionID: UUID

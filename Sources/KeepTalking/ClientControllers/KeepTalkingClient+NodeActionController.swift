@@ -237,6 +237,8 @@ extension KeepTalkingClient {
                     action.descriptor = Self.defaultDescriptor(for: bundle)
                 case .semanticRetrieval(let bundle):
                     action.descriptor = Self.defaultDescriptor(for: bundle)
+                case .filesystem(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
             }
         }
 
@@ -250,6 +252,8 @@ extension KeepTalkingClient {
                 try await primitiveActionManager.registerPrimitiveAction(action)
             case .semanticRetrieval:
                 try await semanticRetrievalActionManager.registerIfNeeded(action)
+            case .filesystem:
+                try await filesystemActionManager.registerFilesystemAction(action)
         }
         await invalidateActionToolCatalog(
             reason: "register_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
@@ -387,6 +391,32 @@ extension KeepTalkingClient {
 
         try await action.save(on: database)
         try await callbackForRegisteringPrimitiveAction?(action)
+        return action
+    }
+
+    public func registerFilesystemAction(
+        bundle: KeepTalkingFilesystemBundle,
+        descriptor: KeepTalkingActionDescriptor? = nil,
+        remoteAuthorisable: Bool = true,
+        blockingAuthorisation: Bool = false
+    ) async throws -> KeepTalkingAction {
+        let node = try await getCurrentNodeInstance()
+        let action = KeepTalkingAction(
+            payload: .filesystem(bundle),
+            remoteAuthorisable: remoteAuthorisable,
+            blockingAuthorisation: Self.normalizedBlockingAuthorisation(
+                blockingAuthorisation
+            )
+        )
+        action.$node.id = try node.requireID()
+        action.descriptor = descriptor ?? Self.defaultDescriptor(for: bundle)
+
+        try await action.save(on: localStore.database)
+        try await filesystemActionManager.registerFilesystemAction(action)
+        await invalidateActionToolCatalog(
+            reason:
+                "register_filesystem_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
+        )
         return action
     }
 
@@ -550,6 +580,58 @@ extension KeepTalkingClient {
         return action
     }
 
+    public func modifyFilesystemAction(
+        actionID: UUID,
+        bundle: KeepTalkingFilesystemBundle? = nil,
+        descriptor: KeepTalkingActionDescriptor? = nil,
+        remoteAuthorisable: Bool? = nil,
+        blockingAuthorisation: Bool? = nil,
+        disabled: Bool? = nil
+    ) async throws -> KeepTalkingAction {
+        guard
+            let action = try await KeepTalkingAction.query(
+                on: localStore.database
+            )
+            .filter(\.$id, .equal, actionID)
+            .filter(\.$node.$id, .equal, config.node)
+            .first()
+        else {
+            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
+        }
+
+        if let bundle {
+            action.payload = .filesystem(bundle)
+        }
+        if let descriptor {
+            action.descriptor = descriptor
+        } else if Self.loadedDescriptor(from: action) == nil,
+            case .filesystem(let existingBundle) = action.payload
+        {
+            action.descriptor = Self.defaultDescriptor(for: existingBundle)
+        }
+
+        if let remoteAuthorisable {
+            action.remoteAuthorisable = remoteAuthorisable
+        }
+
+        if let blockingAuthorisation {
+            action.blockingAuthorisation =
+                Self.normalizedBlockingAuthorisation(blockingAuthorisation)
+        }
+
+        if let disabled {
+            action.disabled = disabled
+        }
+
+        try await action.save(on: localStore.database)
+        try await filesystemActionManager.refreshFilesystemAction(action)
+        await invalidateActionToolCatalog(
+            reason: "modify_filesystem_action action=\(actionID.uuidString.lowercased())"
+        )
+
+        return action
+    }
+
     public func removeMCPAction(actionID: UUID) async throws {
         let node = try await getCurrentNodeInstance()
         try await Self.removeMCPAction(
@@ -610,6 +692,21 @@ extension KeepTalkingClient {
         )
     }
 
+    public func removeFilesystemAction(actionID: UUID) async throws {
+        let node = try await getCurrentNodeInstance()
+        try await Self.removeMCPAction(
+            actionID: actionID,
+            node: node,
+            on: localStore.database,
+            callbackForUnregisteringAction: { id in
+                await self.filesystemActionManager.unregisterAction(actionID: id)
+            }
+        )
+        await invalidateActionToolCatalog(
+            reason: "remove_filesystem_action action=\(actionID.uuidString.lowercased())"
+        )
+    }
+
     static public func removeMCPAction(
         actionID: UUID,
         node: KeepTalkingNode,
@@ -665,44 +762,44 @@ extension KeepTalkingClient {
                     guard relation.$from.id == config.node else { return nil }
                     return KeepTalkingActionGrantSummary(
                         toNodeID: relation.$to.id,
-                        approvingContext: link.approvingContext
+                        approvingContext: link.approvingContext,
+                        permission: link.permission
                     )
                 }
 
             let isMCP: Bool
             let isSkill: Bool
             let isPrimitive: Bool
+            let isFilesystem: Bool
             let name: String
             let description: String
             switch action.payload {
                 case .mcpBundle(let bundle):
-                    isMCP = true
-                    isSkill = false
-                    isPrimitive = false
+                    isMCP = true; isSkill = false; isPrimitive = false; isFilesystem = false
                     name = bundle.name
                     description =
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
                 case .skill(let bundle):
-                    isMCP = false
-                    isSkill = true
-                    isPrimitive = false
+                    isMCP = false; isSkill = true; isPrimitive = false; isFilesystem = false
                     name = bundle.name
                     description =
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
                 case .primitive(let bundle):
-                    isMCP = false
-                    isSkill = false
-                    isPrimitive = true
+                    isMCP = false; isSkill = false; isPrimitive = true; isFilesystem = false
+                    name = bundle.name
+                    description =
+                        action.descriptor?.action?.description
+                        ?? bundle.indexDescription
+                case .filesystem(let bundle):
+                    isMCP = false; isSkill = false; isPrimitive = false; isFilesystem = true
                     name = bundle.name
                     description =
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
                 default:
-                    isMCP = false
-                    isSkill = false
-                    isPrimitive = false
+                    isMCP = false; isSkill = false; isPrimitive = false; isFilesystem = false
                     name = "unknown"
                     description = action.descriptor?.action?.description ?? ""
             }
@@ -714,6 +811,7 @@ extension KeepTalkingClient {
                     isMCP: isMCP,
                     isSkill: isSkill,
                     isPrimitive: isPrimitive,
+                    isFilesystem: isFilesystem,
                     name: name,
                     description: description,
                     hostedLocally: action.$node.id == config.node,
@@ -738,6 +836,7 @@ extension KeepTalkingClient {
         actionID: UUID,
         toNodeID: UUID,
         scope: KeepTalkingActionPermissionScope,
+        permission: KeepTalkingGrantPermission? = nil,
         node: KeepTalkingNode,
         on database: any Database,
         callbackForBroadcasting: ((String) async -> Void)? = nil
@@ -775,13 +874,15 @@ extension KeepTalkingClient {
                     targetActionRelation = try .init(
                         relation: relation,
                         action: action,
-                        approvingContext: .all
+                        approvingContext: .all,
+                        permission: permission
                     )
                 case .context(let approvingContext):
                     targetActionRelation = try .init(
                         relation: relation,
                         action: action,
-                        approvingContext: .contexts([approvingContext])
+                        approvingContext: .contexts([approvingContext]),
+                        permission: permission
                     )
             }
 
@@ -791,6 +892,9 @@ extension KeepTalkingClient {
                 current: targetActionRelation!.approvingContext,
                 requestedScope: scope
             )
+            if let permission {
+                targetActionRelation!.permission = permission
+            }
 
             try await targetActionRelation!.update(on: database)
         }
@@ -803,7 +907,8 @@ extension KeepTalkingClient {
     public func grantActionPermission(
         actionID: UUID,
         toNodeID: UUID,
-        scope: KeepTalkingActionPermissionScope
+        scope: KeepTalkingActionPermissionScope,
+        permission: KeepTalkingGrantPermission? = nil
     ) async throws {
         let selfNode = try await ensure(
             config.node,
@@ -815,12 +920,145 @@ extension KeepTalkingClient {
             actionID: actionID,
             toNodeID: toNodeID,
             scope: scope,
+            permission: permission,
             node: selfNode,
             on: localStore.database,
             callbackForBroadcasting: {
                 await self.broadcastLocalNodeState(reason: $0)
             }
         )
+    }
+
+    /// Updates the permission on a specific grant row (identified by its primary key).
+    public func updateGrantPermission(
+        grantID: UUID,
+        permission: KeepTalkingGrantPermission?
+    ) async throws {
+        guard
+            let grant = try await KeepTalkingNodeRelationActionRelation.find(
+                grantID, on: localStore.database
+            )
+        else {
+            throw KeepTalkingClientError.missingAction
+        }
+        grant.permission = permission
+        try await grant.update(on: localStore.database)
+        await broadcastLocalNodeState(
+            reason: "update_grant_permission grant=\(grantID.uuidString.lowercased())"
+        )
+    }
+
+    /// Returns the effective permission mask a node has for a given action in context.
+    ///
+    /// The mask is the union of all applicable grant relations. If the caller is
+    /// the owner node itself, `.all` is returned unconditionally.
+    /// Returns `[]` (empty) if the action is not granted to the node.
+    func effectiveGrantMask(
+        node: KeepTalkingNode,
+        action: KeepTalkingAction,
+        context: KeepTalkingContext?
+    ) async throws -> KeepTalkingActionPermissionMask {
+        let nodeID = try node.requireID()
+        guard let ownerNodeID = action.$node.id else { return [] }
+
+        // Owner always has full access to their own actions.
+        if nodeID == ownerNodeID {
+            return .all
+        }
+
+        let selfNode = try await getCurrentNodeInstance()
+
+        guard
+            let relation = try await Self.preferredTrustedRelation(
+                from: ownerNodeID,
+                to: nodeID,
+                allowing: context,
+                allowPending: ownerNodeID != (try? selfNode.requireID()),
+                on: localStore.database
+            )
+        else {
+            return []
+        }
+
+        let approvals = try await KeepTalkingNodeRelationActionRelation
+            .query(on: localStore.database)
+            .filter(\.$relation.$id == (try relation.requireID()))
+            .filter(\.$action.$id, .equal, try action.requireID())
+            .all()
+
+        var merged: KeepTalkingActionPermissionMask = []
+        var anyApplicable = false
+        for approval in approvals where approval.applicable(in: context) {
+            anyApplicable = true
+            merged.formUnion(approval.effectiveFilesystemMask)
+        }
+
+        return anyApplicable ? merged : []
+    }
+
+
+    /// Lists the tool names currently exposed by a locally-hosted MCP action.
+    public func listMCPToolNames(actionID: UUID) async throws -> [String] {
+        guard
+            let action = try await KeepTalkingAction.find(actionID, on: localStore.database)
+        else {
+            throw KeepTalkingClientError.missingAction
+        }
+        return try await mcpManager.listActionToolNames(action: action)
+    }
+
+    /// Returns the effective MCP tool allowlist for a caller on a given action in context.
+    ///
+    /// Returns `nil` if all tools are permitted (owner access or no restriction set).
+    /// Returns an empty set if the action is not granted.
+    /// Returns a non-nil set when at least one grant has an explicit allowlist;
+    /// the result is the union of all applicable allowlists.
+    func effectiveAllowedMCPTools(
+        node: KeepTalkingNode,
+        action: KeepTalkingAction,
+        context: KeepTalkingContext?
+    ) async throws -> Set<String>? {
+        let nodeID = try node.requireID()
+        guard let ownerNodeID = action.$node.id else { return Set() }
+
+        if nodeID == ownerNodeID { return nil }
+
+        let selfNode = try await getCurrentNodeInstance()
+
+        guard
+            let relation = try await Self.preferredTrustedRelation(
+                from: ownerNodeID,
+                to: nodeID,
+                allowing: context,
+                allowPending: ownerNodeID != (try? selfNode.requireID()),
+                on: localStore.database
+            )
+        else {
+            return Set()
+        }
+
+        let approvals = try await KeepTalkingNodeRelationActionRelation
+            .query(on: localStore.database)
+            .filter(\.$relation.$id == (try relation.requireID()))
+            .filter(\.$action.$id, .equal, try action.requireID())
+            .all()
+
+        var merged: Set<String> = []
+        var anyApplicable = false
+        var anyUnrestricted = false
+
+        for approval in approvals where approval.applicable(in: context) {
+            anyApplicable = true
+            let tools = approval.effectiveMCPAllowedTools
+            if tools == nil {
+                anyUnrestricted = true
+            } else {
+                merged.formUnion(tools!)
+            }
+        }
+
+        guard anyApplicable else { return Set() }
+        return anyUnrestricted ? nil : merged
     }
 
     static public func revokeActionPermission(
@@ -879,6 +1117,53 @@ extension KeepTalkingClient {
             callbackForBroadcasting: {
                 await self.broadcastLocalNodeState(reason: $0)
             }
+        )
+    }
+
+    /// Revokes a single grant row by its primary key, leaving any other
+    /// context-scoped grants for the same node intact.
+    public func revokeActionPermissionGrant(grantID: UUID) async throws {
+        guard
+            let row = try await KeepTalkingNodeRelationActionRelation.find(
+                grantID,
+                on: localStore.database
+            )
+        else { return }
+        let actionID = row.$action.id
+        try await row.delete(on: localStore.database)
+        await broadcastLocalNodeState(
+            reason: "revoke-grant grant=\(grantID.uuidString.lowercased()) action=\(actionID.uuidString.lowercased())"
+        )
+    }
+
+    /// Removes a single context from a `.contexts([...])` grant row.
+    /// If it is the last context in the row the entire row is deleted.
+    public func revokeContextFromGrant(grantID: UUID, contextID: UUID) async throws {
+        guard
+            let row = try await KeepTalkingNodeRelationActionRelation.find(
+                grantID,
+                on: localStore.database
+            )
+        else { return }
+
+        guard case .contexts(let contexts) = row.approvingContext else {
+            // .all grant — delete the whole row
+            try await row.delete(on: localStore.database)
+            await broadcastLocalNodeState(
+                reason: "revoke-grant grant=\(grantID.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"
+            )
+            return
+        }
+
+        let remaining = contexts.filter { $0.id != contextID }
+        if remaining.isEmpty {
+            try await row.delete(on: localStore.database)
+        } else {
+            row.approvingContext = .contexts(remaining)
+            try await row.save(on: localStore.database)
+        }
+        await broadcastLocalNodeState(
+            reason: "revoke-context grant=\(grantID.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"
         )
     }
 
@@ -1050,6 +1335,15 @@ extension KeepTalkingClient {
                         contextIDs: []
                     )
                 )
+            case .filesystem(name: let name, let indexDescription):
+                return .filesystem(
+                    KeepTalkingFilesystemBundle(
+                        id: action.actionID,
+                        name: name,
+                        indexDescription: indexDescription,
+                        rootPath: nil
+                    )
+                )
         }
     }
 
@@ -1091,6 +1385,18 @@ extension KeepTalkingClient {
 
     private static func defaultDescriptor(
         for bundle: KeepTalkingSemanticRetrievalBundle
+    ) -> KeepTalkingActionDescriptor {
+        KeepTalkingActionDescriptor(
+            subject: nil,
+            action: KeepTalkingActionWithDescription(
+                description: bundle.indexDescription
+            ),
+            object: nil
+        )
+    }
+
+    private static func defaultDescriptor(
+        for bundle: KeepTalkingFilesystemBundle
     ) -> KeepTalkingActionDescriptor {
         KeepTalkingActionDescriptor(
             subject: nil,

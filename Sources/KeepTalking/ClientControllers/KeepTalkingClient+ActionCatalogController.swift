@@ -267,8 +267,16 @@ extension KeepTalkingClient {
                     let tools = try await mcpManager.listActionTools(
                         action: action
                     )
-                    let projectedTools = tools.map { tool in
-                        KeepTalkingActionCatalogMCPTool(
+                    // Filter by the caller's per-grant tool allowlist.
+                    // nil allowedTools → all tools visible; non-nil → explicit set.
+                    let allowedTools = try await effectiveAllowedMCPTools(
+                        node: remoteNode,
+                        action: action,
+                        context: context
+                    )
+                    let projectedTools = tools.compactMap { tool -> KeepTalkingActionCatalogMCPTool? in
+                        if let allowedTools, !allowedTools.contains(tool.name) { return nil }
+                        return KeepTalkingActionCatalogMCPTool(
                             name: tool.name,
                             description: tool.description,
                             inputSchema: tool.inputSchema
@@ -305,6 +313,26 @@ extension KeepTalkingClient {
                         actionID: query.actionID,
                         kind: query.kind,
                         skillFile: filePayload,
+                        isError: false
+                    )
+
+                case .filesystemTools:
+                    guard case .filesystem(let bundle) = action.payload else {
+                        throw KeepTalkingClientError.unsupportedActionPayload
+                    }
+                    let callerMask = try await effectiveGrantMask(
+                        node: remoteNode,
+                        action: action,
+                        context: context
+                    )
+                    let tools = await filesystemActionManager.availableTools(
+                        bundle: bundle,
+                        mask: callerMask
+                    )
+                    return KeepTalkingActionCatalogItemResult(
+                        actionID: query.actionID,
+                        kind: query.kind,
+                        filesystemTools: tools,
                         isError: false
                     )
             }

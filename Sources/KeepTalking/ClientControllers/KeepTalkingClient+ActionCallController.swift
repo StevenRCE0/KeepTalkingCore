@@ -95,8 +95,9 @@ extension KeepTalkingClient {
             nil
     ) async -> KeepTalkingActionCallResult {
         let action: KeepTalkingAction
+        let callerMask: KeepTalkingActionPermissionMask
         do {
-            action = try await prepareActionCallExecution(
+            (action, callerMask) = try await prepareActionCallExecution(
                 request,
                 context: context
             )
@@ -138,6 +139,12 @@ extension KeepTalkingClient {
                         action: action,
                         call: request.call
                     )
+                case .filesystem:
+                    callResult = try await filesystemActionManager.callAction(
+                        action: action,
+                        call: request.call,
+                        callerMask: callerMask
+                    )
                 case .semanticRetrieval:
                     callResult = try await semanticRetrievalActionManager.callAction(
                         action: action,
@@ -155,6 +162,8 @@ extension KeepTalkingClient {
                         return "skill"
                     case .primitive:
                         return "primitive"
+                    case .filesystem:
+                        return "filesystem"
                     case .semanticRetrieval:
                         return "semantic_retrieval"
                 }
@@ -197,7 +206,7 @@ extension KeepTalkingClient {
     private func prepareActionCallExecution(
         _ request: KeepTalkingActionCallRequest,
         context: KeepTalkingContext?
-    ) async throws -> KeepTalkingAction {
+    ) async throws -> (KeepTalkingAction, KeepTalkingActionPermissionMask) {
         let action = try await resolveLocalActionForExecution(
             actionID: request.call.action
         )
@@ -214,13 +223,13 @@ extension KeepTalkingClient {
             )
         }
 
-        guard
-            try await isActionGrantedToNode(
-                node: callerNode,
-                action: action,
-                context: context
-            )
-        else {
+        let callerMask = try await effectiveGrantMask(
+            node: callerNode,
+            action: action,
+            context: context
+        )
+
+        guard callerMask != [] else {
             throw KeepTalkingClientError.actionCallNotAuthorized(
                 action: request.call.action,
                 caller: request.callerNodeID,
@@ -246,7 +255,7 @@ extension KeepTalkingClient {
             }
         }
 
-        return action
+        return (action, callerMask)
     }
 
     func handleIncomingActionCallRequest(

@@ -279,6 +279,20 @@ extension KeepTalkingClient {
                             bundle: bundle
                         )
                     )
+
+                case .filesystem(let bundle):
+                    let description =
+                        action.descriptor?.action?.description
+                        ?? bundle.indexDescription
+                    actionStubs.append(KeepTalkingActionStub(
+                        actionID: actionID,
+                        ownerNodeID: ownerNodeID,
+                        name: bundle.name,
+                        kind: .filesystem,
+                        description: description,
+                        supportsWakeAssist: supportsWakeAssist,
+                        isCurrentNode: isCurrentNode
+                    ))
             }
         }
 
