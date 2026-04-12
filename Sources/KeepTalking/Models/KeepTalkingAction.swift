@@ -109,12 +109,6 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
     @OptionalField(key: "disabled")
     public var disabled: Bool?
 
-    /// Locally cached MCP tool names for this action.
-    /// Populated when tools are first fetched (registration, edit, or catalog resolution).
-    /// Not synced via node-status or grants — remote tool availability is always requested live.
-    @OptionalField(key: "cached_mcp_tools")
-    public var cachedMCPTools: [String]?
-
     @Timestamp(key: "created_at", on: .create)
     public var createdAt: Date?
 

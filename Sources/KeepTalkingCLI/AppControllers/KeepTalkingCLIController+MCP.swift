@@ -124,8 +124,8 @@ extension KeepTalkingCLIController {
             ? "MCP server: \(name)"
             : trimmedDescription
 
-        let action = try await client.registerMCPAction(
-            bundle: KeepTalkingMCPBundle(
+        let action = try await client.registerAction(
+            payload: .mcpBundle(KeepTalkingMCPBundle(
                 name: name,
                 indexDescription: indexDescription,
                 service: .http(
@@ -134,7 +134,7 @@ extension KeepTalkingCLIController {
                     headers: headers,
                     scope: nil
                 )
-            )
+            ))
         )
         let actionID = action.id?.uuidString.lowercased() ?? "unknown"
         let headerLabel =
@@ -203,15 +203,15 @@ extension KeepTalkingCLIController {
         command: [String],
         environment: [String: String]
     ) async throws {
-        let action = try await client.registerMCPAction(
-            bundle: KeepTalkingMCPBundle(
+        let action = try await client.registerAction(
+            payload: .mcpBundle(KeepTalkingMCPBundle(
                 name: name,
                 indexDescription: "MCP stdio server: \(name)",
                 service: .stdio(
                     arguments: command,
                     environment: environment
                 )
-            )
+            ))
         )
         let actionID = action.id?.uuidString.lowercased() ?? "unknown"
         let commandLabel = command.joined(separator: " ")

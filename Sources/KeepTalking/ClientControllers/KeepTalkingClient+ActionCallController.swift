@@ -96,8 +96,9 @@ extension KeepTalkingClient {
     ) async -> KeepTalkingActionCallResult {
         let action: KeepTalkingAction
         let callerMask: KeepTalkingActionPermissionMask
+        let allowedMCPTools: Set<String>?
         do {
-            (action, callerMask) = try await prepareActionCallExecution(
+            (action, callerMask, allowedMCPTools) = try await prepareActionCallExecution(
                 request,
                 context: context
             )
@@ -127,7 +128,8 @@ extension KeepTalkingClient {
                 case .mcpBundle:
                     callResult = try await mcpManager.callAction(
                         action: action,
-                        call: request.call
+                        call: request.call,
+                        allowedTools: allowedMCPTools
                     )
                 case .skill:
                     callResult = try await skillManager.callAction(
@@ -207,7 +209,7 @@ extension KeepTalkingClient {
     private func prepareActionCallExecution(
         _ request: KeepTalkingActionCallRequest,
         context: KeepTalkingContext?
-    ) async throws -> (KeepTalkingAction, KeepTalkingActionPermissionMask) {
+    ) async throws -> (KeepTalkingAction, KeepTalkingActionPermissionMask, Set<String>?) {
         let action = try await resolveLocalActionForExecution(
             actionID: request.call.action
         )
@@ -256,7 +258,18 @@ extension KeepTalkingClient {
             }
         }
 
-        return (action, callerMask)
+        let allowedMCPTools: Set<String>?
+        if case .mcpBundle = action.payload {
+            allowedMCPTools = try await effectiveAllowedMCPTools(
+                node: callerNode,
+                action: action,
+                context: context
+            )
+        } else {
+            allowedMCPTools = nil
+        }
+
+        return (action, callerMask, allowedMCPTools)
     }
 
     func handleIncomingActionCallRequest(

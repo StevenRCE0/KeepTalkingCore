@@ -56,6 +56,7 @@ public enum AIPromptPresets {
             If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
             Do not fabricate tool outputs.
             Available actions are listed in the conversation context under "Available actions". Call \(ktRunActionToolFunctionName)(action_id, task) to execute an action end-to-end — the ACT agent will handle tool discovery, argument construction, and execution, then return a concise result.
+            Action types in the listing — mcp: external server tools; skill: a directory-based agent skill you can read and invoke; primitive: a direct built-in operation; filesystem: sandboxed file access on the owning node, including a blob bridge (file-to-blob uploads a local file as a shared context attachment visible to all participants, blob-to-file materialises a shared context attachment to disk); semanticretrieval: remote thread-memory search on another node.
             For skill actions, call \(ktSkillMetainfoToolFunctionName) first to read the manifest and discover file/metadata tools.
             After reading skill metadata, that skill's specific tool schemas will be injected into the next turn — call those injected tools directly.
             Notice that you also have built-in tools like web search and context attachment access.
@@ -194,6 +195,31 @@ public enum AIPromptPresets {
         let kind = isImage ? "image" : "file"
         return
             "Inspect the attached context \(kind) '\(filename)'. This is the user-provided attachment you just requested, and it is already included in this turn. Use it directly. Do not call context attachment tools to verify this same file again; only call them if you truly need a different attachment or metadata not present here."
+    }
+
+    // MARK: - ACT agent type guidance
+
+    /// Returns a short type-specific paragraph injected into the ACT agent system prompt.
+    /// Helps the agent understand what kind of action it is executing and any non-obvious
+    /// mechanics (e.g. the filesystem blob bridge).
+    public static func actAgentTypeGuidance(for kind: KeepTalkingActionStub.Kind) -> String {
+        switch kind {
+        case .filesystem:
+            return """
+                Filesystem action — tools operate on the owning node's sandboxed directories.
+                file-to-blob: reads a local file and publishes it as a context attachment shared with all participants in this context; returns a blob_id. Use this when the task asks to share, send, or attach a file to the conversation.
+                blob-to-file: writes a context attachment identified by blob_id to a local file path; creates intermediate directories automatically. Use this when the task asks to save, materialise, or process a shared attachment on disk.
+                A blob_id from file-to-blob is the same ID that appears in kt_list_context_attachments — it is immediately visible to all other nodes in this context.
+                """
+        case .mcp:
+            return "MCP action — tools are provided by an external MCP server. Call only the tools relevant to the task; do not probe or invoke tools speculatively."
+        case .skill:
+            return "Skill action — this skill provides a directory of files, scripts, and a manifest. Manifest metadata and file tools are pre-loaded in your tool list. Read the most relevant files before calling the skill's action tool."
+        case .primitive:
+            return "Primitive action — this is a direct built-in operation. Pass the required arguments and call it once."
+        case .semanticRetrieval:
+            return "Semantic retrieval action — performs thread-memory search on a remote node. Use the retrieval tool to find relevant earlier threads from that node."
+        }
     }
 
     // MARK: - MCP proxy tool description

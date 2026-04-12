@@ -20,6 +20,7 @@ public enum MCPManagerError: LocalizedError {
     case toolCallTimedOut(UUID, TimeInterval)
     case stdioProcessExitedEarly(command: [String], status: Int32)
     case unknownMCPTool(requested: String, available: [String])
+    case toolNotPermitted(String)
     case unregisteredAction(UUID)
 
     public var errorDescription: String? {
@@ -48,6 +49,8 @@ public enum MCPManagerError: LocalizedError {
             case .unknownMCPTool(let requested, let available):
                 let options = available.joined(separator: ", ")
                 return "Unknown MCP tool '\(requested)'. Available tools: [\(options)]"
+            case .toolNotPermitted(let name):
+                return "MCP tool '\(name)' is not permitted by the caller's grant."
             case .unregisteredAction(let actionID):
                 return "Action is not registered in MCPManager: \(actionID)"
         }
@@ -267,6 +270,7 @@ public actor MCPManager {
     private var stdioProcessesByActionID: [UUID: StdioProcessHandle] = [:]
     private var virtualToolNamesByActionID: [UUID: [String]] = [:]
     private var onActionToolsChanged: (@Sendable (UUID) async -> Void)?
+    private var onToolsFetched: (@Sendable (UUID, [String]) async -> Void)?
     private var onLog: (@Sendable (String) -> Void)?
     private var onHTTPAuthURL: (@Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult)?
 
@@ -289,6 +293,14 @@ public actor MCPManager {
         _ handler: (@Sendable (UUID) async -> Void)?
     ) {
         onActionToolsChanged = handler
+    }
+
+    /// Sets a callback invoked after every successful live tool listing from an MCP server.
+    /// Receives the action ID and the sorted tool names returned by the server.
+    public func setToolsFetchedHandler(
+        _ handler: (@Sendable (UUID, [String]) async -> Void)?
+    ) {
+        onToolsFetched = handler
     }
 
     /// Sets a log sink for MCP lifecycle events.
@@ -360,9 +372,14 @@ public actor MCPManager {
     }
 
     /// Invokes an MCP tool for the supplied action call.
+    ///
+    /// - Parameter allowedTools: The set of tool names the caller's grant permits.
+    ///   `nil` means all tools are allowed (owner access). An empty set means no tools
+    ///   are allowed and every call will be rejected.
     public func callAction(
         action: KeepTalkingAction,
-        call: KeepTalkingActionCall
+        call: KeepTalkingActionCall,
+        allowedTools: Set<String>?
     ) async throws -> (content: [Tool.Content], isError: Bool?) {
         guard let actionID = action.id else {
             throw MCPManagerError.missingActionID
@@ -379,6 +396,10 @@ public actor MCPManager {
             defaultToolName: mcpBundle.name,
             rawArguments: call.arguments
         )
+
+        if let allowedTools, !allowedTools.contains(invocation.name) {
+            throw MCPManagerError.toolNotPermitted(invocation.name)
+        }
 
         return try await Self.callToolWithTimeout(
             client: client,
@@ -402,8 +423,9 @@ public actor MCPManager {
         guard let client = clientsByActionID[actionID] else {
             throw MCPManagerError.unregisteredAction(actionID)
         }
-        let listing = try await client.listTools()
-        return listing.tools.map(\.name).sorted()
+        let names = try await client.listTools().tools.map(\.name).sorted()
+        if let onToolsFetched { await onToolsFetched(actionID, names) }
+        return names
     }
 
     /// Returns the full tool metadata currently exposed by an MCP action.
@@ -418,8 +440,9 @@ public actor MCPManager {
         guard let client = clientsByActionID[actionID] else {
             throw MCPManagerError.unregisteredAction(actionID)
         }
-        let listing = try await client.listTools()
-        return listing.tools.sorted { $0.name < $1.name }
+        let tools = try await client.listTools().tools.sorted { $0.name < $1.name }
+        if let onToolsFetched { await onToolsFetched(actionID, tools.map(\.name)) }
+        return tools
     }
 
     private func resolveToolInvocation(
@@ -811,6 +834,9 @@ public actor MCPManager {
         }
         guard case .mcpBundle(let bundle) = action.payload else {
             return []
+        }
+        if let cached = bundle.cachedTools, !cached.isEmpty {
+            return cached.sorted()
         }
         let trimmed = bundle.name.trimmingCharacters(
             in: .whitespacesAndNewlines

@@ -87,9 +87,9 @@ extension KeepTalkingFilesystemOperation {
         case .stat:
             return "Return metadata (size, type, modification date) for a path."
         case .fileToBlob:
-            return "Read a local file and upload it as a blob attachment scoped to the current context."
+            return "Read a local file and publish it as a context attachment (blob) shared with all participants in this context. Returns a blob_id that can be referenced in blob-to-file or discovered via kt_list_context_attachments. Use this to make a local file visible in the conversation."
         case .blobToFile:
-            return "Copy a context blob attachment identified by blob_id to a local filesystem path."
+            return "Materialise a context attachment (blob) to a local file path on this node. Supply a blob_id from a prior file-to-blob call or from kt_list_context_attachments. Use this to bring a shared context file onto disk for further processing by other filesystem tools."
         }
     }
 
@@ -116,22 +116,22 @@ extension KeepTalkingFilesystemOperation {
             return [
                 "path": [
                     "type": "string",
-                    "description": "Local file path to upload into the context blob store.",
+                    "description": "Absolute path of the local file to read and upload. Must be within a permitted directory.",
                 ],
                 "filename": [
                     "type": "string",
-                    "description": "Optional display filename. Defaults to the last path component.",
+                    "description": "Display name for the attachment in the conversation. Defaults to the last path component of path.",
                 ],
             ]
         case .blobToFile:
             return [
                 "blob_id": [
                     "type": "string",
-                    "description": "Blob ID of the context attachment to copy.",
+                    "description": "ID of the context attachment to write to disk. Obtain from a prior file-to-blob call or from kt_list_context_attachments.",
                 ],
                 "path": [
                     "type": "string",
-                    "description": "Destination local filesystem path to write the blob data.",
+                    "description": "Absolute destination path on this node's filesystem. Intermediate directories are created automatically.",
                 ],
             ]
         }

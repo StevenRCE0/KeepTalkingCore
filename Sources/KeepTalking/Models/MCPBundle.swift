@@ -57,13 +57,10 @@ public struct KeepTalkingMCPBundle: KeepTalkingActionBundle {
     public var service: KeepTalkingMCPService
     public var oauthRegistration: KeepTalkingMCPOAuthRegistration?
 
-    /// Per-tool permission requirements for this MCP server.
-    ///
-    /// When a remote node requests the tool list the grant mask is intersected
-    /// with each tool's declared requirements: tools whose required bits are
-    /// not all present in the grant mask are stripped from the response.
-    /// Tools absent from this map default to `.read`.
-    public var toolPermissions: [String: KeepTalkingActionPermissionMask]?
+    /// Locally cached MCP tool names for this action.
+    /// Populated when tools are first fetched (registration, edit, or catalog resolution).
+    /// Not synced via node-status or grants — remote tool availability is always requested live.
+    public var cachedTools: [String]?
 
     public init(
         id: UUID = UUID(),
@@ -71,14 +68,14 @@ public struct KeepTalkingMCPBundle: KeepTalkingActionBundle {
         indexDescription: String,
         service: KeepTalkingMCPService,
         oauthRegistration: KeepTalkingMCPOAuthRegistration? = nil,
-        toolPermissions: [String: KeepTalkingActionPermissionMask]? = nil
+        cachedTools: [String]? = nil
     ) {
         self.id = id
         self.name = name
         self.indexDescription = indexDescription
         self.service = service
         self.oauthRegistration = oauthRegistration
-        self.toolPermissions = toolPermissions
+        self.cachedTools = cachedTools
     }
 }
 

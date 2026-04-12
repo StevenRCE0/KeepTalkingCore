@@ -349,6 +349,7 @@ extension KeepTalkingClient {
 
         return """
             Available actions (use \(Self.runActionToolFunctionName) to execute, \(Self.ktSkillMetainfoToolFunctionName) to inspect skill manifests):
+            Types: mcp=external server tools · skill=directory-based agent skill · primitive=built-in operation · filesystem=sandboxed file access + context blob bridge · semanticretrieval=remote thread-memory search
             \(lines.joined(separator: "\n"))
             """
     }

@@ -152,28 +152,55 @@ extension KeepTalkingClient {
         }
     }
 
-    public func registerMCPAction(
-        bundle: KeepTalkingMCPBundle,
+    public func registerAction(
+        payload: KeepTalkingAction.Payload,
         descriptor: KeepTalkingActionDescriptor? = nil,
         remoteAuthorisable: Bool = true,
         blockingAuthorisation: Bool = false
     ) async throws -> KeepTalkingAction {
-        let node = try await getCurrentNodeInstance()
-        let action = try await Self.registerMCPAction(
-            bundle: bundle,
-            descriptor: descriptor,
+        var finalPayload = payload
+        if case .primitive(let bundle) = payload {
+            finalPayload = .primitive(bundle.assigningNewID())
+        }
+        let action = KeepTalkingAction(
+            payload: finalPayload,
             remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: blockingAuthorisation,
-            node: node,
-            on: localStore.database,
-            callbackForRegisteringMCPAction: {
-                try await self.mcpManager.registerMCPAction($0)
+            blockingAuthorisation: blockingAuthorisation
+        )
+        if let descriptor { action.descriptor = descriptor }
+        return try await saveConstructedAction(action)
+    }
+
+    static public func registerAction(
+        payload: KeepTalkingAction.Payload,
+        descriptor: KeepTalkingActionDescriptor? = nil,
+        remoteAuthorisable: Bool = true,
+        blockingAuthorisation: Bool = false,
+        node: KeepTalkingNode,
+        on database: any Database
+    ) async throws -> KeepTalkingAction {
+        var finalPayload = payload
+        if case .primitive(let bundle) = payload {
+            finalPayload = .primitive(bundle.assigningNewID())
+        }
+        let action = KeepTalkingAction(
+            payload: finalPayload,
+            remoteAuthorisable: remoteAuthorisable,
+            blockingAuthorisation: normalizedBlockingAuthorisation(blockingAuthorisation)
+        )
+        action.$node.id = try node.requireID()
+        if let descriptor {
+            action.descriptor = descriptor
+        } else {
+            switch finalPayload {
+                case .mcpBundle(let b): action.descriptor = Self.defaultDescriptor(for: b)
+                case .skill(let b): action.descriptor = Self.defaultDescriptor(for: b)
+                case .primitive(let b): action.descriptor = Self.defaultDescriptor(for: b)
+                case .semanticRetrieval(let b): action.descriptor = Self.defaultDescriptor(for: b)
+                case .filesystem(let b): action.descriptor = Self.defaultDescriptor(for: b)
             }
-        )
-        await invalidateActionToolCatalog(
-            reason:
-                "register_mcp_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
-        )
+        }
+        try await action.save(on: database)
         return action
     }
 
@@ -261,372 +288,74 @@ extension KeepTalkingClient {
         return action
     }
 
-    public func saveConstructedMCPAction(
-        _ action: KeepTalkingAction
-    ) async throws -> KeepTalkingAction {
-        try await saveConstructedAction(action)
-    }
 
-    static public func registerMCPAction(
-        bundle: KeepTalkingMCPBundle,
+    public func modifyAction(
+        actionID: UUID,
+        payload: KeepTalkingAction.Payload? = nil,
         descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool = true,
-        blockingAuthorisation: Bool = false,
-        node: KeepTalkingNode,
-        on database: any Database,
-        callbackForRegisteringMCPAction: ((KeepTalkingAction) async throws -> Void)? = nil
+        remoteAuthorisable: Bool? = nil,
+        blockingAuthorisation: Bool? = nil,
+        disabled: Bool? = nil
     ) async throws -> KeepTalkingAction {
-        let action = KeepTalkingAction(
-            payload: .mcpBundle(bundle),
-            remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: normalizedBlockingAuthorisation(
-                blockingAuthorisation
+        guard
+            let action = try await KeepTalkingAction.query(
+                on: localStore.database
             )
-        )
-        action.$node.id = try node.requireID()
-        action.descriptor =
-            descriptor ?? Self.defaultDescriptor(for: bundle)
+            .filter(\.$id, .equal, actionID)
+            .filter(\.$node.$id, .equal, config.node)
+            .first()
+        else {
+            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
+        }
 
-        try await action.save(on: database)
-        try await callbackForRegisteringMCPAction?(action)
-        return action
-    }
-
-    public func registerSkillAction(
-        bundle: KeepTalkingSkillBundle,
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool = true,
-        blockingAuthorisation: Bool = false
-    ) async throws -> KeepTalkingAction {
-        let node = try await getCurrentNodeInstance()
-        let action = try await Self.registerSkillAction(
-            bundle: bundle,
-            descriptor: descriptor,
-            remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: blockingAuthorisation,
-            node: node,
-            on: localStore.database,
-            callbackForRegisteringSkillAction: {
-                try await self.skillManager.registerSkillAction($0)
+        if let payload {
+            action.payload = payload
+        }
+        if let descriptor {
+            action.descriptor = descriptor
+        } else if Self.loadedDescriptor(from: action) == nil {
+            switch action.payload {
+                case .mcpBundle(let bundle):
+                    action.descriptor = defaultDescriptor(for: bundle)
+                case .skill(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
+                case .primitive(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
+                case .filesystem(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
+                case .semanticRetrieval:
+                    break
             }
-        )
-        await invalidateActionToolCatalog(
-            reason:
-                "register_skill_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
-        )
-        return action
-    }
-
-    static public func registerSkillAction(
-        bundle: KeepTalkingSkillBundle,
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool = true,
-        blockingAuthorisation: Bool = false,
-        node: KeepTalkingNode,
-        on database: any Database,
-        callbackForRegisteringSkillAction: ((KeepTalkingAction) async throws -> Void)? = nil
-    ) async throws -> KeepTalkingAction {
-        let action = KeepTalkingAction(
-            payload: .skill(bundle),
-            remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: normalizedBlockingAuthorisation(
-                blockingAuthorisation
-            )
-        )
-        action.$node.id = try node.requireID()
-        action.descriptor =
-            descriptor ?? Self.defaultDescriptor(for: bundle)
-
-        try await action.save(on: database)
-        try await callbackForRegisteringSkillAction?(action)
-        return action
-    }
-
-    public func registerPrimitiveAction(
-        bundle: KeepTalkingPrimitiveBundle,
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool = true,
-        blockingAuthorisation: Bool = false
-    ) async throws -> KeepTalkingAction {
-        let node = try await getCurrentNodeInstance()
-        let action = try await Self.registerPrimitiveAction(
-            bundle: bundle,
-            descriptor: descriptor,
-            remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: blockingAuthorisation,
-            node: node,
-            on: localStore.database,
-            callbackForRegisteringPrimitiveAction: {
-                try await self.primitiveActionManager.registerPrimitiveAction($0)
-            }
-        )
-        await invalidateActionToolCatalog(
-            reason:
-                "register_primitive_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
-        )
-        return action
-    }
-
-    static public func registerPrimitiveAction(
-        bundle: KeepTalkingPrimitiveBundle,
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool = true,
-        blockingAuthorisation: Bool = false,
-        node: KeepTalkingNode,
-        on database: any Database,
-        callbackForRegisteringPrimitiveAction:
-            ((KeepTalkingAction) async throws -> Void)? = nil
-    ) async throws -> KeepTalkingAction {
-        let persistedBundle = bundle.assigningNewID()
-        let action = KeepTalkingAction(
-            payload: .primitive(persistedBundle),
-            remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: normalizedBlockingAuthorisation(
-                blockingAuthorisation
-            )
-        )
-        action.$node.id = try node.requireID()
-        action.descriptor =
-            descriptor ?? Self.defaultDescriptor(for: bundle)
-
-        try await action.save(on: database)
-        try await callbackForRegisteringPrimitiveAction?(action)
-        return action
-    }
-
-    public func registerFilesystemAction(
-        bundle: KeepTalkingFilesystemBundle,
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool = true,
-        blockingAuthorisation: Bool = false
-    ) async throws -> KeepTalkingAction {
-        let node = try await getCurrentNodeInstance()
-        let action = KeepTalkingAction(
-            payload: .filesystem(bundle),
-            remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: Self.normalizedBlockingAuthorisation(
-                blockingAuthorisation
-            )
-        )
-        action.$node.id = try node.requireID()
-        action.descriptor = descriptor ?? Self.defaultDescriptor(for: bundle)
-
-        try await action.save(on: localStore.database)
-        try await filesystemActionManager.registerFilesystemAction(action)
-        await invalidateActionToolCatalog(
-            reason:
-                "register_filesystem_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
-        )
-        return action
-    }
-
-    public func modifyMCPAction(
-        actionID: UUID,
-        bundle: KeepTalkingMCPBundle? = nil,
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool? = nil,
-        blockingAuthorisation: Bool? = nil,
-        disabled: Bool? = nil
-    ) async throws -> KeepTalkingAction {
-        guard
-            let action = try await KeepTalkingAction.query(
-                on: localStore.database
-            )
-            .filter(\.$id, .equal, actionID)
-            .filter(\.$node.$id, .equal, config.node)
-            .first()
-        else {
-            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
-        }
-
-        if let bundle {
-            action.payload = .mcpBundle(bundle)
-        }
-        if let descriptor {
-            action.descriptor = descriptor
-        } else if Self.loadedDescriptor(from: action) == nil,
-            case .mcpBundle(let existingBundle) = action.payload
-        {
-            action.descriptor = defaultDescriptor(for: existingBundle)
         }
 
         if let remoteAuthorisable {
             action.remoteAuthorisable = remoteAuthorisable
         }
-
-        if let blockingAuthorisation {
-            action.blockingAuthorisation =
-                Self
-                .normalizedBlockingAuthorisation(blockingAuthorisation)
-        }
-
-        if let disabled {
-            action.disabled = disabled
-        }
-
-        try await action.save(on: localStore.database)
-        try await mcpManager.refreshMCPAction(action)
-        await invalidateActionToolCatalog(
-            reason: "modify_mcp_action action=\(actionID.uuidString.lowercased())"
-        )
-
-        return action
-    }
-
-    public func modifySkillAction(
-        actionID: UUID,
-        bundle: KeepTalkingSkillBundle? = nil,
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool? = nil,
-        blockingAuthorisation: Bool? = nil,
-        disabled: Bool? = nil
-    ) async throws -> KeepTalkingAction {
-        guard
-            let action = try await KeepTalkingAction.query(
-                on: localStore.database
-            )
-            .filter(\.$id, .equal, actionID)
-            .filter(\.$node.$id, .equal, config.node)
-            .first()
-        else {
-            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
-        }
-
-        if let bundle {
-            action.payload = .skill(bundle)
-        }
-        if let descriptor {
-            action.descriptor = descriptor
-        } else if Self.loadedDescriptor(from: action) == nil,
-            case .skill(let existingBundle) = action.payload
-        {
-            action.descriptor = Self.defaultDescriptor(for: existingBundle)
-        }
-
-        if let remoteAuthorisable {
-            action.remoteAuthorisable = remoteAuthorisable
-        }
-
-        if let blockingAuthorisation {
-            action.blockingAuthorisation =
-                Self
-                .normalizedBlockingAuthorisation(blockingAuthorisation)
-        }
-
-        if let disabled {
-            action.disabled = disabled
-        }
-
-        try await action.save(on: localStore.database)
-        try await skillManager.refreshSkillAction(action)
-        await invalidateActionToolCatalog(
-            reason: "modify_skill_action action=\(actionID.uuidString.lowercased())"
-        )
-
-        return action
-    }
-
-    public func modifyPrimitiveAction(
-        actionID: UUID,
-        bundle: KeepTalkingPrimitiveBundle? = nil,
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool? = nil,
-        blockingAuthorisation: Bool? = nil,
-        disabled: Bool? = nil
-    ) async throws -> KeepTalkingAction {
-        guard
-            let action = try await KeepTalkingAction.query(
-                on: localStore.database
-            )
-            .filter(\.$id, .equal, actionID)
-            .filter(\.$node.$id, .equal, config.node)
-            .first()
-        else {
-            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
-        }
-
-        if let bundle {
-            action.payload = .primitive(bundle)
-        }
-        if let descriptor {
-            action.descriptor = descriptor
-        } else if Self.loadedDescriptor(from: action) == nil,
-            case .primitive(let existingBundle) = action.payload
-        {
-            action.descriptor = Self.defaultDescriptor(for: existingBundle)
-        }
-
-        if let remoteAuthorisable {
-            action.remoteAuthorisable = remoteAuthorisable
-        }
-
-        if let blockingAuthorisation {
-            action.blockingAuthorisation =
-                Self
-                .normalizedBlockingAuthorisation(blockingAuthorisation)
-        }
-
-        if let disabled {
-            action.disabled = disabled
-        }
-
-        try await action.save(on: localStore.database)
-        try await primitiveActionManager.refreshPrimitiveAction(action)
-        await invalidateActionToolCatalog(
-            reason:
-                "modify_primitive_action action=\(actionID.uuidString.lowercased())"
-        )
-
-        return action
-    }
-
-    public func modifyFilesystemAction(
-        actionID: UUID,
-        bundle: KeepTalkingFilesystemBundle? = nil,
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool? = nil,
-        blockingAuthorisation: Bool? = nil,
-        disabled: Bool? = nil
-    ) async throws -> KeepTalkingAction {
-        guard
-            let action = try await KeepTalkingAction.query(
-                on: localStore.database
-            )
-            .filter(\.$id, .equal, actionID)
-            .filter(\.$node.$id, .equal, config.node)
-            .first()
-        else {
-            throw KeepTalkingClientError.actionNotHostedLocally(actionID)
-        }
-
-        if let bundle {
-            action.payload = .filesystem(bundle)
-        }
-        if let descriptor {
-            action.descriptor = descriptor
-        } else if Self.loadedDescriptor(from: action) == nil,
-            case .filesystem(let existingBundle) = action.payload
-        {
-            action.descriptor = Self.defaultDescriptor(for: existingBundle)
-        }
-
-        if let remoteAuthorisable {
-            action.remoteAuthorisable = remoteAuthorisable
-        }
-
         if let blockingAuthorisation {
             action.blockingAuthorisation =
                 Self.normalizedBlockingAuthorisation(blockingAuthorisation)
         }
-
         if let disabled {
             action.disabled = disabled
         }
 
         try await action.save(on: localStore.database)
-        try await filesystemActionManager.refreshFilesystemAction(action)
+
+        switch action.payload {
+            case .mcpBundle:
+                try await mcpManager.refreshMCPAction(action)
+            case .skill:
+                try await skillManager.refreshSkillAction(action)
+            case .primitive:
+                try await primitiveActionManager.refreshPrimitiveAction(action)
+            case .filesystem:
+                try await filesystemActionManager.refreshFilesystemAction(action)
+            case .semanticRetrieval:
+                break
+        }
+
         await invalidateActionToolCatalog(
-            reason: "modify_filesystem_action action=\(actionID.uuidString.lowercased())"
+            reason: "modify_action action=\(actionID.uuidString.lowercased())"
         )
 
         return action
@@ -1005,6 +734,21 @@ extension KeepTalkingClient {
             throw KeepTalkingClientError.missingAction
         }
         return try await mcpManager.listActionToolNames(action: action)
+    }
+
+    /// Persists a freshly-fetched tool list into the action's bundle in the DB.
+    /// Called by the MCPManager `onToolsFetched` callback so every live server
+    /// listing is automatically reflected in the stored payload.
+    func persistCachedMCPTools(actionID: UUID, toolNames: [String]) async {
+        guard
+            let action = try? await KeepTalkingAction.find(actionID, on: localStore.database),
+            case .mcpBundle(var bundle) = action.payload
+        else {
+            return
+        }
+        bundle.cachedTools = toolNames
+        action.payload = .mcpBundle(bundle)
+        try? await action.save(on: localStore.database)
     }
 
     /// Returns the effective MCP tool allowlist for a caller on a given action in context.
@@ -1407,46 +1151,4 @@ extension KeepTalkingClient {
         )
     }
 
-    // MARK: - Semantic Retrieval Action Registration
-
-    public func registerSemanticRetrievalAction(
-        bundle: KeepTalkingSemanticRetrievalBundle = .init(),
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool = true,
-        blockingAuthorisation: Bool = false
-    ) async throws -> KeepTalkingAction {
-        let node = try await getCurrentNodeInstance()
-        let action = try await Self.registerSemanticRetrievalAction(
-            bundle: bundle,
-            descriptor: descriptor,
-            remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: blockingAuthorisation,
-            node: node,
-            on: localStore.database
-        )
-        await invalidateActionToolCatalog(
-            reason:
-                "register_semantic_retrieval_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
-        )
-        return action
-    }
-
-    static public func registerSemanticRetrievalAction(
-        bundle: KeepTalkingSemanticRetrievalBundle = .init(),
-        descriptor: KeepTalkingActionDescriptor? = nil,
-        remoteAuthorisable: Bool = true,
-        blockingAuthorisation: Bool = false,
-        node: KeepTalkingNode,
-        on database: any Database
-    ) async throws -> KeepTalkingAction {
-        let action = KeepTalkingAction(
-            payload: .semanticRetrieval(bundle),
-            remoteAuthorisable: remoteAuthorisable,
-            blockingAuthorisation: normalizedBlockingAuthorisation(blockingAuthorisation)
-        )
-        action.$node.id = try node.requireID()
-        action.descriptor = descriptor ?? Self.defaultDescriptor(for: bundle)
-        try await action.save(on: database)
-        return action
-    }
 }

@@ -16,7 +16,6 @@ struct CreateKeepTalkingActionsMigration: AsyncMigration {
             .field("disabled", .bool)
             .field("created_at", .datetime, .required)
             .field("last_used", .datetime)
-            .field("cached_mcp_tools", .json)
             .create()
     }
 

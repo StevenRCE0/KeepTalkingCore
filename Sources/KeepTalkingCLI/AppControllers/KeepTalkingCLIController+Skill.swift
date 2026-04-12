@@ -96,12 +96,12 @@ extension KeepTalkingCLIController {
             ? "Skill directory: \(name)"
             : trimmedDescription
 
-        let action = try await client.registerSkillAction(
-            bundle: KeepTalkingSkillBundle(
+        let action = try await client.registerAction(
+            payload: .skill(KeepTalkingSkillBundle(
                 name: name,
                 indexDescription: indexDescription,
                 directory: directory
-            )
+            ))
         )
         let actionID = action.id?.uuidString.lowercased() ?? "unknown"
         print(

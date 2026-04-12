@@ -436,6 +436,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// Starts transports, persists local node state, and registers local actions.
     public func connect() async throws {
         await mcpManager.setHTTPAuthURLHandler(mcpHTTPAuthURLHandler)
+        await mcpManager.setToolsFetchedHandler { [weak self] actionID, toolNames in
+            await self?.persistCachedMCPTools(actionID: actionID, toolNames: toolNames)
+        }
         _ = try await ensure(config.contextID, for: KeepTalkingContext.self)
 
         try await rtcClient.start()

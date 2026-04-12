@@ -160,6 +160,7 @@ extension KeepTalkingClient {
         let ownerNodeName = aliasLookup.resolve(.node(stub.ownerNodeID)).primary()
         let selfNodeName = aliasLookup.resolve(.node(config.node)).primary()
 
+        let typeGuidance = AIPromptPresets.actAgentTypeGuidance(for: stub.kind)
         let systemPrompt = """
             You are an Action Execution Agent (ACT agent) for the KeepTalking platform.
 
@@ -171,9 +172,10 @@ extension KeepTalkingClient {
 
             Context: \(contextID)
             Current node: \(selfNodeName)
-            Action: \(stub.name) (id: \(actionID.uuidString.lowercased()), node: \(ownerNodeName))
+            Action: \(stub.name) (id: \(actionID.uuidString.lowercased()), type: \(stub.kind.rawValue), node: \(ownerNodeName))
             Task: \(task.isEmpty ? "(no specific task provided — use your best judgment)" : task)
             \(resolvedAction.promptContext.isEmpty ? "" : "\nAction metadata:\n\(resolvedAction.promptContext)\n")
+            \(typeGuidance)
 
             Be factual and direct. Only report what the tool returned. Do not speculate.
             Your job is to get the user's task done — not to ask for clarification or request more information. Make your best judgment and execute.
@@ -441,13 +443,15 @@ extension KeepTalkingClient {
             "runtime-catalog action=\(actionID.uuidString.lowercased()) injected=\(definitions.count)"
         )
 
-        // Persist the resolved tool names into the action row so the grant UI
+        // Persist the resolved tool names into the bundle so the grant UI
         // can display them without a live MCP round-trip.
         let toolNames = definitions.compactMap(\.targetName).filter { !$0.isEmpty }
         if !toolNames.isEmpty,
-            let action = try? await KeepTalkingAction.find(actionID, on: localStore.database)
+            let action = try? await KeepTalkingAction.find(actionID, on: localStore.database),
+            case .mcpBundle(var bundle) = action.payload
         {
-            action.cachedMCPTools = toolNames.sorted()
+            bundle.cachedTools = toolNames.sorted()
+            action.payload = .mcpBundle(bundle)
             try? await action.save(on: localStore.database)
         }
     }
