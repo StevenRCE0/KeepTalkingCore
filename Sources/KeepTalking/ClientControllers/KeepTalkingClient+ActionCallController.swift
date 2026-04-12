@@ -143,7 +143,8 @@ extension KeepTalkingClient {
                     callResult = try await filesystemActionManager.callAction(
                         action: action,
                         call: request.call,
-                        callerMask: callerMask
+                        callerMask: callerMask,
+                        contextID: request.contextID
                     )
                 case .semanticRetrieval:
                     callResult = try await semanticRetrievalActionManager.callAction(

@@ -14,13 +14,17 @@ public enum KeepTalkingFilesystemOperation: String, Codable, Sendable, Hashable,
     case writeFile = "write-file"
     /// Return metadata (size, modification date, type) for a path.
     case stat
+    /// Read a local file and register it as a context blob attachment.
+    case fileToBlob = "file-to-blob"
+    /// Copy a context blob attachment to a local filesystem path.
+    case blobToFile = "blob-to-file"
 
     /// Minimum mask bit required to invoke this operation.
     public var requiredMask: KeepTalkingActionPermissionMask {
         switch self {
-        case .ls, .readFile, .grep, .stat:
+        case .ls, .readFile, .grep, .stat, .fileToBlob:
             return .read
-        case .writeFile:
+        case .writeFile, .blobToFile:
             return .write
         }
     }
@@ -82,6 +86,10 @@ extension KeepTalkingFilesystemOperation {
             return "Write or overwrite the content of a file."
         case .stat:
             return "Return metadata (size, type, modification date) for a path."
+        case .fileToBlob:
+            return "Read a local file and upload it as a blob attachment scoped to the current context."
+        case .blobToFile:
+            return "Copy a context blob attachment identified by blob_id to a local filesystem path."
         }
     }
 
@@ -104,6 +112,28 @@ extension KeepTalkingFilesystemOperation {
             ]
         case .stat:
             return ["path": ["type": "string", "description": "Path to stat."]]
+        case .fileToBlob:
+            return [
+                "path": [
+                    "type": "string",
+                    "description": "Local file path to upload into the context blob store.",
+                ],
+                "filename": [
+                    "type": "string",
+                    "description": "Optional display filename. Defaults to the last path component.",
+                ],
+            ]
+        case .blobToFile:
+            return [
+                "blob_id": [
+                    "type": "string",
+                    "description": "Blob ID of the context attachment to copy.",
+                ],
+                "path": [
+                    "type": "string",
+                    "description": "Destination local filesystem path to write the blob data.",
+                ],
+            ]
         }
     }
 
@@ -114,6 +144,8 @@ extension KeepTalkingFilesystemOperation {
         case .grep: return ["pattern", "path"]
         case .writeFile: return ["path", "content"]
         case .stat: return ["path"]
+        case .fileToBlob: return ["path"]
+        case .blobToFile: return ["blob_id", "path"]
         }
     }
 }

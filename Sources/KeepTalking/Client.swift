@@ -303,6 +303,45 @@ public final class KeepTalkingClient: @unchecked Sendable {
         )
         self.filesystemActionManager = FilesystemActionManager()
 
+        // All stored properties are initialized above; [weak self] is safe from here on.
+        // Inject the blob bridge synchronously so blob transfer operations are available
+        // immediately, using the same send(attachments:) path as ask-for-file.
+        filesystemActionManager.bridgeBox.bridge = FilesystemBlobBridge(
+            readBlob: { [weak self] blobID in
+                guard let self else {
+                    throw FilesystemActionManagerError.blobBridgeNotConfigured
+                }
+                let records = try await self.blobRecordsByBlobID([blobID])
+                guard let record = records[blobID], record.availability == .ready else {
+                    throw FilesystemActionManagerError.blobNotAvailable(blobID)
+                }
+                return try self.blobStore.read(
+                    relativePath: record.relativePath,
+                    blobID: blobID
+                )
+            },
+            uploadFileAsContextAttachment: { [weak self] fileURL, filename, mimeType, contextID in
+                guard let self else {
+                    throw FilesystemActionManagerError.blobBridgeNotConfigured
+                }
+                let data = try Data(contentsOf: fileURL)
+                let blobID = self.hexDigest(for: data)
+                try await self.send(
+                    "",
+                    attachments: [
+                        KeepTalkingLocalAttachmentInput(
+                            sourceURL: fileURL,
+                            filename: filename,
+                            mimeType: mimeType
+                        )
+                    ],
+                    in: contextID,
+                    type: .intermediate(hint: "file-to-blob")
+                )
+                return blobID
+            }
+        )
+
         rtcClient.onLog = { [weak self] line in
             self?.onLog?(line)
         }
