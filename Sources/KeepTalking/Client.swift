@@ -36,7 +36,7 @@ public enum KeepTalkingClientError: LocalizedError {
     case unsupportedActionPayload
     case missingRelation
     case missingContextSecret(UUID)
-    case missingContext(UUID)
+    case missingContext(UUID?)
     case invalidTurningPoint(UUID)
 
     public var errorDescription: String? {
@@ -102,7 +102,7 @@ public enum KeepTalkingClientError: LocalizedError {
             case .missingContextSecret(let contextID):
                 return "Missing context secret for context: \(contextID)"
             case .missingContext(let contextID):
-                return "Context not found: \(contextID)"
+                return "Context not found: \(String(describing: contextID))"
             case .invalidTurningPoint(let messageID):
                 return "Message cannot be used as a turning point (not found or is the first message): \(messageID)"
         }
@@ -436,9 +436,6 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// Starts transports, persists local node state, and registers local actions.
     public func connect() async throws {
         await mcpManager.setHTTPAuthURLHandler(mcpHTTPAuthURLHandler)
-        await mcpManager.setToolsFetchedHandler { [weak self] actionID, toolNames in
-            await self?.persistCachedMCPTools(actionID: actionID, toolNames: toolNames)
-        }
         _ = try await ensure(config.contextID, for: KeepTalkingContext.self)
 
         try await rtcClient.start()

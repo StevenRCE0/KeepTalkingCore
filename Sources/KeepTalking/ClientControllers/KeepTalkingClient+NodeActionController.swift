@@ -288,7 +288,6 @@ extension KeepTalkingClient {
         return action
     }
 
-
     public func modifyAction(
         actionID: UUID,
         payload: KeepTalkingAction.Payload? = nil,
@@ -504,31 +503,46 @@ extension KeepTalkingClient {
             let description: String
             switch action.payload {
                 case .mcpBundle(let bundle):
-                    isMCP = true; isSkill = false; isPrimitive = false; isFilesystem = false
+                    isMCP = true
+                    isSkill = false
+                    isPrimitive = false
+                    isFilesystem = false
                     name = bundle.name
                     description =
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
                 case .skill(let bundle):
-                    isMCP = false; isSkill = true; isPrimitive = false; isFilesystem = false
+                    isMCP = false
+                    isSkill = true
+                    isPrimitive = false
+                    isFilesystem = false
                     name = bundle.name
                     description =
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
                 case .primitive(let bundle):
-                    isMCP = false; isSkill = false; isPrimitive = true; isFilesystem = false
+                    isMCP = false
+                    isSkill = false
+                    isPrimitive = true
+                    isFilesystem = false
                     name = bundle.name
                     description =
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
                 case .filesystem(let bundle):
-                    isMCP = false; isSkill = false; isPrimitive = false; isFilesystem = true
+                    isMCP = false
+                    isSkill = false
+                    isPrimitive = false
+                    isFilesystem = true
                     name = bundle.name
                     description =
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
                 default:
-                    isMCP = false; isSkill = false; isPrimitive = false; isFilesystem = false
+                    isMCP = false
+                    isSkill = false
+                    isPrimitive = false
+                    isFilesystem = false
                     name = "unknown"
                     description = action.descriptor?.action?.description ?? ""
             }
@@ -709,7 +723,8 @@ extension KeepTalkingClient {
             return []
         }
 
-        let approvals = try await KeepTalkingNodeRelationActionRelation
+        let approvals =
+            try await KeepTalkingNodeRelationActionRelation
             .query(on: localStore.database)
             .filter(\.$relation.$id == (try relation.requireID()))
             .filter(\.$action.$id, .equal, try action.requireID())
@@ -725,7 +740,6 @@ extension KeepTalkingClient {
         return anyApplicable ? merged : []
     }
 
-
     /// Lists the tool names currently exposed by a locally-hosted MCP action.
     public func listMCPToolNames(actionID: UUID) async throws -> [String] {
         guard
@@ -733,13 +747,16 @@ extension KeepTalkingClient {
         else {
             throw KeepTalkingClientError.missingAction
         }
-        return try await mcpManager.listActionToolNames(action: action)
+        let names = try await mcpManager.listActionToolNames(action: action)
+        await cacheMCPTools(actionID: actionID, toolNames: names)
+
+        return names
     }
 
     /// Persists a freshly-fetched tool list into the action's bundle in the DB.
     /// Called by the MCPManager `onToolsFetched` callback so every live server
     /// listing is automatically reflected in the stored payload.
-    func persistCachedMCPTools(actionID: UUID, toolNames: [String]) async {
+    public func cacheMCPTools(actionID: UUID, toolNames: [String]) async {
         guard
             let action = try? await KeepTalkingAction.find(actionID, on: localStore.database),
             case .mcpBundle(var bundle) = action.payload
@@ -781,7 +798,8 @@ extension KeepTalkingClient {
             return Set()
         }
 
-        let approvals = try await KeepTalkingNodeRelationActionRelation
+        let approvals =
+            try await KeepTalkingNodeRelationActionRelation
             .query(on: localStore.database)
             .filter(\.$relation.$id == (try relation.requireID()))
             .filter(\.$action.$id, .equal, try action.requireID())
@@ -894,7 +912,8 @@ extension KeepTalkingClient {
             // .all grant — delete the whole row
             try await row.delete(on: localStore.database)
             await broadcastLocalNodeState(
-                reason: "revoke-grant grant=\(grantID.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"
+                reason:
+                    "revoke-grant grant=\(grantID.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"
             )
             return
         }
@@ -907,7 +926,8 @@ extension KeepTalkingClient {
             try await row.save(on: localStore.database)
         }
         await broadcastLocalNodeState(
-            reason: "revoke-context grant=\(grantID.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"
+            reason:
+                "revoke-context grant=\(grantID.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"
         )
     }
 
@@ -1070,7 +1090,7 @@ extension KeepTalkingClient {
                         action: primitiveKind
                     )
                 )
-            case .semanticRetrieval(name: let name, let indexDescription):
+            case .semanticRetrieval(let name, let indexDescription):
                 return .semanticRetrieval(
                     .init(
                         id: action.actionID,
@@ -1079,7 +1099,7 @@ extension KeepTalkingClient {
                         contextIDs: []
                     )
                 )
-            case .filesystem(name: let name, let indexDescription):
+            case .filesystem(let name, let indexDescription):
                 return .filesystem(
                     KeepTalkingFilesystemBundle(
                         id: action.actionID,

@@ -270,7 +270,6 @@ public actor MCPManager {
     private var stdioProcessesByActionID: [UUID: StdioProcessHandle] = [:]
     private var virtualToolNamesByActionID: [UUID: [String]] = [:]
     private var onActionToolsChanged: (@Sendable (UUID) async -> Void)?
-    private var onToolsFetched: (@Sendable (UUID, [String]) async -> Void)?
     private var onLog: (@Sendable (String) -> Void)?
     private var onHTTPAuthURL: (@Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult)?
 
@@ -293,14 +292,6 @@ public actor MCPManager {
         _ handler: (@Sendable (UUID) async -> Void)?
     ) {
         onActionToolsChanged = handler
-    }
-
-    /// Sets a callback invoked after every successful live tool listing from an MCP server.
-    /// Receives the action ID and the sorted tool names returned by the server.
-    public func setToolsFetchedHandler(
-        _ handler: (@Sendable (UUID, [String]) async -> Void)?
-    ) {
-        onToolsFetched = handler
     }
 
     /// Sets a log sink for MCP lifecycle events.
@@ -424,7 +415,7 @@ public actor MCPManager {
             throw MCPManagerError.unregisteredAction(actionID)
         }
         let names = try await client.listTools().tools.map(\.name).sorted()
-        if let onToolsFetched { await onToolsFetched(actionID, names) }
+
         return names
     }
 
@@ -441,7 +432,7 @@ public actor MCPManager {
             throw MCPManagerError.unregisteredAction(actionID)
         }
         let tools = try await client.listTools().tools.sorted { $0.name < $1.name }
-        if let onToolsFetched { await onToolsFetched(actionID, tools.map(\.name)) }
+
         return tools
     }
 
