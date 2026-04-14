@@ -54,7 +54,7 @@ public enum KeepTalkingPushWakePreviewResolver {
             .all()
         let senderLabel = KeepTalkingAliasLookup(mappings: mappings)
             .resolve(sender: preview.sender)
-            .combined(uppercaseID: true)
+            .primary()
         let body =
             if preview.isTruncated, !preview.content.isEmpty {
                 preview.content + "…"
@@ -80,15 +80,15 @@ public enum KeepTalkingPushWakeActionResolver {
             .all()
         let callerLabel = KeepTalkingAliasLookup(mappings: mappings)
             .resolve(sender: .node(node: payload.senderNodeID))
-            .combined(uppercaseID: true)
-        let actionDescription =
+            .primary()
+        var actionDescription =
             try await KeepTalkingAction.query(on: database)
             .filter(\.$id, .equal, payload.actionID)
             .first()?
-            .descriptor?
-            .action?
-            .description
+            .wakeDescription
             ?? payload.actionID.uuidString.lowercased()
+
+        actionDescription = "Request to run \(actionDescription)"
 
         return KeepTalkingResolvedPushWakeAction(
             title: callerLabel,

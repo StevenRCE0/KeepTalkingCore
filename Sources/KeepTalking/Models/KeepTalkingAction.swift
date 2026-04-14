@@ -88,6 +88,19 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
             .capitalized(with: .autoupdatingCurrent)
     }
 
+    public var wakeDescription: String {
+        let description =
+            descriptor?.action?.description
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !description.isEmpty {
+            return description
+        }
+        if !beautifulLabel.isEmpty {
+            return beautifulLabel
+        }
+        return id?.uuidString.lowercased() ?? "Remote action"
+    }
+
     @ID(key: .id)
     public var id: UUID?
 
