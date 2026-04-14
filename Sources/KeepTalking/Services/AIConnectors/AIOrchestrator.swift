@@ -32,9 +32,34 @@ public struct AIOrchestrator {
         ([ToolExecution]) async throws -> [Message]
     public typealias AssistantPublisher =
         @Sendable ((String, KeepTalkingContextMessage.MessageType)) async throws ->
-            Void
+        Void
     public typealias ToolNameResolver = (ToolCall) -> String
-    public typealias ToolHintResolver = (ToolCall, AIStage) -> IntermediateMessageHints?
+
+    /// Rich context returned by `ToolHintResolver`; carries optional action metadata
+    /// for population into `MessageType.intermediate`.
+    public struct ToolHintContext: Sendable {
+        public let hint: IntermediateMessageHints
+        public let targetNodeID: UUID?
+        public let actionID: UUID?
+        public let actionName: String?
+        public let parameters: [String: String]?
+
+        public init(
+            hint: IntermediateMessageHints,
+            targetNodeID: UUID? = nil,
+            actionID: UUID? = nil,
+            actionName: String? = nil,
+            parameters: [String: String]? = nil
+        ) {
+            self.hint = hint
+            self.targetNodeID = targetNodeID
+            self.actionID = actionID
+            self.actionName = actionName
+            self.parameters = parameters
+        }
+    }
+
+    public typealias ToolHintResolver = (ToolCall, AIStage) -> ToolHintContext?
 
     public struct ACTAgent: Sendable {
         public typealias CanHandle = @Sendable (ToolCall) -> Bool
@@ -92,7 +117,7 @@ public struct AIOrchestrator {
             actAgent: ACTAgent? = nil,
             assistantPublisher: @escaping AssistantPublisher,
             toolNameResolver: @escaping ToolNameResolver = { $0.function.name },
-            toolHintResolver: @escaping ToolHintResolver = { _, _ in .toolUse },
+            toolHintResolver: @escaping ToolHintResolver = { _, _ in .init(hint: .toolUse) },
             toolRetryObserver: ToolRetryObserver? = nil
         ) {
             self.aiConnector = aiConnector
@@ -289,18 +314,36 @@ public struct AIOrchestrator {
             turn.toolCalls.map(toolNameResolver)
         )
 
-        // Use a specific hint if all calls in this turn share one.
-        let hints = turn.toolCalls.compactMap { toolHintResolver($0, stage) }
-        guard !hints.isEmpty else {
+        // Use a specific hint context if all calls in this turn share one.
+        let contexts = turn.toolCalls.compactMap { toolHintResolver($0, stage) }
+        guard !contexts.isEmpty else {
             return nil
         }
 
-        let hint: IntermediateMessageHints =
-            hints.allSatisfy({ $0 == hints[0] }) ? hints[0] : .toolUse
+        // If all calls agree on the same hint enum, use it; otherwise fall back to .toolUse.
+        let dominantHint: IntermediateMessageHints =
+            contexts.allSatisfy({ $0.hint == contexts[0].hint }) ? contexts[0].hint : .toolUse
+
+        // Carry action metadata only when there is exactly one call (avoids ambiguity).
+        let singleContext = contexts.count == 1 ? contexts[0] : nil
+
+        let displayName: String
         if toolNames.count == 1, let name = toolNames.first {
-            return (name, .intermediate(hint: hint.rawValue))
+            displayName = name
+        } else {
+            displayName = toolNames.joined(separator: ", ")
         }
-        return (toolNames.joined(separator: ", "), .intermediate(hint: hint.rawValue))
+
+        return (
+            displayName,
+            .intermediate(
+                hint: dominantHint.rawValue,
+                targetNodeID: singleContext?.targetNodeID,
+                actionID: singleContext?.actionID,
+                actionName: singleContext?.actionName,
+                parameters: singleContext?.parameters
+            )
+        )
     }
 
     private static func orderedUniqueToolNames(_ rawNames: [String]) -> [String] {
@@ -319,7 +362,7 @@ public struct AIOrchestrator {
         return names.isEmpty ? rawNames : names
     }
 
-    public enum IntermediateMessageHints: String {
+    public enum IntermediateMessageHints: String, Equatable, Sendable {
         case toolUse = "Using tool"
         case reasoning = "Reasoning"
         case searchingMemory = "Searching memory"

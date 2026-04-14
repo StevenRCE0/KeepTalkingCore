@@ -166,14 +166,19 @@ public actor OpenAIConnector: AIConnector {
         switch apiMode {
             case .responses:
                 return try await completeTurnViaResponses(
-                    messages: messages, tools: tools, model: model,
+                    messages: messages,
+                    tools: tools,
+                    model: model,
                     toolChoice: toolChoice,
                     stage: stage
                 )
             case .chatCompletions:
                 return try await completeTurnViaChatCompletions(
-                    messages: messages, tools: tools, model: model,
-                    toolChoice: toolChoice,
+                    messages: messages,
+                    tools: tools,
+                    model: model,
+                    /// Ignoring this intentionally to improve compatibility
+                    toolChoice: nil,
                     stage: stage
                 )
         }

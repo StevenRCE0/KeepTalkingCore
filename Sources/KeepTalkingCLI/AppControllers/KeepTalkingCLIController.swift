@@ -90,7 +90,7 @@ final class KeepTalkingCLIController {
             switch message.sender {
                 case .node(let node):
                     senderLabel = node.uuidString.lowercased()
-                case .autonomous(let name):
+                case .autonomous(let name, _, _):
                     senderLabel = name
             }
             return "[\(senderLabel)] \(message.content)"

@@ -144,7 +144,7 @@ func senderSortKey(_ sender: KeepTalkingContextMessage.Sender) -> String {
     switch sender {
         case .node(let node):
             return "node:\(node.uuidString.lowercased())"
-        case .autonomous(let name):
+        case .autonomous(let name, _, _):
             return "autonomous:\(name)"
     }
 }

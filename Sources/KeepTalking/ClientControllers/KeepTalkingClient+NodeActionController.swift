@@ -670,6 +670,17 @@ extension KeepTalkingClient {
                 await self.broadcastLocalNodeState(reason: $0)
             }
         )
+        let contextID: UUID? = {
+            switch scope {
+                case .all: return nil
+                case .context(let ctx): return ctx.id
+            }
+        }()
+        await invalidateActionToolCatalog(
+            contextID: contextID,
+            reason:
+                "grant_action_permission action=\(actionID.uuidString.lowercased()) to=\(toNodeID.uuidString.lowercased())"
+        )
     }
 
     /// Updates the permission on a specific grant row (identified by its primary key).
@@ -689,6 +700,17 @@ extension KeepTalkingClient {
         await broadcastLocalNodeState(
             reason: "update_grant_permission grant=\(grantID.uuidString.lowercased())"
         )
+
+        switch grant.approvingContext {
+            case .all:
+                await invalidateActionToolCatalog(reason: "update_grant_permission_all")
+            case .contexts(let contexts):
+                for contextID in contexts.compactMap(\.id) {
+                    await invalidateActionToolCatalog(contextID: contextID, reason: "update_grant_permission_context")
+                }
+            case nil:
+                break
+        }
     }
 
     /// Returns the effective permission mask a node has for a given action in context.

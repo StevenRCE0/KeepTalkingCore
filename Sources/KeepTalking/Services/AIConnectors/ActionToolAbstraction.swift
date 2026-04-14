@@ -197,7 +197,7 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         switch sender {
             case .node(let nodeID):
                 return "user:\(routedUserNodeName(nodeID, alias: nodeAliasResolver?(nodeID)))"
-            case .autonomous(let name):
+            case .autonomous(let name, _, _):
                 return "agent:\(name)"
         }
     }

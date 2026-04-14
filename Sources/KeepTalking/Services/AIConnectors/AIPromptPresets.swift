@@ -115,9 +115,10 @@ public enum AIPromptPresets {
             │  Action: call \(markTurningPointToolFunctionName)(current_topic_name="<topic>")
             │  Do not use this case if a live thread topic is already shown in the transcript.
 
-            ├─ CASE B · SHIFT (message starts a new unrelated goal)
-            │  Condition: a live thread topic exists AND the user is now pursuing a clearly
-            │  different goal, topic, or task — not a refinement of the current one.
+            ├─ CASE B · SHIFT (message starts a different goal or topic)
+            │  Condition: a live thread topic exists AND the user is now pursuing a different
+            │  goal, topic, or task — even a moderate topic change qualifies.
+            │  When in doubt between SHIFT and CONTINUE, prefer SHIFT.
             │  Action: call \(markTurningPointToolFunctionName)(
             │      previous_topic_name="<current live topic, verbatim or close paraphrase>",
             │      current_topic_name="<new topic>")
@@ -131,11 +132,9 @@ public enum AIPromptPresets {
             │  ongoing work ("exactly", "right", "I know what you mean"), or continue context.
 
             └─ CASE D · CONTINUE (same topic, no annotation needed)
-               Condition: follow-up, clarification, deeper dive, wording tweak, or any
-               refinement of the task already underway.
+               Condition: a direct follow-up, clarification, deeper dive, wording tweak, or
+               refinement of the exact task already underway — with no change of subject.
                Action: do nothing — call neither tool.
-
-            When in doubt between SHIFT and CONTINUE, choose CONTINUE.
             """
     }
 

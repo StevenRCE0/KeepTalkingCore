@@ -97,8 +97,12 @@ actor KeepTalkingActionCatalogCache {
         catalogByKey[key] = catalog
     }
 
-    func invalidate(nodeID: UUID) {
-        catalogByKey = catalogByKey.filter { $0.key.nodeID != nodeID }
+    func invalidate(nodeID: UUID, contextID: UUID? = nil) {
+        if let contextID {
+            catalogByKey.removeValue(forKey: .init(nodeID: nodeID, contextID: contextID))
+        } else {
+            catalogByKey = catalogByKey.filter { $0.key.nodeID != nodeID }
+        }
     }
 }
 

@@ -133,24 +133,7 @@ extension KeepTalkingClient {
         guard !collapsed.isEmpty else {
             return "using tool"
         }
-        guard let ownerNodeID else {
-            return collapsed
-        }
-
-        let ownerName = nodeDisplayName(
-            ownerNodeID,
-            nodeAliasResolver: nodeAliasResolver
-        )
-        if ownerNodeID == config.node {
-            return "\(collapsed) on current node \(ownerName)"
-        }
-        let wakeSuffix: String
-        if supportsWakeAssist && !onlineNodeIDs().contains(ownerNodeID) {
-            wakeSuffix = " while waking the node"
-        } else {
-            wakeSuffix = ""
-        }
-        return "\(collapsed) on node \(ownerName)\(wakeSuffix)"
+        return collapsed
     }
 
     func renderCatalogListing(

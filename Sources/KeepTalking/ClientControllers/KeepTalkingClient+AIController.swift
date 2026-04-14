@@ -211,12 +211,13 @@ extension KeepTalkingClient {
                 userMessage
             ]
 
+        let selfNodeName = aliasLookup.alias(for: .node(config.node))
         let assistantPublisher: AIOrchestrator.AssistantPublisher = { [self] payload in
             let (assistantText, messageType) = payload
             try await send(
                 assistantText,
                 in: persistedContext,
-                sender: .autonomous(name: roleName),
+                sender: .autonomous(name: roleName, nodeName: selfNodeName, model: model),
                 type: messageType,
                 emitLocalEnvelope: true
             )
@@ -282,7 +283,22 @@ extension KeepTalkingClient {
                     )
                 },
                 toolHintResolver: { [self] toolCall, stage in
-                    publishedToolHint(for: toolCall, stage: stage)
+                    guard var ctx = publishedToolHint(for: toolCall, stage: stage) else {
+                        return nil
+                    }
+                    // Patch actionName from the catalog stub when we have an actionID.
+                    if let actionID = ctx.actionID,
+                        let stub = runtimeCatalog.actionStubs.first(where: { $0.actionID == actionID })
+                    {
+                        ctx = .init(
+                            hint: ctx.hint,
+                            targetNodeID: ctx.targetNodeID ?? stub.ownerNodeID,
+                            actionID: ctx.actionID,
+                            actionName: stub.name,
+                            parameters: ctx.parameters
+                        )
+                    }
+                    return ctx
                 }
             ),
             configuration: .init(maxTurns: Self.maxAgentTurns)
@@ -400,7 +416,7 @@ extension KeepTalkingClient {
         for toolCall: ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
             .ToolCallParam,
         stage: AIStage
-    ) -> AIOrchestrator.IntermediateMessageHints? {
+    ) -> AIOrchestrator.ToolHintContext? {
         let name = toolCall.function.name
         if name == Self.markTurningPointToolFunctionName
             || name == Self.markChitterChatterToolFunctionName
@@ -409,7 +425,26 @@ extension KeepTalkingClient {
         }
 
         if name == Self.runActionToolFunctionName {
-            return .inspecting
+            // Decode action metadata from the tool call arguments so it can be
+            // stored in the intermediate message and surfaced in the UI.
+            let args = (try? decodeToolArguments(toolCall.function.arguments)) ?? [:]
+            let actionID: UUID? = args["action_id"]?.stringValue.flatMap { UUID(uuidString: $0) }
+            let targetNodeID: UUID? = args["node_id"]?.stringValue.flatMap { UUID(uuidString: $0) }
+
+            // Collect the remaining arguments (everything except the routing keys)
+            let reservedKeys: Set<String> = ["action_id", "node_id"]
+            var params: [String: String] = [:]
+            for (key, value) in args where !reservedKeys.contains(key) {
+                params[key] = value.stringValue ?? value.description
+            }
+
+            return .init(
+                hint: .inspecting,
+                targetNodeID: targetNodeID,
+                actionID: actionID,
+                actionName: nil,   // resolved by toolNameResolver; populated below by caller
+                parameters: params.isEmpty ? nil : params
+            )
         }
 
         if name == Self.ktSkillMetainfoToolFunctionName
@@ -419,16 +454,16 @@ extension KeepTalkingClient {
         }
 
         if stage == .planning {
-            return .reasoning
+            return .init(hint: .reasoning)
         }
 
         switch name {
             case Self.searchThreadsToolFunctionName:
-                return .searchingMemory
+                return .init(hint: .searchingMemory)
             case Self.webSearchFunctionName:
-                return .searchingWeb
+                return .init(hint: .searchingWeb)
             default:
-                return .toolUse
+                return .init(hint: .toolUse)
         }
     }
 
@@ -777,9 +812,17 @@ extension KeepTalkingClient {
         }
     }
 
-    func invalidateActionToolCatalog(reason: String) async {
-        await KeepTalkingActionCatalogCache.shared.invalidate(nodeID: config.node)
-        onLog?("[ai] catalog invalidated reason=\(reason)")
+    func invalidateActionToolCatalog(
+        contextID: UUID? = nil,
+        reason: String
+    ) async {
+        await KeepTalkingActionCatalogCache.shared.invalidate(
+            nodeID: config.node,
+            contextID: contextID
+        )
+        onLog?(
+            "[ai] catalog invalidated context=\(contextID?.uuidString.lowercased() ?? "all") reason=\(reason)"
+        )
     }
 
     public func discoverActionToolCatalog(in context: KeepTalkingContext)

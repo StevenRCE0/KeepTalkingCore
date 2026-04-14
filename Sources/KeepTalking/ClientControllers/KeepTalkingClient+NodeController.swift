@@ -61,13 +61,24 @@ extension KeepTalkingClient {
         scope: KeepTalkingNodeTrustScope = .allContexts,
         own: Bool = false
     ) async throws -> String {
-        try await Self.trust(
+        let publicKey = try await Self.trust(
             node: targetNodeID,
             scope: scope,
             own: own,
             localNode: getCurrentNodeInstance(),
             on: localStore.database
         )
+        let contextID: UUID? = {
+            switch scope {
+                case .allContexts: return nil
+                case .context(let ctx): return ctx.id
+            }
+        }()
+        await invalidateActionToolCatalog(
+            contextID: contextID,
+            reason: "trust_node target=\(targetNodeID.uuidString.lowercased())"
+        )
+        return publicKey
     }
 
     /// Marks a remote node as trusted or owned and returns the local public key for that relation.
@@ -518,6 +529,10 @@ extension KeepTalkingClient {
         try await mergeIncomingActionAuthorisations(
             from: status,
             advertisedActions: advertisedActions
+        )
+        await invalidateActionToolCatalog(
+            contextID: status.contextID,
+            reason: "merge_discovered_node_status node=\(status.node.id?.uuidString.lowercased() ?? "unknown")"
         )
     }
 
