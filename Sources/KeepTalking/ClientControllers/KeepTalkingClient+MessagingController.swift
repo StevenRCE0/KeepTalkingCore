@@ -23,7 +23,7 @@ extension KeepTalkingClient {
     ) async throws {
         try await send(
             text,
-            attachments: [],
+            preparedAttachments: [],
             in: context,
             sender: sender,
             type: type,
@@ -34,6 +34,27 @@ extension KeepTalkingClient {
     public func send(
         _ text: String,
         attachments: [KeepTalkingLocalAttachmentInput],
+        in context: KeepTalkingContext,
+        sender: KeepTalkingContextMessage.Sender? = nil,
+        type: KeepTalkingContextMessage.MessageType = .message,
+        emitLocalEnvelope: Bool = false
+    ) async throws {
+        let preparedAttachments = try await prepareLocalAttachments(
+            attachments
+        )
+        try await send(
+            text,
+            preparedAttachments: preparedAttachments,
+            in: context,
+            sender: sender,
+            type: type,
+            emitLocalEnvelope: emitLocalEnvelope
+        )
+    }
+
+    func send(
+        _ text: String,
+        preparedAttachments: [KeepTalkingPreparedAttachment],
         in context: KeepTalkingContext,
         sender: KeepTalkingContextMessage.Sender? = nil,
         type: KeepTalkingContextMessage.MessageType = .message,
@@ -53,7 +74,7 @@ extension KeepTalkingClient {
 
         try await message.save(on: localStore.database)
         let savedAttachments = try await persistOutgoingAttachments(
-            attachments,
+            preparedAttachments,
             in: persistedContext,
             parentMessage: message,
             sender: sender
@@ -101,7 +122,7 @@ extension KeepTalkingClient {
     ) async throws {
         try await send(
             text,
-            attachments: [],
+            preparedAttachments: [],
             in: context,
             sender: sender,
             type: type,
@@ -125,6 +146,29 @@ extension KeepTalkingClient {
         try await send(
             text,
             attachments: attachments,
+            in: targetContext,
+            sender: sender,
+            type: type,
+            emitLocalEnvelope: emitLocalEnvelope
+        )
+    }
+
+    func send(
+        _ text: String,
+        preparedAttachments: [KeepTalkingPreparedAttachment],
+        in context: UUID,
+        sender: KeepTalkingContextMessage.Sender? = nil,
+        type: KeepTalkingContextMessage.MessageType = .message,
+        emitLocalEnvelope: Bool = false
+    ) async throws {
+        let targetContext = try await ensure(
+            context,
+            for: KeepTalkingContext.self
+        )
+
+        try await send(
+            text,
+            preparedAttachments: preparedAttachments,
             in: targetContext,
             sender: sender,
             type: type,
@@ -481,20 +525,17 @@ extension KeepTalkingClient {
         }
     }
 
-    private func persistOutgoingAttachments(
-        _ attachments: [KeepTalkingLocalAttachmentInput],
-        in context: KeepTalkingContext,
-        parentMessage: KeepTalkingContextMessage,
-        sender: KeepTalkingContextMessage.Sender
-    ) async throws -> [KeepTalkingContextAttachment] {
+    func prepareLocalAttachments(
+        _ attachments: [KeepTalkingLocalAttachmentInput]
+    ) async throws -> [KeepTalkingPreparedAttachment] {
         guard !attachments.isEmpty else {
             return []
         }
 
-        var saved: [KeepTalkingContextAttachment] = []
-        saved.reserveCapacity(attachments.count)
+        var prepared: [KeepTalkingPreparedAttachment] = []
+        prepared.reserveCapacity(attachments.count)
 
-        for (index, attachmentInput) in attachments.enumerated() {
+        for attachmentInput in attachments {
             let data = try Data(contentsOf: attachmentInput.sourceURL)
             let blobID = hexDigest(for: data)
             let filename = resolvedAttachmentFilename(attachmentInput)
@@ -521,22 +562,59 @@ extension KeepTalkingClient {
                 receivedBytes: data.count
             )
 
+            prepared.append(
+                KeepTalkingPreparedAttachment(
+                    blobID: blobID,
+                    filename: filename,
+                    mimeType: mimeType,
+                    byteCount: data.count
+                )
+            )
+        }
+
+        return prepared
+    }
+
+    func persistOutgoingAttachments(
+        _ attachments: [KeepTalkingPreparedAttachment],
+        in context: KeepTalkingContext,
+        parentMessage: KeepTalkingContextMessage,
+        sender: KeepTalkingContextMessage.Sender
+    ) async throws -> [KeepTalkingContextAttachment] {
+        guard !attachments.isEmpty else {
+            return []
+        }
+
+        var saved: [KeepTalkingContextAttachment] = []
+        saved.reserveCapacity(attachments.count)
+        let blobRecords = try await blobRecordsByBlobID(attachments.map(\.blobID))
+
+        for (index, attachmentInput) in attachments.enumerated() {
             let attachment = KeepTalkingContextAttachment(
                 context: context,
                 parentMessageID: parentMessage.id,
                 sender: sender,
-                blobID: blobID,
-                filename: filename,
-                mimeType: mimeType,
-                byteCount: data.count,
+                blobID: attachmentInput.blobID,
+                filename: attachmentInput.filename,
+                mimeType: attachmentInput.mimeType,
+                byteCount: attachmentInput.byteCount,
                 createdAt: parentMessage.timestamp,
                 sortIndex: index,
-                metadata: derivedAttachmentMetadata(
-                    for: data,
-                    mimeType: mimeType,
-                    filename: filename
-                )
+                metadata: .init()
             )
+
+            if let blobRecord = blobRecords[attachmentInput.blobID],
+                let data = try? blobStore.read(
+                    relativePath: blobRecord.relativePath,
+                    blobID: attachmentInput.blobID
+                )
+            {
+                attachment.metadata = derivedAttachmentMetadata(
+                    for: data,
+                    mimeType: attachmentInput.mimeType,
+                    filename: attachmentInput.filename
+                )
+            }
             try await attachment.save(on: localStore.database)
             saved.append(attachment)
         }
@@ -715,5 +793,4 @@ extension KeepTalkingClient {
         )
     }
 }
-
 

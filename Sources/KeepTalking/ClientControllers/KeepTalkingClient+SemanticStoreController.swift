@@ -47,21 +47,15 @@ extension KeepTalkingClient {
     }
 
     /// Builds the indexable text content for a thread.
-    /// Prefers the summary if available; otherwise concatenates
-    /// non-chitter-chatter message content within the thread's range,
-    /// plus attachment metadata for any attachments in that range.
+    /// Includes the full thread transcript, prefixed by the thread summary when
+    /// available, plus attachment metadata for any attachments in range.
     public static func threadDocumentText(
         for thread: KeepTalkingThread,
         on database: any Database
     ) async throws -> String {
-        if let summary = thread.summary,
-            !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        {
-            return summary
-        }
-
         let db = database
         let contextID = thread.$context.id
+        let topic = normalizedDocumentSummary(for: thread)
 
         let messages = try await KeepTalkingContextMessage.query(on: db)
             .filter(\.$context.$id == contextID)
@@ -100,16 +94,35 @@ extension KeepTalkingClient {
                 return messageIDs.contains(parentID)
             }
 
-        guard !attachments.isEmpty else {
-            return messageText
+        let attachmentText: String
+        if attachments.isEmpty {
+            attachmentText = ""
+        } else {
+            let attachmentLines = attachments.map { attachment in
+                attachmentMetadataLine(attachment)
+            }
+            attachmentText = "[Attachments]\n" + attachmentLines.joined(separator: "\n")
         }
 
-        let attachmentLines = attachments.map { attachment in
-            attachmentMetadataLine(attachment)
+        let body = [messageText, attachmentText]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+
+        if let topic {
+            guard !body.isEmpty else { return topic }
+            return "Topic: \(topic)\n\n" + body
         }
 
-        return messageText + "\n\n[Attachments]\n"
-            + attachmentLines.joined(separator: "\n")
+        return body
+    }
+
+    private static func normalizedDocumentSummary(for thread: KeepTalkingThread) -> String? {
+        guard let summary = thread.summary?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !summary.isEmpty
+        else {
+            return nil
+        }
+        return summary
     }
 
     private static func attachmentMetadataLine(

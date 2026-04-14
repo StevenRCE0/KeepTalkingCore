@@ -4,6 +4,12 @@ import MCP
 import OpenAI
 import UniformTypeIdentifiers
 
+private struct KeepTalkingQueuedPromptPreparationError: LocalizedError, Sendable {
+    let message: String
+
+    var errorDescription: String? { message }
+}
+
 extension KeepTalkingClient {
     static let ktSkillMetainfoToolFunctionName = "kt_skill_metainfo"
     static let contextAttachmentListingToolFunctionName =
@@ -42,11 +48,40 @@ extension KeepTalkingClient {
     ) async -> UUID {
         let context = KeepTalkingContext(id: contextID)
         let preview = String(prompt.prefix(120))
+        let preparedAttachmentsResult: Result<
+            [KeepTalkingPreparedAttachment], KeepTalkingQueuedPromptPreparationError
+        >
+        do {
+            preparedAttachmentsResult = .success(
+                try await prepareLocalAttachments(attachments)
+            )
+        } catch {
+            preparedAttachmentsResult = .failure(
+                KeepTalkingQueuedPromptPreparationError(
+                    message: error.localizedDescription
+                )
+            )
+        }
 
-        let work: @Sendable () async throws -> Void = { [self] in
+        let work: @Sendable () async throws -> Void = { [self, preparedAttachmentsResult] in
             try Task.checkCancellation()
-            let outgoingPrompt = prefix + prompt.trimmingPrefix(prefix)
-            try await send(outgoingPrompt, attachments: attachments, in: context)
+            let preparedAttachments = try preparedAttachmentsResult.get()
+            let trimmedPrompt = prompt.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            let outgoingPrompt: String
+            if trimmedPrompt.isEmpty {
+                outgoingPrompt = prefix.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+            } else {
+                outgoingPrompt = prefix + prompt.trimmingPrefix(prefix)
+            }
+            try await send(
+                outgoingPrompt,
+                preparedAttachments: preparedAttachments,
+                in: context
+            )
             try Task.checkCancellation()
             _ = try await runAI(
                 prompt: prompt,
@@ -54,7 +89,7 @@ extension KeepTalkingClient {
                 model: model,
                 actModel: actModel,
                 roleName: roleName,
-                currentPromptAttachments: attachments
+                preparedPromptAttachments: preparedAttachments
             )
         }
 
@@ -63,6 +98,17 @@ extension KeepTalkingClient {
             promptPreview: preview,
             work: work,
             onCompleted: { [self] error in
+                if let error {
+                    let errorMessage = error.localizedDescription
+                    Task { [self] in
+                        await publishAgentRunFailure(
+                            contextID: contextID,
+                            roleName: roleName,
+                            model: model,
+                            message: errorMessage
+                        )
+                    }
+                }
                 onAgentRunCompleted?(contextID, error)
             }
         )
@@ -82,6 +128,27 @@ extension KeepTalkingClient {
         actModel: OpenAIModel? = nil,
         roleName: String = "ai",
         currentPromptAttachments: [KeepTalkingLocalAttachmentInput] = []
+    ) async throws -> String {
+        let preparedPromptAttachments = try await prepareLocalAttachments(
+            currentPromptAttachments
+        )
+        return try await runAI(
+            prompt: prompt,
+            in: context,
+            model: model,
+            actModel: actModel,
+            roleName: roleName,
+            preparedPromptAttachments: preparedPromptAttachments
+        )
+    }
+
+    private func runAI(
+        prompt: String,
+        in context: KeepTalkingContext,
+        model: OpenAIModel,
+        actModel: OpenAIModel?,
+        roleName: String,
+        preparedPromptAttachments: [KeepTalkingPreparedAttachment]
     ) async throws -> String {
         guard let aiConnector = try await resolveAIConnector() else {
             throw KeepTalkingClientError.aiNotConfigured
@@ -146,14 +213,14 @@ extension KeepTalkingClient {
             persistedContext,
             excludingMessageID: promptMessageID
         )
-        let hasCurrentPromptAttachments = !currentPromptAttachments.isEmpty
+        let hasCurrentPromptAttachments = !preparedPromptAttachments.isEmpty
         let allowAutomaticToolUse = Self.shouldAllowAutomaticToolUse(
             prompt: prompt,
             hasCurrentPromptAttachments: hasCurrentPromptAttachments
         )
-        let userMessage = try currentPromptUserMessage(
+        let userMessage = try await currentPromptUserMessage(
             prompt: prompt,
-            attachments: currentPromptAttachments,
+            attachments: preparedPromptAttachments,
             apiMode: aiConnector.apiMode
         )
 
@@ -469,9 +536,9 @@ extension KeepTalkingClient {
 
     func currentPromptUserMessage(
         prompt: String,
-        attachments: [KeepTalkingLocalAttachmentInput],
+        attachments: [KeepTalkingPreparedAttachment],
         apiMode: OpenAIAPIMode
-    ) throws -> ChatQuery.ChatCompletionMessageParam {
+    ) async throws -> ChatQuery.ChatCompletionMessageParam {
         guard !attachments.isEmpty else {
             return .user(.init(content: .string(prompt)))
         }
@@ -485,31 +552,32 @@ extension KeepTalkingClient {
         if !trimmedPrompt.isEmpty {
             contentParts.append(.text(.init(text: trimmedPrompt)))
         }
+        let blobRecords = try await blobRecordsByBlobID(attachments.map(\.blobID))
 
         for attachment in attachments {
-            let filename = currentPromptAttachmentFilename(attachment)
-            let mimeType = currentPromptAttachmentMimeType(
-                attachment,
-                filename: filename
-            )
-            let data = try Data(contentsOf: attachment.sourceURL)
-
-            guard data.count <= Self.maxAINativeAttachmentBytes else {
+            guard attachment.byteCount <= Self.maxAINativeAttachmentBytes else {
                 contentParts.append(
                     .text(
                         .init(
                             text:
-                                "Attachment '\(filename)' was omitted because it exceeds the native AI input budget."
+                                "Attachment '\(attachment.filename)' was omitted because it exceeds the native AI input budget."
                         )
                     )
                 )
                 continue
             }
+            guard let blobRecord = blobRecords[attachment.blobID] else {
+                throw KeepTalkingBlobStoreError.blobNotFound(attachment.blobID)
+            }
+            let data = try blobStore.read(
+                relativePath: blobRecord.relativePath,
+                blobID: attachment.blobID
+            )
 
             contentParts.append(
                 contentsOf: attachmentContentParts(
-                    filename: filename,
-                    mimeType: mimeType,
+                    filename: attachment.filename,
+                    mimeType: attachment.mimeType,
                     data: data,
                     apiMode: apiMode
                 )
@@ -523,42 +591,6 @@ extension KeepTalkingClient {
         return .user(
             .init(content: .contentParts(contentParts))
         )
-    }
-
-    private func currentPromptAttachmentFilename(
-        _ attachment: KeepTalkingLocalAttachmentInput
-    ) -> String {
-        let filename = attachment.filename?.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        if let filename, !filename.isEmpty {
-            return filename
-        }
-        return attachment.sourceURL.lastPathComponent
-    }
-
-    private func currentPromptAttachmentMimeType(
-        _ attachment: KeepTalkingLocalAttachmentInput,
-        filename: String
-    ) -> String {
-        if let mimeType = attachment.mimeType?.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        ), !mimeType.isEmpty {
-            return mimeType
-        }
-
-        let pathExtension = attachment.sourceURL.pathExtension
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedExtension =
-            pathExtension.isEmpty
-            ? URL(fileURLWithPath: filename).pathExtension
-            : pathExtension
-        if let type = UTType(filenameExtension: resolvedExtension),
-            let mimeType = type.preferredMIMEType
-        {
-            return mimeType
-        }
-        return "application/octet-stream"
     }
 
     func attachmentContentParts(
@@ -834,6 +866,26 @@ extension KeepTalkingClient {
 
     func resolveAIConnector() async throws -> (any AIConnector)? {
         aiConnector
+    }
+
+    func publishAgentRunFailure(
+        contextID: UUID,
+        roleName: String,
+        model: OpenAIModel,
+        message: String
+    ) async {
+        do {
+            try await send(
+                "Agent run failed: \(message)",
+                in: contextID,
+                sender: .autonomous(name: roleName, model: model),
+                emitLocalEnvelope: true
+            )
+        } catch {
+            onLog?(
+                "[ai] failed to publish run failure context=\(contextID.uuidString.lowercased()) error=\(error.localizedDescription)"
+            )
+        }
     }
 
     func ensureMCPToolChangeObserverInstalled() async {

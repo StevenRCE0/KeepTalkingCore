@@ -44,6 +44,13 @@ public struct KeepTalkingLocalAttachmentInput: Sendable, Equatable {
     }
 }
 
+struct KeepTalkingPreparedAttachment: Sendable, Equatable {
+    let blobID: String
+    let filename: String
+    let mimeType: String
+    let byteCount: Int
+}
+
 public struct KeepTalkingContextAttachmentDTO: Codable, Sendable, Equatable {
     public let id: UUID
     public let contextID: UUID
