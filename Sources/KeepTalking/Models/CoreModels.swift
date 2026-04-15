@@ -14,6 +14,10 @@ public struct KeepTalkingConfig: Sendable {
     public let p2pPreferredRemoteID: String?
     public let p2pAttemptTimeoutSeconds: TimeInterval
     public let p2pStunServers: [String]
+    /// ICE servers (STUN/TURN) used for the SFU transport path.
+    /// Include at least one TURN URL with `transport=tcp` for clients behind
+    /// restrictive NATs.  Omit credentials when coturn runs with `no-auth`.
+    public let sfuIceServers: [String]
     public let recentAttachmentSyncLookback: TimeInterval
 
     /// Creates a configuration for a single KeepTalking node session.
@@ -24,7 +28,8 @@ public struct KeepTalkingConfig: Sendable {
     ///   - node: Local node identifier.
     ///   - p2pPreferredRemoteID: Preferred peer identifier for direct P2P attempts.
     ///   - p2pAttemptTimeoutSeconds: Maximum duration to wait for a P2P attempt.
-    ///   - p2pStunServers: STUN servers used during ICE negotiation.
+    ///   - p2pStunServers: STUN servers used during P2P ICE negotiation.
+    ///   - sfuIceServers: STUN/TURN servers used during SFU ICE negotiation.
     public init(
         signalURL: URL,
         contextID: UUID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!,
@@ -32,6 +37,7 @@ public struct KeepTalkingConfig: Sendable {
         p2pPreferredRemoteID: String? = nil,
         p2pAttemptTimeoutSeconds: TimeInterval = 5,
         p2pStunServers: [String] = ["stun:stun.l.google.com:19302"],
+        sfuIceServers: [String] = [],
         recentAttachmentSyncLookback: TimeInterval = 14 * 24 * 60 * 60
     ) {
         self.signalURL = signalURL
@@ -40,6 +46,7 @@ public struct KeepTalkingConfig: Sendable {
         self.p2pPreferredRemoteID = p2pPreferredRemoteID
         self.p2pAttemptTimeoutSeconds = p2pAttemptTimeoutSeconds
         self.p2pStunServers = p2pStunServers
+        self.sfuIceServers = sfuIceServers
         self.recentAttachmentSyncLookback = max(0, recentAttachmentSyncLookback)
     }
 
@@ -72,6 +79,7 @@ public struct KeepTalkingConfig: Sendable {
             p2pPreferredRemoteID: p2pPreferredRemoteID,
             p2pAttemptTimeoutSeconds: p2pAttemptTimeoutSeconds,
             p2pStunServers: p2pStunServers,
+            sfuIceServers: sfuIceServers,
             recentAttachmentSyncLookback: recentAttachmentSyncLookback
         )
     }
@@ -85,6 +93,7 @@ public struct KeepTalkingConfig: Sendable {
             p2pPreferredRemoteID: remoteID,
             p2pAttemptTimeoutSeconds: p2pAttemptTimeoutSeconds,
             p2pStunServers: p2pStunServers,
+            sfuIceServers: sfuIceServers,
             recentAttachmentSyncLookback: recentAttachmentSyncLookback
         )
     }

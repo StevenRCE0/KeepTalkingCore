@@ -94,7 +94,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         try await signal.connect()
 
         let rtcConfig = RTCShared.makeRTCConfiguration(
-            iceServerURLs: config.p2pStunServers
+            iceServerURLs: config.sfuIceServers
         )
         let constraints = RTCShared.makePeerConnectionConstraints()
 

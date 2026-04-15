@@ -6,12 +6,12 @@ enum RTCShared {
 
     static func configureForDataOnlyTransport() {
         #if os(iOS)
-            // Keep WebRTC from auto-activating the app audio session for today's
-            // data-only chat transport. When we add realtime audio/video chat,
-            // this is the hook to revisit and enable WebRTC-managed media.
-            let audioSession = LKRTCAudioSession.sharedInstance()
-            audioSession.useManualAudio = true
-            audioSession.isAudioEnabled = false
+        // Keep WebRTC from auto-activating the app audio session for today's
+        // data-only chat transport. When we add realtime audio/video chat,
+        // this is the hook to revisit and enable WebRTC-managed media.
+        let audioSession = LKRTCAudioSession.sharedInstance()
+        audioSession.useManualAudio = true
+        audioSession.isAudioEnabled = false
         #endif
     }
 
@@ -19,8 +19,16 @@ enum RTCShared {
         let config = LKRTCConfiguration()
         config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherContinually
-        config.iceServers = iceServerURLs.map {
-            LKRTCIceServer(urlStrings: [$0], username: nil, credential: nil)
+        config.iceServers = iceServerURLs.map { url in
+            let isTurn = url.lowercased().hasPrefix("turn:") || url.lowercased().hasPrefix("turns:")
+            // libwebrtc rejects TURN servers with empty credentials even when the
+            // server runs no-auth.  Use "_" as a placeholder — coturn no-auth
+            // accepts any non-empty value.
+            return LKRTCIceServer(
+                urlStrings: [url],
+                username: isTurn ? "_" : nil,
+                credential: isTurn ? "_" : nil
+            )
         }
         return config
     }
