@@ -482,8 +482,12 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
 
                 case .sfu:
                     guard broadcast.isReady else { continue }
-                    try sendViaSFU()
-                    return
+                    do {
+                        try sendViaSFU()
+                        return
+                    } catch {
+                        debug("sfu send failed error=\(error.localizedDescription)")
+                    }
             }
         }
         throw KeepTalkingTransportError.allChannelsUnavailable

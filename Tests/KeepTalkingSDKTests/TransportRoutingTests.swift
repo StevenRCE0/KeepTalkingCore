@@ -232,6 +232,37 @@ struct TransportRoutingTests {
         #expect(harness.broadcast.sentBlob == [blob])
     }
 
+    @Test("broadcast send failures stay at the transport layer")
+    func broadcastSendFailureDoesNotLeakDataChannelErrors() async throws {
+        let harness = makeHarness()
+        harness.broadcast.sendError = P2PError.dataChannelNotOpen("keep-talking.chat.test")
+        try await harness.transport.start()
+        defer { harness.transport.stop() }
+
+        let remote = UUID(uuidString: "81500000-0000-0000-0000-000000000000")!
+        _ = harness.registerPeer(remote, isReady: false)
+        let envelope = makeContextSyncEnvelope(
+            contextID: harness.config.contextID,
+            requester: harness.config.node,
+            recipient: remote
+        )
+
+        do {
+            try harness.transport.sendEnvelope(envelope)
+            Issue.record("expected transport-level unavailability error")
+        } catch let error as KeepTalkingTransportError {
+            guard case .allChannelsUnavailable = error else {
+                Issue.record("unexpected transport error: \(error)")
+                return
+            }
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+
+        #expect(harness.broadcast.sentSequenced.count == 1)
+        #expect(harness.broadcast.state == .reconnecting(attempt: 1))
+    }
+
     @Test("incoming p2p signals create a direct channel and forward the signal")
     func p2pSignalCreatesChannelAndForwardsSignal() async throws {
         let harness = makeHarness()
@@ -286,6 +317,16 @@ struct TransportRoutingTests {
 }
 
 struct ChannelStateMachineTests {
+    @Test("rtc configuration can force relay-only ice policy")
+    func rtcConfigurationSupportsRelayOnlyPolicy() {
+        let config = RTCShared.makeRTCConfiguration(
+            iceServerURLs: ["turn:relay.example.com:3478?transport=tcp"],
+            iceTransportPolicy: .relay
+        )
+
+        #expect(config.iceTransportPolicy == .relay)
+    }
+
     @Test("broadcast state machine reconnects and recovers")
     func broadcastReconnectsAndRecovers() {
         var machine = BroadcastChannelStateMachine()
@@ -468,6 +509,9 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
     var sentSequenced: [KeepTalkingSequencedEnvelope] = []
     var sentRaw: [any KeepTalkingEnvelope] = []
     var sentBlob: [Data] = []
+    var sendError: Error?
+    var rawSendError: Error?
+    var blobSendError: Error?
 
     func start() async throws {
         state = .ready
@@ -479,14 +523,26 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
 
     func send(_ sequenced: KeepTalkingSequencedEnvelope) throws {
         sentSequenced.append(sequenced)
+        if let sendError {
+            state = .reconnecting(attempt: 1)
+            throw sendError
+        }
     }
 
     func sendBlobData(_ data: Data) throws {
         sentBlob.append(data)
+        if let blobSendError {
+            state = .reconnecting(attempt: 1)
+            throw blobSendError
+        }
     }
 
     func sendRawEnvelope(_ envelope: any KeepTalkingEnvelope) throws {
         sentRaw.append(envelope)
+        if let rawSendError {
+            state = .reconnecting(attempt: 1)
+            throw rawSendError
+        }
     }
 
     func runtimeStats() -> KeepTalkingRuntimeStats {

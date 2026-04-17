@@ -32,7 +32,7 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
     }
 
     var isReady: Bool {
-        state == .ready
+        state == .ready && sfuClient.isReady()
     }
 
     // MARK: - Init
@@ -60,16 +60,31 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
     // MARK: - Send
 
     func send(_ sequenced: KeepTalkingSequencedEnvelope) throws {
-        try sfuClient.sendEnvelope(sequenced.envelope)
+        do {
+            try sfuClient.sendEnvelope(sequenced.envelope)
+        } catch {
+            handleSendFailure(error, operation: "sequenced send")
+            throw error
+        }
     }
 
     func sendBlobData(_ data: Data) throws {
-        try sfuClient.sendBlobData(data, targetPeerNodeID: nil)
+        do {
+            try sfuClient.sendBlobData(data, targetPeerNodeID: nil)
+        } catch {
+            handleSendFailure(error, operation: "blob send")
+            throw error
+        }
     }
 
     /// Send a raw (non-sequenced) envelope — used for presence and signaling.
     func sendRawEnvelope(_ envelope: any KeepTalkingEnvelope) throws {
-        try sfuClient.sendEnvelope(envelope)
+        do {
+            try sfuClient.sendEnvelope(envelope)
+        } catch {
+            handleSendFailure(error, operation: "raw send")
+            throw error
+        }
     }
 
     // MARK: - SFU callback binding
@@ -152,6 +167,11 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
 
     func runtimeStats() -> KeepTalkingRuntimeStats {
         sfuClient.runtimeStats()
+    }
+
+    private func handleSendFailure(_ error: Error, operation: String) {
+        debug("\(operation) failed error=\(error.localizedDescription)")
+        applyEvent(.transportDegraded)
     }
 
     private func debug(_ message: String) {

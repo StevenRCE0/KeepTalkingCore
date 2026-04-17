@@ -94,7 +94,8 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         try await signal.connect()
 
         let rtcConfig = RTCShared.makeRTCConfiguration(
-            iceServerURLs: config.sfuIceServers
+            iceServerURLs: config.sfuIceServers,
+            iceTransportPolicy: .relay
         )
         let constraints = RTCShared.makePeerConnectionConstraints()
 
@@ -298,6 +299,10 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             retainedChannels: retainedChannelCount,
             route: "sfu"
         )
+    }
+
+    func isReady() -> Bool {
+        Self.requiredChannels.allSatisfy { channels.isOpen(for: $0) }
     }
 
     // MARK: - Internals

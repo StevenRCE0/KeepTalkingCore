@@ -15,10 +15,14 @@ enum RTCShared {
         #endif
     }
 
-    static func makeRTCConfiguration(iceServerURLs: [String]) -> LKRTCConfiguration {
+    static func makeRTCConfiguration(
+        iceServerURLs: [String],
+        iceTransportPolicy: LKRTCIceTransportPolicy = .all
+    ) -> LKRTCConfiguration {
         let config = LKRTCConfiguration()
         config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherContinually
+        config.iceTransportPolicy = iceTransportPolicy
         config.iceServers = iceServerURLs.map { url in
             let isTurn = url.lowercased().hasPrefix("turn:") || url.lowercased().hasPrefix("turns:")
             // libwebrtc rejects TURN servers with empty credentials even when the
