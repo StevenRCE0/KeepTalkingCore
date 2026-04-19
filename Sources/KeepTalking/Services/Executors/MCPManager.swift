@@ -594,14 +594,23 @@ public actor MCPManager {
             throw MCPManagerError.stdioUnavailableOnThisPlatform
         }
 
+        #if os(macOS)
+        let launched = try await stdioTransportLauncher.launchTransport(
+            command: command,
+            environment: environment,
+            stderrHandler: { [weak self] data in
+                Task { await self?.logStdioStderr(actionID: actionID, data: data) }
+            },
+            sandboxPolicy: nil
+        )
+        #else
         let launched = try await stdioTransportLauncher.launchTransport(
             command: command,
             environment: environment
         ) { [weak self] data in
-            Task {
-                await self?.logStdioStderr(actionID: actionID, data: data)
-            }
+            Task { await self?.logStdioStderr(actionID: actionID, data: data) }
         }
+        #endif
         let launchedTransport = IncrementingRequestIDTransport(
             base: launched.transport
         )

@@ -154,6 +154,25 @@ extension KeepTalkingClient {
                             .decryptActionCatalogResultEnvelope(envelope)
                     }
                 )
+            case .encryptedAgentTurnContinuationResponse:
+                return makeTrustedEnvelopeCryptor(
+                    plaintext: { $0.agentTurnContinuationResponse },
+                    encrypted: { $0.encryptedAgentTurnContinuationResponse },
+                    wrapPlaintext: { $0 },
+                    wrapEncrypted: KeepTalkingEncryptedAgentTurnContinuationResponseEnvelope.init,
+                    encrypt: { [weak self] response in
+                        guard let self else {
+                            throw KeepTalkingTrustedEnvelopeCryptorError.ownerUnavailable
+                        }
+                        return try await self.encryptAgentTurnContinuationResponseEnvelope(response)
+                    },
+                    decrypt: { [weak self] envelope in
+                        guard let self else {
+                            throw KeepTalkingTrustedEnvelopeCryptorError.ownerUnavailable
+                        }
+                        return try await self.decryptAgentTurnContinuationResponseEnvelope(envelope)
+                    }
+                )
             default:
                 return nil
         }
@@ -328,6 +347,38 @@ extension KeepTalkingClient {
             throw KeepTalkingClientError.malformedEncryptedActionCatalog
         }
         return result
+    }
+
+    func encryptAgentTurnContinuationResponseEnvelope(
+        _ response: KeepTalkingAgentTurnContinuationResponse
+    ) async throws -> KeepTalkingAsymmetricCipherEnvelope {
+        let encoded = try JSONEncoder().encode(response)
+        return try await encryptAsymmetricPayload(
+            encoded,
+            recipientNodeID: response.originNodeID,
+            purpose: "agent-turn-continuation-response"
+        )
+    }
+
+    func decryptAgentTurnContinuationResponseEnvelope(
+        _ envelope: KeepTalkingAsymmetricCipherEnvelope
+    ) async throws -> KeepTalkingAgentTurnContinuationResponse {
+        let payload = try await decryptAsymmetricPayload(
+            envelope,
+            expectedSenderNodeID: envelope.senderNodeID,
+            purpose: "agent-turn-continuation-response"
+        )
+        let response = try JSONDecoder().decode(
+            KeepTalkingAgentTurnContinuationResponse.self,
+            from: payload
+        )
+        guard
+            response.responderNodeID == envelope.senderNodeID,
+            response.originNodeID == envelope.recipientNodeID
+        else {
+            throw KeepTalkingClientError.malformedEncryptedActionCall
+        }
+        return response
     }
 
     func asymmetricPublicKeysForRecipient(nodeID: UUID) async throws

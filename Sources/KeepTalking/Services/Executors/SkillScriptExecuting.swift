@@ -19,6 +19,18 @@ public struct SkillScriptExecutionResult: Sendable {
     }
 }
 
+#if os(macOS)
+public protocol SkillScriptExecuting: Sendable {
+    func runScript(
+        scriptURL: URL,
+        arguments: [String],
+        currentDirectory: URL,
+        actionID: UUID,
+        timeoutSeconds: TimeInterval,
+        sandboxPolicy: KTSandboxPolicy?
+    ) async throws -> SkillScriptExecutionResult
+}
+#else
 public protocol SkillScriptExecuting: Sendable {
     func runScript(
         scriptURL: URL,
@@ -28,6 +40,7 @@ public protocol SkillScriptExecuting: Sendable {
         timeoutSeconds: TimeInterval
     ) async throws -> SkillScriptExecutionResult
 }
+#endif
 
 public enum DefaultSkillScriptExecutor {
     public static var current: (any SkillScriptExecuting)? {

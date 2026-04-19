@@ -1,4 +1,4 @@
-#if !os(iOS) && !os(tvOS) && !os(watchOS) && !os(visionOS)
+#if os(macOS)
 import Foundation
 
 extension DefaultSkillScriptExecutor {
@@ -13,7 +13,8 @@ private struct Executor: SkillScriptExecuting {
         arguments: [String],
         currentDirectory: URL,
         actionID: UUID,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        sandboxPolicy: KTSandboxPolicy?
     ) async throws -> SkillScriptExecutionResult {
         try await SkillScriptRunner.run(
             command: SkillScriptRunner.makeCommand(
@@ -22,7 +23,8 @@ private struct Executor: SkillScriptExecuting {
             ),
             currentDirectory: currentDirectory,
             actionID: actionID,
-            timeoutSeconds: timeoutSeconds
+            timeoutSeconds: timeoutSeconds,
+            sandboxPolicy: sandboxPolicy
         )
     }
 }

@@ -6,6 +6,7 @@ public struct KeepTalkingAgentRunSnapshot: Sendable, Identifiable {
     public enum State: Sendable, Equatable {
         case queued
         case running
+        case suspended
     }
 
     public let id: UUID
@@ -13,6 +14,7 @@ public struct KeepTalkingAgentRunSnapshot: Sendable, Identifiable {
     public let promptPreview: String
     public let createdAt: Date
     public let state: State
+    public let agentTurnID: UUID?
 }
 
 // MARK: - Queue actor
@@ -25,6 +27,7 @@ actor AgentRunQueue {
     private struct RunItem {
         let id: UUID
         let contextID: UUID
+        let agentTurnID: UUID?
         let promptPreview: String
         let createdAt: Date
         let work: @Sendable () async throws -> Void
@@ -35,6 +38,12 @@ actor AgentRunQueue {
     private var queued: [UUID: [RunItem]] = [:]
     /// Per-context active run.
     private var active: [UUID: (item: RunItem, task: Task<Void, Never>)] = [:]
+    /// Suspended turns awaiting continuation response, keyed by agentTurnID.
+    private var suspended: [UUID: RunItem] = [:]
+    /// Continuations waiting for resume, keyed by agentTurnID.
+    private var suspensionContinuations: [UUID: CheckedContinuation<KeepTalkingAgentTurnContinuationResponse, any Error>] = [:]
+    /// Continuation responses that arrived before the run suspended, keyed by agentTurnID.
+    private var earlyResponses: [UUID: KeepTalkingAgentTurnContinuationResponse] = [:]
 
     /// Called on every state transition with the current flat snapshot list.
     nonisolated(unsafe) var onChanged: (@Sendable ([KeepTalkingAgentRunSnapshot]) -> Void)?
@@ -48,6 +57,7 @@ actor AgentRunQueue {
     func enqueue(
         id: UUID = UUID(),
         contextID: UUID,
+        agentTurnID: UUID? = nil,
         promptPreview: String,
         work: @escaping @Sendable () async throws -> Void,
         onCompleted: (@Sendable (Error?) -> Void)? = nil
@@ -55,6 +65,7 @@ actor AgentRunQueue {
         let item = RunItem(
             id: id,
             contextID: contextID,
+            agentTurnID: agentTurnID,
             promptPreview: String(promptPreview.prefix(120)),
             createdAt: Date(),
             work: work,
@@ -91,6 +102,53 @@ actor AgentRunQueue {
 
     var currentSnapshots: [KeepTalkingAgentRunSnapshot] { makeSnapshots() }
 
+    /// Returns true if any active or suspended run is associated with the given agent turn ID.
+    func hasActiveTurn(agentTurnID: UUID) -> Bool {
+        active.values.contains { $0.item.agentTurnID == agentTurnID }
+    }
+
+    // MARK: - Suspension & Resumption
+
+    /// Called from within a running agent turn to suspend and wait for a
+    /// continuation response from a remote node.  The run slot is freed so
+    /// queued runs can proceed.  Returns when `deliverContinuationResponse`
+    /// is called with a matching `agentTurnID`.
+    func awaitContinuation(
+        agentTurnID: UUID
+    ) async throws -> KeepTalkingAgentTurnContinuationResponse {
+        // Check for early arrival
+        if let early = earlyResponses.removeValue(forKey: agentTurnID) {
+            return early
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            suspensionContinuations[agentTurnID] = continuation
+            emit()  // transition active run to .suspended in snapshots
+        }
+    }
+
+    /// Delivers a continuation response, resuming a suspended agent turn.
+    func deliverContinuationResponse(
+        _ response: KeepTalkingAgentTurnContinuationResponse
+    ) {
+        let turnID = response.agentTurnID
+        if let continuation = suspensionContinuations.removeValue(forKey: turnID) {
+            emit()  // transition back to .running before resuming
+            continuation.resume(returning: response)
+        } else {
+            // The run hasn't suspended yet — stash for pickup
+            earlyResponses[turnID] = response
+        }
+    }
+
+    /// Cancels a suspended run by failing its continuation.
+    func cancelSuspended(agentTurnID: UUID) {
+        if let continuation = suspensionContinuations.removeValue(forKey: agentTurnID) {
+            continuation.resume(throwing: CancellationError())
+        }
+        earlyResponses.removeValue(forKey: agentTurnID)
+    }
+
     // MARK: - Private
 
     private func start(_ item: RunItem) {
@@ -122,12 +180,16 @@ actor AgentRunQueue {
     private func makeSnapshots() -> [KeepTalkingAgentRunSnapshot] {
         var result: [KeepTalkingAgentRunSnapshot] = []
         for (_, entry) in active {
+            let isSuspended = entry.item.agentTurnID.map {
+                suspensionContinuations[$0] != nil
+            } ?? false
             result.append(KeepTalkingAgentRunSnapshot(
                 id: entry.item.id,
                 contextID: entry.item.contextID,
                 promptPreview: entry.item.promptPreview,
                 createdAt: entry.item.createdAt,
-                state: .running
+                state: isSuspended ? .suspended : .running,
+                agentTurnID: entry.item.agentTurnID
             ))
         }
         for (_, items) in queued {
@@ -137,9 +199,20 @@ actor AgentRunQueue {
                     contextID: item.contextID,
                     promptPreview: item.promptPreview,
                     createdAt: item.createdAt,
-                    state: .queued
+                    state: .queued,
+                    agentTurnID: item.agentTurnID
                 ))
             }
+        }
+        for (_, item) in suspended {
+            result.append(KeepTalkingAgentRunSnapshot(
+                id: item.id,
+                contextID: item.contextID,
+                promptPreview: item.promptPreview,
+                createdAt: item.createdAt,
+                state: .suspended,
+                agentTurnID: item.agentTurnID
+            ))
         }
         result.sort {
             if $0.state == .running, $1.state != .running { return true }

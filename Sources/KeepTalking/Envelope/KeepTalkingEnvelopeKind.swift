@@ -18,6 +18,7 @@ public enum KeepTalkingEnvelopeKind: String, Codable, Sendable {
     case actionCatalogResult
     case encryptedActionCatalogRequest
     case encryptedActionCatalogResult
+    case encryptedAgentTurnContinuationResponse
     case p2pSignal
     case p2pPresence
 }
@@ -42,7 +43,8 @@ extension KeepTalkingEnvelopeKind {
                 .actionCatalogRequest,
                 .actionCatalogResult,
                 .encryptedActionCatalogRequest,
-                .encryptedActionCatalogResult:
+                .encryptedActionCatalogResult,
+                .encryptedAgentTurnContinuationResponse:
                 return .actionCall
             case .p2pSignal, .p2pPresence:
                 return .signaling
@@ -59,7 +61,8 @@ extension KeepTalkingEnvelopeKind {
                 .actionCatalogRequest,
                 .actionCatalogResult,
                 .encryptedActionCatalogRequest,
-                .encryptedActionCatalogResult:
+                .encryptedActionCatalogResult,
+                .encryptedAgentTurnContinuationResponse:
                 return [.sfu]
             case .contextSync,
                 .message,
@@ -92,7 +95,8 @@ extension KeepTalkingEnvelopeKind {
                 .actionCatalogRequest,
                 .actionCatalogResult,
                 .encryptedActionCatalogRequest,
-                .encryptedActionCatalogResult:
+                .encryptedActionCatalogResult,
+                .encryptedAgentTurnContinuationResponse:
                 return .service
             case .p2pSignal, .p2pPresence:
                 return .p2pSignaling

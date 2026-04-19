@@ -57,6 +57,37 @@ extension KeepTalkingClient {
         )
     }
 
+    // MARK: - kt_create_action tool definition
+
+    func makeCreateActionTool() -> OpenAITool {
+        .functionTool(
+            .init(
+                name: Self.createActionToolFunctionName,
+                description: """
+                    Ask the user to create a new action (MCP server, skill, filesystem path, etc.)
+                    and make it available in this conversation.
+                    The user will be prompted with the action-creation panel.
+                    On success the new action is automatically granted to this context.
+                    Use this when you need a capability that no existing action provides.
+                    """,
+                parameters: JSONSchema(
+                    .type(.object),
+                    .properties([
+                        "reason": JSONSchema(
+                            .type(.string),
+                            .description(
+                                "Brief explanation of why you need this action and what it should do."
+                            )
+                        )
+                    ]),
+                    .required(["reason"]),
+                    .additionalProperties(.boolean(false))
+                ),
+                strict: true
+            )
+        )
+    }
+
     // MARK: - Tool executor
 
     /// Executes a `kt_run_action` tool call by running the ACT agent mini-loop.
@@ -67,7 +98,8 @@ extension KeepTalkingClient {
         context: KeepTalkingContext,
         actConnector: any AIConnector,
         actModel: OpenAIModel,
-        publisher: AIOrchestrator.AssistantPublisher
+        publisher: AIOrchestrator.AssistantPublisher,
+        agentTurnID: UUID? = nil
     ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
         let args = try decodeToolArguments(rawArguments)
 
@@ -112,7 +144,8 @@ extension KeepTalkingClient {
             context: context,
             actConnector: actConnector,
             actModel: actModel,
-            publisher: publisher
+            publisher: publisher,
+            agentTurnID: agentTurnID
         )
     }
 
@@ -127,7 +160,8 @@ extension KeepTalkingClient {
         context: KeepTalkingContext,
         actConnector: any AIConnector,
         actModel: OpenAIModel,
-        publisher: AIOrchestrator.AssistantPublisher
+        publisher: AIOrchestrator.AssistantPublisher,
+        agentTurnID: UUID? = nil
     ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
         let resolvedAction = try await resolvedACTAction(
             actionID: actionID,
@@ -240,7 +274,8 @@ extension KeepTalkingClient {
                 turn.toolCalls,
                 runtimeCatalog: runtimeCatalog,
                 promptMessageID: nil,
-                context: context
+                context: context,
+                agentTurnID: agentTurnID
             )
             actLog(
                 "action-result action=\(actionID.uuidString.lowercased()) calls=\(turn.toolCalls.map(\.function.name).joined(separator: ",")) payload=\(actExecutionPreview(executions, source: stub.kind))"
@@ -248,6 +283,15 @@ extension KeepTalkingClient {
             for exec in executions {
                 actTranscript.append(contentsOf: exec.messages)
             }
+            // Inject native file content inline so the ACT agent can work with
+            // files directly without needing to call kt_get_context_attachment.
+            let injected = try await adaptMidTurnInjectionMessages(
+                executions,
+                runtimeCatalog: runtimeCatalog,
+                context: context,
+                transferReceiptTimeout: .seconds(0)  // blobs already synced
+            )
+            actTranscript.append(contentsOf: injected)
         }
 
         if summary.isEmpty {

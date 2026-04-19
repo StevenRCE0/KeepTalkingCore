@@ -111,6 +111,11 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
                     try cast(KeepTalkingEncryptedActionCatalogResultEnvelope.self),
                     forKey: .payload
                 )
+            case .encryptedAgentTurnContinuationResponse:
+                try container.encode(
+                    try cast(KeepTalkingEncryptedAgentTurnContinuationResponseEnvelope.self),
+                    forKey: .payload
+                )
             case .p2pSignal:
                 try container.encode(
                     try cast(KeepTalkingP2PSignalPayload.self),
@@ -227,6 +232,11 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
             case .encryptedActionCatalogResult:
                 return try container.decode(
                     KeepTalkingEncryptedActionCatalogResultEnvelope.self,
+                    forKey: .payload
+                )
+            case .encryptedAgentTurnContinuationResponse:
+                return try container.decode(
+                    KeepTalkingEncryptedAgentTurnContinuationResponseEnvelope.self,
                     forKey: .payload
                 )
             case .p2pSignal:

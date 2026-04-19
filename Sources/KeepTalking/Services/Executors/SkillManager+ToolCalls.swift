@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import MCP
 import OpenAI
@@ -26,7 +27,8 @@ extension SkillManager {
         _ toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
             .ToolCallParam],
         actionID: UUID,
-        skillDirectory: URL
+        skillDirectory: URL,
+        sandboxPolicy: KTSandboxPolicy? = nil
     ) async throws -> [ChatQuery.ChatCompletionMessageParam.ToolMessageParam] {
         var messages: [ChatQuery.ChatCompletionMessageParam.ToolMessageParam] = []
         for toolCall in toolCalls {
@@ -50,7 +52,8 @@ extension SkillManager {
                     payload = try await executeRunScript(
                         arguments,
                         actionID: actionID,
-                        skillDirectory: skillDirectory
+                        skillDirectory: skillDirectory,
+                        sandboxPolicy: sandboxPolicy
                     )
                 default:
                     payload = "Unknown tool name: \(functionName)"
@@ -109,7 +112,8 @@ extension SkillManager {
     func executeRunScript(
         _ arguments: [String: Value],
         actionID: UUID,
-        skillDirectory: URL
+        skillDirectory: URL,
+        sandboxPolicy: KTSandboxPolicy? = nil
     ) async throws -> String {
         guard let scriptExecutor else {
             throw SkillManagerError.scriptExecutionUnavailableOnThisPlatform
@@ -128,7 +132,8 @@ extension SkillManager {
             arguments: scriptArguments,
             currentDirectory: skillDirectory,
             actionID: actionID,
-            timeoutSeconds: scriptTimeoutSeconds
+            timeoutSeconds: scriptTimeoutSeconds,
+            sandboxPolicy: sandboxPolicy
         )
 
         let joinedCommand = execution.command.joined(separator: " ")
@@ -169,30 +174,16 @@ extension SkillManager {
     }
 
     func scriptArgumentString(for value: Value) -> String? {
-        if let string = value.stringValue {
-            return string
-        }
-        if let int = value.intValue {
-            return String(int)
-        }
-        if let double = value.doubleValue {
-            return String(double)
-        }
-        if let bool = value.boolValue {
-            return String(bool)
-        }
+        if let string = value.stringValue { return string }
+        if let int = value.intValue { return String(int) }
+        if let double = value.doubleValue { return String(double) }
+        if let bool = value.boolValue { return String(bool) }
         return nil
     }
 
-    func normalizedSkillToolArguments(_ arguments: [String: Value])
-        -> [String: Value]
-    {
-        if let nested = arguments["arguments"]?.objectValue {
-            return nested
-        }
-        if let nested = arguments["params"]?.objectValue {
-            return nested
-        }
+    func normalizedSkillToolArguments(_ arguments: [String: Value]) -> [String: Value] {
+        if let nested = arguments["arguments"]?.objectValue { return nested }
+        if let nested = arguments["params"]?.objectValue { return nested }
         return arguments
     }
 
@@ -213,7 +204,6 @@ extension SkillManager {
         let resolved = candidate.standardizedFileURL
         let rootPath = skillDirectory.standardizedFileURL.path
         let resolvedPath = resolved.path
-
         let insideRoot =
             resolvedPath == rootPath
             || resolvedPath.hasPrefix(rootPath + "/")
@@ -231,7 +221,6 @@ extension SkillManager {
         guard !trimmed.isEmpty else {
             throw SkillManagerError.invalidToolArguments(rawScript)
         }
-
         let primary = try resolveSkillFileURL(trimmed, skillDirectory: skillDirectory)
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: primary.path, isDirectory: &isDirectory),
@@ -239,7 +228,6 @@ extension SkillManager {
         {
             return primary
         }
-
         let scriptsCandidate = "scripts/\(trimmed)"
         let resolvedScriptsCandidate = try resolveSkillFileURL(
             scriptsCandidate,
@@ -248,12 +236,10 @@ extension SkillManager {
         if FileManager.default.fileExists(
             atPath: resolvedScriptsCandidate.path,
             isDirectory: &isDirectory
-        ),
-            !isDirectory.boolValue
-        {
+        ), !isDirectory.boolValue {
             return resolvedScriptsCandidate
         }
-
         throw SkillManagerError.invalidSkillPath(trimmed)
     }
 }
+#endif

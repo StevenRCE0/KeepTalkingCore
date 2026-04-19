@@ -174,6 +174,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let primitiveActionManager: PrimitiveActionManager
     let semanticRetrievalActionManager: SemanticRetrievalActionManager
     let filesystemActionManager: FilesystemActionManager
+    #if os(macOS)
+    let scopeManager: ScopeManager
+    #endif
     let aiConnector: (any AIConnector)?
     let blobStore: KeepTalkingBlobStore
     private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
@@ -181,6 +184,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     var primitiveActionPostResultHandler: PrimitiveActionPostResultHandler?
     var semanticSearchCallback: SemanticSearchCallback?
     var webSearchProvider: WebSearchProvider?
+    /// Called when the AI agent invokes `kt_create_action`.  The handler presents
+    /// the action-creation UI; returns the new action's UUID on success, nil on cancel.
+    public var onAgentCreateActionRequest: (@Sendable (_ reason: String, _ contextID: UUID) async -> UUID?)?
 
     // MARK: Agent Run Queue
     let agentRunQueue = AgentRunQueue()
@@ -302,6 +308,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
             database: localStore.database
         )
         self.filesystemActionManager = FilesystemActionManager()
+        #if os(macOS)
+        self.scopeManager = ScopeManager(sandbox: SeatbeltSandbox())
+        #endif
 
         // All stored properties are initialized above; [weak self] is safe from here on.
         // Inject the blob bridge synchronously so blob transfer operations are available
@@ -452,6 +461,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         }
 
         await broadcastLocalNodeState(reason: "connect")
+        await reconcileStaleContinuations()
     }
 
     /// Stops transports and fails any pending remote requests.
@@ -470,6 +480,20 @@ public final class KeepTalkingClient: @unchecked Sendable {
             await self?.mcpManager.setHTTPAuthURLHandler(handler)
         }
     }
+
+    #if os(macOS)
+    /// Installs a callback invoked when the agent requests creation of a new scoped action.
+    ///
+    /// The handler receives the request details (descriptor, reason, duration) and returns
+    /// whether the request is approved and with what grant duration.
+    public func setActionCreationApprovalHandler(
+        _ handler: ScopeManager.ActionCreationApprovalHandler?
+    ) {
+        Task { [weak self] in
+            await self?.scopeManager.setApprovalHandler(handler)
+        }
+    }
+    #endif
 
     /// Returns the current transport statistics for diagnostics and UI.
     public func runtimeStats() -> KeepTalkingRuntimeStats {

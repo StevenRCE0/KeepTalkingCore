@@ -77,6 +77,46 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
     }
 }
 
+// MARK: - Agent Turn Continuation
+
+/// Response sent from node B back to node A when a remote user fulfills
+/// (or rejects) a suspended agent turn continuation.
+public struct KeepTalkingAgentTurnContinuationResponse: Codable, Sendable, KeepTalkingEnvelope {
+    public static var kind: KeepTalkingEnvelopeKind { .encryptedAgentTurnContinuationResponse }
+    public var participantNodeIDs: [UUID] { [responderNodeID, originNodeID] }
+    public var targetPeerNodeID: UUID? { originNodeID }
+    public var transportContextID: UUID? { contextID }
+    public var continuationMessageID: UUID
+    public var agentTurnID: UUID
+    public var contextID: UUID
+    public var responderNodeID: UUID
+    public var originNodeID: UUID
+    public var state: KeepTalkingContextMessage.AgentTurnContinuationState
+    /// Asym-encrypted payload containing the response data (tool result, file refs, etc.)
+    public var encryptedPayload: Data
+    public var plainTextHint: String?
+
+    public init(
+        continuationMessageID: UUID,
+        agentTurnID: UUID,
+        contextID: UUID,
+        responderNodeID: UUID,
+        originNodeID: UUID,
+        state: KeepTalkingContextMessage.AgentTurnContinuationState,
+        encryptedPayload: Data,
+        plainTextHint: String? = nil
+    ) {
+        self.continuationMessageID = continuationMessageID
+        self.agentTurnID = agentTurnID
+        self.contextID = contextID
+        self.responderNodeID = responderNodeID
+        self.originNodeID = originNodeID
+        self.state = state
+        self.encryptedPayload = encryptedPayload
+        self.plainTextHint = plainTextHint
+    }
+}
+
 public enum KeepTalkingRequestAckKind: String, Codable, Sendable {
     case actionCall
 }

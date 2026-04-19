@@ -33,6 +33,11 @@ public struct AIOrchestrator {
     public typealias AssistantPublisher =
         @Sendable ((String, KeepTalkingContextMessage.MessageType)) async throws ->
         Void
+
+    /// Extended publisher that also carries the agent turn ID.
+    public typealias AgentTurnPublisher =
+        @Sendable (String, KeepTalkingContextMessage.MessageType, UUID) async throws ->
+        Void
     public typealias ToolNameResolver = (ToolCall) -> String
 
     /// Rich context returned by `ToolHintResolver`; carries optional action metadata

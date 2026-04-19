@@ -118,10 +118,12 @@ public actor SkillManager {
         }
     }
 
+    #if os(macOS)
     /// Executes a skill action by planning tool usage with the configured AI connector.
     public func callAction(
         action: KeepTalkingAction,
-        call: KeepTalkingActionCall
+        call: KeepTalkingActionCall,
+        sandboxPolicy: KTSandboxPolicy? = nil
     ) async throws -> (content: [MCP.Tool.Content], isError: Bool?) {
         guard let actionID = action.id else {
             throw SkillManagerError.missingActionID
@@ -135,16 +137,12 @@ public actor SkillManager {
 
         try await registerIfNeeded(action)
 
-        let manifestContext = try loadManifestContext(
-            for: skillBundle.directory
-        )
+        let manifestContext = try loadManifestContext(for: skillBundle.directory)
         let allowScriptExecution = shouldAllowScriptExecution(
             call: call,
             manifestContext: manifestContext
         )
-        let tools = makeSkillTools(
-            allowScriptExecution: allowScriptExecution
-        )
+        let tools = makeSkillTools(allowScriptExecution: allowScriptExecution)
         var messages: [ChatQuery.ChatCompletionMessageParam] = [
             .developer(
                 .init(
@@ -159,13 +157,7 @@ public actor SkillManager {
                     )
                 )
             ),
-            .user(
-                .init(
-                    content: .string(
-                        makeSkillUserPrompt(call: call)
-                    )
-                )
-            ),
+            .user(.init(content: .string(makeSkillUserPrompt(call: call)))),
         ]
 
         var latestAssistantText: String?
@@ -181,7 +173,8 @@ public actor SkillManager {
                     return try await self.executeSkillToolCalls(
                         toolCalls,
                         actionID: actionID,
-                        skillDirectory: skillBundle.directory
+                        skillDirectory: skillBundle.directory,
+                        sandboxPolicy: sandboxPolicy
                     )
                 }
             )
@@ -190,34 +183,30 @@ public actor SkillManager {
                 messages.append(assistantMessage)
             }
             if let assistantText = turn.assistantText,
-                !assistantText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .isEmpty
+                !assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             {
                 latestAssistantText = assistantText
             }
 
-            guard !turn.toolCalls.isEmpty else {
-                break
-            }
+            guard !turn.toolCalls.isEmpty else { break }
 
             messages.append(
                 contentsOf: try await executeSkillToolCalls(
                     turn.toolCalls,
                     actionID: actionID,
-                    skillDirectory: skillBundle.directory
+                    skillDirectory: skillBundle.directory,
+                    sandboxPolicy: sandboxPolicy
                 ).map { .tool($0) }
             )
         }
 
-        let finalText =
-            latestAssistantText
-            ?? "Skill execution completed."
-
+        let finalText = latestAssistantText ?? "Skill execution completed."
         return (
             content: [.text(text: finalText, annotations: nil, _meta: nil)],
             isError: false
         )
     }
+    #endif
 
     /// Returns the external tool names exposed by a skill action.
     public func listActionToolNames(action: KeepTalkingAction) async throws

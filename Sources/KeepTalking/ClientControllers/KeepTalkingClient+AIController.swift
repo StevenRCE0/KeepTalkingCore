@@ -21,6 +21,7 @@ extension KeepTalkingClient {
     static let contextAttachmentUpdateMetadataToolFunctionName =
         "kt_update_context_attachment_metadata"
     static let searchThreadsToolFunctionName = "kt_search_threads"
+    static let createActionToolFunctionName = "kt_create_action"
     /// Function name used for web search in chat-completions mode (e.g. OpenRouter).
     /// In Responses API mode the built-in webSearchPreview tool is used instead.
     static let webSearchFunctionName = "web_search"
@@ -63,6 +64,7 @@ extension KeepTalkingClient {
             )
         }
 
+        let agentTurnID = UUID()
         let work: @Sendable () async throws -> Void = { [self, preparedAttachmentsResult] in
             try Task.checkCancellation()
             let preparedAttachments = try preparedAttachmentsResult.get()
@@ -89,12 +91,14 @@ extension KeepTalkingClient {
                 model: model,
                 actModel: actModel,
                 roleName: roleName,
-                preparedPromptAttachments: preparedAttachments
+                preparedPromptAttachments: preparedAttachments,
+                agentTurnID: agentTurnID
             )
         }
 
         return await agentRunQueue.enqueue(
             contextID: contextID,
+            agentTurnID: agentTurnID,
             promptPreview: preview,
             work: work,
             onCompleted: { [self] error in
@@ -108,6 +112,10 @@ extension KeepTalkingClient {
                             message: errorMessage
                         )
                     }
+                }
+                // Cancel any pending continuation this turn was waiting on.
+                Task { [self] in
+                    await cancelStaleContinuations(agentTurnID: agentTurnID, in: contextID)
                 }
                 onAgentRunCompleted?(contextID, error)
             }
@@ -148,7 +156,8 @@ extension KeepTalkingClient {
         model: OpenAIModel,
         actModel: OpenAIModel?,
         roleName: String,
-        preparedPromptAttachments: [KeepTalkingPreparedAttachment]
+        preparedPromptAttachments: [KeepTalkingPreparedAttachment],
+        agentTurnID: UUID = UUID()
     ) async throws -> String {
         guard let aiConnector = try await resolveAIConnector() else {
             throw KeepTalkingClientError.aiNotConfigured
@@ -192,6 +201,7 @@ extension KeepTalkingClient {
         let allTools: [OpenAITool] =
             [
                 makeRunActionTool(),
+                makeCreateActionTool(),
                 ktSkillMetainfoTool,
                 attachmentListingTool,
                 attachmentReadTool,
@@ -286,6 +296,7 @@ extension KeepTalkingClient {
                 in: persistedContext,
                 sender: .autonomous(name: roleName, nodeName: selfNodeName, model: model),
                 type: messageType,
+                agentTurnID: agentTurnID,
                 emitLocalEnvelope: true
             )
         }
@@ -309,7 +320,8 @@ extension KeepTalkingClient {
                                 context: persistedContext,
                                 actConnector: aiConnector,
                                 actModel: actModel ?? activeModel,
-                                publisher: assistantPublisher
+                                publisher: assistantPublisher,
+                                agentTurnID: agentTurnID
                             )
                         )
                     )
@@ -329,7 +341,8 @@ extension KeepTalkingClient {
                         toolCalls,
                         runtimeCatalog: runtimeCatalog,
                         promptMessageID: promptMessageID,
-                        context: persistedContext
+                        context: persistedContext,
+                        agentTurnID: agentTurnID
                     )
                 },
                 toolTranscriptAdapter: { [self] executions in

@@ -39,6 +39,16 @@ public struct MCPStdioTransportHandle: Sendable {
     }
 }
 
+#if os(macOS)
+public protocol MCPStdioTransportLaunching: Sendable {
+    func launchTransport(
+        command: [String],
+        environment: [String: String],
+        stderrHandler: @escaping @Sendable (Data) -> Void,
+        sandboxPolicy: KTSandboxPolicy?
+    ) async throws -> MCPStdioTransportHandle
+}
+#else
 public protocol MCPStdioTransportLaunching: Sendable {
     func launchTransport(
         command: [String],
@@ -46,3 +56,4 @@ public protocol MCPStdioTransportLaunching: Sendable {
         stderrHandler: @escaping @Sendable (Data) -> Void
     ) async throws -> MCPStdioTransportHandle
 }
+#endif

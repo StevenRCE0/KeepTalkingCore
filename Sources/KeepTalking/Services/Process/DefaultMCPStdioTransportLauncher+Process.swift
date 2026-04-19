@@ -53,7 +53,8 @@ private struct Launcher: MCPStdioTransportLaunching {
     func launchTransport(
         command: [String],
         environment: [String: String],
-        stderrHandler: @escaping @Sendable (Data) -> Void
+        stderrHandler: @escaping @Sendable (Data) -> Void,
+        sandboxPolicy: KTSandboxPolicy? = nil
     ) async throws -> MCPStdioTransportHandle {
         let process = Process()
         let stdinPipe = Pipe()
@@ -75,6 +76,12 @@ private struct Launcher: MCPStdioTransportLaunching {
         process.environment = mergedEnvironment
         process.terminationHandler = { process in
             exitState.set(status: process.terminationStatus)
+        }
+
+        // Apply sandbox policy before launch
+        if let sandboxPolicy {
+            let sandbox = SeatbeltSandbox()
+            try sandbox.apply(policy: sandboxPolicy, to: process)
         }
 
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in

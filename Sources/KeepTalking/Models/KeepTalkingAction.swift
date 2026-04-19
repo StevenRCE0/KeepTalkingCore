@@ -12,18 +12,95 @@ public enum KeepTalkingActionResource: Codable, Sendable {
 public struct KeepTalkingActionResourceWithDescription: Codable, Sendable {
     public var description: String
     public var resource: KeepTalkingActionResource
+
+    public init(description: String, resource: KeepTalkingActionResource) {
+        self.description = description
+        self.resource = resource
+    }
+}
+
+/// An atomic operation that can be performed within an action's scope.
+public enum KeepTalkingActionVerb: String, Codable, Sendable, Hashable, CaseIterable {
+    case read
+    case write
+    case execute
+    case network
+    case grep
+    case ls
+    case callTool = "call-tool"
 }
 
 /// Describes the verb portion of an action descriptor.
+///
+/// When `verbs` is populated, the descriptor drives sandbox policy compilation.
+/// When `nil`, the descriptor is display-only (legacy behavior).
 public struct KeepTalkingActionWithDescription: Codable, Sendable {
     public var description: String
+    public var verbs: Set<KeepTalkingActionVerb>?
+
+    public init(description: String, verbs: Set<KeepTalkingActionVerb>? = nil) {
+        self.description = description
+        self.verbs = verbs
+    }
 }
 
 /// Provides subject-action-object metadata used to explain an action to users and AI planners.
+///
+/// When populated with typed verbs and a concrete object resource, the descriptor also drives
+/// sandbox policy compilation — the verbs determine what operations are allowed, and the object
+/// resource defines the scope boundary enforced by the platform sandbox backend.
 public struct KeepTalkingActionDescriptor: Codable, Sendable {
     public var subject: KeepTalkingActionResourceWithDescription?
     public var action: KeepTalkingActionWithDescription?
     public var object: KeepTalkingActionResourceWithDescription?
+
+    public init(
+        subject: KeepTalkingActionResourceWithDescription? = nil,
+        action: KeepTalkingActionWithDescription? = nil,
+        object: KeepTalkingActionResourceWithDescription? = nil
+    ) {
+        self.subject = subject
+        self.action = action
+        self.object = object
+    }
+
+    /// Whether this descriptor carries enough information to compile a sandbox policy.
+    public var hasSandboxConstraints: Bool {
+        action?.verbs != nil && object?.resource != nil
+    }
+}
+
+/// The lifetime of a granted action scope.
+public enum KeepTalkingActionGrantDuration: String, Codable, Sendable {
+    /// Valid for a single execution only.
+    case once
+    /// Valid until the current session (context connection) ends.
+    case session
+    /// Persisted across sessions.
+    case standing
+}
+
+/// A recorded grant that associates a descriptor with its approval metadata.
+public struct KeepTalkingActionGrant: Codable, Sendable, Identifiable {
+    public var id: UUID
+    public var descriptor: KeepTalkingActionDescriptor
+    public var duration: KeepTalkingActionGrantDuration
+    public var grantedAt: Date
+    public var grantedByNodeID: UUID
+
+    public init(
+        id: UUID = UUID(),
+        descriptor: KeepTalkingActionDescriptor,
+        duration: KeepTalkingActionGrantDuration,
+        grantedAt: Date = .now,
+        grantedByNodeID: UUID
+    ) {
+        self.id = id
+        self.descriptor = descriptor
+        self.duration = duration
+        self.grantedAt = grantedAt
+        self.grantedByNodeID = grantedByNodeID
+    }
 }
 
 public protocol KeepTalkingActionBundle: Identifiable, Codable, Sendable, Hashable {

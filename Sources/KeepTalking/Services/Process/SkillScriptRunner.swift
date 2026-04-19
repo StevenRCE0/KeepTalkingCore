@@ -1,4 +1,4 @@
-#if !os(iOS) && !os(tvOS) && !os(watchOS) && !os(visionOS)
+#if os(macOS)
 import Foundation
 
 public enum SkillScriptRunner {
@@ -24,7 +24,8 @@ public enum SkillScriptRunner {
         command: [String],
         currentDirectory: URL,
         actionID: UUID,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        sandboxPolicy: KTSandboxPolicy? = nil
     ) async throws -> SkillScriptExecutionResult {
         guard let executable = command.first else {
             return SkillScriptExecutionResult(
@@ -43,7 +44,8 @@ public enum SkillScriptRunner {
                 command: command,
                 currentDirectory: currentDirectory,
                 actionID: actionID,
-                timeoutSeconds: timeoutSeconds
+                timeoutSeconds: timeoutSeconds,
+                sandboxPolicy: sandboxPolicy
             )
         } onCancel: {
             terminateProcessIfRunning(processBox.process)
@@ -65,7 +67,8 @@ public enum SkillScriptRunner {
         command: [String],
         currentDirectory: URL,
         actionID: UUID,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        sandboxPolicy: KTSandboxPolicy? = nil
     ) async throws -> SkillScriptExecutionResult {
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -81,6 +84,11 @@ public enum SkillScriptRunner {
                 environment: [:]
             )
 
+        if let sandboxPolicy {
+            let sandbox = SeatbeltSandbox()
+            try sandbox.apply(policy: sandboxPolicy, to: process)
+        }
+
         async let stdoutData = DefaultProcessExecutionSupport.readToEnd(
             stdoutPipe.fileHandleForReading
         )
@@ -91,17 +99,12 @@ public enum SkillScriptRunner {
         let timeoutNanos = UInt64(max(timeoutSeconds, 1) * 1_000_000_000)
         let exitCode: Int32
         do {
-            let outcome = try await withThrowingTaskGroup(of: Outcome.self) {
-                group in
+            let outcome = try await withThrowingTaskGroup(of: Outcome.self) { group in
                 group.addTask {
                     let status = try await withCheckedThrowingContinuation {
-                        (
-                            continuation: CheckedContinuation<Int32, Error>
-                        ) in
+                        (continuation: CheckedContinuation<Int32, Error>) in
                         process.terminationHandler = { process in
-                            continuation.resume(
-                                returning: process.terminationStatus
-                            )
+                            continuation.resume(returning: process.terminationStatus)
                         }
                         do {
                             try process.run()
@@ -121,23 +124,16 @@ public enum SkillScriptRunner {
                 }
 
                 guard let result = try await group.next() else {
-                    throw SkillManagerError.toolCallTimedOut(
-                        actionID,
-                        timeoutSeconds
-                    )
+                    throw SkillManagerError.toolCallTimedOut(actionID, timeoutSeconds)
                 }
                 group.cancelAll()
                 return result
             }
 
             switch outcome {
-                case .exited(let status):
-                    exitCode = status
+                case .exited(let status): exitCode = status
                 case .timedOut:
-                    throw SkillManagerError.toolCallTimedOut(
-                        actionID,
-                        timeoutSeconds
-                    )
+                    throw SkillManagerError.toolCallTimedOut(actionID, timeoutSeconds)
             }
         } catch {
             terminateProcessIfRunning(process)
@@ -149,48 +145,20 @@ public enum SkillScriptRunner {
         return SkillScriptExecutionResult(
             command: command,
             exitCode: exitCode,
-            stdout: DefaultProcessExecutionSupport.decode(
-                data: try await stdoutData
-            ),
-            stderr: DefaultProcessExecutionSupport.decode(
-                data: try await stderrData
-            )
+            stdout: DefaultProcessExecutionSupport.decode(data: try await stdoutData),
+            stderr: DefaultProcessExecutionSupport.decode(data: try await stderrData)
         )
     }
 
     private static func terminateProcessIfRunning(_ process: Process) {
-        guard process.isRunning else {
-            return
-        }
+        guard process.isRunning else { return }
         process.terminate()
         process.waitUntilExit()
     }
 
     private static func requestProcessTermination(_ process: Process) {
-        guard process.isRunning else {
-            return
-        }
+        guard process.isRunning else { return }
         process.terminate()
-    }
-}
-#else
-import Foundation
-
-public enum SkillScriptRunner {
-    public static func makeCommand(
-        scriptURL: URL,
-        arguments: [String]
-    ) -> [String] {
-        [scriptURL.path] + arguments
-    }
-
-    public static func run(
-        command _: [String],
-        currentDirectory _: URL,
-        actionID _: UUID,
-        timeoutSeconds _: TimeInterval
-    ) async throws -> SkillScriptExecutionResult {
-        throw SkillManagerError.scriptExecutionUnavailableOnThisPlatform
     }
 }
 #endif

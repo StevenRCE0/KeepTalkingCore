@@ -19,6 +19,7 @@ extension KeepTalkingClient {
         in context: KeepTalkingContext,
         sender: KeepTalkingContextMessage.Sender? = nil,
         type: KeepTalkingContextMessage.MessageType = .message,
+        agentTurnID: UUID? = nil,
         emitLocalEnvelope: Bool = false
     ) async throws {
         try await send(
@@ -27,6 +28,7 @@ extension KeepTalkingClient {
             in: context,
             sender: sender,
             type: type,
+            agentTurnID: agentTurnID,
             emitLocalEnvelope: emitLocalEnvelope
         )
     }
@@ -37,6 +39,7 @@ extension KeepTalkingClient {
         in context: KeepTalkingContext,
         sender: KeepTalkingContextMessage.Sender? = nil,
         type: KeepTalkingContextMessage.MessageType = .message,
+        agentTurnID: UUID? = nil,
         emitLocalEnvelope: Bool = false
     ) async throws {
         let preparedAttachments = try await prepareLocalAttachments(
@@ -48,6 +51,7 @@ extension KeepTalkingClient {
             in: context,
             sender: sender,
             type: type,
+            agentTurnID: agentTurnID,
             emitLocalEnvelope: emitLocalEnvelope
         )
     }
@@ -58,6 +62,7 @@ extension KeepTalkingClient {
         in context: KeepTalkingContext,
         sender: KeepTalkingContextMessage.Sender? = nil,
         type: KeepTalkingContextMessage.MessageType = .message,
+        agentTurnID: UUID? = nil,
         emitLocalEnvelope: Bool = false
     ) async throws {
         let node = try await getCurrentNodeInstance()
@@ -68,7 +73,8 @@ extension KeepTalkingClient {
             context: persistedContext,
             sender: sender,
             content: text,
-            type: type
+            type: type,
+            agentTurnID: agentTurnID
         )
         persistedContext.updatedAt = message.timestamp
 
@@ -118,6 +124,7 @@ extension KeepTalkingClient {
         in context: UUID,
         sender: KeepTalkingContextMessage.Sender? = nil,
         type: KeepTalkingContextMessage.MessageType = .message,
+        agentTurnID: UUID? = nil,
         emitLocalEnvelope: Bool = false
     ) async throws {
         try await send(
@@ -126,6 +133,7 @@ extension KeepTalkingClient {
             in: context,
             sender: sender,
             type: type,
+            agentTurnID: agentTurnID,
             emitLocalEnvelope: emitLocalEnvelope
         )
     }
@@ -136,6 +144,7 @@ extension KeepTalkingClient {
         in context: UUID,
         sender: KeepTalkingContextMessage.Sender? = nil,
         type: KeepTalkingContextMessage.MessageType = .message,
+        agentTurnID: UUID? = nil,
         emitLocalEnvelope: Bool = false
     ) async throws {
         let targetContext = try await ensure(
@@ -149,6 +158,7 @@ extension KeepTalkingClient {
             in: targetContext,
             sender: sender,
             type: type,
+            agentTurnID: agentTurnID,
             emitLocalEnvelope: emitLocalEnvelope
         )
     }
@@ -159,6 +169,7 @@ extension KeepTalkingClient {
         in context: UUID,
         sender: KeepTalkingContextMessage.Sender? = nil,
         type: KeepTalkingContextMessage.MessageType = .message,
+        agentTurnID: UUID? = nil,
         emitLocalEnvelope: Bool = false
     ) async throws {
         let targetContext = try await ensure(
@@ -172,6 +183,7 @@ extension KeepTalkingClient {
             in: targetContext,
             sender: sender,
             type: type,
+            agentTurnID: agentTurnID,
             emitLocalEnvelope: emitLocalEnvelope
         )
     }
@@ -249,6 +261,11 @@ extension KeepTalkingClient {
         guard !messages.isEmpty else {
             return
         }
+
+        // Continuation messages use replacing sync: if a non-pending state arrives
+        // for a message we already have, update it in place (the dedup filter would
+        // otherwise drop it as a duplicate).
+        await replaceContinuationStatesIfNeeded(messages)
 
         let newMessages = try await filterNewMessages(messages)
         guard !newMessages.isEmpty else {
@@ -791,6 +808,46 @@ extension KeepTalkingClient {
             content: previewText,
             isTruncated: rawContent.count > previewText.count
         )
+    }
+
+    /// Replacing sync for continuation messages: when a non-pending state arrives
+    /// for a message that already exists locally, update it in place and fire the
+    /// local envelope sink so the UI refreshes immediately.
+    private func replaceContinuationStatesIfNeeded(
+        _ messages: [KeepTalkingContextMessage]
+    ) async {
+        let candidates = messages.compactMap { msg -> (UUID, KeepTalkingContextMessage.AgentTurnContinuationState)? in
+            guard let id = msg.id,
+                  case .agentTurnContinuation(_, _, _, _, _, let state) = msg.type,
+                  state != .pending
+            else { return nil }
+            return (id, state)
+        }
+        guard !candidates.isEmpty else { return }
+
+        let candidateIDs = candidates.map(\.0)
+        let existing = (try? await KeepTalkingContextMessage.query(on: localStore.database)
+            .filter(\.$id ~~ candidateIDs)
+            .all()) ?? []
+
+        for existing in existing {
+            guard let id = existing.id,
+                  case .agentTurnContinuation(let toolCallID, let actionID, let targetNodeID, let kind, let payload, let currentState) = existing.type,
+                  currentState == .pending,
+                  let newState = candidates.first(where: { $0.0 == id })?.1
+            else { continue }
+
+            existing.type = .agentTurnContinuation(
+                toolCallID: toolCallID,
+                actionID: actionID,
+                targetNodeID: targetNodeID,
+                kind: kind,
+                encryptedPayload: payload,
+                state: newState
+            )
+            try? await existing.save(on: localStore.database)
+            onEnvelope?(existing)
+        }
     }
 }
 

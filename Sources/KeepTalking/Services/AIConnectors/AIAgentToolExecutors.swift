@@ -28,7 +28,8 @@ extension KeepTalkingClient {
             .ToolCallParam],
         runtimeCatalog: KeepTalkingActionRuntimeCatalog,
         promptMessageID: UUID?,
-        context: KeepTalkingContext
+        context: KeepTalkingContext,
+        agentTurnID: UUID? = nil
     ) async throws -> [AIOrchestrator.ToolExecution] {
         var executions: [AIOrchestrator.ToolExecution] = []
 
@@ -155,6 +156,23 @@ extension KeepTalkingClient {
                         )
                     )
                     continue
+                } else if functionName == Self.createActionToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: await executeCreateActionToolCall(
+                                        toolCallID: toolCallID,
+                                        rawArguments: toolCall.function.arguments,
+                                        context: context
+                                    ),
+                                    toolCallID: toolCallID
+                                )
+                            ]
+                        )
+                    )
+                    continue
                 } else if functionName == Self.ktSkillMetainfoToolFunctionName {
                     executions.append(
                         .init(
@@ -183,7 +201,8 @@ extension KeepTalkingClient {
                             functionName: functionName,
                             definition: definition,
                             rawArguments: toolCall.function.arguments,
-                            context: context
+                            context: context,
+                            agentTurnID: agentTurnID
                         )
                     case .skillMetadata(let skillContext):
                         payload = renderSkillMetadataPayload(
@@ -270,7 +289,8 @@ extension KeepTalkingClient {
         functionName: String,
         definition: KeepTalkingActionToolDefinition,
         rawArguments: String,
-        context: KeepTalkingContext
+        context: KeepTalkingContext,
+        agentTurnID: UUID? = nil
     ) async throws -> String {
         let arguments = try parsedActionCallArguments(
             definition: definition,
@@ -304,7 +324,8 @@ extension KeepTalkingClient {
         let result = try await dispatchActionCall(
             actionOwner: definition.ownerNodeID,
             call: actionCall,
-            context: context
+            context: context,
+            agentTurnID: agentTurnID
         )
         return renderAgentToolPayload(
             functionName: functionName,
@@ -867,6 +888,49 @@ extension KeepTalkingClient {
         }
         try await consumePendingMarks(in: contextID)
         return jsonString(["ok": true, "created": true])
+    }
+
+    func executeCreateActionToolCall(
+        toolCallID: String,
+        rawArguments: String,
+        context: KeepTalkingContext
+    ) async -> String {
+        let args = (try? decodeToolArguments(rawArguments)) ?? [:]
+        let reason = args["reason"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? "The agent requested a new action."
+        guard let contextID = try? context.requireID() else {
+            return jsonString(["ok": false, "error": "missing_context_id"])
+        }
+        guard let handler = onAgentCreateActionRequest else {
+            return jsonString([
+                "ok": false,
+                "error": "action_creation_unavailable",
+                "message": "Action creation is not configured on this node.",
+            ])
+        }
+        guard let actionID = await handler(reason, contextID) else {
+            return jsonString(["ok": false, "error": "cancelled", "message": "User cancelled action creation."])
+        }
+        // Grant the new action to all trusted peers in this context so they can call it.
+        let persistedContext = try? await ensure(contextID, for: KeepTalkingContext.self)
+        if let persistedContext {
+            let relations = (try? await KeepTalkingNodeRelation.query(on: localStore.database)
+                .filter(\.$from.$id, .equal, config.node)
+                .all()) ?? []
+            for relation in relations where relation.allows(context: persistedContext) {
+                try? await grantActionPermission(
+                    actionID: actionID,
+                    toNodeID: relation.$to.id,
+                    scope: .context(persistedContext)
+                )
+            }
+        }
+        await broadcastLocalNodeState(reason: "agent_create_action")
+        return jsonString([
+            "ok": true,
+            "action_id": actionID.uuidString.lowercased(),
+            "message": "Action created and granted to this context.",
+        ])
     }
 
     func executeWebSearchToolCall(rawArguments: String) async throws -> String {

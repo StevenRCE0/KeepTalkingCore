@@ -51,5 +51,14 @@ extension KeepTalkingEnvelopeAsyncHandlers {
             }
             _ = client.resolvePendingActionCall(result)
         }
+        onEncryptedAgentTurnContinuationResponse { encryptedResponse in
+            let decrypted = try await client.decryptTrustedEnvelope(
+                KeepTalkingEncryptedAgentTurnContinuationResponseEnvelope(encryptedResponse)
+            )
+            guard let response = decrypted.agentTurnContinuationResponse else {
+                return
+            }
+            await client.handleIncomingAgentTurnContinuationResponse(response)
+        }
     }
 }

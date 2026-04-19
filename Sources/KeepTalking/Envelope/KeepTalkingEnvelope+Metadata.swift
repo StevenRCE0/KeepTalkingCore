@@ -69,6 +69,14 @@ extension KeepTalkingEnvelope {
         (self as? KeepTalkingEncryptedActionCatalogResultEnvelope)?.payload
     }
 
+    public var agentTurnContinuationResponse: KeepTalkingAgentTurnContinuationResponse? {
+        self as? KeepTalkingAgentTurnContinuationResponse
+    }
+
+    public var encryptedAgentTurnContinuationResponse: KeepTalkingAsymmetricCipherEnvelope? {
+        (self as? KeepTalkingEncryptedAgentTurnContinuationResponseEnvelope)?.payload
+    }
+
     public var p2pSignal: KeepTalkingP2PSignalPayload? {
         self as? KeepTalkingP2PSignalPayload
     }

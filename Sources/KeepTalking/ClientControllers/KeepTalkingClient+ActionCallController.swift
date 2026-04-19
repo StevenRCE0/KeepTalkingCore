@@ -123,6 +123,9 @@ extension KeepTalkingClient {
         }
 
         do {
+            #if os(macOS)
+            let sandboxPolicy = try? await scopeManager.resolvedPolicy(for: action)
+            #endif
             let callResult: (content: [Tool.Content], isError: Bool?)
             switch action.payload {
                 case .mcpBundle:
@@ -132,10 +135,15 @@ extension KeepTalkingClient {
                         allowedTools: allowedMCPTools
                     )
                 case .skill:
+                    #if os(macOS)
                     callResult = try await skillManager.callAction(
                         action: action,
-                        call: request.call
+                        call: request.call,
+                        sandboxPolicy: sandboxPolicy
                     )
+                    #else
+                    callResult = (content: [], isError: true)
+                    #endif
                 case .primitive:
                     callResult = try await primitiveActionManager.callAction(
                         action: action,
@@ -240,7 +248,14 @@ extension KeepTalkingClient {
             )
         }
 
+        // blockingAuthorisation actions from remote callers are now handled via
+        // the agentTurnContinuation message channel — the remote agent suspends
+        // and B's user responds in-chat.  If this path is reached for such an
+        // action it means a legacy or local caller is executing it; fall through
+        // to normal execution in that case (local callers still use the approval
+        // handler).
         if action.blockingAuthorisation == true,
+            request.callerNodeID == config.node,
             let context,
             let actionApprovalHandler
         {
@@ -493,7 +508,8 @@ extension KeepTalkingClient {
     func dispatchActionCall(
         actionOwner: UUID,
         call: KeepTalkingActionCall,
-        context: KeepTalkingContext
+        context: KeepTalkingContext,
+        agentTurnID: UUID? = nil
     ) async throws -> KeepTalkingActionCallResult {
         // TODO: This is a bug
         let deliveryNodeID = try await deliveryNodeID(
@@ -522,36 +538,96 @@ extension KeepTalkingClient {
             return result
         }
 
-        let usesWakeAssistedDelivery = await shouldUseWakeAssistedDelivery(
-            for: call.action
-        )
-        let deliveryDescription =
-            usesWakeAssistedDelivery
-            ? "rtc (with APN wake if needed)"
-            : "rtc"
-        onLog?(
-            "[action-call/request] dispatching remote request=\(requestID) action=\(actionID) owner=\(actionOwner.uuidString.lowercased()) target=\(deliveryNodeID.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased()) delivery=\(deliveryDescription)"
-        )
-        if usesWakeAssistedDelivery {
-            onLog?(
-                "[action-call/request] wake-assisted delivery request=\(requestID) action=\(actionID) owner=\(actionOwner.uuidString.lowercased()) target=\(deliveryNodeID.uuidString.lowercased())"
-            )
-            await sendActionWakeIfNeeded(
-                actionOwner: deliveryNodeID,
+        // Remote blocking actions use the continuation model instead of the
+        // synchronous action-call channel. The agent turn suspends until the
+        // remote user responds via the in-chat widget.
+        if await shouldUseWakeAssistedDelivery(for: call.action), let agentTurnID {
+            return try await dispatchBlockingActionCallViaContinuation(
+                request: request,
                 call: call,
-                context: context
+                context: context,
+                agentTurnID: agentTurnID
             )
-            await waitForNodeToComeOnline(deliveryNodeID)
         }
 
-        try await sendRemoteActionCallRequest(
-            request,
-            deliveryDescription: deliveryDescription
+        onLog?(
+            "[action-call/request] dispatching remote request=\(requestID) action=\(actionID) owner=\(actionOwner.uuidString.lowercased()) target=\(deliveryNodeID.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased())"
         )
+
+        try await sendRemoteActionCallRequest(request, deliveryDescription: "rtc")
 
         return try await waitForActionCallResult(
             requestID: request.id,
             timeoutSeconds: Self.actionCallResultTimeoutSeconds
+        )
+    }
+
+    private func dispatchBlockingActionCallViaContinuation(
+        request: KeepTalkingActionCallRequest,
+        call: KeepTalkingActionCall,
+        context: KeepTalkingContext,
+        agentTurnID: UUID
+    ) async throws -> KeepTalkingActionCallResult {
+        let actionID = call.action.uuidString.lowercased()
+        let targetNodeID = request.targetNodeID
+        onLog?(
+            "[action-call/continuation] suspending agentTurnID=\(agentTurnID.uuidString.lowercased()) action=\(actionID) target=\(targetNodeID.uuidString.lowercased())"
+        )
+
+        // Encrypt the full action call request for the target node.
+        let encryptedRequest = try await encryptActionCallRequestEnvelope(request)
+
+        // Look up action kind for the `kind` label in the continuation message.
+        let kind: String
+        if let action = try? await KeepTalkingAction.find(call.action, on: localStore.database) {
+            kind = switch action.payload {
+                case .primitive(let b): b.action.rawValue
+                case .mcpBundle: "mcp"
+                case .skill: "skill"
+                case .filesystem: "filesystem"
+                case .semanticRetrieval: "semantic_retrieval"
+            }
+        } else {
+            kind = actionID
+        }
+
+        let selfNode = try await getCurrentNodeInstance()
+        let selfNodeID = try selfNode.requireID()
+        let sender = KeepTalkingContextMessage.Sender.node(node: selfNodeID)
+
+        // Push-wake the target node in case it's offline, then suspend.
+        await sendActionWakeIfNeeded(
+            actionOwner: targetNodeID,
+            call: call,
+            context: context
+        )
+
+        let content = try await suspendAgentTurnForContinuation(
+            agentTurnID: agentTurnID,
+            toolCallID: request.id.uuidString.lowercased(),
+            actionID: call.action,
+            targetNodeID: targetNodeID,
+            kind: kind,
+            encryptedPayload: encryptedRequest.ciphertext,
+            context: context,
+            sender: sender
+        )
+
+        // For file requests, wait until blobs have synced before returning
+        // control to the agent so it can immediately read the files.
+        if kind == KeepTalkingPrimitiveActionKind.askForFile.rawValue, !content.isEmpty {
+            let contextID = try context.requireID()
+            await waitForContinuationBlobs(from: content, in: contextID)
+        }
+
+        return KeepTalkingActionCallResult(
+            requestID: request.id,
+            contextID: request.contextID,
+            callerNodeID: config.node,
+            targetNodeID: targetNodeID,
+            actionID: call.action,
+            content: content,
+            isError: content.isEmpty
         )
     }
 
