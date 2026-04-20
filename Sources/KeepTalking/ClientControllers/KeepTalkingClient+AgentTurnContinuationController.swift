@@ -74,10 +74,10 @@ extension KeepTalkingClient {
     private func blobIDsFromAskForFileContent(_ content: [Tool.Content]) -> [String] {
         for item in content {
             guard case .text(let text, _, _) = item,
-                  let data = text.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  json["status"] as? String == "sent_to_context",
-                  let attachments = json["attachments"] as? [[String: Any]]
+                let data = text.data(using: .utf8),
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                json["status"] as? String == "sent_to_context",
+                let attachments = json["attachments"] as? [[String: Any]]
             else { continue }
             return attachments.compactMap { $0["blob_id"] as? String }
         }
@@ -97,10 +97,12 @@ extension KeepTalkingClient {
 
         for message in messages {
             guard message.$context.id == contextID else { continue }
-            guard case .agentTurnContinuation(
-                let toolCallID, let actionID, let targetNodeID, let kind,
-                let encryptedPayload, let state
-            ) = message.type, state == .pending else { continue }
+            guard
+                case .agentTurnContinuation(
+                    let toolCallID, let actionID, let targetNodeID, let kind,
+                    let encryptedPayload, let state
+                ) = message.type, state == .pending
+            else { continue }
 
             message.type = .agentTurnContinuation(
                 toolCallID: toolCallID,
@@ -118,15 +120,17 @@ extension KeepTalkingClient {
     /// On connect, finds all pending continuation messages sent by this node
     /// and cancels any whose agent turn is no longer active in the queue.
     public func reconcileStaleContinuations() async {
-        guard let messages = try? await KeepTalkingContextMessage.query(on: localStore.database)
-            .all()
+        guard
+            let messages = try? await KeepTalkingContextMessage.query(on: localStore.database)
+                .all()
         else { return }
 
         for message in messages {
-            guard case .agentTurnContinuation(
-                let toolCallID, let actionID, let targetNodeID, let kind,
-                let encryptedPayload, let state
-            ) = message.type,
+            guard
+                case .agentTurnContinuation(
+                    let toolCallID, let actionID, let targetNodeID, let kind,
+                    let encryptedPayload, let state
+                ) = message.type,
                 state == .pending,
                 case .node(let senderID) = message.sender,
                 senderID == config.node,
@@ -192,6 +196,54 @@ extension KeepTalkingClient {
         try await rtcClient.sendTrustedEnvelope(
             response,
             cryptorSource: trustedEnvelopeCryptorSource()
+        )
+    }
+
+    /// Fulfils a pending continuation by executing its original action call locally.
+    /// This is used when a user approves a blocking authorisation bubble in the chat.
+    public func fulfilAgentTurnContinuation(
+        continuationMessageID: UUID
+    ) async throws {
+        // 1. Find the message
+        guard
+            let message = try await KeepTalkingContextMessage.query(on: localStore.database)
+                .filter(\.$id, .equal, continuationMessageID)
+                .first(),
+            case .agentTurnContinuation(
+                _, _, let targetNodeID,
+                _, let encryptedPayload, let state
+            ) = message.type,
+            state == .pending
+        else {
+            throw KeepTalkingClientError.invalidContinuationMessage
+        }
+
+        let selfNodeID = config.node
+        guard targetNodeID == selfNodeID, let originNodeID = message.sender.nodeID else {
+            throw KeepTalkingClientError.notAuthorized
+        }
+
+        // 2. Decrypt ActionCallRequest
+        let cipher = KeepTalkingAsymmetricCipherEnvelope(
+            senderNodeID: originNodeID,
+            recipientNodeID: selfNodeID,
+            ciphertext: encryptedPayload
+        )
+        let request = try await decryptActionCallRequestEnvelope(cipher)
+
+        // 3. Execute locally
+        // Load the correct context instance from our client state
+        let contextID = request.contextID
+        let context = try await upsertContext(KeepTalkingContext(id: contextID))
+        let result = await executeActionCallRequest(request, context: context)
+
+        // 4. Respond back to origin
+        try await respondToAgentTurnContinuation(
+            continuationMessageID: continuationMessageID,
+            agentTurnID: message.agentTurnID ?? UUID(),
+            originNodeID: originNodeID,
+            state: result.isError ? .rejected : .fulfilled,
+            resultContent: result.content
         )
     }
 

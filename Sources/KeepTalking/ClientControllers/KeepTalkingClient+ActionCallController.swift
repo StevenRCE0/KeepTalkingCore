@@ -145,9 +145,11 @@ extension KeepTalkingClient {
                     callResult = (content: [], isError: true)
                     #endif
                 case .primitive:
+                    var call = request.call
+                    call.metadata.fields["caller_id"] = .string(request.callerNodeID.uuidString.lowercased())
                     callResult = try await primitiveActionManager.callAction(
                         action: action,
-                        call: request.call
+                        call: call
                     )
                 case .filesystem:
                     callResult = try await filesystemActionManager.callAction(
@@ -580,13 +582,14 @@ extension KeepTalkingClient {
         // Look up action kind for the `kind` label in the continuation message.
         let kind: String
         if let action = try? await KeepTalkingAction.find(call.action, on: localStore.database) {
-            kind = switch action.payload {
-                case .primitive(let b): b.action.rawValue
-                case .mcpBundle: "mcp"
-                case .skill: "skill"
-                case .filesystem: "filesystem"
-                case .semanticRetrieval: "semantic_retrieval"
-            }
+            kind =
+                switch action.payload {
+                    case .primitive(let b): b.action.rawValue
+                    case .mcpBundle: "mcp"
+                    case .skill: "skill"
+                    case .filesystem: "filesystem"
+                    case .semanticRetrieval: "semantic_retrieval"
+                }
         } else {
             kind = actionID
         }

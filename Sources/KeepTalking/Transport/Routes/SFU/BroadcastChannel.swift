@@ -78,13 +78,10 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
     }
 
     /// Send a raw (non-sequenced) envelope — used for presence and signaling.
+    /// Failures here are not treated as transport degraded: presence is best-effort
+    /// and the authoritative degraded signal comes from channel/ICE state callbacks.
     func sendRawEnvelope(_ envelope: any KeepTalkingEnvelope) throws {
-        do {
-            try sfuClient.sendEnvelope(envelope)
-        } catch {
-            handleSendFailure(error, operation: "raw send")
-            throw error
-        }
+        try sfuClient.sendEnvelope(envelope)
     }
 
     // MARK: - SFU callback binding

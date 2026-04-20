@@ -65,19 +65,19 @@ extension KeepTalkingClient {
             )
             return KeepTalkingActionToolDefinition(
                 functionName:
-                        KeepTalkingActionToolDefinition.normalizedFunctionName(
-                            ownerNodeID: ownerNodeID,
-                            actionID: actionID,
-                            targetName: selectedToolName.isEmpty
-                                ? nil
-                                : selectedToolName
-                        ),
-                    actionID: actionID,
-                    ownerNodeID: ownerNodeID,
-                    source: .mcp,
-                    targetName: selectedToolName.isEmpty ? nil : selectedToolName,
-                    displayName: selectedToolName.isEmpty ? bundle.name : selectedToolName,
-                    supportsWakeAssist: action.blockingAuthorisation == true,
+                    KeepTalkingActionToolDefinition.normalizedFunctionName(
+                        ownerNodeID: ownerNodeID,
+                        actionID: actionID,
+                        targetName: selectedToolName.isEmpty
+                            ? nil
+                            : selectedToolName
+                    ),
+                actionID: actionID,
+                ownerNodeID: ownerNodeID,
+                source: .mcp,
+                targetName: selectedToolName.isEmpty ? nil : selectedToolName,
+                displayName: selectedToolName.isEmpty ? bundle.name : selectedToolName,
+                supportsWakeAssist: action.blockingAuthorisation == true,
                 description: mcpProxyToolDescription(
                     originalToolName: selectedToolName.isEmpty
                         ? bundle.name
@@ -134,19 +134,19 @@ extension KeepTalkingClient {
             )
             return KeepTalkingActionToolDefinition(
                 functionName:
-                        KeepTalkingActionToolDefinition.normalizedFunctionName(
-                            ownerNodeID: ownerNodeID,
-                            actionID: actionID,
-                            targetName: selectedToolName.isEmpty
-                                ? nil
-                                : selectedToolName
-                        ),
-                    actionID: actionID,
-                    ownerNodeID: ownerNodeID,
-                    source: .mcp,
-                    targetName: selectedToolName.isEmpty ? nil : selectedToolName,
-                    displayName: selectedToolName.isEmpty ? bundle.name : selectedToolName,
-                    supportsWakeAssist: action.blockingAuthorisation == true,
+                    KeepTalkingActionToolDefinition.normalizedFunctionName(
+                        ownerNodeID: ownerNodeID,
+                        actionID: actionID,
+                        targetName: selectedToolName.isEmpty
+                            ? nil
+                            : selectedToolName
+                    ),
+                actionID: actionID,
+                ownerNodeID: ownerNodeID,
+                source: .mcp,
+                targetName: selectedToolName.isEmpty ? nil : selectedToolName,
+                displayName: selectedToolName.isEmpty ? bundle.name : selectedToolName,
+                supportsWakeAssist: action.blockingAuthorisation == true,
                 description: mcpProxyToolDescription(
                     originalToolName: selectedToolName.isEmpty
                         ? bundle.name
@@ -221,7 +221,8 @@ extension KeepTalkingClient {
             displayName: bundle.name,
             supportsWakeAssist: supportsWakeAssist,
             description: description,
-            parameters: primitiveActionParameters(for: bundle.action)
+            parameters: primitiveRegistry?.toolParameters(bundle.action)
+                ?? KeepTalkingActionToolDefinition.permissiveObjectParameters
         )
     }
 
@@ -303,7 +304,7 @@ extension KeepTalkingClient {
                             .description(
                                 "The action_id of the skill action to inspect, from the available actions list."
                             )
-                        ),
+                        )
                     ]),
                     .required(["action_id"]),
                     .additionalProperties(.boolean(false))
@@ -389,7 +390,7 @@ extension KeepTalkingClient {
                             .description(
                                 "Required. A short 2-5 word label for the live thread topic that starts at this message and should remain active after this tool call."
                             )
-                        )
+                        ),
                     ]),
                     .required(["current_topic_name"]),
                     .additionalProperties(.boolean(false))
@@ -510,113 +511,6 @@ extension KeepTalkingClient {
                         ),
                         strict: false
                     )
-                )
-        }
-    }
-
-    func primitiveActionParameters(for action: KeepTalkingPrimitiveActionKind)
-        -> JSONSchema
-    {
-        switch action {
-            case .openURLInBrowser:
-                return JSONSchema(
-                    .type(.object),
-                    .properties([
-                        "url": JSONSchema(
-                            .type(.string),
-                            .description("URL to open in the system browser.")
-                        )
-                    ]),
-                    .additionalProperties(.boolean(false))
-                )
-            case .addToReadingList:
-                return JSONSchema(
-                    .type(.object),
-                    .properties([
-                        "url": JSONSchema(
-                            .type(.string),
-                            .description("URL to add to the reading list.")
-                        ),
-                        "title": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "Optional title for the reading list entry.")
-                        ),
-                        "previewText": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "Optional preview text for the reading list entry."
-                            )
-                        ),
-                    ]),
-                    .required(["url"]),
-                    .additionalProperties(.boolean(false))
-                )
-            case .askForFile:
-                return JSONSchema(
-                    .type(.object),
-                    .properties([
-                        "picker": JSONSchema(
-                            .type(.string),
-                            .enumValues([
-                                "ask",
-                                "filePicker",
-                                "photoPicker",
-                            ]),
-                            .description(
-                                "Which picker UI to present. Use ask to let the host prompt for take photo, select photo, or pick file, photoPicker for the photo library, or filePicker for general files. Defaults to ask."
-                            )
-                        ),
-                        "allowedTypes": JSONSchema(
-                            .type(.array),
-                            .items(JSONSchema(
-                                .type(.string)
-                            )),
-                            .description(
-                                "Optional array of UTI strings to filter file types, e.g. [\"public.image\", \"public.plain-text\"]."
-                            )
-                        ),
-                        "allowMultiple": JSONSchema(
-                            .type(.boolean),
-                            .description(
-                                "Whether to allow selecting multiple files. Defaults to false."
-                            )
-                        ),
-                    ]),
-                    .additionalProperties(.boolean(false))
-                )
-            case .getCurrentlyPlayingMusic:
-                return JSONSchema(
-                    .type(.object),
-                    .properties([
-                        "storeID": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "Optional Apple Music song store ID to play. If omitted, the tool returns the currently playing music metadata."
-                            )
-                        ),
-                        "url": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "Optional Apple Music song URL to play. The song store ID will be extracted from the URL. If omitted, the tool returns the currently playing music metadata."
-                            )
-                        ),
-                    ]),
-                    .additionalProperties(.boolean(false))
-                )
-            case .runMacOSShortcut:
-                return JSONSchema(
-                    .type(.object),
-                    .properties([
-                        "input": JSONSchema(
-                            .type(.array),
-                            .items(JSONSchema(.type(.string))),
-                            .description(
-                                "Optional list of string values to pass to the shortcut as input. Each item is sent as a separate line via stdin."
-                            )
-                        )
-                    ]),
-                    .additionalProperties(.boolean(false))
                 )
         }
     }

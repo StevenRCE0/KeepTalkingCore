@@ -36,7 +36,7 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
         }
     }
 
-    private static let keepAliveIntervalNanoseconds: UInt64 = 20_000_000_000
+    private static let keepAliveIntervalNanoseconds: UInt64 = 10_000_000_000
     private static let reconnectBaseDelayNanoseconds: UInt64 = 500_000_000
     private static let maxReconnectAttempts = 3
 
@@ -251,7 +251,8 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
                 }
             }
 
-            socketTask.send(.data(encoded)) { [weak self] error in
+            let text = String(data: encoded, encoding: .utf8) ?? ""
+            socketTask.send(.string(text)) { [weak self] error in
                 if let error {
                     self?.debug(
                         "send failed method=\(method) id=\(id) error=\(error.localizedDescription)"
@@ -269,7 +270,8 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
             return
         }
         debug("send notify method=\(method) bytes=\(encoded.count)")
-        socketTask?.send(.data(encoded)) { [weak self] error in
+        let text = String(data: encoded, encoding: .utf8) ?? ""
+        socketTask?.send(.string(text)) { [weak self] error in
             guard let self, let error else {
                 return
             }
@@ -399,6 +401,7 @@ final class IonJsonRpcSignal: NSObject, @unchecked Sendable {
 
             do {
                 debug("reconnect attempt=\(attempt) reason=\(reason)")
+                debug("socket reconnected successfully reason=\(reason)")
                 try await connect()
                 startKeepAliveIfNeeded()
                 debug("reconnect succeeded attempt=\(attempt)")

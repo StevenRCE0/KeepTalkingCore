@@ -38,6 +38,8 @@ public enum KeepTalkingClientError: LocalizedError {
     case missingContextSecret(UUID)
     case missingContext(UUID?)
     case invalidTurningPoint(UUID)
+    case invalidContinuationMessage
+    case notAuthorized
 
     public var errorDescription: String? {
         switch self {
@@ -105,6 +107,10 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Context not found: \(String(describing: contextID))"
             case .invalidTurningPoint(let messageID):
                 return "Message cannot be used as a turning point (not found or is the first message): \(messageID)"
+            case .invalidContinuationMessage:
+                return "Agent turn continuation message is invalid or expired."
+            case .notAuthorized:
+                return "Operation not authorized."
         }
     }
 }
@@ -182,11 +188,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
     var actionApprovalHandler: ActionApprovalHandler?
     var primitiveActionPostResultHandler: PrimitiveActionPostResultHandler?
+    let primitiveRegistry: KeepTalkingPrimitiveRegistry?
     var semanticSearchCallback: SemanticSearchCallback?
     var webSearchProvider: WebSearchProvider?
-    /// Called when the AI agent invokes `kt_create_action`.  The handler presents
-    /// the action-creation UI; returns the new action's UUID on success, nil on cancel.
-    public var onAgentCreateActionRequest: (@Sendable (_ reason: String, _ contextID: UUID) async -> UUID?)?
 
     // MARK: Agent Run Queue
     let agentRunQueue = AgentRunQueue()
@@ -252,7 +256,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
             DefaultMCPStdioTransportLauncher.current,
         skillScriptExecutor: (any SkillScriptExecuting)? =
             DefaultSkillScriptExecutor.current,
-        primitiveActionCallback: KeepTalkingPrimitiveActionCallback? = nil,
+        primitiveRegistry: KeepTalkingPrimitiveRegistry? = nil,
         logon: UUID = UUID(),
         localStore: any KeepTalkingLocalStore =
             KeepTalkingClient.makeDefaultLocalStore()
@@ -301,8 +305,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
             aiConnector: self.aiConnector,
             scriptExecutor: skillScriptExecutor
         )
+        self.primitiveRegistry = primitiveRegistry
         self.primitiveActionManager = PrimitiveActionManager(
-            callback: primitiveActionCallback
+            registry: primitiveRegistry
         )
         self.semanticRetrievalActionManager = SemanticRetrievalActionManager(
             database: localStore.database

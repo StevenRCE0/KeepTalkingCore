@@ -156,23 +156,6 @@ extension KeepTalkingClient {
                         )
                     )
                     continue
-                } else if functionName == Self.createActionToolFunctionName {
-                    executions.append(
-                        .init(
-                            toolCall: toolCall,
-                            messages: [
-                                toolMessage(
-                                    payload: await executeCreateActionToolCall(
-                                        toolCallID: toolCallID,
-                                        rawArguments: toolCall.function.arguments,
-                                        context: context
-                                    ),
-                                    toolCallID: toolCallID
-                                )
-                            ]
-                        )
-                    )
-                    continue
                 } else if functionName == Self.ktSkillMetainfoToolFunctionName {
                     executions.append(
                         .init(
@@ -338,7 +321,7 @@ extension KeepTalkingClient {
         rawArguments: String
     ) throws -> [String: Value] {
         var arguments = try decodeToolArguments(rawArguments)
-        if (definition.source == .mcp || definition.source == .filesystem),
+        if definition.source == .mcp || definition.source == .filesystem,
             let targetName = definition.targetName,
             arguments["tool"] == nil
         {
@@ -750,7 +733,7 @@ extension KeepTalkingClient {
                         actionID: actionID,
                         ownerNodeID: stub.ownerNodeID,
                         skillName: metadata.name
-                    ),
+                    )
                 ]
                 await runtimeCatalog.lazyRegistry.register(
                     routes: remoteSkillRoutes,
@@ -888,49 +871,6 @@ extension KeepTalkingClient {
         }
         try await consumePendingMarks(in: contextID)
         return jsonString(["ok": true, "created": true])
-    }
-
-    func executeCreateActionToolCall(
-        toolCallID: String,
-        rawArguments: String,
-        context: KeepTalkingContext
-    ) async -> String {
-        let args = (try? decodeToolArguments(rawArguments)) ?? [:]
-        let reason = args["reason"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? "The agent requested a new action."
-        guard let contextID = try? context.requireID() else {
-            return jsonString(["ok": false, "error": "missing_context_id"])
-        }
-        guard let handler = onAgentCreateActionRequest else {
-            return jsonString([
-                "ok": false,
-                "error": "action_creation_unavailable",
-                "message": "Action creation is not configured on this node.",
-            ])
-        }
-        guard let actionID = await handler(reason, contextID) else {
-            return jsonString(["ok": false, "error": "cancelled", "message": "User cancelled action creation."])
-        }
-        // Grant the new action to all trusted peers in this context so they can call it.
-        let persistedContext = try? await ensure(contextID, for: KeepTalkingContext.self)
-        if let persistedContext {
-            let relations = (try? await KeepTalkingNodeRelation.query(on: localStore.database)
-                .filter(\.$from.$id, .equal, config.node)
-                .all()) ?? []
-            for relation in relations where relation.allows(context: persistedContext) {
-                try? await grantActionPermission(
-                    actionID: actionID,
-                    toNodeID: relation.$to.id,
-                    scope: .context(persistedContext)
-                )
-            }
-        }
-        await broadcastLocalNodeState(reason: "agent_create_action")
-        return jsonString([
-            "ok": true,
-            "action_id": actionID.uuidString.lowercased(),
-            "message": "Action created and granted to this context.",
-        ])
     }
 
     func executeWebSearchToolCall(rawArguments: String) async throws -> String {

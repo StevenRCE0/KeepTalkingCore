@@ -1,4 +1,5 @@
 import Foundation
+import OpenAI
 
 public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     Hashable, CaseIterable
@@ -8,6 +9,8 @@ public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     case askForFile = "ask-for-file"
     case getCurrentlyPlayingMusic = "get-currently-playing-music"
     case runMacOSShortcut = "run-macos-shortcut"
+    /// Prompts the action host's user to create a new action and grant it to the caller.
+    case createAction = "create-action"
 }
 
 public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle {
@@ -17,33 +20,24 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle {
     public var action: KeepTalkingPrimitiveActionKind
     /// The name of the macOS Shortcut to run. Only used when `action == .runMacOSShortcut`.
     public var shortcutName: String?
+    /// When true, remote calls use the blocking-authorisation continuation model
+    /// (the remote user must interactively respond before the action returns).
+    public var blockingAuthorisation: Bool
 
     public init(
         id: UUID = UUID(),
         name: String,
         indexDescription: String,
         action: KeepTalkingPrimitiveActionKind,
-        shortcutName: String? = nil
+        shortcutName: String? = nil,
+        blockingAuthorisation: Bool = false
     ) {
         self.id = id
         self.name = name
         self.indexDescription = indexDescription
         self.action = action
         self.shortcutName = shortcutName
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case id, name, indexDescription, action, shortcutName
-    }
-
-    // Custom decoder so existing stored records without `shortcutName` decode cleanly.
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(UUID.self, forKey: .id)
-        name = try container.decode(String.self, forKey: .name)
-        indexDescription = try container.decode(String.self, forKey: .indexDescription)
-        action = try container.decode(KeepTalkingPrimitiveActionKind.self, forKey: .action)
-        shortcutName = try container.decodeIfPresent(String.self, forKey: .shortcutName)
+        self.blockingAuthorisation = blockingAuthorisation
     }
 
     public static let availablePrimitiveActions: [KeepTalkingPrimitiveBundle] = [
@@ -71,6 +65,13 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle {
                 "Get metadata about currently playing music on the action host, or play an Apple Music song by URL or store ID.",
             action: .getCurrentlyPlayingMusic
         ),
+        KeepTalkingPrimitiveBundle(
+            name: "create-action",
+            indexDescription:
+                "Prompts the user to create a new action and grant it to the caller's context.",
+            action: .createAction,
+            blockingAuthorisation: true
+        ),
     ]
 
     public func assigningNewID() -> KeepTalkingPrimitiveBundle {
@@ -90,8 +91,18 @@ public struct KeepTalkingPrimitiveActionResponse: Sendable {
     }
 }
 
-public typealias KeepTalkingPrimitiveActionCallback =
-    @Sendable (
-        _ primitive: KeepTalkingPrimitiveBundle,
-        _ call: KeepTalkingActionCall
-    ) async throws -> KeepTalkingPrimitiveActionResponse
+public struct KeepTalkingPrimitiveRegistry: Sendable {
+    public let toolParameters: @Sendable (KeepTalkingPrimitiveActionKind) -> JSONSchema
+    public let callAction:
+        @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall) async throws -> KeepTalkingPrimitiveActionResponse
+
+    public init(
+        toolParameters: @escaping @Sendable (KeepTalkingPrimitiveActionKind) -> JSONSchema,
+        callAction:
+            @escaping @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall) async throws ->
+            KeepTalkingPrimitiveActionResponse
+    ) {
+        self.toolParameters = toolParameters
+        self.callAction = callAction
+    }
+}

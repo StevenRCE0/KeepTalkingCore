@@ -1,4 +1,5 @@
 import Foundation
+import OpenAI
 import Testing
 
 @testable import KeepTalkingSDK
@@ -6,13 +7,31 @@ import Testing
 struct PrimitiveActionSchemaTests {
     @Test("ask-for-file schema exposes picker selection modes")
     func askForFileSchemaIncludesPickerModes() throws {
+        let askForFileParameters = JSONSchema(
+            .type(.object),
+            .properties([
+                "picker": JSONSchema(
+                    .type(.string),
+                    .enumValues(["ask", "filePicker", "photoPicker"]),
+                    .description("Which picker UI to present.")
+                ),
+                "allowedTypes": JSONSchema(.type(.array), .items(JSONSchema(.type(.string)))),
+                "allowMultiple": JSONSchema(.type(.boolean)),
+            ]),
+            .additionalProperties(.boolean(false))
+        )
+
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(
                 signalURL: try #require(URL(string: "ws://127.0.0.1")),
                 contextID: UUID(),
                 node: UUID()
             ),
-            localStore: KeepTalkingInMemoryStore()
+            primitiveRegistry: KeepTalkingPrimitiveRegistry(
+                toolParameters: { _ in askForFileParameters },
+                callAction: { _, _ in KeepTalkingPrimitiveActionResponse(text: "") }
+            ),
+            localStore: try await KeepTalkingInMemoryStore()
         )
         let definition = client.makePrimitiveActionProxyDefinition(
             actionID: UUID(),

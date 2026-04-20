@@ -1,12 +1,13 @@
 import Foundation
 import MCP
+import OpenAI
 import Testing
 
 @testable import KeepTalkingSDK
 
 struct PrimitiveActionManagerTests {
-    @Test("primitive action callback is invoked and response is forwarded")
-    func callbackResponseForwarded() async throws {
+    @Test("primitive action registry is invoked and response is forwarded")
+    func registryResponseForwarded() async throws {
         let bundle = KeepTalkingPrimitiveBundle(
             name: "open-url-in-browser",
             indexDescription: "Open a URL",
@@ -22,29 +23,30 @@ struct PrimitiveActionManagerTests {
             arguments: ["url": .string("https://example.com")]
         )
 
-        let manager = PrimitiveActionManager { primitive, incomingCall in
-            #expect(primitive == bundle)
-            #expect(incomingCall.action == call.action)
-            #expect(incomingCall.arguments["url"]?.stringValue == "https://example.com")
-            return KeepTalkingPrimitiveActionResponse(
-                text: "opened",
-                isError: true
-            )
-        }
+        let registry = KeepTalkingPrimitiveRegistry(
+            toolParameters: { _ in JSONSchema(.type(.object)) },
+            callAction: { primitive, incomingCall in
+                #expect(primitive == bundle)
+                #expect(incomingCall.action == call.action)
+                #expect(incomingCall.arguments["url"]?.stringValue == "https://example.com")
+                return KeepTalkingPrimitiveActionResponse(text: "opened", isError: true)
+            }
+        )
+        let manager = PrimitiveActionManager(registry: registry)
 
         let response = try await manager.callAction(action: action, call: call)
 
         #expect(response.isError == true)
         #expect(response.content.count == 1)
-        if case .text(text: let text, annotations: _, _meta: _) = try #require(response.content.first) {
+        if case .text(let text, _, _) = try #require(response.content.first) {
             #expect(text == "opened")
         } else {
-            Issue.record("Expected text content from primitive action callback")
+            Issue.record("Expected text content from primitive action registry")
         }
     }
 
-    @Test("primitive action manager rejects missing callback")
-    func missingCallbackRejected() async throws {
+    @Test("primitive action manager rejects missing registry")
+    func missingRegistryRejected() async throws {
         let bundle = KeepTalkingPrimitiveBundle.availablePrimitiveActions[0]
         let action = KeepTalkingAction(
             payload: .primitive(bundle),
@@ -52,7 +54,7 @@ struct PrimitiveActionManagerTests {
             blockingAuthorisation: false
         )
         let call = KeepTalkingActionCall(action: try #require(action.id))
-        let manager = PrimitiveActionManager(callback: nil)
+        let manager = PrimitiveActionManager(registry: nil)
 
         await #expect(throws: PrimitiveActionManagerError.self) {
             _ = try await manager.callAction(action: action, call: call)
@@ -71,9 +73,11 @@ struct PrimitiveActionManagerTests {
             remoteAuthorisable: false,
             blockingAuthorisation: false
         )
-        let manager = PrimitiveActionManager { _, _ in
-            KeepTalkingPrimitiveActionResponse(text: "unused")
-        }
+        let registry = KeepTalkingPrimitiveRegistry(
+            toolParameters: { _ in JSONSchema(.type(.object)) },
+            callAction: { _, _ in KeepTalkingPrimitiveActionResponse(text: "unused") }
+        )
+        let manager = PrimitiveActionManager(registry: registry)
 
         await #expect(throws: PrimitiveActionManagerError.self) {
             try await manager.registerPrimitiveAction(action)

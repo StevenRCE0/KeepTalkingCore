@@ -17,6 +17,7 @@ struct ContextAttachmentAIToolTests {
                 )
             ],
             runtimeCatalog: emptyRuntimeCatalog(),
+            promptMessageID: nil,
             context: fixture.visibleContext
         )
 
@@ -46,6 +47,7 @@ struct ContextAttachmentAIToolTests {
                 )
             ],
             runtimeCatalog: emptyRuntimeCatalog(),
+            promptMessageID: nil,
             context: fixture.visibleContext
         )
 
@@ -71,18 +73,24 @@ struct ContextAttachmentAIToolTests {
                 contextID: contextID,
                 node: nodeID
             ),
-            primitiveActionCallback: { _, _ in
-                KeepTalkingPrimitiveActionResponse(
-                    text: """
-                        {"status":"sent_to_context","context_id":"\(contextID.uuidString.lowercased())","attachments":[{"blob_id":"\(blobID)","size":3}]}
-                        """
-                )
-            },
+            primitiveRegistry: KeepTalkingPrimitiveRegistry(
+                toolParameters: { _ in JSONSchema(.type(.object)) },
+                callAction: { _, _ in
+                    KeepTalkingPrimitiveActionResponse(
+                        text: """
+                            {"status":"sent_to_context","context_id":"\(contextID.uuidString.lowercased())","attachments":[{"blob_id":"\(blobID)","size":3}]}
+                            """
+                    )
+                }
+            ),
             localStore: localStore
         )
 
         let context = KeepTalkingContext(id: contextID)
         try await context.save(on: localStore.database)
+
+        let node = KeepTalkingNode(id: nodeID)
+        try await node.save(on: localStore.database)
 
         let stored = try client.blobStore.put(
             data: attachmentData,
@@ -114,10 +122,13 @@ struct ContextAttachmentAIToolTests {
             indexDescription: "Ask for a file",
             action: .askForFile
         )
-        let action = try await client.registerPrimitiveAction(
-            bundle: bundle,
-            remoteAuthorisable: false
+        let action = KeepTalkingAction(
+            payload: .primitive(bundle),
+            remoteAuthorisable: false,
+            blockingAuthorisation: false
         )
+        action.$node.id = nodeID
+        _ = try await client.saveConstructedAction(action)
 
         let definition = client.makePrimitiveActionProxyDefinition(
             actionID: try #require(action.id),
@@ -191,18 +202,24 @@ struct ContextAttachmentAIToolTests {
                 contextID: contextID,
                 node: nodeID
             ),
-            primitiveActionCallback: { _, _ in
-                KeepTalkingPrimitiveActionResponse(
-                    text: """
-                        {"status":"sent_to_context","context_id":"\(contextID.uuidString.lowercased())","attachments":[{"blob_id":"\(blobID)","size":3}]}
-                        """
-                )
-            },
+            primitiveRegistry: KeepTalkingPrimitiveRegistry(
+                toolParameters: { _ in JSONSchema(.type(.object)) },
+                callAction: { _, _ in
+                    KeepTalkingPrimitiveActionResponse(
+                        text: """
+                            {"status":"sent_to_context","context_id":"\(contextID.uuidString.lowercased())","attachments":[{"blob_id":"\(blobID)","size":3}]}
+                            """
+                    )
+                }
+            ),
             localStore: localStore
         )
 
         let context = KeepTalkingContext(id: contextID)
         try await context.save(on: localStore.database)
+
+        let node = KeepTalkingNode(id: nodeID)
+        try await node.save(on: localStore.database)
 
         let attachment = KeepTalkingContextAttachment(
             id: UUID(uuidString: "D0000000-0000-0000-0000-000000000004")!,
@@ -220,10 +237,13 @@ struct ContextAttachmentAIToolTests {
             indexDescription: "Ask for a file",
             action: .askForFile
         )
-        let action = try await client.registerPrimitiveAction(
-            bundle: bundle,
-            remoteAuthorisable: false
+        let action = KeepTalkingAction(
+            payload: .primitive(bundle),
+            remoteAuthorisable: false,
+            blockingAuthorisation: false
         )
+        action.$node.id = nodeID
+        _ = try await client.saveConstructedAction(action)
 
         let definition = client.makePrimitiveActionProxyDefinition(
             actionID: try #require(action.id),
@@ -327,7 +347,9 @@ struct ContextAttachmentAIToolTests {
         KeepTalkingActionRuntimeCatalog(
             catalog: .init(definitions: []),
             routesByFunctionName: [:],
-            skillSummaries: []
+            actionStubs: [],
+            remoteSemanticRetrievalActions: [],
+            lazyRegistry: KeepTalkingLazyToolRegistry()
         )
     }
 
@@ -339,7 +361,9 @@ struct ContextAttachmentAIToolTests {
             routesByFunctionName: [
                 definition.functionName: .actionProxy(definition)
             ],
-            skillSummaries: []
+            actionStubs: [],
+            remoteSemanticRetrievalActions: [],
+            lazyRegistry: KeepTalkingLazyToolRegistry()
         )
     }
 
@@ -347,7 +371,8 @@ struct ContextAttachmentAIToolTests {
         name: String,
         arguments: String,
         id: String = "tool-call-1"
-    ) -> ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
+    )
+        -> ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
         .ToolCallParam
     {
         .init(

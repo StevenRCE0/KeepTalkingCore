@@ -6,7 +6,7 @@ import Testing
 struct ContextSyncMetadataTests {
     @Test("context refresh stores local sender and chunk summaries")
     func refreshStoresChunkedMetadata() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore()
         let context = KeepTalkingContext(
             id: UUID(uuidString: "10000000-0000-0000-0000-000000000000")!
         )
@@ -132,7 +132,7 @@ struct ContextSyncMetadataTests {
 
     @Test("saving a context refreshes local sync metadata automatically")
     func saveContextRefreshesSyncMetadata() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore()
         let context = KeepTalkingContext(
             id: UUID(uuidString: "30000000-0000-0000-0000-000000000000")!
         )

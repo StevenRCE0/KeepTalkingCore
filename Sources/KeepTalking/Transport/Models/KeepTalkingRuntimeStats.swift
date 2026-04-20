@@ -9,6 +9,10 @@ public struct KeepTalkingRuntimeStats: Sendable {
     public let inboundState: Int?
     public let retainedChannels: Int
     public let route: String?
+    /// ICE connection state of the publisher peer connection (e.g. "connected", "failed").
+    public let publisherIceState: String?
+    /// ICE connection state of the subscriber peer connection.
+    public let subscriberIceState: String?
 
     public var outboundIsOpen: Bool {
         outboundState == 1
@@ -26,7 +30,9 @@ public struct KeepTalkingRuntimeStats: Sendable {
         inboundLabel: String?,
         inboundState: Int?,
         retainedChannels: Int,
-        route: String?
+        route: String?,
+        publisherIceState: String? = nil,
+        subscriberIceState: String? = nil
     ) {
         self.sent = sent
         self.received = received
@@ -36,5 +42,7 @@ public struct KeepTalkingRuntimeStats: Sendable {
         self.inboundState = inboundState
         self.retainedChannels = retainedChannels
         self.route = route
+        self.publisherIceState = publisherIceState
+        self.subscriberIceState = subscriberIceState
     }
 }

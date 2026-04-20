@@ -1,5 +1,5 @@
 import Foundation
-import LiveKitWebRTC
+@preconcurrency import LiveKitWebRTC
 
 enum RTCError: LocalizedError {
     case peerConnectionCreateFailed
@@ -60,6 +60,9 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     private var recvMessageCount = 0
     private var notifiedConnectedPeers = Set<UUID>()
     private var didReportDegrade = false
+    /// The ion-sfu API channel created by the server on the subscriber peer.
+    /// Stored separately because it is not part of RTCChannelSet.
+    private var ionSFUAPIChannel: LKRTCDataChannel?
 
     private func reportTransportDegraded(_ reason: String) {
         guard !didReportDegrade else { return }
@@ -89,13 +92,13 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         didReportDegrade = false
         RTCShared.configureForDataOnlyTransport()
         debug(
-            "starting session=\(config.scopedSessionID) id=\(config.node.uuidString) context=\(config.contextID.uuidString.lowercased()) chat=\(config.chatChannelLabel) blob=\(config.blobChannelLabel) action=\(config.actionCallChannelLabel)"
+            "starting session=\(config.scopedSessionID) id=\(config.node.uuidString) context=\(config.contextID.uuidString.lowercased()) chat=\(config.chatChannelLabel) blob=\(config.blobChannelLabel) action=\(config.actionCallChannelLabel) iceServers=\(config.sfuIceServers)"
         )
         try await signal.connect()
 
         let rtcConfig = RTCShared.makeRTCConfiguration(
             iceServerURLs: config.sfuIceServers,
-            iceTransportPolicy: .relay
+            iceTransportPolicy: .all
         )
         let constraints = RTCShared.makePeerConnectionConstraints()
 
@@ -126,17 +129,6 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         }
         signal.onTrickle = { [weak self] trickle in
             self?.acceptRemoteTrickle(trickle)
-        }
-
-        // ion-sfu API channel (retained but not routed)
-        let apiChannelConfig = LKRTCDataChannelConfiguration()
-        let apiChannel = publisher.dataChannel(
-            forLabel: "ion-sfu",
-            configuration: apiChannelConfig
-        )
-        apiChannel?.delegate = self
-        if let apiChannel {
-            retainChannel(apiChannel)
         }
 
         // Create outbound channels for each kind
@@ -182,23 +174,38 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             uid: config.node.uuidString,
             offer: localOffer
         )
+        let answerEmbedded = answerPayload.sdp.components(separatedBy: "a=candidate:").count - 1
         debug(
-            "join answer type=\(answerPayload.type) sdpBytes=\(answerPayload.sdp.utf8.count)"
+            "join answer type=\(answerPayload.type) sdpBytes=\(answerPayload.sdp.utf8.count) embeddedCandidates=\(answerEmbedded)"
         )
         try await RTCShared.setRemoteDescription(
             answerPayload,
             on: publisher,
             invalidSdpTypeError: RTCError.invalidSdpType
         )
+        // Flush immediately so ICE checks can start against the server's candidates
+        // without waiting on the API channel poll below.
         flushPendingCandidates(for: Target.publisher)
 
-        guard await waitForRequiredChannelsOpen(timeoutSeconds: 8) else {
+        // Wait for the ion-sfu API channel that the server opens on the subscriber side.
+        // This signals the server has processed the join and is ready to relay.
+        let apiOpened = await RTCShared.waitForOpenDataChannel(timeoutSeconds: 10) { [weak self] in
+            self?.ionSFUAPIChannel
+        }
+        if !apiOpened {
+            debug("timeout waiting for ion-sfu api channel - checking health anyway")
+        } else {
+            debug("ion-sfu api channel confirmed open")
+        }
+
+        guard await waitForRequiredChannelsOpen(timeoutSeconds: 15) else {
             throw RTCError.dataChannelNotOpen(config.chatChannelLabel)
         }
     }
 
     func stop() {
         debug("stopping sent=\(sentMessageCount) recv=\(recvMessageCount)")
+        ionSFUAPIChannel = nil
         channels.closeAll()
         let peers = withState { Array(peerPool.values) }
         for peer in peers {
@@ -289,6 +296,8 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     func runtimeStats() -> KeepTalkingRuntimeStats {
         let retainedChannelCount = withState { retainedChannels.count }
         let outChat = channels.preferred(for: .chat)
+        let pubIce = withState { peerPool[Target.publisher]?.iceConnectionState }
+        let subIce = withState { peerPool[Target.subscriber]?.iceConnectionState }
         return KeepTalkingRuntimeStats(
             sent: sentMessageCount,
             received: recvMessageCount,
@@ -297,8 +306,43 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             inboundLabel: nil,
             inboundState: nil,
             retainedChannels: retainedChannelCount,
-            route: "sfu"
+            route: "sfu",
+            publisherIceState: pubIce.map(iceStateName),
+            subscriberIceState: subIce.map(iceStateName)
         )
+    }
+
+    private func iceStateName(_ state: LKRTCIceConnectionState) -> String {
+        switch state {
+            case .new: return "new"
+            case .checking: return "checking"
+            case .connected: return "connected"
+            case .completed: return "completed"
+            case .failed: return "failed"
+            case .disconnected: return "disconnected"
+            case .closed: return "closed"
+            default: return "unknown(\(state.rawValue))"
+        }
+    }
+
+    /// Extracts "typ <candidateType> proto <protocol>" from a raw SDP candidate string.
+    /// SDP format: "candidate:<foundation> <component> <protocol> <priority> <address> <port> typ <type> ..."
+    private static func parseCandidateType(from sdp: String) -> String {
+        let parts = sdp.split(separator: " ")
+        var result = ""
+        for (i, part) in parts.enumerated() {
+            if part == "typ", i + 1 < parts.count {
+                result += "typ=\(parts[i + 1])"
+            }
+            if part == "relayProtocol", i + 1 < parts.count {
+                result += " relay=\(parts[i + 1])"
+            }
+        }
+        // protocol is the 3rd token (index 2)
+        if parts.count > 2 {
+            result = "proto=\(parts[2]) \(result)"
+        }
+        return result.isEmpty ? sdp : result.trimmingCharacters(in: .whitespaces)
     }
 
     func isReady() -> Bool {
@@ -332,8 +376,9 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             debug("drop remote offer: subscriber missing")
             return
         }
+        let offerEmbedded = payload.sdp.components(separatedBy: "a=candidate:").count - 1
         debug(
-            "remote offer received type=\(payload.type) sdpBytes=\(payload.sdp.utf8.count)"
+            "remote offer received type=\(payload.type) sdpBytes=\(payload.sdp.utf8.count) embeddedCandidates=\(offerEmbedded)"
         )
 
         Task { [weak self, subscriber] in
@@ -426,12 +471,90 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         }
     }
 
-    private func target(for peer: LKRTCPeerConnection) -> Int? {
+    func target(for peer: LKRTCPeerConnection) -> Int? {
         withState {
             for (target, pooledPeer) in peerPool where pooledPeer === peer {
                 return target
             }
             return nil
+        }
+    }
+
+    /// Collect and log ICE candidates + selected pair from both peer connections.
+    /// Fire-and-forget: callbacks may arrive after this method returns.
+    /// Use `snapshotICE()` when you need to await completion.
+    func dumpICESnapshot() {
+        Task { await snapshotICE() }
+    }
+
+    /// Async version of `dumpICESnapshot` — awaits each peer's stats before returning.
+    func snapshotICE() async {
+        let peers: [(Int, LKRTCPeerConnection)] = withState {
+            peerPool.map { ($0.key, $0.value) }
+        }
+        guard !peers.isEmpty else {
+            debug("ice snapshot: no peers")
+            return
+        }
+        for (tgt, pc) in peers.sorted(by: { $0.0 < $1.0 }) {
+            await withCheckedContinuation {
+                (continuation: CheckedContinuation<Void, Never>) in
+                pc.statistics { [weak self] (report: LKRTCStatisticsReport) in
+                    guard let self else {
+                        continuation.resume()
+                        return
+                    }
+                    var locals: [String] = []
+                    var remotes: [String] = []
+                    var pairs: [String] = []
+
+                    for stat in report.statistics.values {
+                        let v = stat.values
+                        switch stat.type {
+                            case "local-candidate":
+                                let ctype = v["candidateType"] as? String ?? "?"
+                                let proto = v["protocol"] as? String ?? "?"
+                                let addr = v["address"] as? String ?? (v["ip"] as? String ?? "?")
+                                let port = v["port"] as? NSNumber ?? 0
+                                let relay = v["relayProtocol"] as? String
+                                let url = v["url"] as? String
+                                var line = "local id=\(stat.id) typ=\(ctype) proto=\(proto) \(addr):\(port)"
+                                if let r = relay { line += " relayProto=\(r)" }
+                                if let u = url { line += " url=\(u)" }
+                                locals.append(line)
+                            case "remote-candidate":
+                                let ctype = v["candidateType"] as? String ?? "?"
+                                let proto = v["protocol"] as? String ?? "?"
+                                let addr = v["address"] as? String ?? (v["ip"] as? String ?? "?")
+                                let port = v["port"] as? NSNumber ?? 0
+                                remotes.append(
+                                    "remote id=\(stat.id) typ=\(ctype) proto=\(proto) \(addr):\(port)"
+                                )
+                            case "candidate-pair":
+                                let state = v["state"] as? String ?? "?"
+                                let nominated = (v["nominated"] as? NSNumber)?.boolValue ?? false
+                                let selected = (v["selected"] as? NSNumber)?.boolValue ?? false
+                                let localID = v["localCandidateId"] as? String ?? "?"
+                                let remoteID = v["remoteCandidateId"] as? String ?? "?"
+                                if nominated || selected || state == "succeeded" {
+                                    pairs.append(
+                                        "pair state=\(state) nominated=\(nominated) selected=\(selected) local=\(localID) remote=\(remoteID)"
+                                    )
+                                }
+                            default:
+                                break
+                        }
+                    }
+
+                    let iceStr = self.iceStateName(pc.iceConnectionState)
+                    self.debug("ICE snapshot target=\(tgt) ice=\(iceStr)")
+                    for line in locals.sorted() { self.debug("  \(line)") }
+                    for line in remotes.sorted() { self.debug("  \(line)") }
+                    for line in pairs { self.debug("  \(line)") }
+                    if pairs.isEmpty { self.debug("  (no nominated/selected pairs)") }
+                    continuation.resume()
+                }
+            }
         }
     }
 
@@ -472,10 +595,16 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             "ice connection state target=\(target) state=\(newState.rawValue)"
         )
         switch newState {
+            case .connected, .completed:
+                debug("ice connection established target=\(target)")
             case .failed:
+                debug("ice connection failed target=\(target) - check TURN reachability")
                 reportTransportDegraded("ice failed target=\(target)")
             case .closed:
+                debug("ice connection closed target=\(target)")
                 reportTransportDegraded("ice closed target=\(target)")
+            case .disconnected:
+                debug("ice connection disconnected target=\(target) - may reconnect")
             default:
                 break
         }
@@ -506,8 +635,10 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
                 usernameFragment: nil
             )
         )
+        // Extract typ and protocol from SDP for diagnostics (e.g. "typ relay" or "typ host")
+        let candidateInfo = Self.parseCandidateType(from: candidate.sdp)
         debug(
-            "local trickle target=\(target) mid=\(candidate.sdpMid ?? "nil") mline=\(candidate.sdpMLineIndex)"
+            "local candidate target=\(target) \(candidateInfo) mid=\(candidate.sdpMid ?? "nil")"
         )
         signal.trickle(payload)
     }
@@ -556,6 +687,9 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         if let kind = channelKind(for: dataChannel.label) {
             channels.setInbound(dataChannel, for: kind)
             debug("bound inbound channel kind=\(kind) label=\(dataChannel.label)")
+        } else if dataChannel.label == "ion-sfu" {
+            ionSFUAPIChannel = dataChannel
+            debug("recognized inbound ion-sfu api channel")
         }
     }
 

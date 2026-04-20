@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# Ensure we're in the git root
+cd "$(git rev-parse --show-toplevel)"
+
+# Find staged swift files
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep "\.swift$")
+
+if [ -z "$STAGED_FILES" ]; then
+    exit 0
+fi
+
+# Check if swift-format is available
+# We check both 'swift-format' and 'swift format'
+if command -v swift-format &> /dev/null; then
+    FORMAT_CMD="swift-format"
+elif swift format --version &> /dev/null; then
+    FORMAT_CMD="swift format"
+else
+    echo "Warning: swift-format not found. Skipping formatting."
+    exit 0
+fi
+
+echo "Formatting staged Swift files..."
+
+# Run formatting in-place
+# We use xargs to handle multiple files
+echo "$STAGED_FILES" | xargs $FORMAT_CMD -i
+
+# Re-add the formatted files to the staging area
+echo "$STAGED_FILES" | xargs git add
+
+echo "Formatting complete."

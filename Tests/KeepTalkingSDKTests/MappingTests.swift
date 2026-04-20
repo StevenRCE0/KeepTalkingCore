@@ -6,7 +6,7 @@ import Testing
 struct MappingTests {
     @Test("alias upsert keeps one live alias and clears cleanly")
     func aliasRoundTrip() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore()
         let node = KeepTalkingNode(id: UUID())
         try await node.save(on: localStore.database)
 
@@ -42,7 +42,7 @@ struct MappingTests {
 
     @Test("tag add and remove deduplicates on normalized value")
     func tagRoundTrip() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore()
         let context = KeepTalkingContext(id: UUID())
         try await context.save(on: localStore.database)
 
@@ -78,7 +78,7 @@ struct MappingTests {
 
     @Test("tag color is generated once and reused across targets")
     func tagColorReuse() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore()
         let context = KeepTalkingContext(id: UUID())
         let node = KeepTalkingNode(id: UUID())
         try await context.save(on: localStore.database)
@@ -115,38 +115,38 @@ struct MappingTests {
 }
 
 @Test("static mapping helpers behave like instance wrappers")
-  func staticMappingHelpersWork() async throws {
-      let localStore = KeepTalkingInMemoryStore()
-      let node = KeepTalkingNode(id: UUID())
-      try await node.save(on: localStore.database)
+func staticMappingHelpersWork() async throws {
+    let localStore = try await KeepTalkingInMemoryStore()
+    let node = KeepTalkingNode(id: UUID())
+    try await node.save(on: localStore.database)
 
-      let target = KeepTalkingMappingTarget.node(try #require(node.id))
+    let target = KeepTalkingMappingTarget.node(try #require(node.id))
 
-      try await KeepTalkingClient.setAlias(
-          "  Home Node  ",
-          for: target,
-          on: localStore.database
-      )
+    try await KeepTalkingClient.setAlias(
+        "  Home Node  ",
+        for: target,
+        on: localStore.database
+    )
 
-      #expect(
-          try await KeepTalkingClient.alias(
-              for: target,
-              on: localStore.database
-          ) == "Home Node"
-      )
+    #expect(
+        try await KeepTalkingClient.alias(
+            for: target,
+            on: localStore.database
+        ) == "Home Node"
+    )
 
-      try await KeepTalkingClient.addTag(
-          " Tenant ",
-          namespace: "tenant",
-          to: target,
-          on: localStore.database
-      )
+    try await KeepTalkingClient.addTag(
+        " Tenant ",
+        namespace: "tenant",
+        to: target,
+        on: localStore.database
+    )
 
-      let tags = try await KeepTalkingClient.tags(
-          for: target,
-          namespace: "tenant",
-          on: localStore.database
-      )
-      #expect(tags.count == 1)
-      #expect(tags.first?.value == "Tenant")
-  }
+    let tags = try await KeepTalkingClient.tags(
+        for: target,
+        namespace: "tenant",
+        on: localStore.database
+    )
+    #expect(tags.count == 1)
+    #expect(tags.first?.value == "Tenant")
+}

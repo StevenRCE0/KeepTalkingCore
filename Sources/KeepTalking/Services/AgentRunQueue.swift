@@ -41,7 +41,8 @@ actor AgentRunQueue {
     /// Suspended turns awaiting continuation response, keyed by agentTurnID.
     private var suspended: [UUID: RunItem] = [:]
     /// Continuations waiting for resume, keyed by agentTurnID.
-    private var suspensionContinuations: [UUID: CheckedContinuation<KeepTalkingAgentTurnContinuationResponse, any Error>] = [:]
+    private var suspensionContinuations:
+        [UUID: CheckedContinuation<KeepTalkingAgentTurnContinuationResponse, any Error>] = [:]
     /// Continuation responses that arrived before the run suspended, keyed by agentTurnID.
     private var earlyResponses: [UUID: KeepTalkingAgentTurnContinuationResponse] = [:]
 
@@ -121,9 +122,15 @@ actor AgentRunQueue {
             return early
         }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            suspensionContinuations[agentTurnID] = continuation
-            emit()  // transition active run to .suspended in snapshots
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                suspensionContinuations[agentTurnID] = continuation
+                emit()  // transition active run to .suspended in snapshots
+            }
+        } onCancel: {
+            Task {
+                await cancelSuspended(agentTurnID: agentTurnID)
+            }
         }
     }
 
@@ -180,39 +187,43 @@ actor AgentRunQueue {
     private func makeSnapshots() -> [KeepTalkingAgentRunSnapshot] {
         var result: [KeepTalkingAgentRunSnapshot] = []
         for (_, entry) in active {
-            let isSuspended = entry.item.agentTurnID.map {
-                suspensionContinuations[$0] != nil
-            } ?? false
-            result.append(KeepTalkingAgentRunSnapshot(
-                id: entry.item.id,
-                contextID: entry.item.contextID,
-                promptPreview: entry.item.promptPreview,
-                createdAt: entry.item.createdAt,
-                state: isSuspended ? .suspended : .running,
-                agentTurnID: entry.item.agentTurnID
-            ))
+            let isSuspended =
+                entry.item.agentTurnID.map {
+                    suspensionContinuations[$0] != nil
+                } ?? false
+            result.append(
+                KeepTalkingAgentRunSnapshot(
+                    id: entry.item.id,
+                    contextID: entry.item.contextID,
+                    promptPreview: entry.item.promptPreview,
+                    createdAt: entry.item.createdAt,
+                    state: isSuspended ? .suspended : .running,
+                    agentTurnID: entry.item.agentTurnID
+                ))
         }
         for (_, items) in queued {
             for item in items {
-                result.append(KeepTalkingAgentRunSnapshot(
+                result.append(
+                    KeepTalkingAgentRunSnapshot(
+                        id: item.id,
+                        contextID: item.contextID,
+                        promptPreview: item.promptPreview,
+                        createdAt: item.createdAt,
+                        state: .queued,
+                        agentTurnID: item.agentTurnID
+                    ))
+            }
+        }
+        for (_, item) in suspended {
+            result.append(
+                KeepTalkingAgentRunSnapshot(
                     id: item.id,
                     contextID: item.contextID,
                     promptPreview: item.promptPreview,
                     createdAt: item.createdAt,
-                    state: .queued,
+                    state: .suspended,
                     agentTurnID: item.agentTurnID
                 ))
-            }
-        }
-        for (_, item) in suspended {
-            result.append(KeepTalkingAgentRunSnapshot(
-                id: item.id,
-                contextID: item.contextID,
-                promptPreview: item.promptPreview,
-                createdAt: item.createdAt,
-                state: .suspended,
-                agentTurnID: item.agentTurnID
-            ))
         }
         result.sort {
             if $0.state == .running, $1.state != .running { return true }

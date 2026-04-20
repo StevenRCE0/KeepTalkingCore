@@ -21,7 +21,6 @@ extension KeepTalkingClient {
     static let contextAttachmentUpdateMetadataToolFunctionName =
         "kt_update_context_attachment_metadata"
     static let searchThreadsToolFunctionName = "kt_search_threads"
-    static let createActionToolFunctionName = "kt_create_action"
     /// Function name used for web search in chat-completions mode (e.g. OpenRouter).
     /// In Responses API mode the built-in webSearchPreview tool is used instead.
     static let webSearchFunctionName = "web_search"
@@ -49,9 +48,10 @@ extension KeepTalkingClient {
     ) async -> UUID {
         let context = KeepTalkingContext(id: contextID)
         let preview = String(prompt.prefix(120))
-        let preparedAttachmentsResult: Result<
-            [KeepTalkingPreparedAttachment], KeepTalkingQueuedPromptPreparationError
-        >
+        let preparedAttachmentsResult:
+            Result<
+                [KeepTalkingPreparedAttachment], KeepTalkingQueuedPromptPreparationError
+            >
         do {
             preparedAttachmentsResult = .success(
                 try await prepareLocalAttachments(attachments)
@@ -201,7 +201,6 @@ extension KeepTalkingClient {
         let allTools: [OpenAITool] =
             [
                 makeRunActionTool(),
-                makeCreateActionTool(),
                 ktSkillMetainfoTool,
                 attachmentListingTool,
                 attachmentReadTool,
@@ -522,7 +521,7 @@ extension KeepTalkingClient {
                 hint: .inspecting,
                 targetNodeID: targetNodeID,
                 actionID: actionID,
-                actionName: nil,   // resolved by toolNameResolver; populated below by caller
+                actionName: nil,  // resolved by toolNameResolver; populated below by caller
                 parameters: params.isEmpty ? nil : params
             )
         }

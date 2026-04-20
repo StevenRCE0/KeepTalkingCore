@@ -6,7 +6,7 @@ import Testing
 struct ContextSyncTransportTests {
     @Test("context sync callback is emitted after a sync completes")
     func contextSyncCallbackEmission() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore()
         let contextID = UUID(uuidString: "30000000-0000-0000-0000-000000000000")!
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(
@@ -27,7 +27,7 @@ struct ContextSyncTransportTests {
 
     @Test("summary dispatch returns locally maintained context sync metadata")
     func summaryDispatchReturnsMetadata() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
             signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: UUID(uuidString: "40000000-0000-0000-0000-000000000000")!,
@@ -180,7 +180,7 @@ struct ContextSyncTransportTests {
 
     @Test("chunk dispatch returns messages from the requested chunk onward")
     func chunkDispatchReturnsChunkTail() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
             signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: UUID(uuidString: "70000000-0000-0000-0000-000000000000")!,
@@ -272,14 +272,15 @@ struct ContextSyncTransportTests {
                 UUID(uuidString: "00000000-0000-0000-0000-000000000305")!,
             ]
         )
-        #expect(result.attachments.map(\.parentMessageID) == [
-            attachmentMessageID
-        ])
+        #expect(
+            result.attachments.map(\.parentMessageID) == [
+                attachmentMessageID
+            ])
     }
 
     @Test("incoming sync skips messages that already exist locally")
     func saveIncomingMessagesSkipsExistingRows() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
             signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: UUID(uuidString: "80000000-0000-0000-0000-000000000000")!,
@@ -304,7 +305,7 @@ struct ContextSyncTransportTests {
                     sender: sender,
                     content: "one",
                     second: 1
-                ),
+                )
             ]
         )
 
@@ -335,10 +336,11 @@ struct ContextSyncTransportTests {
         .sort(\.$timestamp, .ascending)
         .all()
 
-        #expect(storedMessages.compactMap(\.id) == [
-            UUID(uuidString: "00000000-0000-0000-0000-000000000401")!,
-            UUID(uuidString: "00000000-0000-0000-0000-000000000402")!,
-        ])
+        #expect(
+            storedMessages.compactMap(\.id) == [
+                UUID(uuidString: "00000000-0000-0000-0000-000000000401")!,
+                UUID(uuidString: "00000000-0000-0000-0000-000000000402")!,
+            ])
         #expect(storedMessages.map(\.content) == ["one", "two"])
 
         let storedContext = try #require(
@@ -352,7 +354,7 @@ struct ContextSyncTransportTests {
 
     @Test("incoming attachment dto creates a pending attachment placeholder")
     func saveIncomingAttachmentDTOCreatesPlaceholder() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
             signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: UUID(uuidString: "81000000-0000-0000-0000-000000000000")!,
@@ -424,7 +426,7 @@ struct ContextSyncTransportTests {
 
     @Test("summary wait resolves when the reply arrives immediately during send")
     func immediateSummaryReplyDoesNotRaceThePendingWait() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
             signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: UUID(uuidString: "90000000-0000-0000-0000-000000000000")!,
@@ -461,7 +463,7 @@ struct ContextSyncTransportTests {
 
     @Test("attachment sync request includes only recent missing hashes")
     func attachmentRequestReturnsRecentMissingHashes() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
             signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: UUID(uuidString: "A0000000-0000-0000-0000-000000000000")!,

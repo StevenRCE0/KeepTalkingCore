@@ -3,7 +3,7 @@ import KeepTalkingSDK
 
 let keepTalkingUsage = """
     Usage:
-      KeepTalking [--signal-url <ws-url>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--openai-endpoint <url>] [--openai-api-key <key>] [--mcp <list|remove|add-http|add-stdio> ...] [--skill <list|remove|add-directory> ...] [--p2p-peer <peer-id>] [--p2p-timeout <seconds>] [--stun-url <stun-url>]
+      KeepTalking [--signal-url <ws-url>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--openai-endpoint <url>] [--openai-api-key <key>] [--mcp <list|remove|add-http|add-stdio> ...] [--skill <list|remove|add-directory> ...] [--p2p-peer <peer-id>] [--p2p-timeout <seconds>] [--stun-url <stun-url>] [--ice-server <url>] [--diagnose]
 
     Environment fallbacks:
       KT_SIGNAL_URL (default: ws://127.0.0.1:17000/ws)
@@ -13,8 +13,16 @@ let keepTalkingUsage = """
       KT_P2P_PEER_ID    (optional, preferred remote peer ID)
       KT_P2P_TIMEOUT    (default: 5)
       KT_STUN_URL       (default: stun:stun.l.google.com:19302)
+      KT_SFU_ICE_SERVERS (comma-separated TURN/STUN URLs for SFU transport)
       OPENAI_API_KEY    (optional, enables /ai)
       KT_OPENAI_ENDPOINT / OPENAI_ENDPOINT / OPENAI_BASE_URL (optional, OpenAI-compatible API endpoint)
+
+    Diagnose mode (--diagnose):
+      Connects to the SFU, probes ICE connectivity, dumps candidates and selected
+      pairs, then exits 0 (pass) or 1 (fail/timeout). Defaults to production infra
+      when --signal-url and --ice-server are not specified.
+        KT_SFU_SIGNAL_URL  (default: wss://signal.rcex.live/ws)
+        KT_SFU_ICE_SERVERS (default: turn:turn.rcex.live:49372?transport=tcp)
 
     Examples:
       KeepTalking --context 11111111-2222-3333-4444-555555555555 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
@@ -22,6 +30,8 @@ let keepTalkingUsage = """
       KeepTalking --mcp add-http linear https://mcp.linear.app --header Authorization=Bearer_token
       KeepTalking --mcp add-stdio foo --env OPENAI_API_KEY=sk-... --env MODEL=gpt-4.1 -- npx -y @modelcontextprotocol/server-github
       KeepTalking --skill add-directory doc-summarizer ~/.codex/skills/doc-summarizer "Local documentation summarizer"
+      KeepTalking --diagnose
+      KeepTalking --diagnose --signal-url wss://signal.rcex.live/ws --ice-server turn:turn.rcex.live:49372?transport=tcp
 
     Interactive commands:
       /new         create and join a new context
@@ -138,10 +148,14 @@ struct CliConfig {
     let openAIEndpoint: String?
     let mcpCommand: MCPManagementCommand?
     let skillCommand: SkillManagementCommand?
+    /// When true, run ICE connectivity probe then exit instead of entering
+    /// interactive / one-shot mode.
+    let diagnose: Bool
 
     static func parse() throws -> CliConfig {
         let env = ProcessInfo.processInfo.environment
         var signalURLRaw = env["KT_SIGNAL_URL"] ?? "ws://127.0.0.1:17000/ws"
+        var signalURLExplicit = false
         var nodeIDRaw = env["KT_NODE"] ?? UUID().uuidString
         var contextIDRaw =
             env["KT_CONTEXT"]
@@ -150,6 +164,11 @@ struct CliConfig {
         var p2pPeerID = env["KT_P2P_PEER_ID"]
         var p2pTimeoutRaw = env["KT_P2P_TIMEOUT"] ?? "5"
         var stunURLs = [env["KT_STUN_URL"] ?? "stun:stun.l.google.com:19302"]
+        var sfuIceServers: [String] =
+            (env["KT_SFU_ICE_SERVERS"] ?? "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
         var openAIAPIKey = env["OPENAI_API_KEY"]
         var openAIEndpointRaw =
             env["KT_OPENAI_ENDPOINT"]
@@ -158,6 +177,7 @@ struct CliConfig {
         var singleMessage: String?
         var mcpCommand: MCPManagementCommand?
         var skillCommand: SkillManagementCommand?
+        var diagnose = false
 
         let args = Array(CommandLine.arguments.dropFirst())
         var index = 0
@@ -167,10 +187,17 @@ struct CliConfig {
                 case "--help", "-h":
                     print(keepTalkingUsage)
                     Foundation.exit(0)
+                case "--diagnose":
+                    diagnose = true
+                case "--ice-server":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue(arg) }
+                    sfuIceServers.append(args[index])
                 case "--signal-url":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
                     signalURLRaw = args[index]
+                    signalURLExplicit = true
                 case "--node", "--id":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
@@ -341,6 +368,23 @@ struct CliConfig {
             throw CliError.conflictingManagementCommands
         }
 
+        // In diagnose mode, default signal URL and ICE servers to production
+        // infra unless the user explicitly overrode them.
+        if diagnose {
+            if !signalURLExplicit {
+                signalURLRaw =
+                    env["KT_SFU_SIGNAL_URL"] ?? "wss://signal.rcex.live/ws"
+            }
+            if sfuIceServers.isEmpty {
+                sfuIceServers =
+                    (env["KT_SFU_ICE_SERVERS"]?
+                        .split(separator: ",")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty })
+                    ?? ["turn:turn.rcex.live:49372?transport=tcp"]
+            }
+        }
+
         guard let signalURL = URL(string: signalURLRaw) else {
             throw CliError.invalidSignalURL(signalURLRaw)
         }
@@ -366,7 +410,8 @@ struct CliConfig {
                 node: nodeID,
                 p2pPreferredRemoteID: p2pPeerID,
                 p2pAttemptTimeoutSeconds: p2pTimeout,
-                p2pStunServers: stunURLs
+                p2pStunServers: stunURLs,
+                sfuIceServers: sfuIceServers
             ),
             databaseURL: databaseURL,
             singleMessage: singleMessage,
@@ -375,7 +420,8 @@ struct CliConfig {
                 : nil,
             openAIEndpoint: openAIEndpoint,
             mcpCommand: mcpCommand,
-            skillCommand: skillCommand
+            skillCommand: skillCommand,
+            diagnose: diagnose
         )
     }
 

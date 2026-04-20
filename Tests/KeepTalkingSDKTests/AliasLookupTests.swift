@@ -14,7 +14,7 @@ struct AliasLookupTests {
         )
 
         #expect(resolution.primary() == "Home")
-        #expect(resolution.secondary() == id.uuidString.lowercased())
+        #expect(resolution.secondary() == id.uuidString.uppercased())
         #expect(resolution.combined() == "Home (\(id.uuidString.lowercased()))")
         #expect(
             resolution.combined(uppercaseID: true)
@@ -68,7 +68,7 @@ struct AliasLookupTests {
 
         #expect(lookup.alias(for: .node(nodeID)) == "Home Node")
         #expect(lookup.alias(for: .context(contextID)) == "Workspace")
-        #expect(lookup.resolve(node: nodeID).combined(uppercaseID: true).hasPrefix("Home Node"))
+        #expect(lookup.resolve(.node(nodeID)).combined(uppercaseID: true).hasPrefix("Home Node"))
         #expect(
             lookup.resolve(sender: .autonomous(name: "Scheduler")).primary()
                 == "Scheduler"

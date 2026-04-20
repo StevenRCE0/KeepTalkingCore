@@ -2,7 +2,7 @@ import Foundation
 import KeepTalkingSDK
 
 final class KeepTalkingCLIController {
-    private let cliConfig: CliConfig
+    let cliConfig: CliConfig
     let localStore: any KeepTalkingLocalStore
 
     var currentConfig: KeepTalkingConfig
@@ -51,6 +51,10 @@ final class KeepTalkingCLIController {
     private func run() async throws {
         bindCallbacks(to: client)
 
+        if cliConfig.diagnose {
+            await runDiagnose()
+            return  // runDiagnose() exits the process; this is unreachable
+        }
         if let mcpCommand = cliConfig.mcpCommand {
             try await runMCPManagementCommand(mcpCommand)
             return

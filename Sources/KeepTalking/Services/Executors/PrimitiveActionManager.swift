@@ -4,7 +4,7 @@ import MCP
 public enum PrimitiveActionManagerError: LocalizedError {
     case invalidAction
     case missingActionID
-    case missingCallback
+    case missingRegistry
 
     public var errorDescription: String? {
         switch self {
@@ -12,22 +12,22 @@ public enum PrimitiveActionManagerError: LocalizedError {
                 return "Action payload is not a primitive bundle."
             case .missingActionID:
                 return "Action must have an ID before registration."
-            case .missingCallback:
+            case .missingRegistry:
                 return
-                    "Primitive action callback is not configured for this client."
+                    "Primitive action registry is not configured for this client."
         }
     }
 }
 
 public actor PrimitiveActionManager {
-    private let callback: KeepTalkingPrimitiveActionCallback?
+    private let registry: KeepTalkingPrimitiveRegistry?
     private var primitiveBundlesByActionID: [UUID: KeepTalkingPrimitiveBundle] =
         [:]
 
     public init(
-        callback: KeepTalkingPrimitiveActionCallback?
+        registry: KeepTalkingPrimitiveRegistry?
     ) {
-        self.callback = callback
+        self.registry = registry
     }
 
     public func registerPrimitiveAction(_ action: KeepTalkingAction) async throws {
@@ -68,12 +68,12 @@ public actor PrimitiveActionManager {
         guard case .primitive(let primitiveBundle) = action.payload else {
             throw PrimitiveActionManagerError.invalidAction
         }
-        guard let callback else {
-            throw PrimitiveActionManagerError.missingCallback
+        guard let registry else {
+            throw PrimitiveActionManagerError.missingRegistry
         }
         try await registerIfNeeded(action)
 
-        let response = try await callback(primitiveBundle, call)
+        let response = try await registry.callAction(primitiveBundle, call)
         return (
             content: [.text(text: response.text, annotations: nil, _meta: nil)],
             isError: response.isError

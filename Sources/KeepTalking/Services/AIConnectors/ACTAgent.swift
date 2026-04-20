@@ -57,37 +57,6 @@ extension KeepTalkingClient {
         )
     }
 
-    // MARK: - kt_create_action tool definition
-
-    func makeCreateActionTool() -> OpenAITool {
-        .functionTool(
-            .init(
-                name: Self.createActionToolFunctionName,
-                description: """
-                    Ask the user to create a new action (MCP server, skill, filesystem path, etc.)
-                    and make it available in this conversation.
-                    The user will be prompted with the action-creation panel.
-                    On success the new action is automatically granted to this context.
-                    Use this when you need a capability that no existing action provides.
-                    """,
-                parameters: JSONSchema(
-                    .type(.object),
-                    .properties([
-                        "reason": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "Brief explanation of why you need this action and what it should do."
-                            )
-                        )
-                    ]),
-                    .required(["reason"]),
-                    .additionalProperties(.boolean(false))
-                ),
-                strict: true
-            )
-        )
-    }
-
     // MARK: - Tool executor
 
     /// Executes a `kt_run_action` tool call by running the ACT agent mini-loop.

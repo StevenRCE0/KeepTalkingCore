@@ -79,7 +79,7 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
 
 // MARK: - Agent Turn Continuation
 
-/// Response sent from node B back to node A when a remote user fulfills
+/// Response sent from node B back to node A when a remote user fulfils
 /// (or rejects) a suspended agent turn continuation.
 public struct KeepTalkingAgentTurnContinuationResponse: Codable, Sendable, KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .encryptedAgentTurnContinuationResponse }

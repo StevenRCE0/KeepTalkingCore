@@ -21,15 +21,23 @@ enum RTCShared {
     ) -> LKRTCConfiguration {
         let config = LKRTCConfiguration()
         config.sdpSemantics = .unifiedPlan
-        config.continualGatheringPolicy = .gatherContinually
         config.iceTransportPolicy = iceTransportPolicy
+        // gatherContinually keeps the TURN allocation loop alive so that a late
+        // TCP TURN connection (e.g. first SYN dropped) still produces a relay
+        // candidate after the initial gathering window closes.
+        config.continualGatheringPolicy = .gatherContinually
+        config.tcpCandidatePolicy = .enabled
         config.iceServers = iceServerURLs.map { url in
             let isTurn = url.lowercased().hasPrefix("turn:") || url.lowercased().hasPrefix("turns:")
-            // libwebrtc rejects TURN servers with empty credentials even when the
-            // server runs no-auth.  Use "_" as a placeholder — coturn no-auth
-            // accepts any non-empty value.
+            var normalizedUrl = url
+            // Force transport=tcp for the known relay port if not already specified
+            if isTurn && url.contains(":49372") && !url.contains("transport=") {
+                let separator = url.contains("?") ? "&" : "?"
+                normalizedUrl = url + separator + "transport=tcp"
+            }
+
             return LKRTCIceServer(
-                urlStrings: [url],
+                urlStrings: [normalizedUrl],
                 username: isTurn ? "_" : nil,
                 credential: isTurn ? "_" : nil
             )
@@ -134,6 +142,15 @@ enum RTCShared {
                 }
             }
         }
+    }
+
+    static func toIceCandidatePayload(_ candidate: LKRTCIceCandidate) -> IceCandidatePayload {
+        return IceCandidatePayload(
+            candidate: candidate.sdp,
+            sdpMid: candidate.sdpMid,
+            sdpMLineIndex: candidate.sdpMLineIndex,
+            usernameFragment: nil
+        )
     }
 
     static func applyOrBufferCandidate(

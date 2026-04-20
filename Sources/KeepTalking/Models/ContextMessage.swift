@@ -77,6 +77,11 @@ extension KeepTalkingContextMessage {
     public enum Sender: Codable, Sendable, Hashable {
         case node(node: UUID)
         case autonomous(name: String, nodeName: String? = nil, model: String? = nil)
+
+        public var nodeID: UUID? {
+            if case .node(let id) = self { return id }
+            return nil
+        }
     }
 
     public enum MessageType: Codable, Sendable, Hashable {

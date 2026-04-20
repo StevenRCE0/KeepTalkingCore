@@ -6,7 +6,7 @@ import Testing
 struct ThreadSemanticDocumentTests {
     @Test("thread semantic document includes transcript even when a summary exists")
     func documentIncludesTranscriptAlongsideSummary() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore()
         let context = KeepTalkingContext(
             id: UUID(uuidString: "10000000-0000-0000-0000-000000000001")!
         )
@@ -51,7 +51,7 @@ struct ThreadSemanticDocumentTests {
 
     @Test("thread semantic document skips chitter chatter and keeps attachment metadata")
     func documentOmitsChatterButIncludesAttachments() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore()
         let context = KeepTalkingContext(
             id: UUID(uuidString: "10000000-0000-0000-0000-000000000002")!
         )

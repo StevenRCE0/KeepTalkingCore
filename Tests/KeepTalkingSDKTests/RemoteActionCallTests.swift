@@ -1,5 +1,6 @@
 import Foundation
 import MCP
+import OpenAI
 import Testing
 
 @testable import KeepTalkingSDK
@@ -38,9 +39,16 @@ struct RemoteActionCallTests {
         )
         try await relation.save(on: localStore.database)
 
+        let reverseRelation = try KeepTalkingNodeRelation(
+            from: remoteNode,
+            to: localNode,
+            relationship: .trusted([context])
+        )
+        try await reverseRelation.save(on: localStore.database)
+
         let status = KeepTalkingNodeStatus(
             node: KeepTalkingNode(id: remoteNodeID),
-            context: context,
+            contextID: try #require(context.id),
             nodeRelations: [
                 KeepTalkingNodeRelationStatus(
                     toNodeID: localNodeID,
@@ -82,6 +90,7 @@ struct RemoteActionCallTests {
             node: localNode,
             action: try #require(action),
             context: context,
+            selfNode: localNode,
             on: localStore.database
         )
 
@@ -126,7 +135,7 @@ struct RemoteActionCallTests {
 
         let status = KeepTalkingNodeStatus(
             node: KeepTalkingNode(id: remoteNodeID),
-            context: grantedContext,
+            contextID: try #require(grantedContext.id),
             nodeRelations: [
                 KeepTalkingNodeRelationStatus(
                     toNodeID: localNodeID,
@@ -168,6 +177,7 @@ struct RemoteActionCallTests {
             node: localNode,
             action: try #require(action),
             context: grantedContext,
+            selfNode: localNode,
             on: localStore.database
         )
 
@@ -212,11 +222,11 @@ struct RemoteActionCallTests {
         let targetRelation = try KeepTalkingNodeRelation(
             from: ownedHostNode,
             to: targetNode,
-            relationship: .trusted([context])
+            relationship: .trustedInAllContext
         )
         try await targetRelation.save(on: localStore.database)
 
-        let action = KeepTalkingAction(
+        let action = try await KeepTalkingClient.registerAction(
             payload: .primitive(
                 KeepTalkingPrimitiveBundle(
                     name: "open-url-in-browser",
@@ -224,11 +234,9 @@ struct RemoteActionCallTests {
                     action: .openURLInBrowser
                 )
             ),
-            remoteAuthorisable: false,
-            blockingAuthorisation: false
+            node: ownedHostNode,
+            on: localStore.database
         )
-        action.$node.id = ownedHostNodeID
-        try await action.save(on: localStore.database)
 
         try await client.grantActionPermission(
             actionID: try #require(action.id),
@@ -236,7 +244,8 @@ struct RemoteActionCallTests {
             scope: .context(context)
         )
 
-        let approval = try await KeepTalkingNodeRelationActionRelation
+        let approval =
+            try await KeepTalkingNodeRelationActionRelation
             .query(on: localStore.database)
             .filter(\.$relation.$id, .equal, try #require(targetRelation.id))
             .filter(\.$action.$id, .equal, try #require(action.id))
@@ -253,7 +262,7 @@ struct RemoteActionCallTests {
         let localStore = KeepTalkingInMemoryStore()
         let localNodeID = UUID(uuidString: "AAAAAAA1-1111-1111-1111-111111111111")!
         let remoteNodeID = UUID(uuidString: "BBBBBBB2-2222-2222-2222-222222222222")!
-        let ownedHostNodeID = UUID(uuidString: "CCCCCCC3-3333-3333-3333-333333333333")!
+        let ownedHostNodeID = remoteNodeID
         let contextID = UUID(uuidString: "DDDDDDD4-4444-4444-4444-444444444444")!
         let actionID = UUID(uuidString: "EEEEEEE5-5555-5555-5555-555555555555")!
 
@@ -268,12 +277,10 @@ struct RemoteActionCallTests {
 
         let localNode = KeepTalkingNode(id: localNodeID)
         let remoteNode = KeepTalkingNode(id: remoteNodeID)
-        let ownedHostNode = KeepTalkingNode(id: ownedHostNodeID)
         let context = KeepTalkingContext(id: contextID)
 
         try await localNode.save(on: localStore.database)
         try await remoteNode.save(on: localStore.database)
-        try await ownedHostNode.save(on: localStore.database)
         try await context.save(on: localStore.database)
 
         let trustedRemoteRelation = try KeepTalkingNodeRelation(
@@ -283,9 +290,16 @@ struct RemoteActionCallTests {
         )
         try await trustedRemoteRelation.save(on: localStore.database)
 
+        let reverseRelation = try KeepTalkingNodeRelation(
+            from: remoteNode,
+            to: localNode,
+            relationship: .trusted([context])
+        )
+        try await reverseRelation.save(on: localStore.database)
+
         let status = KeepTalkingNodeStatus(
             node: KeepTalkingNode(id: remoteNodeID),
-            context: context,
+            contextID: try #require(context.id),
             nodeRelations: [
                 KeepTalkingNodeRelationStatus(
                     toNodeID: localNodeID,
@@ -320,13 +334,14 @@ struct RemoteActionCallTests {
         let mergedLink = try await KeepTalkingNodeRelationActionRelation.query(
             on: localStore.database
         )
-        .filter(\.$relation.$id, .equal, try #require(trustedRemoteRelation.id))
+        .filter(\.$relation.$id, .equal, try #require(reverseRelation.id))
         .filter(\.$action.$id, .equal, actionID)
         .first()
         let isGranted = try await KeepTalkingClient.isActionGrantedToNode(
             node: localNode,
             action: try #require(action),
             context: context,
+            selfNode: localNode,
             on: localStore.database
         )
 
@@ -369,7 +384,7 @@ struct RemoteActionCallTests {
         )
         try await otherRelation.save(on: localStore.database)
 
-        let action = KeepTalkingAction(
+        let action = try await KeepTalkingClient.registerAction(
             payload: .primitive(
                 KeepTalkingPrimitiveBundle(
                     name: "open-url-in-browser",
@@ -377,11 +392,9 @@ struct RemoteActionCallTests {
                     action: .openURLInBrowser
                 )
             ),
-            remoteAuthorisable: false,
-            blockingAuthorisation: false
+            node: ownerNode,
+            on: localStore.database
         )
-        action.$node.id = try ownerNode.requireID()
-        try await action.save(on: localStore.database)
 
         let approval = try KeepTalkingNodeRelationActionRelation(
             relation: grantedRelation,
@@ -391,17 +404,19 @@ struct RemoteActionCallTests {
         try await approval.save(on: localStore.database)
 
         let grantedAuthorized =
-            try await KeepTalkingClient.isNodeAuthorizedForAction(
+            try await KeepTalkingClient.isActionGrantedToNode(
                 node: grantedNode,
                 action: action,
                 context: context,
+                selfNode: ownerNode,
                 on: localStore.database
             )
         let otherAuthorized =
-            try await KeepTalkingClient.isNodeAuthorizedForAction(
+            try await KeepTalkingClient.isActionGrantedToNode(
                 node: otherNode,
                 action: action,
                 context: context,
+                selfNode: ownerNode,
                 on: localStore.database
             )
 
@@ -442,7 +457,7 @@ struct RemoteActionCallTests {
         )
         try await trustedRelation.save(on: localStore.database)
 
-        let action = KeepTalkingAction(
+        let action = try await KeepTalkingClient.registerAction(
             payload: .primitive(
                 KeepTalkingPrimitiveBundle(
                     name: "open-url-in-browser",
@@ -450,11 +465,9 @@ struct RemoteActionCallTests {
                     action: .openURLInBrowser
                 )
             ),
-            remoteAuthorisable: false,
-            blockingAuthorisation: false
+            node: ownerNode,
+            on: localStore.database
         )
-        action.$node.id = try ownerNode.requireID()
-        try await action.save(on: localStore.database)
 
         let approval = try KeepTalkingNodeRelationActionRelation(
             relation: trustedRelation,
@@ -463,10 +476,11 @@ struct RemoteActionCallTests {
         )
         try await approval.save(on: localStore.database)
 
-        let isAuthorized = try await KeepTalkingClient.isNodeAuthorizedForAction(
+        let isAuthorized = try await KeepTalkingClient.isActionGrantedToNode(
             node: targetNode,
             action: action,
             context: context,
+            selfNode: ownerNode,
             on: localStore.database
         )
 
@@ -509,11 +523,11 @@ struct RemoteActionCallTests {
         let trustedRelation = try KeepTalkingNodeRelation(
             from: ownerNode,
             to: targetNode,
-            relationship: .trusted([context])
+            relationship: .trustedInAllContext
         )
         try await trustedRelation.save(on: localStore.database)
 
-        let action = KeepTalkingAction(
+        let action = try await KeepTalkingClient.registerAction(
             payload: .primitive(
                 KeepTalkingPrimitiveBundle(
                     name: "open-url-in-browser",
@@ -521,11 +535,9 @@ struct RemoteActionCallTests {
                     action: .openURLInBrowser
                 )
             ),
-            remoteAuthorisable: false,
-            blockingAuthorisation: false
+            node: ownerNode,
+            on: localStore.database
         )
-        action.$node.id = ownerNodeID
-        try await action.save(on: localStore.database)
 
         try await client.grantActionPermission(
             actionID: try #require(action.id),
@@ -533,12 +545,14 @@ struct RemoteActionCallTests {
             scope: .context(context)
         )
 
-        let trustedApproval = try await KeepTalkingNodeRelationActionRelation
+        let trustedApproval =
+            try await KeepTalkingNodeRelationActionRelation
             .query(on: localStore.database)
             .filter(\.$relation.$id, .equal, try #require(trustedRelation.id))
             .filter(\.$action.$id, .equal, try #require(action.id))
             .first()
-        let pendingApproval = try await KeepTalkingNodeRelationActionRelation
+        let pendingApproval =
+            try await KeepTalkingNodeRelationActionRelation
             .query(on: localStore.database)
             .filter(\.$relation.$id, .equal, try #require(pendingRelation.id))
             .filter(\.$action.$id, .equal, try #require(action.id))
@@ -636,9 +650,10 @@ struct RemoteActionCallTests {
                 contextID: contextID,
                 node: selfNodeID
             ),
-            primitiveActionCallback: { _, _ in
-                KeepTalkingPrimitiveActionResponse(text: "opened")
-            },
+            primitiveRegistry: KeepTalkingPrimitiveRegistry(
+                toolParameters: { _ in JSONSchema(.type(.object)) },
+                callAction: { _, _ in KeepTalkingPrimitiveActionResponse(text: "opened") }
+            ),
             localStore: localStore
         )
 
@@ -659,13 +674,11 @@ struct RemoteActionCallTests {
             indexDescription: "Open a URL",
             action: .openURLInBrowser
         )
-        let action = KeepTalkingAction(
+        let action = try await KeepTalkingClient.registerAction(
             payload: .primitive(bundle),
-            remoteAuthorisable: false,
-            blockingAuthorisation: false
+            node: selfNode,
+            on: localStore.database
         )
-        action.$node.id = selfNodeID
-        try await action.save(on: localStore.database)
 
         let approval = try KeepTalkingNodeRelationActionRelation(
             relation: relation,
