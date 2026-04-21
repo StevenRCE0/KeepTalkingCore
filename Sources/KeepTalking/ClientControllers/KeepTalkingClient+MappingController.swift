@@ -44,21 +44,14 @@ extension KeepTalkingClient {
         for target: KeepTalkingMappingTarget,
         on database: any Database
     ) async throws -> String? {
-        try await queryMappings(
-            for: target,
-            on: database
-        )
-        .filter(\.$kind, .equal, .alias)
-        .first()?
-        .value
-
+        try await queryMappings(for: target, on: database)
+            .filter(\.$kind, .equal, .alias)
+            .first()?
+            .value
     }
 
     public func alias(for target: KeepTalkingMappingTarget) async throws -> String? {
-        try await Self.alias(
-            for: target,
-            on: localStore.database
-        )
+        try await Self.alias(for: target, on: localStore.database)
     }
 
     public static func tags(

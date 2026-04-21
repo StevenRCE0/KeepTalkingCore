@@ -344,7 +344,8 @@ extension KeepTalkingClient {
             let nodeTag = stub.isCurrentNode ? "\(nodeName) (current)" : nodeName
             let desc = stub.description.trimmingCharacters(in: .whitespacesAndNewlines)
             let descSuffix = desc.isEmpty ? "" : "  description: \(desc)"
-            return "- action_id: \(stub.actionID.uuidString.lowercased())  name: \(stub.name)  type: \(stub.kind.rawValue)  node: \(nodeTag)\(descSuffix)"
+            return
+                "- action_id: \(stub.actionID.uuidString.lowercased())  name: \(stub.name)  type: \(stub.kind.rawValue)  node: \(nodeTag)\(descSuffix)"
         }
 
         return """
@@ -373,7 +374,7 @@ extension KeepTalkingClient {
             let name =
                 aliasLookup
                 .resolve(.node(nodeID))
-                .primary(uppercaseID: true)
+                .primary(.uppercase)
             let prefix = nodeID == config.node ? "current_node" : "node"
             return "- \(prefix): \(name)"
         }

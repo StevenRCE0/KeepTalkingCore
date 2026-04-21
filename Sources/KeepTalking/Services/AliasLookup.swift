@@ -1,6 +1,11 @@
 import Foundation
 
 public struct KeepTalkingAliasResolution: Sendable, Hashable {
+
+    public enum IDDisplayMode: Sendable, Hashable {
+        case uppercase, lowercase, friendly, raw
+    }
+
     public let alias: String?
     public let id: UUID?
     public let fallback: String?
@@ -11,31 +16,34 @@ public struct KeepTalkingAliasResolution: Sendable, Hashable {
         self.fallback = fallback
     }
 
-    public func idText(uppercase: Bool = true) -> String? {
-        guard let id else {
-            return nil
+    /// True when no explicit alias was set — the displayed name is a fallback (friendly name or UUID).
+    public var isFallback: Bool { alias == nil }
+
+    public func idText(_ mode: IDDisplayMode = .friendly) -> String? {
+        guard let id else { return nil }
+        switch mode {
+            case .uppercase: return id.uuidString.uppercased()
+            case .lowercase: return id.uuidString.lowercased()
+            case .friendly: return id.friendlyName
+            case .raw: return id.uuidString
         }
-        return uppercase ? id.uuidString.uppercased() : id.uuidString.lowercased()
     }
 
-    public func primary(uppercaseID: Bool = true) -> String {
-        alias ?? fallback ?? idText(uppercase: uppercaseID) ?? "Unknown"
+    public func primary(_ mode: IDDisplayMode = .friendly) -> String {
+        alias ?? fallback ?? idText(mode) ?? "Unknown"
     }
 
-    public func secondary(uppercaseID: Bool = true) -> String? {
-        guard alias != nil else {
-            return nil
-        }
-        return idText(uppercase: uppercaseID)
+    public func secondary(_ mode: IDDisplayMode = .friendly) -> String? {
+        guard alias != nil else { return nil }
+        return idText(mode)
     }
 
     public func combined(
         includeID: Bool = true,
-        uppercaseID: Bool = false
+        _ mode: IDDisplayMode = .friendly
     ) -> String {
-        let primary = primary(uppercaseID: uppercaseID)
-        guard includeID, let idText = idText(uppercase: uppercaseID), alias != nil
-        else {
+        let primary = primary(mode)
+        guard includeID, let idText = idText(mode), alias != nil else {
             return primary
         }
         return "\(primary) (\(idText))"
@@ -64,7 +72,10 @@ public struct KeepTalkingAliasLookup: Sendable {
         aliases[target]
     }
 
-    public func resolve(_ target: KeepTalkingMappingTarget, fallback: String? = nil) -> KeepTalkingAliasResolution {
+    public func resolve(
+        _ target: KeepTalkingMappingTarget,
+        fallback: String? = nil
+    ) -> KeepTalkingAliasResolution {
         KeepTalkingAliasResolution(
             alias: alias(for: target),
             id: target.id,
@@ -72,9 +83,10 @@ public struct KeepTalkingAliasLookup: Sendable {
         )
     }
 
-    public func resolve(sender: KeepTalkingContextMessage.Sender, fallback: String? = nil)
-        -> KeepTalkingAliasResolution
-    {
+    public func resolve(
+        sender: KeepTalkingContextMessage.Sender,
+        fallback: String? = nil
+    ) -> KeepTalkingAliasResolution {
         switch sender {
             case .node(let node):
                 return resolve(.node(node), fallback: fallback)
