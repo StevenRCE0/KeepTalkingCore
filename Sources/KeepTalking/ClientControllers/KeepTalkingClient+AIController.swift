@@ -341,7 +341,8 @@ extension KeepTalkingClient {
                         runtimeCatalog: runtimeCatalog,
                         promptMessageID: promptMessageID,
                         context: persistedContext,
-                        agentTurnID: agentTurnID
+                        agentTurnID: agentTurnID,
+                        agentIntention: prompt
                     )
                 },
                 toolTranscriptAdapter: { [self] executions in

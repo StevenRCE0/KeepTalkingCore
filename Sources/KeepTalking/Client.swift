@@ -159,6 +159,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
             rtcClient.onLog = onLog
             Task { [weak self] in
                 guard let self else { return }
+                await self.skillManager.setLogHandler(self.onLog)
                 await self.mcpManager.setLogHandler(self.onLog)
             }
         }

@@ -1,7 +1,8 @@
 import Foundation
 
 extension SkillManager {
-    func validateSkillDirectory(_ directory: URL) throws {
+    func validateSkillDirectory(_ directory: URL?) throws {
+        guard let directory else { return }
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(
             atPath: directory.path,
@@ -20,46 +21,59 @@ extension SkillManager {
         }
     }
 
-    func loadManifestContext(for directory: URL) throws
+    func loadManifestContext(for directory: URL?, parameters: [String: String] = [:]) throws
         -> SkillManifestContext
     {
         try validateSkillDirectory(directory)
+        guard let directory else {
+            return SkillManifestContext(
+                manifestURL: URL(fileURLWithPath: "/dev/null"),
+                manifestText: "",
+                manifestMetadata: [:],
+                referencesFiles: [],
+                scripts: [],
+                assets: [],
+                declaredTools: [:]
+            )
+        }
         let manifestURL = SkillDirectoryDefinitions.entryURL(
             .manifest,
             in: directory
         )
         let rawManifest = try String(contentsOf: manifestURL, encoding: .utf8)
+        let substituted = parameters.reduce(rawManifest) { result, pair in
+            result.replacingOccurrences(of: "{{\(pair.key)}}", with: pair.value)
+        }
         let manifestText = clipped(
-            rawManifest,
+            substituted,
             maxCharacters: Self.manifestMaxCharacters
         )
-        let metadata = parseManifestMetadata(rawManifest)
+        let metadata = parseManifestMetadata(substituted)
+        let declaredTools =
+            metadata
+            .filter { $0.key.hasPrefix("scripts.") }
+            .reduce(into: [String: String]()) { result, pair in
+                let toolName = String(pair.key.dropFirst("scripts.".count))
+                if !toolName.isEmpty { result[toolName] = pair.value }
+            }
 
         return SkillManifestContext(
             manifestURL: manifestURL,
             manifestText: manifestText,
             manifestMetadata: metadata,
             referencesFiles: listRelativeFiles(
-                in: SkillDirectoryDefinitions.entryURL(
-                    .references,
-                    in: directory
-                ),
+                in: SkillDirectoryDefinitions.entryURL(.references, in: directory),
                 root: directory
             ),
             scripts: listRelativeFiles(
-                in: SkillDirectoryDefinitions.entryURL(
-                    .scripts,
-                    in: directory
-                ),
+                in: SkillDirectoryDefinitions.entryURL(.scripts, in: directory),
                 root: directory
             ),
             assets: listRelativeFiles(
-                in: SkillDirectoryDefinitions.entryURL(
-                    .assets,
-                    in: directory
-                ),
+                in: SkillDirectoryDefinitions.entryURL(.assets, in: directory),
                 root: directory
-            )
+            ),
+            declaredTools: declaredTools
         )
     }
 

@@ -29,9 +29,21 @@ struct KeepTalkingSkillCatalogLoader {
         bundle: KeepTalkingSkillBundle
     ) throws -> KeepTalkingActionCatalogSkillMetadata {
         try validateSkillDirectory(bundle.directory)
+        guard let directory = bundle.directory else {
+            return KeepTalkingActionCatalogSkillMetadata(
+                name: bundle.name,
+                directoryPath: "",
+                manifestPath: "",
+                manifestMetadata: [:],
+                referencesFiles: [],
+                scripts: [],
+                assets: [],
+                manifestPreview: ""
+            )
+        }
         let manifestURL = SkillDirectoryDefinitions.entryURL(
             .manifest,
-            in: bundle.directory
+            in: directory
         )
         let manifestText = try String(
             contentsOf: manifestURL,
@@ -40,29 +52,29 @@ struct KeepTalkingSkillCatalogLoader {
 
         return KeepTalkingActionCatalogSkillMetadata(
             name: bundle.name,
-            directoryPath: bundle.directory.path,
+            directoryPath: directory.path,
             manifestPath: manifestURL.path,
             manifestMetadata: parseManifestMetadata(manifestText),
             referencesFiles: listRelativeFiles(
                 in: SkillDirectoryDefinitions.entryURL(
                     .references,
-                    in: bundle.directory
+                    in: directory
                 ),
-                root: bundle.directory
+                root: directory
             ),
             scripts: listRelativeFiles(
                 in: SkillDirectoryDefinitions.entryURL(
                     .scripts,
-                    in: bundle.directory
+                    in: directory
                 ),
-                root: bundle.directory
+                root: directory
             ),
             assets: listRelativeFiles(
                 in: SkillDirectoryDefinitions.entryURL(
                     .assets,
-                    in: bundle.directory
+                    in: directory
                 ),
-                root: bundle.directory
+                root: directory
             ),
             manifestPreview: clipped(
                 manifestText,
@@ -115,7 +127,7 @@ struct KeepTalkingSkillCatalogLoader {
             String(data: rawData, encoding: .utf8)
             ?? String(decoding: rawData, as: UTF8.self)
 
-        let rootPath = bundle.directory.standardizedFileURL.path
+        let rootPath = bundle.directory?.standardizedFileURL.path ?? ""
         let path = fileURL.standardizedFileURL.path
         let relativePath: String
         if path.hasPrefix(rootPath + "/") {
@@ -147,7 +159,8 @@ struct KeepTalkingSkillCatalogLoader {
         return arguments
     }
 
-    func validateSkillDirectory(_ directory: URL) throws {
+    func validateSkillDirectory(_ directory: URL?) throws {
+        guard let directory else { return }
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(
             atPath: directory.path,
@@ -244,7 +257,7 @@ struct KeepTalkingSkillCatalogLoader {
 
     func resolveSkillFileURL(
         _ rawPath: String,
-        skillDirectory: URL
+        skillDirectory: URL?
     ) throws -> URL {
         let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -255,10 +268,14 @@ struct KeepTalkingSkillCatalogLoader {
         if trimmed.hasPrefix("/") {
             candidate = URL(fileURLWithPath: trimmed)
         } else {
+            guard let skillDirectory else {
+                throw SkillManagerError.invalidSkillDirectory(URL(fileURLWithPath: "<none>"))
+            }
             candidate = skillDirectory.appendingPathComponent(trimmed)
         }
 
         let resolved = candidate.standardizedFileURL
+        guard let skillDirectory else { return resolved }
         let rootPath = skillDirectory.standardizedFileURL.path
         let resolvedPath = resolved.path
         let insideRoot =

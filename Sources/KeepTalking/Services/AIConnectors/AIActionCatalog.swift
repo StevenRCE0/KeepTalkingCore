@@ -222,43 +222,46 @@ extension KeepTalkingClient {
                     let description =
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
-                    actionStubs.append(KeepTalkingActionStub(
-                        actionID: actionID,
-                        ownerNodeID: ownerNodeID,
-                        name: bundle.name,
-                        kind: .mcp,
-                        description: description,
-                        supportsWakeAssist: supportsWakeAssist,
-                        isCurrentNode: isCurrentNode
-                    ))
+                    actionStubs.append(
+                        KeepTalkingActionStub(
+                            actionID: actionID,
+                            ownerNodeID: ownerNodeID,
+                            name: bundle.name,
+                            kind: .mcp,
+                            description: description,
+                            supportsWakeAssist: supportsWakeAssist,
+                            isCurrentNode: isCurrentNode
+                        ))
 
                 case .skill(let bundle):
                     let description =
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
-                    actionStubs.append(KeepTalkingActionStub(
-                        actionID: actionID,
-                        ownerNodeID: ownerNodeID,
-                        name: bundle.name,
-                        kind: .skill,
-                        description: description,
-                        supportsWakeAssist: supportsWakeAssist,
-                        isCurrentNode: isCurrentNode
-                    ))
+                    actionStubs.append(
+                        KeepTalkingActionStub(
+                            actionID: actionID,
+                            ownerNodeID: ownerNodeID,
+                            name: bundle.name,
+                            kind: .skill,
+                            description: description,
+                            supportsWakeAssist: supportsWakeAssist,
+                            isCurrentNode: isCurrentNode
+                        ))
 
                 case .primitive(let bundle):
                     let description =
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
-                    actionStubs.append(KeepTalkingActionStub(
-                        actionID: actionID,
-                        ownerNodeID: ownerNodeID,
-                        name: bundle.name,
-                        kind: .primitive,
-                        description: description,
-                        supportsWakeAssist: supportsWakeAssist,
-                        isCurrentNode: isCurrentNode
-                    ))
+                    actionStubs.append(
+                        KeepTalkingActionStub(
+                            actionID: actionID,
+                            ownerNodeID: ownerNodeID,
+                            name: bundle.name,
+                            kind: .primitive,
+                            description: description,
+                            supportsWakeAssist: supportsWakeAssist,
+                            isCurrentNode: isCurrentNode
+                        ))
                     let primitiveActionDefinition =
                         makePrimitiveActionProxyDefinition(
                             actionID: actionID,
@@ -288,15 +291,16 @@ extension KeepTalkingClient {
                     let description =
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
-                    actionStubs.append(KeepTalkingActionStub(
-                        actionID: actionID,
-                        ownerNodeID: ownerNodeID,
-                        name: bundle.name,
-                        kind: .filesystem,
-                        description: description,
-                        supportsWakeAssist: supportsWakeAssist,
-                        isCurrentNode: isCurrentNode
-                    ))
+                    actionStubs.append(
+                        KeepTalkingActionStub(
+                            actionID: actionID,
+                            ownerNodeID: ownerNodeID,
+                            name: bundle.name,
+                            kind: .filesystem,
+                            description: description,
+                            supportsWakeAssist: supportsWakeAssist,
+                            isCurrentNode: isCurrentNode
+                        ))
             }
         }
 
@@ -349,10 +353,7 @@ extension KeepTalkingClient {
                 actionID: actionID,
                 ownerNodeID: ownerNodeID,
                 bundle: bundle,
-                manifestPath: SkillDirectoryDefinitions.entryURL(
-                    .manifest,
-                    in: bundle.directory
-                ).path,
+                manifestPath: bundle.directory.map { SkillDirectoryDefinitions.entryURL(.manifest, in: $0).path } ?? "",
                 manifestMetadata: [:],
                 referencesFiles: [],
                 scripts: [],
@@ -365,7 +366,7 @@ extension KeepTalkingClient {
 
     func resolveSkillFileURL(
         _ rawPath: String,
-        skillDirectory: URL
+        skillDirectory: URL?
     ) throws -> URL {
         try skillCatalogContextLoader.resolveSkillFileURL(
             rawPath,

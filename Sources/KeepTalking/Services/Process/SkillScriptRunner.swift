@@ -23,6 +23,7 @@ public enum SkillScriptRunner {
     public static func run(
         command: [String],
         currentDirectory: URL,
+        environment: [String: String] = [:],
         actionID: UUID,
         timeoutSeconds: TimeInterval,
         sandboxPolicy: KTSandboxPolicy? = nil
@@ -43,6 +44,7 @@ public enum SkillScriptRunner {
                 executable: executable,
                 command: command,
                 currentDirectory: currentDirectory,
+                environment: environment,
                 actionID: actionID,
                 timeoutSeconds: timeoutSeconds,
                 sandboxPolicy: sandboxPolicy
@@ -66,6 +68,7 @@ public enum SkillScriptRunner {
         executable: String,
         command: [String],
         currentDirectory: URL,
+        environment: [String: String] = [:],
         actionID: UUID,
         timeoutSeconds: TimeInterval,
         sandboxPolicy: KTSandboxPolicy? = nil
@@ -81,7 +84,7 @@ public enum SkillScriptRunner {
             DefaultProcessExecutionSupport
             .mergedEnvironment(
                 for: command,
-                environment: [:]
+                environment: environment
             )
 
         if let sandboxPolicy {

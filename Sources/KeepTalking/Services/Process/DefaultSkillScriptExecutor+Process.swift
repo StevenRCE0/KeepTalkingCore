@@ -12,6 +12,7 @@ private struct Executor: SkillScriptExecuting {
         scriptURL: URL,
         arguments: [String],
         currentDirectory: URL,
+        environment: [String: String],
         actionID: UUID,
         timeoutSeconds: TimeInterval,
         sandboxPolicy: KTSandboxPolicy?
@@ -22,6 +23,7 @@ private struct Executor: SkillScriptExecuting {
                 arguments: arguments
             ),
             currentDirectory: currentDirectory,
+            environment: environment,
             actionID: actionID,
             timeoutSeconds: timeoutSeconds,
             sandboxPolicy: sandboxPolicy

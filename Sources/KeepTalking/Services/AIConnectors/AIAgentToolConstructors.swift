@@ -178,9 +178,29 @@ extension KeepTalkingClient {
         descriptor: KeepTalkingActionDescriptor?,
         supportsWakeAssist: Bool = false
     ) -> KeepTalkingActionToolDefinition {
-        let description =
+        let baseDescription =
             descriptor?.action?.description
             ?? bundle.indexDescription
+
+        // Surface configured parameter names so the outer AI knows what's already set
+        let dirParams = bundle.parameters.filter { $0.value.hasPrefix("/") }
+        let envParams = bundle.parameters.filter { !$0.value.hasPrefix("/") }
+        var paramHints: [String] = []
+        if !dirParams.isEmpty {
+            let dirs = dirParams.keys.sorted().joined(separator: ", ")
+            paramHints.append("Configured directories: \(dirs) (already set, do NOT ask the user for paths).")
+        }
+        if !envParams.isEmpty {
+            let envs = envParams.keys.sorted().joined(separator: ", ")
+            paramHints.append("Configured parameters: \(envs).")
+        }
+        let paramSuffix = paramHints.isEmpty ? "" : " " + paramHints.joined(separator: " ")
+
+        let description =
+            "Execute skill \(bundle.name). Call this tool to run the skill — "
+            + "do NOT just read metadata or describe commands. "
+            + baseDescription
+            + paramSuffix
         return KeepTalkingActionToolDefinition(
             functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
                 ownerNodeID: ownerNodeID,

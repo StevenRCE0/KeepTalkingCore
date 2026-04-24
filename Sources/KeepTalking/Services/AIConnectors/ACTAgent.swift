@@ -244,7 +244,8 @@ extension KeepTalkingClient {
                 runtimeCatalog: runtimeCatalog,
                 promptMessageID: nil,
                 context: context,
-                agentTurnID: agentTurnID
+                agentTurnID: agentTurnID,
+                agentIntention: task
             )
             actLog(
                 "action-result action=\(actionID.uuidString.lowercased()) calls=\(turn.toolCalls.map(\.function.name).joined(separator: ",")) payload=\(actExecutionPreview(executions, source: stub.kind))"
@@ -754,7 +755,8 @@ extension KeepTalkingClient {
             return "<no-tool-payload>"
         }
         if source == .skill {
-            return "<skill-result-redacted>"
+            // skill tool results (script outputs) are structured; let's show a preview.
+            return clipped(payloads.joined(separator: " | "), maxCharacters: 400)
         }
         return clipped(payloads.joined(separator: " | "), maxCharacters: 320)
     }

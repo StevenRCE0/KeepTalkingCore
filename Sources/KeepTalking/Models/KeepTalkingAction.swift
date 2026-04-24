@@ -53,20 +53,29 @@ public struct KeepTalkingActionDescriptor: Codable, Sendable {
     public var subject: KeepTalkingActionResourceWithDescription?
     public var action: KeepTalkingActionWithDescription?
     public var object: KeepTalkingActionResourceWithDescription?
+    /// Environment variables required by this action at execution time.
+    public var environment: [String: String]?
+    /// Named base directories the action needs access to (e.g. "project_root").
+    /// Values are absolute paths on the host, resolved before sandbox compilation.
+    public var directories: [String: URL]?
 
     public init(
         subject: KeepTalkingActionResourceWithDescription? = nil,
         action: KeepTalkingActionWithDescription? = nil,
-        object: KeepTalkingActionResourceWithDescription? = nil
+        object: KeepTalkingActionResourceWithDescription? = nil,
+        environment: [String: String]? = nil,
+        directories: [String: URL]? = nil
     ) {
         self.subject = subject
         self.action = action
         self.object = object
+        self.environment = environment
+        self.directories = directories
     }
 
     /// Whether this descriptor carries enough information to compile a sandbox policy.
     public var hasSandboxConstraints: Bool {
-        action?.verbs != nil && object?.resource != nil
+        action?.verbs != nil && (object?.resource != nil || directories?.isEmpty == false)
     }
 }
 
@@ -103,7 +112,7 @@ public struct KeepTalkingActionGrant: Codable, Sendable, Identifiable {
     }
 }
 
-public protocol KeepTalkingActionBundle: Identifiable, Codable, Sendable, Hashable {
+public protocol KeepTalkingActionBundle: Identifiable, Codable, Sendable {
     var id: UUID { get set }
     var name: String { get set }
     var indexDescription: String { get set }

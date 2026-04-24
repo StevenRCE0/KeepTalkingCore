@@ -27,7 +27,8 @@ extension SkillManager {
         _ toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
             .ToolCallParam],
         actionID: UUID,
-        skillDirectory: URL,
+        skillDirectory: URL?,
+        manifestContext: SkillManifestContext,
         sandboxPolicy: KTSandboxPolicy? = nil
     ) async throws -> [ChatQuery.ChatCompletionMessageParam.ToolMessageParam] {
         var messages: [ChatQuery.ChatCompletionMessageParam.ToolMessageParam] = []
@@ -41,22 +42,39 @@ extension SkillManager {
                 try decodeToolArguments(toolCall.function.arguments)
             )
 
+            let parameters = skillBundlesByActionID[actionID]?.parameters ?? [:]
             let payload: String
-            switch functionName {
-                case Self.getFileToolName:
-                    payload = try executeGetFile(
-                        arguments,
-                        skillDirectory: skillDirectory
-                    )
-                case Self.runScriptToolName:
-                    payload = try await executeRunScript(
-                        arguments,
-                        actionID: actionID,
-                        skillDirectory: skillDirectory,
-                        sandboxPolicy: sandboxPolicy
-                    )
-                default:
-                    payload = "Unknown tool name: \(functionName)"
+            let paramDirRoots = parameters.values.filter { $0.hasPrefix("/") }
+            if functionName == Self.getFileToolName {
+                var resolvedArgs = arguments
+                // Resolve directory labels in the path (e.g. "input_dir/file.txt" → "/real/path/file.txt")
+                if let path = arguments["path"]?.stringValue {
+                    resolvedArgs["path"] = .string(resolveDirectoryLabel(path, parameters: parameters))
+                }
+                let raw = try executeGetFile(resolvedArgs, skillDirectory: skillDirectory, allowedRoots: paramDirRoots)
+                payload = parameters.reduce(raw) { result, pair in
+                    result.replacingOccurrences(of: "{{\(pair.key)}}", with: pair.value)
+                }
+            } else if functionName == Self.listFilesToolName {
+                let dirLabel = arguments["directory"]?.stringValue ?? ""
+                payload = executeListFiles(directory: dirLabel, parameters: parameters, skillDirectory: skillDirectory)
+            } else if let scriptPath = manifestContext.declaredTools[functionName] {
+                // Route declared tool call to its script — ACT provides raw CLI args string
+                let rawArgs = arguments["args"]?.stringValue ?? ""
+                let resolvedArgs = resolveDirectoryLabel(rawArgs, parameters: parameters)
+                let scriptArgs: [String: Value] = [
+                    "script": .string(scriptPath),
+                    "args": .string(resolvedArgs),
+                ]
+                payload = try await executeRunScript(
+                    scriptArgs,
+                    actionID: actionID,
+                    skillDirectory: skillDirectory,
+                    parameters: parameters,
+                    sandboxPolicy: sandboxPolicy
+                )
+            } else {
+                payload = "Tool '\(functionName)' is not declared in this skill's manifest."
             }
 
             messages.append(
@@ -86,7 +104,8 @@ extension SkillManager {
 
     func executeGetFile(
         _ arguments: [String: Value],
-        skillDirectory: URL
+        skillDirectory: URL?,
+        allowedRoots: [String] = []
     ) throws -> String {
         let rawPath =
             arguments["path"]?.stringValue
@@ -94,7 +113,8 @@ extension SkillManager {
             ?? ""
         let fileURL = try resolveSkillFileURL(
             rawPath,
-            skillDirectory: skillDirectory
+            skillDirectory: skillDirectory,
+            allowedRoots: allowedRoots
         )
         let data = try Data(contentsOf: fileURL)
         let decoded =
@@ -112,7 +132,8 @@ extension SkillManager {
     func executeRunScript(
         _ arguments: [String: Value],
         actionID: UUID,
-        skillDirectory: URL,
+        skillDirectory: URL?,
+        parameters: [String: String] = [:],
         sandboxPolicy: KTSandboxPolicy? = nil
     ) async throws -> String {
         guard let scriptExecutor else {
@@ -127,14 +148,38 @@ extension SkillManager {
             skillDirectory: skillDirectory
         )
         let scriptArguments = extractScriptArguments(arguments)
+
+        // Build env from bundle parameters; always inject SKILL_DIR
+        var environment = parameters
+        if let skillDir = skillDirectory {
+            environment["SKILL_DIR"] = skillDir.path
+        }
+
         let execution = try await scriptExecutor.runScript(
             scriptURL: scriptURL,
             arguments: scriptArguments,
-            currentDirectory: skillDirectory,
+            currentDirectory: skillDirectory ?? URL(fileURLWithPath: "/"),
+            environment: environment,
             actionID: actionID,
             timeoutSeconds: scriptTimeoutSeconds,
             sandboxPolicy: sandboxPolicy
         )
+
+        if let sandboxPolicy = sandboxPolicy {
+            if let env = sandboxPolicy.descriptor.environment, !env.isEmpty {
+                let envString = env.keys.sorted().map { "\($0)=\(env[$0] ?? "")" }.joined(separator: " ")
+                let msg = "[ACT/env] \(envString)"
+                onLog?(msg)
+                print(msg)
+            }
+            if let directories = sandboxPolicy.descriptor.directories, !directories.isEmpty {
+                let dirString = directories.keys.sorted().map { "\($0)=\(directories[$0]?.path ?? "")" }.joined(
+                    separator: " ")
+                let msg = "[ACT/dirs] \(dirString)"
+                onLog?(msg)
+                print(msg)
+            }
+        }
 
         let joinedCommand = execution.command.joined(separator: " ")
         let stdout = clipped(
@@ -145,6 +190,21 @@ extension SkillManager {
             execution.stderr,
             maxCharacters: Self.scriptOutputMaxCharacters
         )
+
+        let logMsg = "[ACT] command='\(joinedCommand)' exit=\(execution.exitCode)"
+        onLog?(logMsg)
+        print(logMsg)
+
+        if !stdout.isEmpty {
+            let outMsg = "[ACT/stdout] \(stdout)"
+            onLog?(outMsg)
+            print(outMsg)
+        }
+        if !stderr.isEmpty {
+            let errMsg = "[ACT/stderr] \(stderr)"
+            onLog?(errMsg)
+            print(errMsg)
+        }
         return """
             command: \(joinedCommand)
             exit_code: \(execution.exitCode)
@@ -156,21 +216,55 @@ extension SkillManager {
     }
 
     func extractScriptArguments(_ arguments: [String: Value]) -> [String] {
+        // ACT provides args as a raw CLI string — split respecting shell quoting
+        if let raw = arguments["args"]?.stringValue {
+            return shellSplit(raw)
+        }
+        if let raw = arguments["arguments"]?.stringValue {
+            return shellSplit(raw)
+        }
         if let array = arguments["args"]?.arrayValue {
             return array.compactMap(scriptArgumentString(for:))
         }
-        if let object = arguments["args"]?.objectValue {
-            return object.sorted { $0.key < $1.key }.compactMap { key, value in
-                scriptArgumentString(for: value).map { "\(key)=\($0)" }
-            }
-        }
-        if let raw = arguments["args"]?.stringValue {
-            return raw.split(whereSeparator: \.isWhitespace).map(String.init)
-        }
-        if let raw = arguments["arguments"]?.stringValue {
-            return raw.split(whereSeparator: \.isWhitespace).map(String.init)
-        }
         return []
+    }
+
+    /// Splits a string into shell-style tokens, respecting double and single quotes.
+    private func shellSplit(_ string: String) -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        var inDouble = false
+        var inSingle = false
+        var escape = false
+        for ch in string {
+            if escape {
+                current.append(ch)
+                escape = false
+                continue
+            }
+            if ch == "\\" && !inSingle {
+                escape = true
+                continue
+            }
+            if ch == "\"" && !inSingle {
+                inDouble.toggle()
+                continue
+            }
+            if ch == "'" && !inDouble {
+                inSingle.toggle()
+                continue
+            }
+            if ch.isWhitespace && !inDouble && !inSingle {
+                if !current.isEmpty {
+                    tokens.append(current)
+                    current = ""
+                }
+                continue
+            }
+            current.append(ch)
+        }
+        if !current.isEmpty { tokens.append(current) }
+        return tokens
     }
 
     func scriptArgumentString(for value: Value) -> String? {
@@ -187,9 +281,81 @@ extension SkillManager {
         return arguments
     }
 
+    /// Resolves a directory label prefix (e.g. "input_dir/file.m4v") to the real path
+    /// using the bundle's parameters. If no label matches, returns the path unchanged.
+    func resolveDirectoryLabel(_ path: String, parameters: [String: String]) -> String {
+        // Check if path starts with a known parameter label
+        for (label, realPath) in parameters where realPath.hasPrefix("/") {
+            if path == label {
+                return realPath
+            }
+            let prefix = label + "/"
+            if path.hasPrefix(prefix) {
+                let remainder = String(path.dropFirst(prefix.count))
+                return (realPath as NSString).appendingPathComponent(remainder)
+            }
+        }
+        return path
+    }
+
+    /// Lists files in a directory identified by label or relative path.
+    func executeListFiles(
+        directory: String,
+        parameters: [String: String],
+        skillDirectory: URL?
+    ) -> String {
+        let resolved = resolveDirectoryLabel(directory, parameters: parameters)
+        let dirURL: URL
+        if resolved.hasPrefix("/") {
+            dirURL = URL(fileURLWithPath: resolved)
+        } else if let skillDir = skillDirectory {
+            dirURL = skillDir.appendingPathComponent(resolved)
+        } else {
+            return "Error: no directory found for '\(directory)'."
+        }
+
+        // Verify the directory is within an allowed path (skill dir or a parameter dir)
+        let resolvedPath = dirURL.resolvingSymlinksInPath().path
+        let allowedRoots =
+            [skillDirectory?.resolvingSymlinksInPath().path].compactMap { $0 }
+            + parameters.values.filter { $0.hasPrefix("/") }
+        let isAllowed = allowedRoots.contains { root in
+            resolvedPath == root || resolvedPath.hasPrefix(root + "/")
+        }
+        guard isAllowed else {
+            return "Error: directory '\(directory)' is outside allowed paths."
+        }
+
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: dirURL.path, isDirectory: &isDir), isDir.boolValue else {
+            return "Error: '\(directory)' is not a directory or does not exist."
+        }
+
+        do {
+            let contents = try fm.contentsOfDirectory(atPath: dirURL.path)
+                .filter { !$0.hasPrefix(".") }
+                .sorted()
+            if contents.isEmpty {
+                return "Directory '\(directory)' is empty."
+            }
+            let listing = contents.map { name -> String in
+                var childIsDir: ObjCBool = false
+                let childPath = (dirURL.path as NSString).appendingPathComponent(name)
+                fm.fileExists(atPath: childPath, isDirectory: &childIsDir)
+                let suffix = childIsDir.boolValue ? "/" : ""
+                return "\(directory)/\(name)\(suffix)"
+            }
+            return listing.joined(separator: "\n")
+        } catch {
+            return "Error listing '\(directory)': \(error.localizedDescription)"
+        }
+    }
+
     func resolveSkillFileURL(
         _ rawPath: String,
-        skillDirectory: URL
+        skillDirectory: URL?,
+        allowedRoots: [String] = []
     ) throws -> URL {
         let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -199,15 +365,31 @@ extension SkillManager {
         if trimmed.hasPrefix("/") {
             candidate = URL(fileURLWithPath: trimmed)
         } else {
+            guard let skillDirectory else {
+                throw SkillManagerError.invalidSkillDirectory(URL(fileURLWithPath: "<none>"))
+            }
             candidate = skillDirectory.appendingPathComponent(trimmed)
         }
-        let resolved = candidate.standardizedFileURL
-        let rootPath = skillDirectory.standardizedFileURL.path
+        let resolved = candidate.resolvingSymlinksInPath()
         let resolvedPath = resolved.path
-        let insideRoot =
-            resolvedPath == rootPath
-            || resolvedPath.hasPrefix(rootPath + "/")
-        guard insideRoot else {
+
+        // Check skill directory
+        if let skillDir = skillDirectory?.resolvingSymlinksInPath() {
+            let rootPath = skillDir.path
+            if resolvedPath == rootPath || resolvedPath.hasPrefix(rootPath + "/") {
+                return resolved
+            }
+        }
+
+        // Check parameter directories
+        for root in allowedRoots where !root.isEmpty {
+            if resolvedPath == root || resolvedPath.hasPrefix(root + "/") {
+                return resolved
+            }
+        }
+
+        // If no allowed root matched
+        if skillDirectory != nil || !allowedRoots.isEmpty {
             throw SkillManagerError.invalidSkillPath(trimmed)
         }
         return resolved
@@ -215,7 +397,7 @@ extension SkillManager {
 
     func resolveScriptURL(
         _ rawScript: String,
-        skillDirectory: URL
+        skillDirectory: URL?
     ) throws -> URL {
         let trimmed = rawScript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {

@@ -83,9 +83,9 @@ public enum AIPromptPresets {
 
             Skill execution policy (mandatory):
             1) Before using any skill action, first call \(ktSkillMetainfoToolFunctionName) with the same action_id to read the manifest.
-            2) Then use the injected skill_file tool for that action_id to inspect concrete file content at least once.
-            3) Only after a successful skill_file read may you call the skill's specific injected proxy tool.
-            4) Never skip the skill_file step for skill actions, even if metadata looks sufficient.
+            2) Check the metadata response for "configured_directories" and "configured_parameters" — these are already set by the user and the execution runtime resolves them automatically.
+            3) When configured_directories are present, do NOT ask the user for directory paths — the skill already knows where its files are. Just pass the user's request (e.g. filename, task description) to the action proxy tool.
+            4) Use the injected skill_file tool to inspect manifest content at least once before calling the action proxy.
             5) If skill_file fails, explain the failure and do not continue with that skill action call.
             6) After the required skill metadata and skill file reads succeed, continue to the injected skill action call as soon as it is relevant. Do not stall by restating the plan.
 
@@ -162,7 +162,7 @@ public enum AIPromptPresets {
     public enum ToolDescriptions {
 
         public static let ktSkillMetainfo =
-            "Read the manifest and file index for a skill action. Returns the skill manifest metadata, references, scripts, and assets. Also injects the skill's file-reader and metadata tools into the next turn."
+            "Read the manifest and file index for a skill action. Returns the skill manifest metadata, references, scripts, assets, and configured parameter/directory names. Also injects the skill's file-reader, metadata, and execution proxy tools into the next turn."
 
         public static let contextAttachmentListing =
             "List attachments already stored in the active KeepTalking context, including ids, filenames, mime types, availability, and derived metadata. Use this only when you need a different earlier attachment or need to confirm attachment identity or metadata that is not already present in the current turn. Do not call this just to verify a file or image that was already attached or injected into the same turn."
@@ -203,21 +203,25 @@ public enum AIPromptPresets {
     /// mechanics (e.g. the filesystem blob bridge).
     public static func actAgentTypeGuidance(for kind: KeepTalkingActionStub.Kind) -> String {
         switch kind {
-        case .filesystem:
-            return """
-                Filesystem action — tools operate on the owning node's sandboxed directories.
-                file-to-blob: reads a local file and publishes it as a context attachment shared with all participants in this context; returns a blob_id. Use this when the task asks to share, send, or attach a file to the conversation.
-                blob-to-file: writes a context attachment identified by blob_id to a local file path; creates intermediate directories automatically. Use this when the task asks to save, materialise, or process a shared attachment on disk.
-                A blob_id from file-to-blob is the same ID that appears in kt_list_context_attachments — it is immediately visible to all other nodes in this context.
-                """
-        case .mcp:
-            return "MCP action — tools are provided by an external MCP server. Call only the tools relevant to the task; do not probe or invoke tools speculatively."
-        case .skill:
-            return "Skill action — this skill provides a directory of files, scripts, and a manifest. Manifest metadata and file tools are pre-loaded in your tool list. Read the most relevant files before calling the skill's action tool."
-        case .primitive:
-            return "Primitive action — this is a direct built-in operation. Pass the required arguments and call it once."
-        case .semanticRetrieval:
-            return "Semantic retrieval action — performs thread-memory search on a remote node. Use the retrieval tool to find relevant earlier threads from that node."
+            case .filesystem:
+                return """
+                    Filesystem action — tools operate on the owning node's sandboxed directories.
+                    file-to-blob: reads a local file and publishes it as a context attachment shared with all participants in this context; returns a blob_id. Use this when the task asks to share, send, or attach a file to the conversation.
+                    blob-to-file: writes a context attachment identified by blob_id to a local file path; creates intermediate directories automatically. Use this when the task asks to save, materialise, or process a shared attachment on disk.
+                    A blob_id from file-to-blob is the same ID that appears in kt_list_context_attachments — it is immediately visible to all other nodes in this context.
+                    """
+            case .mcp:
+                return
+                    "MCP action — tools are provided by an external MCP server. Call only the tools relevant to the task; do not probe or invoke tools speculatively."
+            case .skill:
+                return
+                    "Skill action — this skill provides a directory of files, scripts, and a manifest. Manifest metadata and file tools are pre-loaded in your tool list. Read the most relevant files before calling the skill's action tool."
+            case .primitive:
+                return
+                    "Primitive action — this is a direct built-in operation. Pass the required arguments and call it once."
+            case .semanticRetrieval:
+                return
+                    "Semantic retrieval action — performs thread-memory search on a remote node. Use the retrieval tool to find relevant earlier threads from that node."
         }
     }
 

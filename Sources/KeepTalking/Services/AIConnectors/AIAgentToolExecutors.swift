@@ -29,7 +29,8 @@ extension KeepTalkingClient {
         runtimeCatalog: KeepTalkingActionRuntimeCatalog,
         promptMessageID: UUID?,
         context: KeepTalkingContext,
-        agentTurnID: UUID? = nil
+        agentTurnID: UUID? = nil,
+        agentIntention: String? = nil
     ) async throws -> [AIOrchestrator.ToolExecution] {
         var executions: [AIOrchestrator.ToolExecution] = []
 
@@ -185,7 +186,8 @@ extension KeepTalkingClient {
                             definition: definition,
                             rawArguments: toolCall.function.arguments,
                             context: context,
-                            agentTurnID: agentTurnID
+                            agentTurnID: agentTurnID,
+                            agentIntention: agentIntention
                         )
                     case .skillMetadata(let skillContext):
                         payload = renderSkillMetadataPayload(
@@ -273,7 +275,8 @@ extension KeepTalkingClient {
         definition: KeepTalkingActionToolDefinition,
         rawArguments: String,
         context: KeepTalkingContext,
-        agentTurnID: UUID? = nil
+        agentTurnID: UUID? = nil,
+        agentIntention: String? = nil
     ) async throws -> String {
         let arguments = try parsedActionCallArguments(
             definition: definition,
@@ -285,6 +288,9 @@ extension KeepTalkingClient {
             contextID.uuidString.lowercased()
         )
         metadata.fields["tool_name"] = .string(functionName)
+        if let agentIntention {
+            metadata.fields["agent_intention"] = .string(agentIntention)
+        }
         if let targetName = definition.targetName?
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !targetName.isEmpty
@@ -368,7 +374,15 @@ extension KeepTalkingClient {
         functionName: String,
         context: KeepTalkingSkillCatalogContext
     ) -> String {
-        jsonString([
+        // Expose parameter names (not values) so the outer AI knows what's configured
+        let dirParams = context.bundle.parameters.keys
+            .filter { context.bundle.parameters[$0]?.hasPrefix("/") == true }
+            .sorted()
+        let otherParams = context.bundle.parameters.keys
+            .filter { context.bundle.parameters[$0]?.hasPrefix("/") != true }
+            .sorted()
+
+        return jsonString([
             "ok": context.loadError == nil,
             "function_name": functionName,
             "route_kind": "skill_metadata",
@@ -381,6 +395,8 @@ extension KeepTalkingClient {
             "scripts": context.scripts,
             "assets": context.assets,
             "manifest_preview": context.manifestPreview,
+            "configured_directories": dirParams,
+            "configured_parameters": otherParams,
             "error_message": context.loadError ?? "",
         ])
     }
@@ -426,10 +442,10 @@ extension KeepTalkingClient {
                 ?? String(decoding: rawData, as: UTF8.self)
             let content = clipped(fileText, maxCharacters: maxCharacters)
 
-            let rootPath = context.bundle.directory.standardizedFileURL.path
+            let rootPath = context.bundle.directory?.standardizedFileURL.path ?? ""
             let path = fileURL.standardizedFileURL.path
             let relativePath: String
-            if path.hasPrefix(rootPath + "/") {
+            if !rootPath.isEmpty && path.hasPrefix(rootPath + "/") {
                 relativePath = String(path.dropFirst(rootPath.count + 1))
             } else {
                 relativePath = path
@@ -616,8 +632,15 @@ extension KeepTalkingClient {
                 bundle: bundle
             )
 
-            // Register file + metadata tools into lazy registry on first access
+            // Register action proxy + file + metadata tools into lazy registry on first access
             if await !runtimeCatalog.lazyRegistry.isInitialized(actionID) {
+                let actionToolDef = makeSkillActionProxyDefinition(
+                    actionID: actionID,
+                    ownerNodeID: stub.ownerNodeID,
+                    bundle: bundle,
+                    descriptor: action.descriptor,
+                    supportsWakeAssist: stub.supportsWakeAssist
+                )
                 let fileToolDef = makeSkillFileReaderDefinition(
                     actionID: actionID,
                     ownerNodeID: stub.ownerNodeID,
@@ -629,6 +652,7 @@ extension KeepTalkingClient {
                     bundle: bundle
                 )
                 let skillRoutes: [String: KeepTalkingAgentToolRoute] = [
+                    actionToolDef.functionName: .actionProxy(actionToolDef),
                     fileToolDef.functionName: .skillFileLocal(skillContext),
                     metaToolDef.functionName: .skillMetadata(skillContext),
                 ]
@@ -637,7 +661,7 @@ extension KeepTalkingClient {
                     for: actionID
                 )
                 runtimeCatalog.append(
-                    definitions: [fileToolDef, metaToolDef],
+                    definitions: [actionToolDef, fileToolDef, metaToolDef],
                     routes: skillRoutes
                 )
             }

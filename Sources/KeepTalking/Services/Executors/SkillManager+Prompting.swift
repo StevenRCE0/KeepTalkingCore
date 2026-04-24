@@ -3,71 +3,87 @@ import MCP
 import OpenAI
 
 extension SkillManager {
-    func makeSkillTools(
-        allowScriptExecution: Bool
-    ) -> [ChatQuery.ChatCompletionToolParam] {
+    func makeSkillTools(context: SkillManifestContext) -> [ChatQuery.ChatCompletionToolParam] {
         var tools: [ChatQuery.ChatCompletionToolParam] = [
             ChatQuery.ChatCompletionToolParam(
                 function: .init(
                     name: Self.getFileToolName,
                     description:
-                        "Read a file from the skill directory. Use relative paths when possible.",
+                        "Read a file from the skill directory or any accessible directory. "
+                        + "Use a directory label (e.g. \"input_dir/file.txt\") or a path relative to the skill directory.",
                     parameters: JSONSchema(
                         .type(.object),
                         .properties([
                             "path": JSONSchema(
                                 .type(.string),
                                 .description(
-                                    "Path to read, relative to the skill directory."
-                                )
+                                    "Path to read. Use \"<dir_label>/filename\" for parameter directories "
+                                        + "or a relative path for the skill directory.")
                             ),
                             "max_characters": JSONSchema(
                                 .type(.integer),
-                                .description(
-                                    "Optional maximum characters to return."
-                                )
+                                .description("Optional maximum characters to return.")
                             ),
                         ]),
                         .additionalProperties(.boolean(true))
                     ),
                     strict: false
                 )
-            )
-        ]
-
-        guard allowScriptExecution else {
-            return tools
-        }
-
-        tools.append(
+            ),
             ChatQuery.ChatCompletionToolParam(
                 function: .init(
-                    name: Self.runScriptToolName,
+                    name: Self.listFilesToolName,
                     description:
-                        "Run a script inside the skill directory. Prefer files inside scripts/.",
+                        "List files in an accessible directory. "
+                        + "Use a directory label (e.g. \"input_dir\") to list files the user granted access to.",
                     parameters: JSONSchema(
                         .type(.object),
                         .properties([
-                            "script": JSONSchema(
+                            "directory": JSONSchema(
                                 .type(.string),
                                 .description(
-                                    "Script file path, relative to the skill directory or scripts/."
-                                )
-                            ),
-                            "args": JSONSchema(
-                                .type(.object),
-                                .description(
-                                    "Optional script arguments, usually an array of strings."
-                                ),
-                                .additionalProperties(.boolean(true))
-                            ),
+                                    "Directory label from the accessible directories list (e.g. \"input_dir\", \"output_dir\"), "
+                                        + "or a relative path within the skill directory.")
+                            )
                         ]),
-                        .additionalProperties(.boolean(true))
+                        .required(["directory"]),
+                        .additionalProperties(.boolean(false))
                     ),
                     strict: false
                 )
+            ),
+        ]
+
+        guard scriptExecutor != nil, !context.declaredTools.isEmpty else {
+            return tools
+        }
+
+        for toolName in context.declaredTools.keys.sorted() {
+            let scriptPath = context.declaredTools[toolName]!
+            tools.append(
+                ChatQuery.ChatCompletionToolParam(
+                    function: .init(
+                        name: toolName,
+                        description: "Run the \(toolName) skill tool (\(scriptPath)). "
+                            + "Pass the full CLI arguments as a plain text string — "
+                            + "the runtime resolves directory labels and env values automatically.",
+                        parameters: JSONSchema(
+                            .type(.object),
+                            .properties([
+                                "args": JSONSchema(
+                                    .type(.string),
+                                    .description(
+                                        "Raw CLI arguments string, e.g. '--text \"hello world\" --voice Samantha'. "
+                                            + "Use directory labels (e.g. input_dir/file.txt) for paths.")
+                                )
+                            ]),
+                            .additionalProperties(.boolean(false))
+                        ),
+                        strict: false
+                    )
+                )
             )
-        )
+        }
         return tools
     }
 
@@ -75,8 +91,7 @@ extension SkillManager {
         actionID: UUID,
         bundle: KeepTalkingSkillBundle,
         call: KeepTalkingActionCall,
-        manifestContext: SkillManifestContext,
-        allowScriptExecution: Bool
+        manifestContext: SkillManifestContext
     ) -> String {
         let metadataJSON = encodeJSON(call.metadata.fields)
         let argumentsJSON = encodeJSON(call.arguments)
@@ -85,22 +100,50 @@ extension SkillManager {
         let referenceIndex = manifestContext.referencesFiles.joined(separator: "\n")
         let assetIndex = manifestContext.assets.joined(separator: "\n")
 
+        let declaredToolsList =
+            manifestContext.declaredTools.isEmpty
+            ? "<none>"
+            : manifestContext.declaredTools.sorted(by: { $0.key < $1.key })
+                .map { "- \($0.key) → \($0.value)" }.joined(separator: "\n")
+
+        // Build accessible directories list from parameters that look like paths
+        let directoryParams = bundle.parameters.filter { _, value in
+            value.hasPrefix("/") && FileManager.default.fileExists(atPath: value)
+        }
+        let accessibleDirsList: String
+        if directoryParams.isEmpty {
+            accessibleDirsList = "<none>"
+        } else {
+            accessibleDirsList = directoryParams.sorted(by: { $0.key < $1.key })
+                .map { "- \($0.key) (use \"\($0.key)/\" prefix to access files)" }
+                .joined(separator: "\n")
+        }
+
         return """
             You are executing a KeepTalking skill action.
             Action ID: \(actionID.uuidString.lowercased())
             Skill Name: \(bundle.name)
-            Skill Directory: \(bundle.directory.path)
-            Skill Manifest: \(manifestContext.manifestURL.path)
 
-            Execution requirements:
-            - Extract and use metadata from the request and skill manifest.
-            - Use tool calls for file reads when needed.
-            - If a tool call can advance the request, make the tool call instead of only describing the next step.
-            - Script execution is allowed only when explicitly requested.
-            - Keep script execution scoped to this skill directory.
+            ## CRITICAL: You MUST call tool functions to execute scripts.
+            You have the following executable tools available. Call them directly — do NOT output
+            shell commands or ask the user to run anything manually.
+            \(declaredToolsList)
+
+            ## Accessible directories
+            These directories were granted by the user. Use \(Self.listFilesToolName) to discover
+            files, and reference them by label (e.g. "input_dir/filename.ext") when passing paths
+            to scripts. The runtime resolves labels to real paths automatically.
+            \(accessibleDirsList)
+
+            ## File tools
+            - \(Self.listFilesToolName): List files in an accessible directory by label.
+            - \(Self.getFileToolName): Read a file from the skill directory or an accessible directory.
+
+            ## Execution requirements
+            - ALWAYS call a declared tool to fulfill the request. Never just describe a command.
+            - If a filename is ambiguous or uncertain, call \(Self.listFilesToolName) first to find the exact name.
+            - Script output (stdout/stderr) is returned directly.
             - Be explicit and concise in the final answer.
-
-            Script execution allowed for this request: \(allowScriptExecution ? "yes" : "no")
 
             Request metadata JSON:
             \(metadataJSON)
@@ -121,43 +164,9 @@ extension SkillManager {
             assets/
             \(assetIndex.isEmpty ? "<none>" : assetIndex)
 
-            Manifest content (possibly truncated):
+            Manifest content:
             \(manifestContext.manifestText)
             """
-    }
-
-    func shouldAllowScriptExecution(
-        call: KeepTalkingActionCall,
-        manifestContext: SkillManifestContext
-    ) -> Bool {
-        guard !manifestContext.scripts.isEmpty else {
-            return false
-        }
-        guard scriptExecutor != nil else {
-            return false
-        }
-
-        if call.arguments["execute_scripts"]?.boolValue == true {
-            return true
-        }
-        if call.metadata.fields["execute_scripts"]?.boolValue == true {
-            return true
-        }
-
-        let promptText =
-            call.arguments["prompt"]?.stringValue?.lowercased() ?? ""
-        if promptText.isEmpty {
-            return false
-        }
-        let executionKeywords = [
-            "run script",
-            "execute script",
-            "run ",
-            "execute ",
-            "build",
-            "test",
-        ]
-        return executionKeywords.contains { promptText.contains($0) }
     }
 
     func makeSkillUserPrompt(call: KeepTalkingActionCall) -> String {

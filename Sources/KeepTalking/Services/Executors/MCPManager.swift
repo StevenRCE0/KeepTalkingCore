@@ -775,7 +775,7 @@ public actor MCPManager {
         let text = String(decoding: data, as: UTF8.self)
         let actionIDLabel = actionID.uuidString.lowercased()
         for line in text.split(whereSeparator: \.isNewline) where !line.isEmpty {
-            log("[mcp][stdio][stderr] action=\(actionIDLabel) \(line)")
+            log("[ACT/mcp/stderr] action=\(actionIDLabel) \(line)")
         }
     }
 

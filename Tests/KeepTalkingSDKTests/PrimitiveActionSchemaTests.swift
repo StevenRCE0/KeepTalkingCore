@@ -6,7 +6,7 @@ import Testing
 
 struct PrimitiveActionSchemaTests {
     @Test("ask-for-file schema exposes picker selection modes")
-    func askForFileSchemaIncludesPickerModes() throws {
+    func askForFileSchemaIncludesPickerModes() async throws {
         let askForFileParameters = JSONSchema(
             .type(.object),
             .properties([
@@ -31,7 +31,7 @@ struct PrimitiveActionSchemaTests {
                 toolParameters: { _ in askForFileParameters },
                 callAction: { _, _ in KeepTalkingPrimitiveActionResponse(text: "") }
             ),
-            localStore: try await KeepTalkingInMemoryStore()
+            localStore: KeepTalkingInMemoryStore()
         )
         let definition = client.makePrimitiveActionProxyDefinition(
             actionID: UUID(),

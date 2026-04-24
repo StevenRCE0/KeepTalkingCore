@@ -25,6 +25,7 @@ public protocol SkillScriptExecuting: Sendable {
         scriptURL: URL,
         arguments: [String],
         currentDirectory: URL,
+        environment: [String: String],
         actionID: UUID,
         timeoutSeconds: TimeInterval,
         sandboxPolicy: KTSandboxPolicy?

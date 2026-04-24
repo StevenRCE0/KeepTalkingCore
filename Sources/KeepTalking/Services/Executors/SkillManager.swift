@@ -53,21 +53,26 @@ struct SkillManifestContext: Sendable {
     let referencesFiles: [String]
     let scripts: [String]
     let assets: [String]
+    /// Tool name → script relative path, parsed from `scripts.<name>` frontmatter keys.
+    /// These are the only tools the agent is allowed to call.
+    let declaredTools: [String: String]
 }
 
 /// Executes skill-backed actions by exposing skill files and scripts as AI tools.
 public actor SkillManager {
     static let getFileToolName = "kt_skill_get_file"
+    static let listFilesToolName = "kt_skill_list_files"
     static let runScriptToolName = "kt_skill_run_script"
     static let manifestMaxCharacters = 20_000
     static let fileReadMaxCharacters = 30_000
     static let scriptOutputMaxCharacters = 18_000
 
-    let aiConnector: (any AIConnector)?
+    public nonisolated let aiConnector: (any AIConnector)?
     let scriptExecutor: (any SkillScriptExecuting)?
     let scriptTimeoutSeconds: TimeInterval
 
-    private var skillBundlesByActionID: [UUID: KeepTalkingSkillBundle] = [:]
+    private(set) public var onLog: ((String) -> Void)?
+    var skillBundlesByActionID: [UUID: KeepTalkingSkillBundle] = [:]
 
     /// Creates a skill manager for a node runtime.
     public init(
@@ -82,6 +87,19 @@ public actor SkillManager {
         self.scriptTimeoutSeconds = scriptTimeoutSeconds
     }
 
+    /// Creates a standalone skill manager with only an AI connector.
+    /// Intended for planning and analysis tasks that do not require script execution.
+    public init(aiConnector: any AIConnector) {
+        self.aiConnector = aiConnector
+        self.scriptExecutor = nil
+        self.scriptTimeoutSeconds = 20
+        self.onLog = nil
+    }
+
+    public func setLogHandler(_ handler: ((String) -> Void)?) {
+        self.onLog = handler
+    }
+
     /// Registers a skill action so it can be resolved and executed later.
     public func registerSkillAction(_ action: KeepTalkingAction) async throws {
         guard case .skill(let skillBundle) = action.payload else {
@@ -90,7 +108,9 @@ public actor SkillManager {
         guard let actionID = action.id else {
             throw SkillManagerError.missingActionID
         }
-        try validateSkillDirectory(skillBundle.directory)
+        if let directory = skillBundle.directory {
+            try validateSkillDirectory(directory)
+        }
         skillBundlesByActionID[actionID] = skillBundle
     }
 
@@ -137,12 +157,28 @@ public actor SkillManager {
 
         try await registerIfNeeded(action)
 
-        let manifestContext = try loadManifestContext(for: skillBundle.directory)
-        let allowScriptExecution = shouldAllowScriptExecution(
-            call: call,
-            manifestContext: manifestContext
+        var manifestContext = try loadManifestContext(
+            for: skillBundle.directory,
+            parameters: skillBundle.parameters
         )
-        let tools = makeSkillTools(allowScriptExecution: allowScriptExecution)
+        // Tool declarations come from the bundle's atomicTools (persisted in DB),
+        // not from SKILL.md frontmatter parsing.
+        let bundleTools = skillBundle.declaredTools
+        if !bundleTools.isEmpty {
+            var merged = manifestContext.declaredTools
+            for (name, path) in bundleTools { merged[name] = path }
+            manifestContext = SkillManifestContext(
+                manifestURL: manifestContext.manifestURL,
+                manifestText: manifestContext.manifestText,
+                manifestMetadata: manifestContext.manifestMetadata,
+                referencesFiles: manifestContext.referencesFiles,
+                scripts: manifestContext.scripts,
+                assets: manifestContext.assets,
+                declaredTools: merged
+            )
+        }
+        let resolvedContext = manifestContext
+        let tools = makeSkillTools(context: resolvedContext)
         var messages: [ChatQuery.ChatCompletionMessageParam] = [
             .developer(
                 .init(
@@ -151,8 +187,7 @@ public actor SkillManager {
                             actionID: actionID,
                             bundle: skillBundle,
                             call: call,
-                            manifestContext: manifestContext,
-                            allowScriptExecution: allowScriptExecution
+                            manifestContext: resolvedContext
                         )
                     )
                 )
@@ -174,6 +209,7 @@ public actor SkillManager {
                         toolCalls,
                         actionID: actionID,
                         skillDirectory: skillBundle.directory,
+                        manifestContext: resolvedContext,
                         sandboxPolicy: sandboxPolicy
                     )
                 }
@@ -183,7 +219,7 @@ public actor SkillManager {
                 messages.append(assistantMessage)
             }
             if let assistantText = turn.assistantText,
-                !assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                !assistantText.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty
             {
                 latestAssistantText = assistantText
             }
@@ -195,6 +231,7 @@ public actor SkillManager {
                     turn.toolCalls,
                     actionID: actionID,
                     skillDirectory: skillBundle.directory,
+                    manifestContext: resolvedContext,
                     sandboxPolicy: sandboxPolicy
                 ).map { .tool($0) }
             )

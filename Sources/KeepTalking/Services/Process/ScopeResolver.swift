@@ -14,62 +14,73 @@ public enum ScopeResolver {
         for action: KeepTalkingAction
     ) -> KeepTalkingActionDescriptor? {
         switch action.payload {
-        case .skill(let bundle):
-            return KeepTalkingActionDescriptor(
-                subject: KeepTalkingActionResourceWithDescription(
-                    description: bundle.name,
-                    resource: .command([[bundle.directory.path]])
-                ),
-                action: KeepTalkingActionWithDescription(
-                    description: "skill execution",
-                    verbs: [.read, .execute]
-                ),
-                object: KeepTalkingActionResourceWithDescription(
-                    description: bundle.directory.path,
-                    resource: .filePaths([bundle.directory])
-                )
-            )
+            case .skill(let bundle):
+                let dirPath = bundle.directory?.path ?? ""
+                let fileResources: [URL] = bundle.directory.map { [$0] } ?? []
 
-        case .mcpBundle(let bundle):
-            switch bundle.service {
-            case .stdio(let arguments, _):
+                // Split parameters: path values → sandbox directories, others → env vars
+                let envParams = bundle.parameters.filter { !$0.value.hasPrefix("/") && !$0.value.isEmpty }
+                let dirParams = bundle.parameters
+                    .filter { $0.value.hasPrefix("/") }
+                    .reduce(into: [String: URL]()) { $0[$1.key] = URL(fileURLWithPath: $1.value) }
+
                 return KeepTalkingActionDescriptor(
                     subject: KeepTalkingActionResourceWithDescription(
                         description: bundle.name,
-                        resource: .command([arguments])
+                        resource: .command([[dirPath]])
                     ),
                     action: KeepTalkingActionWithDescription(
-                        description: "MCP stdio",
-                        verbs: [.execute]
+                        description: "skill execution",
+                        verbs: [.read, .execute]
                     ),
                     object: KeepTalkingActionResourceWithDescription(
-                        description: arguments.first ?? "process",
-                        resource: .command([arguments])
-                    )
+                        description: dirPath,
+                        resource: .filePaths(fileResources)
+                    ),
+                    environment: envParams.isEmpty ? nil : envParams,
+                    directories: dirParams.isEmpty ? nil : dirParams
                 )
 
-            case .http(let url, _, _, _):
-                return KeepTalkingActionDescriptor(
-                    subject: KeepTalkingActionResourceWithDescription(
-                        description: bundle.name,
-                        resource: .urls([url])
-                    ),
-                    action: KeepTalkingActionWithDescription(
-                        description: "MCP HTTP",
-                        verbs: [.network, .callTool]
-                    ),
-                    object: KeepTalkingActionResourceWithDescription(
-                        description: url.absoluteString,
-                        resource: .urls([url])
-                    )
-                )
-            }
+            case .mcpBundle(let bundle):
+                switch bundle.service {
+                    case .stdio(let arguments, _):
+                        return KeepTalkingActionDescriptor(
+                            subject: KeepTalkingActionResourceWithDescription(
+                                description: bundle.name,
+                                resource: .command([arguments])
+                            ),
+                            action: KeepTalkingActionWithDescription(
+                                description: "MCP stdio",
+                                verbs: [.execute]
+                            ),
+                            object: KeepTalkingActionResourceWithDescription(
+                                description: arguments.first ?? "process",
+                                resource: .command([arguments])
+                            )
+                        )
 
-        case .filesystem(let bundle):
-            return filesystemDescriptor(for: bundle, mask: .all)
+                    case .http(let url, _, _, _):
+                        return KeepTalkingActionDescriptor(
+                            subject: KeepTalkingActionResourceWithDescription(
+                                description: bundle.name,
+                                resource: .urls([url])
+                            ),
+                            action: KeepTalkingActionWithDescription(
+                                description: "MCP HTTP",
+                                verbs: [.network, .callTool]
+                            ),
+                            object: KeepTalkingActionResourceWithDescription(
+                                description: url.absoluteString,
+                                resource: .urls([url])
+                            )
+                        )
+                }
 
-        case .primitive, .semanticRetrieval:
-            return nil
+            case .filesystem(let bundle):
+                return filesystemDescriptor(for: bundle, mask: .all)
+
+            case .primitive, .semanticRetrieval:
+                return nil
         }
     }
 
@@ -118,7 +129,8 @@ public enum ScopeResolver {
         additionalGrants: [KeepTalkingActionGrant] = []
     ) -> KeepTalkingActionDescriptor {
         // Start with the action's explicit descriptor, fall back to implicit
-        let base = action.descriptor
+        let base =
+            action.descriptor
             ?? implicitDescriptor(for: action)
             ?? KeepTalkingActionDescriptor()
 
@@ -173,7 +185,9 @@ public enum ScopeResolver {
                     description: base.object?.description ?? "",
                     resource: $0
                 )
-            }
+            },
+            environment: base.environment,
+            directories: base.directories
         )
     }
 
@@ -201,16 +215,16 @@ public enum ScopeResolver {
     ) {
         guard let resource else { return }
         switch resource {
-        case .filePaths(let paths):
-            for path in paths where !filePaths.contains(path) {
-                filePaths.append(path)
-            }
-        case .urls(let u):
-            for url in u where !urls.contains(url) {
-                urls.append(url)
-            }
-        case .command(let cmds):
-            commands.append(contentsOf: cmds)
+            case .filePaths(let paths):
+                for path in paths where !filePaths.contains(path) {
+                    filePaths.append(path)
+                }
+            case .urls(let u):
+                for url in u where !urls.contains(url) {
+                    urls.append(url)
+                }
+            case .command(let cmds):
+                commands.append(contentsOf: cmds)
         }
     }
 }
