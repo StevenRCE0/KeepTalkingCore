@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 import MCP
 import OpenAI
@@ -424,4 +423,3 @@ extension SkillManager {
         throw SkillManagerError.invalidSkillPath(trimmed)
     }
 }
-#endif

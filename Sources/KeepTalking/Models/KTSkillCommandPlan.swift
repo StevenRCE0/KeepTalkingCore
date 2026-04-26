@@ -35,6 +35,10 @@ public struct KTSkillCommandPlan: Codable, Sendable {
     public var rationale: String
     public var requiredEnv: [String]
     public var requiredDirectories: [String]
+    /// Network hosts the skill needs egress to (e.g. "api.github.com").
+    public var requiredNetworkHosts: [String]
+    /// Subset of `requiredNetworkHosts` the user explicitly granted at plan time.
+    public var grantedNetworkHosts: [String]
     public var commands: [KTSkillAtomicCommand]
     public var suggestedManifest: String?
     public var suggestedScripts: [String: String]?  // [Path: Content]
@@ -52,6 +56,8 @@ public struct KTSkillCommandPlan: Codable, Sendable {
         rationale: String,
         requiredEnv: [String] = [],
         requiredDirectories: [String] = [],
+        requiredNetworkHosts: [String] = [],
+        grantedNetworkHosts: [String] = [],
         commands: [KTSkillAtomicCommand]
     ) {
         self.skillActionID = skillActionID
@@ -59,6 +65,8 @@ public struct KTSkillCommandPlan: Codable, Sendable {
         self.rationale = rationale
         self.requiredEnv = requiredEnv
         self.requiredDirectories = requiredDirectories
+        self.requiredNetworkHosts = requiredNetworkHosts
+        self.grantedNetworkHosts = grantedNetworkHosts
         self.commands = commands
         self.suggestedManifest = nil
         self.suggestedScripts = nil

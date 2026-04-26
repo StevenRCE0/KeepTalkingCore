@@ -28,6 +28,11 @@ public struct KeepTalkingSkillBundle: KeepTalkingActionBundle {
     /// Labelled directory keys the skill needs access to (e.g. "project_root").
     /// Keys only — the user supplies actual paths via `parameters`.
     public var requiredDirectories: [String]
+    /// Network hosts the skill needs egress to (e.g. "api.github.com").
+    /// Whether the user actually granted each host is reflected in `grantedNetworkHosts`.
+    public var requiredNetworkHosts: [String]
+    /// Subset of `requiredNetworkHosts` the user explicitly granted at plan time.
+    public var grantedNetworkHosts: [String]
 
     public init(
         id: UUID = UUID(),
@@ -38,7 +43,9 @@ public struct KeepTalkingSkillBundle: KeepTalkingActionBundle {
         toolsAnalysed: Bool = false,
         atomicTools: [KTSkillAtomicCommand] = [],
         requiredEnv: [String] = [],
-        requiredDirectories: [String] = []
+        requiredDirectories: [String] = [],
+        requiredNetworkHosts: [String] = [],
+        grantedNetworkHosts: [String] = []
     ) {
         self.id = id
         self.name = name
@@ -49,6 +56,8 @@ public struct KeepTalkingSkillBundle: KeepTalkingActionBundle {
         self.atomicTools = atomicTools
         self.requiredEnv = requiredEnv
         self.requiredDirectories = requiredDirectories
+        self.requiredNetworkHosts = requiredNetworkHosts
+        self.grantedNetworkHosts = grantedNetworkHosts
     }
 }
 

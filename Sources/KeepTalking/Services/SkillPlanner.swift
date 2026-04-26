@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 import MCP
 import OpenAI
@@ -23,17 +22,21 @@ public enum KeepTalkingSkillPlannerEvent: Sendable {
     case declaringTool(verb: String, intent: String)
     case requiringEnv(name: String)
     case requiringDirectory(label: String)
+    case requiringNetwork(host: String, purpose: String)
+    case requiringHTTPURL(serviceName: String)
     case registeringScript(toolName: String, path: String)
     case suggestingScript(path: String)
     case creatingShortcut(name: String)
     case creatingPrimitive(kind: String)
+    case creatingHTTPMCP(url: URL, name: String)
     case finalizing
 }
 
-/// The outcome of a planner run: either a full skill plan or a direct primitive/shortcut action.
+/// The outcome of a planner run: either a full skill plan or a direct primitive/shortcut/HTTP-MCP action.
 public enum KeepTalkingSkillPlannerResult: Sendable {
     case plan(KTSkillCommandPlan)
     case directAction(KeepTalkingPrimitiveBundle)
+    case directHTTPMCP(url: URL, name: String, indexDescription: String, headers: [String: String])
 }
 
 /// AI-driven planner that analyses a skill bundle by calling structured tools
@@ -51,10 +54,13 @@ public actor KeepTalkingSkillPlanner {
     private static let declareToolTool = "kt_declare_tool"
     private static let requireEnvTool = "kt_require_env"
     private static let requireDirTool = "kt_require_directory"
+    private static let requireNetworkTool = "kt_require_network"
     private static let registerScriptTool = "kt_register_script"
     private static let suggestScriptTool = "kt_suggest_script"
     private static let createShortcutTool = "kt_create_shortcut"
     private static let createPrimitiveTool = "kt_create_primitive"
+    private static let requireHTTPURLTool = "kt_require_http_url"
+    private static let createHTTPMCPTool = "kt_create_http_mcp"
     private static let finalizeTool = "kt_finalize"
 
     private static let maxTurns = 20
@@ -118,6 +124,8 @@ public actor KeepTalkingSkillPlanner {
         var commands: [KTSkillAtomicCommand] = []
         var requiredEnv: [String] = []
         var requiredDirectories: [String] = []
+        var requiredNetworkHosts: [String] = []
+        var grantedNetworkHosts: [String] = []
         var toolDeclarations: [String: String] = [:]
         var suggestedScripts: [String: String] = [:]
         var collectedParameters: [String: String] = [:]
@@ -251,6 +259,20 @@ public actor KeepTalkingSkillPlanner {
                             result = "Noted. User skipped — no directory granted."
                         }
 
+                    case Self.requireNetworkTool:
+                        let host = string(args["host"]) ?? ""
+                        let purpose = string(args["purpose"]) ?? ""
+                        let granted = await onEvent?(.requiringNetwork(host: host, purpose: purpose))
+                        if !host.isEmpty && !requiredNetworkHosts.contains(host) {
+                            requiredNetworkHosts.append(host)
+                        }
+                        if let granted, granted.lowercased() == "granted" {
+                            if !grantedNetworkHosts.contains(host) { grantedNetworkHosts.append(host) }
+                            result = "Granted. The skill may reach \(host) at runtime."
+                        } else {
+                            result = "User denied or skipped network access to \(host)."
+                        }
+
                     case Self.registerScriptTool:
                         let toolName = string(args["tool_name"]) ?? ""
                         let scriptPath = string(args["script_path"]) ?? ""
@@ -297,6 +319,43 @@ public actor KeepTalkingSkillPlanner {
                                 indexDescription: desc,
                                 action: kind
                             ))
+
+                    case Self.requireHTTPURLTool:
+                        let serviceName = string(args["service_name"]) ?? ""
+                        let providedURL = await onEvent?(.requiringHTTPURL(serviceName: serviceName))
+                        if let provided = providedURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+                            !provided.isEmpty
+                        {
+                            result = "User provided URL: \(provided)"
+                        } else {
+                            result =
+                                "User did not provide a URL. Stop and call kt_finalize without creating an HTTP MCP."
+                        }
+
+                    case Self.createHTTPMCPTool:
+                        let urlStr = string(args["url"]) ?? ""
+                        let mcpName = string(args["name"]) ?? urlStr
+                        let desc = string(args["description"]) ?? ""
+                        let headers: [String: String] = {
+                            guard case .object(let dict)? = args["headers"] else { return [:] }
+                            var out: [String: String] = [:]
+                            for (k, v) in dict {
+                                if case .string(let s) = v { out[k] = s }
+                            }
+                            return out
+                        }()
+                        guard let url = URL(string: urlStr), url.scheme?.lowercased().hasPrefix("http") == true
+                        else {
+                            result = "Error: invalid url '\(urlStr)'."
+                            break
+                        }
+                        _ = await onEvent?(.creatingHTTPMCP(url: url, name: mcpName))
+                        return .directHTTPMCP(
+                            url: url,
+                            name: mcpName.isEmpty ? (url.host ?? urlStr) : mcpName,
+                            indexDescription: desc,
+                            headers: headers
+                        )
 
                     case Self.finalizeTool:
                         rationale = string(args["rationale"]) ?? ""
@@ -347,6 +406,8 @@ public actor KeepTalkingSkillPlanner {
             rationale: rationale ?? "",
             requiredEnv: requiredEnv,
             requiredDirectories: requiredDirectories,
+            requiredNetworkHosts: requiredNetworkHosts,
+            grantedNetworkHosts: grantedNetworkHosts,
             commands: commands
         )
         if !toolDeclarations.isEmpty { planResult.toolDeclarations = toolDeclarations }
@@ -436,13 +497,22 @@ public actor KeepTalkingSkillPlanner {
         return """
             You are a KeepTalking action classifier and planner.
 
-            ## Step 1 — Check primitives and shortcuts FIRST
+            ## Step 1 — Check primitives, shortcuts, and HTTP MCP FIRST
 
             Before doing ANYTHING else, check whether the user's intent can be fulfilled by \
-            a built-in primitive action or an installed macOS Shortcut. If it can:
-            - Call kt_create_primitive or kt_create_shortcut as your ONLY tool call.
+            a built-in primitive action, an installed macOS Shortcut, or a remote HTTP MCP server. If it can:
+            - Call kt_create_primitive, kt_create_shortcut, or kt_create_http_mcp as your ONLY tool call.
             - These are terminating — do NOT call any other tools before or after.
-            - Prefer primitives over shortcuts when both could apply.
+            - Prefer primitives, then shortcuts, then HTTP MCP when more than one could apply.
+
+            ### HTTP MCP guidance
+            If the user wants to connect a remote service (e.g. "connect Linear", "add the GitHub MCP", \
+            or provides an https URL), use kt_create_http_mcp:
+            - If the prompt contains an https URL, use it directly.
+            - If the prompt names a service whose MCP endpoint you know with high confidence, use that URL.
+            - Otherwise call kt_require_http_url(service_name) to ask the user for the endpoint, then \
+              call kt_create_http_mcp with the URL they provide.
+            - OAuth scope selection and authentication are handled by the app — do NOT prompt for credentials.
 
             Available Primitive Actions:
             \(Self.primitiveActionList)
@@ -462,6 +532,8 @@ public actor KeepTalkingSkillPlanner {
             - For each distinct operation the skill performs, call kt_declare_tool.
             - For each env var needed at runtime (API keys, tokens), call kt_require_env.
             - For each external directory needed, call kt_require_directory.
+            - For each remote host the skill must reach (HTTP APIs, etc.), call kt_require_network \
+              with the bare hostname and a short purpose. The user grants access per host.
             - If the skill processes or transforms files, you MUST call kt_require_directory \
             with descriptive labels like "input_dir", "output_dir", or "media_files".
             - For each script callable as a named tool, call kt_register_script.
@@ -528,6 +600,16 @@ public actor KeepTalkingSkillPlanner {
                 required: ["label"]),
 
             tool(
+                name: Self.requireNetworkTool,
+                description:
+                    "Request network egress to a specific host the skill needs to reach. The user grants per host.",
+                properties: [
+                    "host": (.string, "Hostname only, e.g. 'api.github.com'. Do not include scheme or path."),
+                    "purpose": (.string, "Short reason this host is needed."),
+                ],
+                required: ["host", "purpose"]),
+
+            tool(
                 name: Self.registerScriptTool,
                 description: "Register a script as a named callable tool in SKILL.md frontmatter.",
                 properties: [
@@ -565,6 +647,30 @@ public actor KeepTalkingSkillPlanner {
                 required: ["action_kind", "description"]),
 
             tool(
+                name: Self.requireHTTPURLTool,
+                description:
+                    "Ask the user for an HTTP MCP endpoint URL when the prompt does not include one and you do not know a well-known URL for the named service.",
+                properties: [
+                    "service_name": (.string, "The service the user wants to connect, e.g. 'Linear', 'GitHub'.")
+                ],
+                required: ["service_name"]),
+
+            tool(
+                name: Self.createHTTPMCPTool,
+                description:
+                    "Create an HTTP MCP action. Use when the user wants to connect a remote MCP server over HTTP. Terminating — do NOT call other tools after.",
+                properties: [
+                    "url": (.string, "Full https URL of the MCP endpoint."),
+                    "name": (.string, "Display name (e.g. 'Linear', 'GitHub MCP')."),
+                    "description": (.string, "One-sentence description of what this MCP exposes."),
+                    "headers": (
+                        .object,
+                        "Optional fixed request headers (e.g. API tokens). OAuth is handled separately by the app."
+                    ),
+                ],
+                required: ["url", "name", "description"]),
+
+            tool(
                 name: Self.finalizeTool,
                 description: "Finalize the analysis. MUST be called once all tools and scopes are declared.",
                 properties: [
@@ -580,7 +686,7 @@ public actor KeepTalkingSkillPlanner {
 
     // MARK: - Tool builder
 
-    private enum ParamType { case string, array }
+    private enum ParamType { case string, array, object }
 
     private func tool(
         name: String, description: String,
@@ -591,6 +697,7 @@ public actor KeepTalkingSkillPlanner {
             switch type {
                 case .string: return JSONSchema(.type(.string), .description(desc))
                 case .array: return JSONSchema(.type(.array), .description(desc), .items(JSONSchema(.type(.string))))
+                case .object: return JSONSchema(.type(.object), .description(desc))
             }
         }
         return ChatQuery.ChatCompletionToolParam(
@@ -625,4 +732,3 @@ public actor KeepTalkingSkillPlanner {
         return arr.compactMap { if case .string(let s) = $0 { return s } else { return nil } }
     }
 }
-#endif
