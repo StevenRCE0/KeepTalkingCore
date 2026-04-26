@@ -154,6 +154,7 @@ extension SkillManager {
             environment["SKILL_DIR"] = skillDir.path
         }
 
+        #if os(macOS)
         let execution = try await scriptExecutor.runScript(
             scriptURL: scriptURL,
             arguments: scriptArguments,
@@ -179,6 +180,18 @@ extension SkillManager {
                 print(msg)
             }
         }
+        #else
+        // iOS protocol does not accept `environment` or `sandboxPolicy`; the
+        // env dict is dropped on this platform.
+        _ = environment
+        let execution = try await scriptExecutor.runScript(
+            scriptURL: scriptURL,
+            arguments: scriptArguments,
+            currentDirectory: skillDirectory ?? URL(fileURLWithPath: "/"),
+            actionID: actionID,
+            timeoutSeconds: scriptTimeoutSeconds
+        )
+        #endif
 
         let joinedCommand = execution.command.joined(separator: " ")
         let stdout = clipped(

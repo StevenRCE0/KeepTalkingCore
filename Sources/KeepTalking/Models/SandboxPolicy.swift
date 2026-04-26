@@ -1,6 +1,6 @@
-#if os(macOS)
 import Foundation
 
+#if os(macOS)
 /// A compiled sandbox policy ready for platform-specific process confinement.
 ///
 /// Consumers treat this as opaque — they pass it through to a `ProcessSandboxing`
@@ -21,5 +21,14 @@ public struct KTSandboxPolicy: Sendable {
         self.descriptor = descriptor
         self.platformPayload = platformPayload
     }
+}
+#else
+/// Stub on platforms without process sandboxing. Lets the cross-platform
+/// `SkillManager` API keep a `sandboxPolicy:` parameter without forcing every
+/// call site to be `#if os(macOS)`. iOS code paths ignore the value — script
+/// execution there is delegated to a different protocol that doesn't take a
+/// sandbox policy.
+public struct KTSandboxPolicy: Sendable {
+    public init() {}
 }
 #endif
