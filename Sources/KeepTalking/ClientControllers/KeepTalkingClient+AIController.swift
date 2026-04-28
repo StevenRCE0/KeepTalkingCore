@@ -44,7 +44,8 @@ extension KeepTalkingClient {
         model: OpenAIModel = "gpt-5-codex",
         actModel: OpenAIModel? = nil,
         roleName: String = "ai",
-        prefix: String = "@AI "
+        prefix: String = "@AI ",
+        reasoningEffort: ChatQuery.ReasoningEffort? = nil
     ) async -> UUID {
         let context = KeepTalkingContext(id: contextID)
         let preview = String(prompt.prefix(120))
@@ -92,7 +93,8 @@ extension KeepTalkingClient {
                 actModel: actModel,
                 roleName: roleName,
                 preparedPromptAttachments: preparedAttachments,
-                agentTurnID: agentTurnID
+                agentTurnID: agentTurnID,
+                reasoningEffort: reasoningEffort
             )
         }
 
@@ -157,7 +159,8 @@ extension KeepTalkingClient {
         actModel: OpenAIModel?,
         roleName: String,
         preparedPromptAttachments: [KeepTalkingPreparedAttachment],
-        agentTurnID: UUID = UUID()
+        agentTurnID: UUID = UUID(),
+        reasoningEffort: ChatQuery.ReasoningEffort? = nil
     ) async throws -> String {
         guard let aiConnector = try await resolveAIConnector() else {
             throw KeepTalkingClientError.aiNotConfigured
@@ -329,9 +332,21 @@ extension KeepTalkingClient {
             }
         )
 
+        let effort = reasoningEffort
         let orchestrator = AIOrchestrator(
             dependencies: .init(
                 aiConnector: aiConnector,
+                turnRunner: { [aiConnector] messages, tools, model, toolChoice, stage in
+                    try await aiConnector.completeTurn(
+                        messages: messages,
+                        tools: tools,
+                        model: model,
+                        toolChoice: toolChoice,
+                        stage: stage,
+                        reasoningEffort: effort,
+                        toolExecutor: nil
+                    )
+                },
                 assistantMessageBuilder: { [self] turn in
                     assistantMessage(from: turn)
                 },

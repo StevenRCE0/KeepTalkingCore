@@ -65,7 +65,25 @@ public protocol AIConnector: Actor, Sendable {
     ///   - model: A hint at which model to use (implementations may ignore this).
     ///   - toolChoice: Whether/how the model should pick a tool.
     ///   - stage: The current orchestrator stage (planning/execution).
+    ///   - reasoningEffort: Optional reasoning effort override; `nil` defers to the connector default.
     ///   - toolExecutor: An optional executor for running tools natively during the turn (e.g. for Apple Intelligence native loops).
+    func completeTurn(
+        messages: [ChatQuery.ChatCompletionMessageParam],
+        tools: [OpenAITool],
+        model: OpenAIModel,
+        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam?,
+        stage: AIStage,
+        reasoningEffort: ChatQuery.ReasoningEffort?,
+        toolExecutor: (
+            @Sendable ([ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]) async throws ->
+                [ChatQuery.ChatCompletionMessageParam.ToolMessageParam]
+        )?
+    ) async throws -> AITurnResult
+}
+
+// MARK: - Convenience overload (no explicit effort — callers that don't need to control effort)
+
+extension AIConnector {
     func completeTurn(
         messages: [ChatQuery.ChatCompletionMessageParam],
         tools: [OpenAITool],
@@ -75,6 +93,16 @@ public protocol AIConnector: Actor, Sendable {
         toolExecutor: (
             @Sendable ([ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]) async throws ->
                 [ChatQuery.ChatCompletionMessageParam.ToolMessageParam]
-        )?
-    ) async throws -> AITurnResult
+        )? = nil
+    ) async throws -> AITurnResult {
+        try await completeTurn(
+            messages: messages,
+            tools: tools,
+            model: model,
+            toolChoice: toolChoice,
+            stage: stage,
+            reasoningEffort: nil,
+            toolExecutor: toolExecutor
+        )
+    }
 }

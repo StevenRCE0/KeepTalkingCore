@@ -133,6 +133,7 @@ extension KeepTalkingClient {
         }
 
         let (_, _, selected) = try await loadContextSelection(contextID: contextID)
+        let aliasLookup = try await aliasLookup()
 
         return selected.flatMap(\.messages).compactMap { message in
             if let excludeID = excludingMessageID, message.id == excludeID {
@@ -144,9 +145,13 @@ extension KeepTalkingClient {
                     return .assistant(
                         .init(content: .textContent(message.content))
                     )
-                case .node:
+                case .node(let nodeID):
+                    let name =
+                        aliasLookup
+                        .resolve(.node(nodeID))
+                        .primary(.uppercase)
                     return .user(
-                        .init(content: .string(message.content))
+                        .init(content: .string("[\(name)] \(message.content)"))
                     )
             }
         }

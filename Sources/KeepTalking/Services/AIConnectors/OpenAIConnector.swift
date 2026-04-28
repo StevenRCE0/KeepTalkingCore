@@ -158,6 +158,7 @@ public actor OpenAIConnector: AIConnector {
         model: OpenAIModel,
         toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam? = nil,
         stage: AIStage,
+        reasoningEffort: ChatQuery.ReasoningEffort? = nil,
         toolExecutor: (
             @Sendable ([ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]) async throws ->
                 [ChatQuery.ChatCompletionMessageParam.ToolMessageParam]
@@ -170,7 +171,8 @@ public actor OpenAIConnector: AIConnector {
                     tools: tools,
                     model: model,
                     toolChoice: toolChoice,
-                    stage: stage
+                    stage: stage,
+                    reasoningEffort: reasoningEffort
                 )
             case .chatCompletions:
                 return try await completeTurnViaChatCompletions(
@@ -179,7 +181,8 @@ public actor OpenAIConnector: AIConnector {
                     model: model,
                     /// Ignoring this intentionally to improve compatibility
                     toolChoice: nil,
-                    stage: stage
+                    stage: stage,
+                    reasoningEffort: reasoningEffort
                 )
         }
     }
@@ -191,17 +194,22 @@ public actor OpenAIConnector: AIConnector {
         tools: [OpenAITool],
         model: OpenAIModel,
         toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam?,
-        stage: AIStage
+        stage: AIStage,
+        reasoningEffort: ChatQuery.ReasoningEffort?
     ) async throws -> AITurnResult {
         let responseInput = toResponseInput(messages: messages)
         let resolvedToolChoice = toResponseToolChoice(
             toolChoice ?? (tools.isEmpty ? .none : .auto)
         )
+        let reasoning = reasoningEffort.map {
+            CreateModelResponseQuery.Schemas
+                .Reasoning(effort: toResponsesReasoningEffort($0))
+        }
 
         let query = CreateModelResponseQuery(
             input: .inputItemList(responseInput),
             model: model,
-            reasoning: .init(effort: .medium),  // TODO: expose the reasoning settings
+            reasoning: reasoning,
             toolChoice: resolvedToolChoice,
             tools: tools.isEmpty ? nil : tools
         )
@@ -227,7 +235,8 @@ public actor OpenAIConnector: AIConnector {
         tools: [OpenAITool],
         model: OpenAIModel,
         toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam?,
-        stage: AIStage
+        stage: AIStage,
+        reasoningEffort: ChatQuery.ReasoningEffort?
     ) async throws -> AITurnResult {
         let chatTools = tools.compactMap(Self.toChatCompletionTool)
         let resolvedToolChoice = toolChoice ?? (chatTools.isEmpty ? .none : .auto)
@@ -235,7 +244,7 @@ public actor OpenAIConnector: AIConnector {
         let query = ChatQuery(
             messages: messages,
             model: model,
-            reasoningEffort: .medium,  // TODO: expose the reasoning settings
+            reasoningEffort: reasoningEffort,
             toolChoice: chatTools.isEmpty ? nil : resolvedToolChoice,
             tools: chatTools.isEmpty ? nil : chatTools
         )
@@ -394,6 +403,19 @@ public actor OpenAIConnector: AIConnector {
                 return .ToolChoiceFunction(
                     .init(_type: .function, name: name)
                 )
+        }
+    }
+
+    private func toResponsesReasoningEffort(
+        _ effort: ChatQuery.ReasoningEffort
+    ) -> Components.Schemas.ReasoningEffort {
+        switch effort {
+            case .none: return .none
+            case .minimal: return .minimal
+            case .low: return .low
+            case .medium: return .medium
+            case .high: return .high
+            case .customValue: return .medium
         }
     }
 
