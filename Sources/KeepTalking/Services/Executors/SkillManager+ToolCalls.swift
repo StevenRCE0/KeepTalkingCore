@@ -1,44 +1,41 @@
+import AIProxy
 import Foundation
 import MCP
-import OpenAI
 
 extension SkillManager {
     func assistantMessage(
         from turn: AITurnResult
-    ) -> ChatQuery.ChatCompletionMessageParam? {
+    ) -> AIMessage? {
         let text = turn.assistantText?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let content: ChatQuery.ChatCompletionMessageParam.TextOrRefusalContent? =
-            (text?.isEmpty == false) ? .textContent(text!) : nil
+        let hasText = (text?.isEmpty == false)
         let toolCalls = turn.toolCalls.isEmpty ? nil : turn.toolCalls
-        if content == nil, toolCalls == nil {
+        if !hasText, toolCalls == nil {
             return nil
         }
-        return .assistant(
-            .init(
-                content: content,
-                toolCalls: toolCalls
-            )
+        return AIMessage(
+            role: .assistant,
+            content: hasText ? .text(text!) : nil,
+            toolCalls: toolCalls ?? []
         )
     }
 
     func executeSkillToolCalls(
-        _ toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
-            .ToolCallParam],
+        _ toolCalls: [AIToolCall],
         actionID: UUID,
         skillDirectory: URL?,
         manifestContext: SkillManifestContext,
         sandboxPolicy: KTSandboxPolicy? = nil
-    ) async throws -> [ChatQuery.ChatCompletionMessageParam.ToolMessageParam] {
-        var messages: [ChatQuery.ChatCompletionMessageParam.ToolMessageParam] = []
+    ) async throws -> [AIMessage] {
+        var messages: [AIMessage] = []
         for toolCall in toolCalls {
             let toolCallID =
                 toolCall.id.isEmpty
                 ? UUID().uuidString.lowercased()
                 : toolCall.id
-            let functionName = toolCall.function.name
+            let functionName = toolCall.name
             let arguments = normalizedSkillToolArguments(
-                try decodeToolArguments(toolCall.function.arguments)
+                try decodeToolArguments(toolCall.argumentsJSON)
             )
 
             let parameters = skillBundlesByActionID[actionID]?.parameters ?? [:]
@@ -77,10 +74,7 @@ extension SkillManager {
             }
 
             messages.append(
-                .init(
-                    content: .textContent(payload),
-                    toolCallId: toolCallID
-                )
+                .tool(payload, toolCallID: toolCallID)
             )
         }
         return messages

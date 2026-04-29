@@ -1,31 +1,28 @@
+import AIProxy
 import FluentKit
 import Foundation
 import MCP
-import OpenAI
 
 extension KeepTalkingClient {
     func assistantMessage(
         from turn: AITurnResult
-    ) -> ChatQuery.ChatCompletionMessageParam? {
+    ) -> AIMessage? {
         let text = turn.assistantText?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let content: ChatQuery.ChatCompletionMessageParam.TextOrRefusalContent? =
-            (text?.isEmpty == false) ? .textContent(text!) : nil
+        let hasText = (text?.isEmpty == false)
         let toolCalls = turn.toolCalls.isEmpty ? nil : turn.toolCalls
-        if content == nil, toolCalls == nil {
+        if !hasText, toolCalls == nil {
             return nil
         }
-        return .assistant(
-            .init(
-                content: content,
-                toolCalls: toolCalls
-            )
+        return AIMessage(
+            role: .assistant,
+            content: hasText ? .text(text!) : nil,
+            toolCalls: toolCalls ?? []
         )
     }
 
     func executeAgentToolCalls(
-        _ toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
-            .ToolCallParam],
+        _ toolCalls: [AIToolCall],
         runtimeCatalog: KeepTalkingActionRuntimeCatalog,
         promptMessageID: UUID?,
         context: KeepTalkingContext,
@@ -39,7 +36,7 @@ extension KeepTalkingClient {
                 toolCall.id.isEmpty
                 ? UUID().uuidString.lowercased()
                 : toolCall.id
-            let functionName = toolCall.function.name
+            let functionName = toolCall.name
 
             do {
                 if functionName
@@ -67,7 +64,7 @@ extension KeepTalkingClient {
                             toolCall: toolCall,
                             messages: try await executeContextAttachmentReadToolCall(
                                 toolCallID: toolCallID,
-                                rawArguments: toolCall.function.arguments,
+                                rawArguments: toolCall.argumentsJSON,
                                 context: context
                             )
                         )
@@ -80,7 +77,7 @@ extension KeepTalkingClient {
                             messages: [
                                 toolMessage(
                                     payload: try await executeMarkTurningPointToolCall(
-                                        rawArguments: toolCall.function.arguments,
+                                        rawArguments: toolCall.argumentsJSON,
                                         promptMessageID: promptMessageID,
                                         context: context
                                     ),
@@ -116,7 +113,7 @@ extension KeepTalkingClient {
                                 toolMessage(
                                     payload: try await executeContextAttachmentUpdateMetadataToolCall(
                                         toolCallID: toolCallID,
-                                        rawArguments: toolCall.function.arguments,
+                                        rawArguments: toolCall.argumentsJSON,
                                         context: context
                                     ),
                                     toolCallID: toolCallID
@@ -132,7 +129,7 @@ extension KeepTalkingClient {
                             messages: [
                                 toolMessage(
                                     payload: try await executeSearchThreadsToolCall(
-                                        rawArguments: toolCall.function.arguments,
+                                        rawArguments: toolCall.argumentsJSON,
                                         runtimeCatalog: runtimeCatalog,
                                         context: context
                                     ),
@@ -149,7 +146,7 @@ extension KeepTalkingClient {
                             messages: [
                                 toolMessage(
                                     payload: try await executeWebSearchToolCall(
-                                        rawArguments: toolCall.function.arguments
+                                        rawArguments: toolCall.argumentsJSON
                                     ),
                                     toolCallID: toolCallID
                                 )
@@ -163,7 +160,7 @@ extension KeepTalkingClient {
                             toolCall: toolCall,
                             messages: try await executeKtSkillMetainfoToolCall(
                                 toolCallID: toolCallID,
-                                rawArguments: toolCall.function.arguments,
+                                rawArguments: toolCall.argumentsJSON,
                                 runtimeCatalog: runtimeCatalog,
                                 context: context
                             )
@@ -184,7 +181,7 @@ extension KeepTalkingClient {
                         payload = try await executeActionProxyToolCall(
                             functionName: functionName,
                             definition: definition,
-                            rawArguments: toolCall.function.arguments,
+                            rawArguments: toolCall.argumentsJSON,
                             context: context,
                             agentTurnID: agentTurnID,
                             agentIntention: agentIntention
@@ -195,9 +192,7 @@ extension KeepTalkingClient {
                             context: skillContext
                         )
                     case .skillFileLocal(let skillContext):
-                        let rawArguments = try decodeToolArguments(
-                            toolCall.function.arguments
-                        )
+                        let rawArguments = try decodeToolArguments(toolCall.argumentsJSON)
                         let arguments = normalizedSkillFileArguments(rawArguments)
                         payload = renderSkillFilePayload(
                             functionName: functionName,
@@ -205,9 +200,7 @@ extension KeepTalkingClient {
                             arguments: arguments
                         )
                     case .skillFileRemote(let actionID, let ownerNodeID, let skillName):
-                        let rawArguments = try decodeToolArguments(
-                            toolCall.function.arguments
-                        )
+                        let rawArguments = try decodeToolArguments(toolCall.argumentsJSON)
                         let arguments = normalizedSkillFileArguments(rawArguments)
                         payload = try await renderRemoteSkillFilePayload(
                             functionName: functionName,
@@ -261,13 +254,8 @@ extension KeepTalkingClient {
     func toolMessage(
         payload: String,
         toolCallID: String
-    ) -> ChatQuery.ChatCompletionMessageParam {
-        .tool(
-            .init(
-                content: .textContent(payload),
-                toolCallId: toolCallID
-            )
-        )
+    ) -> AIMessage {
+        .tool(payload, toolCallID: toolCallID)
     }
 
     func executeActionProxyToolCall(
@@ -573,7 +561,7 @@ extension KeepTalkingClient {
         rawArguments: String,
         runtimeCatalog: KeepTalkingActionRuntimeCatalog,
         context: KeepTalkingContext
-    ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
+    ) async throws -> [AIMessage] {
         let args = try decodeToolArguments(rawArguments)
 
         guard let actionIDString = args["action_id"]?.stringValue,
@@ -737,20 +725,20 @@ extension KeepTalkingClient {
                     displayName: metadata.name,
                     description:
                         "Read a file from skill bundle \(metadata.name). Paths must stay within the skill directory.",
-                    parameters: JSONSchema(
-                        .type(.object),
-                        .properties([
-                            "path": JSONSchema(
-                                .type(.string),
-                                .description("Relative path inside the skill bundle.")
-                            ),
-                            "max_characters": JSONSchema(
-                                .type(.integer),
-                                .description("Optional maximum characters to return.")
-                            ),
+                    parameters: [
+                        "type": .string("object"),
+                        "properties": .object([
+                            "path": .object([
+                                "type": .string("string"),
+                                "description": .string("Relative path inside the skill bundle."),
+                            ]),
+                            "max_characters": .object([
+                                "type": .string("integer"),
+                                "description": .string("Optional maximum characters to return."),
+                            ]),
                         ]),
-                        .additionalProperties(.boolean(true))
-                    )
+                        "additionalProperties": .bool(true),
+                    ]
                 )
                 let remoteSkillRoutes: [String: KeepTalkingAgentToolRoute] = [
                     fileToolDef.functionName: .skillFileRemote(

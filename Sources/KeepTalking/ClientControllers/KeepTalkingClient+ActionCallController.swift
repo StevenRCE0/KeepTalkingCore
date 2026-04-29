@@ -139,7 +139,8 @@ extension KeepTalkingClient {
                     callResult = try await skillManager.callAction(
                         action: action,
                         call: request.call,
-                        sandboxPolicy: sandboxPolicy
+                        sandboxPolicy: sandboxPolicy,
+                        model: openAIModel ?? "gpt-5-codex"
                     )
                     #else
                     callResult = (content: [], isError: true)

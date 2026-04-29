@@ -87,6 +87,11 @@ extension KeepTalkingContextMessage {
     public enum MessageType: Codable, Sendable, Hashable {
         case message
 
+        /// Reasoning / chain-of-thought emitted by the model on this turn. Stored
+        /// alongside the assistant message so the UI can display the model's
+        /// thinking, but excluded from agent-to-agent context replay.
+        case thinking
+
         /// An in-progress tool-invocation hint surfaced during agent execution.
         ///
         /// - `hint`:         Human-readable label (e.g. "Inspecting").

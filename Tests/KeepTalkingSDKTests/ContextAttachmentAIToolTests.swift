@@ -1,5 +1,5 @@
+import AIProxy
 import Foundation
-import OpenAI
 import Testing
 
 @testable import KeepTalkingSDK
@@ -74,7 +74,7 @@ struct ContextAttachmentAIToolTests {
                 node: nodeID
             ),
             primitiveRegistry: KeepTalkingPrimitiveRegistry(
-                toolParameters: { _ in JSONSchema(.type(.object)) },
+                toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
                 callAction: { _, _ in
                     KeepTalkingPrimitiveActionResponse(
                         text: """
@@ -145,7 +145,7 @@ struct ContextAttachmentAIToolTests {
         let payload = try await client.executeActionProxyToolCall(
             functionName: definition.functionName,
             definition: definition,
-            rawArguments: toolCall.function.arguments,
+            rawArguments: toolCall.function.arguments ?? "",
             context: context
         )
         let executions = [
@@ -166,18 +166,18 @@ struct ContextAttachmentAIToolTests {
         )
 
         #expect(messages.count == 1)
-        guard case .user(let message) = try #require(messages.first) else {
+        guard case .user(let content, _) = try #require(messages.first) else {
             Issue.record("Expected a native user message for the picked file")
             return
         }
-        guard case .contentParts(let parts) = message.content else {
+        guard case .parts(let parts) = content else {
             Issue.record("Expected content parts for injected file payload")
             return
         }
         #expect(parts.count == 1)
-        if case .text(let textPart) = try #require(parts.first) {
+        if case .text(let text) = try #require(parts.first) {
             #expect(
-                textPart.text
+                text
                     == """
                     Inspect the attached context file 'picked.txt'. This is the user-provided attachment you just requested, and it is already included in this turn. Use it directly. Do not call context attachment tools to verify this same file again; only call them if you truly need a different attachment or metadata not present here.
 
@@ -203,7 +203,7 @@ struct ContextAttachmentAIToolTests {
                 node: nodeID
             ),
             primitiveRegistry: KeepTalkingPrimitiveRegistry(
-                toolParameters: { _ in JSONSchema(.type(.object)) },
+                toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
                 callAction: { _, _ in
                     KeepTalkingPrimitiveActionResponse(
                         text: """
@@ -260,7 +260,7 @@ struct ContextAttachmentAIToolTests {
         let payload = try await client.executeActionProxyToolCall(
             functionName: definition.functionName,
             definition: definition,
-            rawArguments: toolCall.function.arguments,
+            rawArguments: toolCall.function.arguments ?? "",
             context: context
         )
         let executions = [
@@ -371,16 +371,10 @@ struct ContextAttachmentAIToolTests {
         name: String,
         arguments: String,
         id: String = "tool-call-1"
-    )
-        -> ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
-        .ToolCallParam
-    {
+    ) -> OpenAIChatCompletionRequestBody.Message.ToolCall {
         .init(
             id: id,
-            function: .init(
-                arguments: arguments,
-                name: name
-            )
+            function: .init(name: name, arguments: arguments)
         )
     }
 
@@ -392,18 +386,18 @@ struct ContextAttachmentAIToolTests {
     }
 
     private func toolPayload(
-        from messages: [ChatQuery.ChatCompletionMessageParam]
+        from messages: [OpenAIChatCompletionRequestBody.Message]
     ) throws -> [String: Any] {
         let firstMessage = try #require(messages.first)
-        guard case .tool(let toolMessage) = firstMessage else {
+        guard case .tool(let content, _) = firstMessage else {
             throw FixtureError.missingToolMessage
         }
         let text: String
-        switch toolMessage.content {
-            case .textContent(let value):
+        switch content {
+            case .text(let value):
                 text = value
-            case .contentParts(let parts):
-                text = parts.map { $0.text }.joined()
+            case .parts(let parts):
+                text = parts.joined()
         }
         guard let data = text.data(using: .utf8),
             let payload = try JSONSerialization.jsonObject(with: data)

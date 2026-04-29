@@ -1,6 +1,6 @@
+import AIProxy
 import FluentKit
 import Foundation
-import OpenAI
 import Testing
 
 @testable import KeepTalkingSDK
@@ -24,8 +24,7 @@ struct InlinePromptAttachmentTests {
 
         let message = try await client.currentPromptUserMessage(
             prompt: "Inspect this file",
-            attachments: prepared,
-            apiMode: .chatCompletions
+            attachments: prepared
         )
 
         let text = try #require(userText(from: message))
@@ -142,21 +141,21 @@ struct InlinePromptAttachmentTests {
     }
 
     private func userText(
-        from message: ChatQuery.ChatCompletionMessageParam
+        from message: OpenAIChatCompletionRequestBody.Message
     ) -> String? {
-        guard case .user(let userMessage) = message else {
+        guard case .user(let content, _) = message else {
             return nil
         }
 
-        switch userMessage.content {
-            case .string(let value):
+        switch content {
+            case .text(let value):
                 return value
-            case .contentParts(let parts):
+            case .parts(let parts):
                 return parts.compactMap { part in
                     switch part {
-                        case .text(let payload):
-                            return payload.text
-                        default:
+                        case .text(let value):
+                            return value
+                        case .imageURL:
                             return nil
                     }
                 }

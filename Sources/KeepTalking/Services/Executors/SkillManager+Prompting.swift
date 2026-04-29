@@ -1,56 +1,58 @@
+import AIProxy
 import Foundation
 import MCP
-import OpenAI
 
 extension SkillManager {
-    func makeSkillTools(context: SkillManifestContext) -> [ChatQuery.ChatCompletionToolParam] {
-        var tools: [ChatQuery.ChatCompletionToolParam] = [
-            ChatQuery.ChatCompletionToolParam(
-                function: .init(
-                    name: Self.getFileToolName,
-                    description:
-                        "Read a file from the skill directory or any accessible directory. "
-                        + "Use a directory label (e.g. \"input_dir/file.txt\") or a path relative to the skill directory.",
-                    parameters: JSONSchema(
-                        .type(.object),
-                        .properties([
-                            "path": JSONSchema(
-                                .type(.string),
-                                .description(
-                                    "Path to read. Use \"<dir_label>/filename\" for parameter directories "
-                                        + "or a relative path for the skill directory.")
-                            ),
-                            "max_characters": JSONSchema(
-                                .type(.integer),
-                                .description("Optional maximum characters to return.")
+    func makeSkillTools(context: SkillManifestContext) -> [KeepTalkingActionToolDefinition] {
+        var tools: [KeepTalkingActionToolDefinition] = [
+            .init(
+                functionName: Self.getFileToolName,
+                actionID: UUID(),
+                ownerNodeID: UUID(),
+                source: .skill,
+                description:
+                    "Read a file from the skill directory or any accessible directory. "
+                    + "Use a directory label (e.g. \"input_dir/file.txt\") or a path relative to the skill directory.",
+                parameters: [
+                    "type": .string("object"),
+                    "properties": .object([
+                        "path": .object([
+                            "type": .string("string"),
+                            "description": .string(
+                                "Path to read. Use \"<dir_label>/filename\" for parameter directories "
+                                    + "or a relative path for the skill directory."
                             ),
                         ]),
-                        .additionalProperties(.boolean(true))
-                    ),
-                    strict: false
-                )
+                        "max_characters": .object([
+                            "type": .string("integer"),
+                            "description": .string("Optional maximum characters to return."),
+                        ]),
+                    ]),
+                    "additionalProperties": .bool(true),
+                ]
             ),
-            ChatQuery.ChatCompletionToolParam(
-                function: .init(
-                    name: Self.listFilesToolName,
-                    description:
-                        "List files in an accessible directory. "
-                        + "Use a directory label (e.g. \"input_dir\") to list files the user granted access to.",
-                    parameters: JSONSchema(
-                        .type(.object),
-                        .properties([
-                            "directory": JSONSchema(
-                                .type(.string),
-                                .description(
-                                    "Directory label from the accessible directories list (e.g. \"input_dir\", \"output_dir\"), "
-                                        + "or a relative path within the skill directory.")
-                            )
-                        ]),
-                        .required(["directory"]),
-                        .additionalProperties(.boolean(false))
-                    ),
-                    strict: false
-                )
+            .init(
+                functionName: Self.listFilesToolName,
+                actionID: UUID(),
+                ownerNodeID: UUID(),
+                source: .skill,
+                description:
+                    "List files in an accessible directory. "
+                    + "Use a directory label (e.g. \"input_dir\") to list files the user granted access to.",
+                parameters: [
+                    "type": .string("object"),
+                    "properties": .object([
+                        "directory": .object([
+                            "type": .string("string"),
+                            "description": .string(
+                                "Directory label from the accessible directories list (e.g. \"input_dir\", \"output_dir\"), "
+                                    + "or a relative path within the skill directory."
+                            ),
+                        ])
+                    ]),
+                    "required": .array([.string("directory")]),
+                    "additionalProperties": .bool(false),
+                ]
             ),
         ]
 
@@ -61,26 +63,27 @@ extension SkillManager {
         for toolName in context.declaredTools.keys.sorted() {
             let scriptPath = context.declaredTools[toolName]!
             tools.append(
-                ChatQuery.ChatCompletionToolParam(
-                    function: .init(
-                        name: toolName,
-                        description: "Run the \(toolName) skill tool (\(scriptPath)). "
-                            + "Pass the full CLI arguments as a plain text string — "
-                            + "the runtime resolves directory labels and env values automatically.",
-                        parameters: JSONSchema(
-                            .type(.object),
-                            .properties([
-                                "args": JSONSchema(
-                                    .type(.string),
-                                    .description(
-                                        "Raw CLI arguments string, e.g. '--text \"hello world\" --voice Samantha'. "
-                                            + "Use directory labels (e.g. input_dir/file.txt) for paths.")
-                                )
-                            ]),
-                            .additionalProperties(.boolean(false))
-                        ),
-                        strict: false
-                    )
+                .init(
+                    functionName: toolName,
+                    actionID: UUID(),
+                    ownerNodeID: UUID(),
+                    source: .skill,
+                    description: "Run the \(toolName) skill tool (\(scriptPath)). "
+                        + "Pass the full CLI arguments as a plain text string — "
+                        + "the runtime resolves directory labels and env values automatically.",
+                    parameters: [
+                        "type": .string("object"),
+                        "properties": .object([
+                            "args": .object([
+                                "type": .string("string"),
+                                "description": .string(
+                                    "Raw CLI arguments string, e.g. '--text \"hello world\" --voice Samantha'. "
+                                        + "Use directory labels (e.g. input_dir/file.txt) for paths."
+                                ),
+                            ])
+                        ]),
+                        "additionalProperties": .bool(false),
+                    ]
                 )
             )
         }

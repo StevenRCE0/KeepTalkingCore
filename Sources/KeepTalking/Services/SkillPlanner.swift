@@ -1,6 +1,6 @@
+import AIProxy
 import Foundation
 import MCP
-import OpenAI
 
 public enum KeepTalkingSkillPlannerError: LocalizedError {
     case missingManifest(URL)
@@ -74,9 +74,15 @@ public actor KeepTalkingSkillPlanner {
     }()
 
     private let skillManager: SkillManager
+    /// Model identifier to send to the connector. Provider-specific (e.g.
+    /// `openai/gpt-5-codex` for OpenRouter, `gpt-5-codex` for direct OpenAI).
+    /// Pass the same value the rest of the agent loop uses so the planner
+    /// doesn't 404 on providers that don't recognise the default.
+    private let model: String
 
-    public init(aiConnector: any AIConnector) {
+    public init(aiConnector: any AIConnector, model: String = "gpt-5-codex") {
         self.skillManager = SkillManager(aiConnector: aiConnector)
+        self.model = model
     }
 
     // MARK: - Public
@@ -104,15 +110,13 @@ public actor KeepTalkingSkillPlanner {
         let fileIndex: [String: [String]] = bundle.directory.map { buildFileIndex(for: $0) } ?? [:]
         let availableShortcuts = await listMacOSShortcuts()
 
-        var messages: [ChatQuery.ChatCompletionMessageParam] = [
-            .developer(
-                .init(
-                    content: .textContent(
-                        makeSystemPrompt(
-                            bundle: bundle, isExisting: isExisting, manifest: manifest,
-                            fileIndex: fileIndex, availableShortcuts: availableShortcuts)
-                    ))),
-            .user(.init(content: .string(makeUserPrompt(bundle: bundle, call: call, isExisting: isExisting)))),
+        var messages: [AIMessage] = [
+            .system(
+                makeSystemPrompt(
+                    bundle: bundle, isExisting: isExisting, manifest: manifest,
+                    fileIndex: fileIndex, availableShortcuts: availableShortcuts)
+            ),
+            .user(makeUserPrompt(bundle: bundle, call: call, isExisting: isExisting)),
         ]
 
         let tools = makePlannerTools()
@@ -138,8 +142,8 @@ public actor KeepTalkingSkillPlanner {
         for _ in 0..<Self.maxTurns {
             let turn = try await aiConnector.completeTurn(
                 messages: messages,
-                tools: OpenAIConnector.toResponseTools(tools: tools),
-                model: "gpt-5-codex",
+                tools: tools,
+                model: model,
                 toolChoice: nil,
                 stage: .planning,
                 toolExecutor: nil
@@ -154,11 +158,10 @@ public actor KeepTalkingSkillPlanner {
                     }
                     messages.append(
                         .user(
-                            .init(
-                                content: .string(
-                                    "You must call kt_finalize now to complete the analysis. "
-                                        + "Declare any remaining tools first, then call kt_finalize with a rationale."
-                                ))))
+                            "You must call kt_finalize now to complete the analysis. "
+                                + "Declare any remaining tools first, then call kt_finalize with a rationale."
+                        )
+                    )
                     continue
                 }
                 break
@@ -168,13 +171,13 @@ public actor KeepTalkingSkillPlanner {
                 messages.append(assistantMsg)
             }
 
-            var toolResults: [ChatQuery.ChatCompletionMessageParam.ToolMessageParam] = []
+            var toolResults: [AIMessage] = []
 
             for call in turn.toolCalls {
-                let args = (try? await skillManager.decodeToolArguments(call.function.arguments)) ?? [:]
+                let args = (try? await skillManager.decodeToolArguments(call.argumentsJSON)) ?? [:]
                 var result: String
 
-                switch call.function.name {
+                switch call.name {
 
                     case Self.readFileTool:
                         let path = string(args["path"]) ?? ""
@@ -365,13 +368,13 @@ public actor KeepTalkingSkillPlanner {
                         result = "Done."
 
                     default:
-                        result = "Unknown tool: \(call.function.name)"
+                        result = "Unknown tool: \(call.name)"
                 }
 
-                toolResults.append(.init(content: .textContent(result), toolCallId: call.id))
+                toolResults.append(.tool(result, toolCallID: call.id))
             }
 
-            messages.append(contentsOf: toolResults.map { .tool($0) })
+            messages.append(contentsOf: toolResults)
             if finalized { break }
         }
 
@@ -564,7 +567,7 @@ public actor KeepTalkingSkillPlanner {
 
     // MARK: - Tool definitions
 
-    private func makePlannerTools() -> [ChatQuery.ChatCompletionToolParam] {
+    private func makePlannerTools() -> [KeepTalkingActionToolDefinition] {
         [
             tool(
                 name: Self.readFileTool,
@@ -692,32 +695,54 @@ public actor KeepTalkingSkillPlanner {
         name: String, description: String,
         properties: [String: (ParamType, String)],
         required: [String]
-    ) -> ChatQuery.ChatCompletionToolParam {
-        let schemaProps = properties.mapValues { (type, desc) -> JSONSchema in
+    ) -> KeepTalkingActionToolDefinition {
+        let schemaProps: [String: AIProxyJSONValue] = properties.mapValues { (type, desc) in
             switch type {
-                case .string: return JSONSchema(.type(.string), .description(desc))
-                case .array: return JSONSchema(.type(.array), .description(desc), .items(JSONSchema(.type(.string))))
-                case .object: return JSONSchema(.type(.object), .description(desc))
+                case .string:
+                    return .object([
+                        "type": .string("string"),
+                        "description": .string(desc),
+                    ])
+                case .array:
+                    return .object([
+                        "type": .string("array"),
+                        "description": .string(desc),
+                        "items": .object(["type": .string("string")]),
+                    ])
+                case .object:
+                    return .object([
+                        "type": .string("object"),
+                        "description": .string(desc),
+                    ])
             }
         }
-        return ChatQuery.ChatCompletionToolParam(
-            function: .init(
-                name: name, description: description,
-                parameters: JSONSchema(.type(.object), .properties(schemaProps), .required(required)),
-                strict: false
-            )
+        let parameters: [String: AIProxyJSONValue] = [
+            "type": .string("object"),
+            "properties": .object(schemaProps),
+            "required": .array(required.map(AIProxyJSONValue.string)),
+        ]
+        return .init(
+            functionName: name,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: description,
+            parameters: parameters
         )
     }
 
     // MARK: - Message helper
 
-    private func assistantMessage(from turn: AITurnResult) -> ChatQuery.ChatCompletionMessageParam? {
+    private func assistantMessage(from turn: AITurnResult) -> AIMessage? {
         let text = turn.assistantText?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let content: ChatQuery.ChatCompletionMessageParam.TextOrRefusalContent? =
-            text.flatMap { $0.isEmpty ? nil : .textContent($0) }
+        let hasText = (text?.isEmpty == false)
         let toolCalls = turn.toolCalls.isEmpty ? nil : turn.toolCalls
-        guard content != nil || toolCalls != nil else { return nil }
-        return .assistant(.init(content: content, toolCalls: toolCalls))
+        guard hasText || toolCalls != nil else { return nil }
+        return AIMessage(
+            role: .assistant,
+            content: hasText ? .text(text!) : nil,
+            toolCalls: toolCalls ?? []
+        )
     }
 
     // MARK: - MCP.Value helpers

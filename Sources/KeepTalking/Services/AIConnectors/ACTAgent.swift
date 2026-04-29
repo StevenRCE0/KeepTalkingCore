@@ -1,5 +1,5 @@
+import AIProxy
 import Foundation
-import OpenAI
 
 // MARK: - ACT (Action-Calling-Turn) Agent
 //
@@ -13,7 +13,7 @@ import OpenAI
 extension KeepTalkingClient {
 
     private struct ACTResolvedAction: Sendable {
-        let tools: [OpenAITool]
+        let tools: [KeepTalkingActionToolDefinition]
         let promptContext: String
     }
 
@@ -23,37 +23,37 @@ extension KeepTalkingClient {
 
     /// Builds the `kt_run_action` tool that the primary model uses to delegate
     /// an action to the ACT agent.
-    func makeRunActionTool() -> OpenAITool {
-        .functionTool(
-            .init(
-                name: Self.runActionToolFunctionName,
-                description: """
-                    Delegate a KeepTalking action to the ACT (Action-Calling) agent.
-                    The agent will autonomously discover the action's tools, call the
-                    appropriate one with arguments derived from the conversation, and
-                    return a concise summary of the result.
-                    """,
-                parameters: JSONSchema(
-                    .type(.object),
-                    .properties([
-                        "action_id": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "UUID of the action to run, taken from the Available actions list."
-                            )
-                        ),
-                        "task": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "Natural-language description of what the user wants accomplished."
-                            )
+    func makeRunActionTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.runActionToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: """
+                Delegate a KeepTalking action to the ACT (Action-Calling) agent.
+                The agent will autonomously discover the action's tools, call the
+                appropriate one with arguments derived from the conversation, and
+                return a concise summary of the result.
+                """,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "action_id": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "UUID of the action to run, taken from the Available actions list."
                         ),
                     ]),
-                    .required(["action_id", "task"]),
-                    .additionalProperties(.boolean(false))
-                ),
-                strict: false
-            )
+                    "task": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "Natural-language description of what the user wants accomplished."
+                        ),
+                    ]),
+                ]),
+                "required": .array([.string("action_id"), .string("task")]),
+                "additionalProperties": .bool(false),
+            ]
         )
     }
 
@@ -66,10 +66,10 @@ extension KeepTalkingClient {
         runtimeCatalog: KeepTalkingActionRuntimeCatalog,
         context: KeepTalkingContext,
         actConnector: any AIConnector,
-        actModel: OpenAIModel,
+        actModel: String,
         publisher: AIOrchestrator.AssistantPublisher,
         agentTurnID: UUID? = nil
-    ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
+    ) async throws -> [AIMessage] {
         let args = try decodeToolArguments(rawArguments)
 
         guard
@@ -128,10 +128,10 @@ extension KeepTalkingClient {
         runtimeCatalog: KeepTalkingActionRuntimeCatalog,
         context: KeepTalkingContext,
         actConnector: any AIConnector,
-        actModel: OpenAIModel,
+        actModel: String,
         publisher: AIOrchestrator.AssistantPublisher,
         agentTurnID: UUID? = nil
-    ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
+    ) async throws -> [AIMessage] {
         let resolvedAction = try await resolvedACTAction(
             actionID: actionID,
             stub: stub,
@@ -184,13 +184,9 @@ extension KeepTalkingClient {
             Your job is to get the user's task done — not to ask for clarification or request more information. Make your best judgment and execute.
             """
 
-        var actTranscript: [ChatQuery.ChatCompletionMessageParam] = [
-            .system(.init(content: .textContent(systemPrompt))),
-            .user(
-                .init(
-                    content: .string(
-                        task.isEmpty ? "Please execute the action." : task
-                    ))),
+        var actTranscript: [AIMessage] = [
+            .system(systemPrompt),
+            .user(task.isEmpty ? "Please execute the action." : task),
         ]
 
         var summary = ""
@@ -212,7 +208,11 @@ extension KeepTalkingClient {
 
             if !turn.toolCalls.isEmpty,
                 let chatText = AIOrchestrator.chatText(
-                    for: .init(assistantText: nil, toolCalls: turn.toolCalls),
+                    for: .init(
+                        assistantText: nil,
+                        thinking: nil,
+                        toolCalls: turn.toolCalls
+                    ),
                     stage: .execution,
                     toolNameResolver: { [self] toolCall in
                         publishedToolName(
@@ -248,7 +248,7 @@ extension KeepTalkingClient {
                 agentIntention: task
             )
             actLog(
-                "action-result action=\(actionID.uuidString.lowercased()) calls=\(turn.toolCalls.map(\.function.name).joined(separator: ",")) payload=\(actExecutionPreview(executions, source: stub.kind))"
+                "action-result action=\(actionID.uuidString.lowercased()) calls=\(turn.toolCalls.map(\.name).joined(separator: ",")) payload=\(actExecutionPreview(executions, source: stub.kind))"
             )
             for exec in executions {
                 actTranscript.append(contentsOf: exec.messages)
@@ -304,7 +304,7 @@ extension KeepTalkingClient {
                 let definitions = runtimeCatalog.catalog.definitions
                     .filter { $0.actionID == actionID }
                 return .init(
-                    tools: definitions.map(\.openAITool),
+                    tools: definitions,
                     promptContext: ""
                 )
 
@@ -329,23 +329,26 @@ extension KeepTalkingClient {
         }
     }
 
-    /// Returns an `OpenAITool` for use inside the ACT mini-loop.
-    /// Uses the original MCP `targetName` as the callable function name so the
-    /// model can call tools by their real name (e.g. "XcodeListWindows") rather
-    /// than the opaque normalized ID.
-    private static func actMCPOpenAITool(
+    /// Returns a tool definition for use inside the ACT mini-loop. Uses the
+    /// original MCP `targetName` as the callable function name so the model can
+    /// call tools by their real name (e.g. "XcodeListWindows") rather than the
+    /// opaque normalized ID.
+    private static func actMCPToolDefinition(
         from definition: KeepTalkingActionToolDefinition
-    ) -> OpenAITool {
+    ) -> KeepTalkingActionToolDefinition {
         guard let targetName = definition.targetName, !targetName.isEmpty else {
-            return definition.openAITool
+            return definition
         }
-        return .functionTool(
-            .init(
-                name: targetName,
-                description: definition.description,
-                parameters: definition.parameters,
-                strict: false
-            )
+        return .init(
+            functionName: targetName,
+            actionID: definition.actionID,
+            ownerNodeID: definition.ownerNodeID,
+            source: definition.source,
+            targetName: definition.targetName,
+            displayName: definition.displayName,
+            supportsWakeAssist: definition.supportsWakeAssist,
+            description: definition.description,
+            parameters: definition.parameters
         )
     }
 
@@ -359,7 +362,7 @@ extension KeepTalkingClient {
             .filter { $0.actionID == actionID }
         if !existingDefinitions.isEmpty {
             return .init(
-                tools: existingDefinitions.map(Self.actMCPOpenAITool),
+                tools: existingDefinitions.map(Self.actMCPToolDefinition),
                 promptContext: ""
             )
         }
@@ -429,7 +432,7 @@ extension KeepTalkingClient {
             ? runtimeCatalog.catalog.definitions.filter { $0.actionID == actionID }
             : definitions
         return .init(
-            tools: hydratedDefinitions.map(Self.actMCPOpenAITool),
+            tools: hydratedDefinitions.map(Self.actMCPToolDefinition),
             promptContext: ""
         )
     }
@@ -524,7 +527,6 @@ extension KeepTalkingClient {
 
             let tools = runtimeCatalog.catalog.definitions
                 .filter { $0.actionID == actionID }
-                .map(\.openAITool)
             return .init(
                 tools: tools,
                 promptContext: renderSkillMetadataPayload(
@@ -614,7 +616,6 @@ extension KeepTalkingClient {
 
         let tools = runtimeCatalog.catalog.definitions
             .filter { $0.actionID == actionID }
-            .map(\.openAITool)
         let promptContext = jsonString([
             "ok": true,
             "function_name": Self.ktSkillMetainfoToolFunctionName,
@@ -673,7 +674,7 @@ extension KeepTalkingClient {
         let existingDefinitions = runtimeCatalog.catalog.definitions
             .filter { $0.actionID == actionID }
         if !existingDefinitions.isEmpty {
-            return .init(tools: existingDefinitions.map(\.openAITool), promptContext: "")
+            return .init(tools: existingDefinitions, promptContext: "")
         }
 
         guard
@@ -733,7 +734,7 @@ extension KeepTalkingClient {
         actLog(
             "runtime-catalog action=\(actionID.uuidString.lowercased()) injected=\(definitions.count)"
         )
-        return .init(tools: definitions.map(\.openAITool), promptContext: "")
+        return .init(tools: definitions, promptContext: "")
     }
 
     private func actExecutionPreview(
@@ -741,15 +742,8 @@ extension KeepTalkingClient {
         source: KeepTalkingActionStub.Kind
     ) -> String {
         let payloads = executions.flatMap(\.messages).compactMap { message -> String? in
-            guard case .tool(let toolMessage) = message else {
-                return nil
-            }
-            switch toolMessage.content {
-                case .textContent(let text):
-                    return text
-                default:
-                    return nil
-            }
+            guard message.role == .tool else { return nil }
+            return message.content?.text
         }
         guard !payloads.isEmpty else {
             return "<no-tool-payload>"

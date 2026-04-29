@@ -1,18 +1,25 @@
 import Foundation
-import OpenAI
 
 // MARK: - AITurnResult
 
-/// The result of a single AI turn: optional assistant text and/or tool-call requests.
+/// The result of a single AI turn: optional assistant text, optional reasoning
+/// content, and any tool-call requests.
 public struct AITurnResult: Sendable {
     public let assistantText: String?
-    public let toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]
+    /// The model's reasoning / chain-of-thought, when the provider returns it
+    /// (OpenRouter, DeepSeek, Anthropic extended thinking). Connectors that
+    /// can't surface reasoning leave this `nil`. The orchestrator decides
+    /// whether to publish it into the conversation context.
+    public let thinking: String?
+    public let toolCalls: [AIToolCall]
 
     public init(
         assistantText: String?,
-        toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]
+        thinking: String? = nil,
+        toolCalls: [AIToolCall]
     ) {
         self.assistantText = assistantText
+        self.thinking = thinking
         self.toolCalls = toolCalls
     }
 }
@@ -25,8 +32,14 @@ public struct AIConnectorCapabilities: Sendable {
     /// When `false`, the agent loop may use explicit XML prompting as a fallback.
     public let supportsNativeToolCalling: Bool
 
-    public init(supportsNativeToolCalling: Bool) {
+    /// Whether this connector can return reasoning content (`AITurnResult.thinking`).
+    /// When `false`, callers should not expect thinking output even if a reasoning
+    /// model is requested.
+    public let supportsThinking: Bool
+
+    public init(supportsNativeToolCalling: Bool, supportsThinking: Bool = false) {
         self.supportsNativeToolCalling = supportsNativeToolCalling
+        self.supportsThinking = supportsThinking
     }
 }
 
@@ -44,55 +57,60 @@ public enum AIStage: Sendable {
 
 /// A backend that can drive the KeepTalking AI agent loop.
 ///
-/// Implementations may delegate to OpenAI, an on-device Apple Intelligence model,
-/// or any other LLM provider that can translate the OpenAI message/tool format.
+/// Connectors speak KT-native types — `AIMessage`, `KeepTalkingActionToolDefinition`,
+/// `AIToolCall`, `AIToolChoice` — and translate to their provider's wire format
+/// internally. The SDK never builds vendor types at the call site; that means a
+/// new provider plugs in by adding one connector and zero upstream changes.
 ///
-/// We might migrate the tool normalisation to the turn runner in the future.
+/// Per-turn configuration flows through a single `AITurnConfiguration` value so
+/// callers don't need to know about provider-specific knobs (effort enums,
+/// thinking-token budgets, etc.). Connectors map the relevant fields to their
+/// provider's wire format and ignore the rest.
 public protocol AIConnector: Actor, Sendable {
-    /// The API compatibility mode. Used to determine which input modalities are safe to send
-    /// (e.g. native PDF file inputs are only supported in `.responses` mode).
-    nonisolated var apiMode: OpenAIAPIMode { get }
-
     /// The feature set of this connector.
     nonisolated var capabilities: AIConnectorCapabilities { get }
 
-    /// Perform one turn of the agent loop: given a message history and an optional tool set,
-    /// return the model's response (text and/or tool calls).
+    /// Perform one turn of the agent loop: given a message history and an optional
+    /// tool set, return the model's response (text, reasoning, and/or tool calls).
     ///
     /// - Parameters:
-    ///   - messages: The full conversation history in OpenAI chat-completion format.
-    ///   - tools: The tools the model may choose to call.
-    ///   - model: A hint at which model to use (implementations may ignore this).
+    ///   - messages: The full conversation history in KT-native form.
+    ///   - tools: The KT action/tool definitions the model may choose to call.
+    ///            Each connector translates these to its vendor's tool shape.
+    ///   - model: The model identifier the connector should target. Implementations
+    ///            may map this onto provider-specific naming (e.g. OpenRouter's
+    ///            `openai/gpt-4o-mini`).
     ///   - toolChoice: Whether/how the model should pick a tool.
     ///   - stage: The current orchestrator stage (planning/execution).
-    ///   - reasoningEffort: Optional reasoning effort override; `nil` defers to the connector default.
-    ///   - toolExecutor: An optional executor for running tools natively during the turn (e.g. for Apple Intelligence native loops).
+    ///   - configuration: Provider-agnostic per-turn configuration. `nil` means the
+    ///                    connector picks its defaults.
+    ///   - toolExecutor: An optional executor for running tools natively during the
+    ///                   turn (e.g. for Apple Intelligence native loops). Returns
+    ///                   the resulting `.tool` messages, one per call.
     func completeTurn(
-        messages: [ChatQuery.ChatCompletionMessageParam],
-        tools: [OpenAITool],
-        model: OpenAIModel,
-        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam?,
+        messages: [AIMessage],
+        tools: [KeepTalkingActionToolDefinition],
+        model: String,
+        toolChoice: AIToolChoice?,
         stage: AIStage,
-        reasoningEffort: ChatQuery.ReasoningEffort?,
+        configuration: AITurnConfiguration?,
         toolExecutor: (
-            @Sendable ([ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]) async throws ->
-                [ChatQuery.ChatCompletionMessageParam.ToolMessageParam]
+            @Sendable ([AIToolCall]) async throws -> [AIMessage]
         )?
     ) async throws -> AITurnResult
 }
 
-// MARK: - Convenience overload (no explicit effort — callers that don't need to control effort)
+// MARK: - Convenience overload (no explicit configuration)
 
 extension AIConnector {
     func completeTurn(
-        messages: [ChatQuery.ChatCompletionMessageParam],
-        tools: [OpenAITool],
-        model: OpenAIModel,
-        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam?,
+        messages: [AIMessage],
+        tools: [KeepTalkingActionToolDefinition],
+        model: String,
+        toolChoice: AIToolChoice?,
         stage: AIStage,
         toolExecutor: (
-            @Sendable ([ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]) async throws ->
-                [ChatQuery.ChatCompletionMessageParam.ToolMessageParam]
+            @Sendable ([AIToolCall]) async throws -> [AIMessage]
         )? = nil
     ) async throws -> AITurnResult {
         try await completeTurn(
@@ -101,7 +119,7 @@ extension AIConnector {
             model: model,
             toolChoice: toolChoice,
             stage: stage,
-            reasoningEffort: nil,
+            configuration: nil,
             toolExecutor: toolExecutor
         )
     }

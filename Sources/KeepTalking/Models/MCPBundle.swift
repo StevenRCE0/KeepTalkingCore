@@ -50,7 +50,7 @@ public struct KeepTalkingMCPOAuthRegistration: Codable, Sendable, Hashable {
     }
 }
 
-public struct KeepTalkingMCPBundle: KeepTalkingActionBundle {
+public struct KeepTalkingMCPBundle: KeepTalkingActionBundle, Equatable {
     public var id: UUID
     public var name: String
     public var indexDescription: String

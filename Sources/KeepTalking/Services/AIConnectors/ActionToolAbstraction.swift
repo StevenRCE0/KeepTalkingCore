@@ -1,5 +1,5 @@
+import AIProxy
 import Foundation
-import OpenAI
 
 // MARK: - Action stub (lightweight, no server I/O)
 
@@ -49,7 +49,7 @@ actor KeepTalkingLazyToolRegistry {
 
 // MARK: - Tool definition
 
-public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
+public struct KeepTalkingActionToolDefinition: Sendable {
     public enum Source: String, Sendable, Hashable {
         case mcp
         case skill
@@ -65,7 +65,9 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
     public let displayName: String?
     public let supportsWakeAssist: Bool
     public let description: String
-    public let parameters: JSONSchema
+    /// JSON Schema for the function parameters, in the AIProxy "JSON value" form.
+    /// Top-level should be an object schema (`["type": "object", "properties": ...]`).
+    public let parameters: [String: AIProxyJSONValue]
 
     public init(
         functionName: String,
@@ -76,7 +78,7 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         displayName: String? = nil,
         supportsWakeAssist: Bool = false,
         description: String,
-        parameters: JSONSchema
+        parameters: [String: AIProxyJSONValue]
     ) {
         self.functionName = functionName
         self.actionID = actionID
@@ -87,17 +89,6 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         self.supportsWakeAssist = supportsWakeAssist
         self.description = description
         self.parameters = parameters
-    }
-
-    public var openAITool: OpenAITool {
-        .functionTool(
-            .init(
-                name: functionName,
-                description: description,
-                parameters: parameters,
-                strict: false
-            )
-        )
     }
 
     public static func normalizedFunctionName(
@@ -214,27 +205,27 @@ public struct KeepTalkingActionToolDefinition: Sendable, Hashable {
         )
     }
 
-    public static var permissiveObjectParameters: JSONSchema {
-        JSONSchema(
-            .type(.object),
-            .properties([
-                "tool": JSONSchema(
-                    .type(.string),
-                    .description(
+    /// Default parameters schema for proxy/wrapper tools whose actual argument shape
+    /// is determined by the wrapped MCP/skill tool at call time.
+    public static var permissiveObjectParameters: [String: AIProxyJSONValue] {
+        [
+            "type": .string("object"),
+            "properties": .object([
+                "tool": .object([
+                    "type": .string("string"),
+                    "description": .string(
                         "Optional underlying tool name for this proxy. This selects the wrapped MCP or skill tool and is not the target node name. If omitted, the proxy uses its default mapped tool."
-                    )
-                ),
-                "arguments": JSONSchema(
-                    .type(.object),
-                    .description(
-                        "Arguments object passed to the MCP tool."
                     ),
-                    .properties([:]),
-                    .additionalProperties(.boolean(true))
-                ),
+                ]),
+                "arguments": .object([
+                    "type": .string("object"),
+                    "description": .string("Arguments object passed to the MCP tool."),
+                    "properties": .object([:]),
+                    "additionalProperties": .bool(true),
+                ]),
             ]),
-            .additionalProperties(.boolean(true))
-        )
+            "additionalProperties": .bool(true),
+        ]
     }
 }
 
@@ -243,10 +234,6 @@ public struct KeepTalkingActionToolCatalog: Sendable {
 
     public init(definitions: [KeepTalkingActionToolDefinition]) {
         self.definitions = definitions
-    }
-
-    public var openAITools: [OpenAITool] {
-        definitions.map(\.openAITool)
     }
 
     public func definition(functionName: String)

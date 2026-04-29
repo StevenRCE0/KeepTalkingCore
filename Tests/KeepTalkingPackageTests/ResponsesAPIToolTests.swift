@@ -1,6 +1,7 @@
+import AIProxy
 import XCTest
+
 @testable import KeepTalking
-import OpenAI
 
 final class ResponsesAPIToolTests: XCTestCase {
     func testResponseAPI() async throws {
@@ -13,7 +14,7 @@ final class ResponsesAPIToolTests: XCTestCase {
             apiKey: envKey,
             apiMode: .responses
         )
-        
+
         let tool = Tool.functionTool(
             .init(
                 name: "get_weather",
@@ -28,11 +29,11 @@ final class ResponsesAPIToolTests: XCTestCase {
                 strict: false
             )
         )
-        
+
         let messages: [ChatQuery.ChatCompletionMessageParam] = [
             .user(.init(content: .string("What is the weather in Tokyo?")))
         ]
-        
+
         do {
             let result = try await connector.completeTurn(
                 messages: messages,

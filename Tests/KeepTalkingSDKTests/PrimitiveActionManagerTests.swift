@@ -1,6 +1,6 @@
+import AIProxy
 import Foundation
 import MCP
-import OpenAI
 import Testing
 
 @testable import KeepTalkingSDK
@@ -24,7 +24,7 @@ struct PrimitiveActionManagerTests {
         )
 
         let registry = KeepTalkingPrimitiveRegistry(
-            toolParameters: { _ in JSONSchema(.type(.object)) },
+            toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
             callAction: { primitive, incomingCall in
                 #expect(primitive == bundle)
                 #expect(incomingCall.action == call.action)
@@ -74,7 +74,7 @@ struct PrimitiveActionManagerTests {
             blockingAuthorisation: false
         )
         let registry = KeepTalkingPrimitiveRegistry(
-            toolParameters: { _ in JSONSchema(.type(.object)) },
+            toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
             callAction: { _, _ in KeepTalkingPrimitiveActionResponse(text: "unused") }
         )
         let manager = PrimitiveActionManager(registry: registry)

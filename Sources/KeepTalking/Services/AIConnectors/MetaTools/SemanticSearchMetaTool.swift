@@ -1,7 +1,7 @@
+import AIProxy
 import FluentKit
 import Foundation
 import MCP
-import OpenAI
 
 // Sendable result item used to safely pass data across task boundaries.
 private struct SemanticSearchItem: Sendable {
@@ -37,12 +37,13 @@ extension KeepTalkingClient {
 
         var localItems: [SemanticSearchItem] = []
         if let callback = semanticSearchCallback {
-            let contextTagIDs: [UUID] = (try? await KeepTalkingMapping
-                .query(on: localStore.database)
-                .filter(\.$context.$id == contextID)
-                .filter(\.$kind == .tag)
-                .all()
-                .compactMap(\.id)) ?? []
+            let contextTagIDs: [UUID] =
+                (try? await KeepTalkingMapping
+                    .query(on: localStore.database)
+                    .filter(\.$context.$id == contextID)
+                    .filter(\.$kind == .tag)
+                    .all()
+                    .compactMap(\.id)) ?? []
 
             let localResults: [KeepTalkingSemanticSearchResult]
             do {

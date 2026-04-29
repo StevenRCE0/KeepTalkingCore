@@ -1,82 +1,101 @@
-# KeepTalking
+# KeepTalking SDK
 
-Swift package for `ion-sfu` collaboration over WebRTC data channels.
+Swift package providing the core engine for KeepTalking — a distributed AI conversation platform with P2P transport, semantic threading, multi-provider AI, and MCP-based skill execution.
 
-It includes:
-- `KeepTalkingSDK` (library product) for app integration
-- `KeepTalking` (CLI executable) built on top of the SDK
+## Products
 
-The transport uses `ion-sfu` JSON-RPC signaling (`/ws`) plus WebRTC DataChannels:
-- `signaling` channel: `keep-talking.signaling`
-- `chat` channel for chat messages
-- `action_call` channel for non-chat envelopes (context/node/action flow)
+| Product | Kind | Description |
+|---|---|---|
+| `KeepTalkingSDK` | library | Core SDK consumed by `KeepTalkingApp` and any other host |
+| `KeepTalking` | executable | Development CLI for testing SDK features, MCP tools, and skills |
 
-`chat` and `action_call` labels are suffixed with the context ID:
-- `keep-talking.chat.<context-id>`
-- `keep-talking.action_call.<context-id>`
+## Platforms
 
-The SFU session ID is also context-scoped:
-- `<context-id>`
+iOS 17+, macOS 13+, visionOS 1+, Swift 6.1+
 
-## Prerequisites
+## Architecture
 
-- macOS with Swift 6+
-- A running ion-sfu JSON-RPC server (for your setup: `ws://127.0.0.1:17000/ws`)
-  - Example: `docker run --name ion-sfu-jsonrpc -d -p 17000:7000 -p 5000-5200:5000-5200/udp pionwebrtc/ion-sfu:latest-jsonrpc`
-
-## Build
-
-```bash
-cd /Users/steven/Developer/Example/KeepTalking
-swift build
+```
+Sources/KeepTalking/
+├── Client.swift                    # KeepTalkingClient — main SDK entry point
+├── ClientControllers/              # Action orchestration, thread ops, AI controller
+├── Models/                         # Core domain models
+│   ├── KeepTalkingContextMessage   # Raw conversation history rows
+│   ├── KeepTalkingThread           # Semantic memory unit
+│   ├── KeepTalkingContext          # Conversation container
+│   ├── KeepTalkingNode             # P2P node identity
+│   ├── KeepTalkingAction           # Distributed function call + ACLs
+│   └── KeepTalkingMapping          # Tag/alias abstractions
+├── Services/
+│   ├── AIConnectors/               # LLM provider abstraction layer
+│   │   ├── AIConnector.swift       # Protocol — completeTurn(messages:tools:...)
+│   │   ├── AIMessage.swift         # KT-native message IR (multimodal)
+│   │   ├── AIOrchestrator.swift    # Multi-turn loop driver
+│   │   ├── OpenAIConnector.swift   # OpenRouter + OpenAI + custom endpoints
+│   │   ├── AnthropicConnector.swift # Anthropic Messages API
+│   │   ├── ACTAgent.swift          # Autonomous tool-calling agent
+│   │   └── ActionToolAbstraction.swift # Tool definition + catalog
+│   ├── Executors/                  # Skill & MCP tool execution
+│   ├── SkillPlanner.swift          # Multi-step skill planning
+│   ├── ContextSyncing/             # Cross-node context sync
+│   └── SemanticStore/              # Vector / BM25 hybrid search
+├── Transport/
+│   ├── ContextTransport.swift      # P2P transport orchestrator
+│   ├── RTC/                        # WebRTC (ion-sfu) data channels
+│   └── Models/                     # Envelope, routing, sync shapes
+├── Envelope/                       # Message framing & serialization
+├── Migrations/                     # SQLite schema (Fluent)
+├── Cryptos/                        # Key management & node identity
+└── Helpers/                        # Shared utilities
 ```
 
-## Formatting And Linting
+## Key Dependencies
 
-This repo uses `.swift-format` as the shared Swift style baseline.
+| Dependency | Purpose |
+|---|---|
+| `FluentKit` + `FluentSQLiteDriver` | ORM + SQLite persistence |
+| `LiveKitWebRTC` | WebRTC for P2P data channels (ion-sfu compatible) |
+| `swift-sdk` (MCP) | MCP server/client for tool integration |
+| `AIProxyMultiPlatform` | Chat completions + embeddings client (local fork — see below) |
 
-Format all Swift sources:
+### AIProxy fork
 
-```bash
-cd /Users/steven/Developer/Example/KeepTalking
-swift-format format --in-place --recursive Sources
+`KeepTalking` depends on a local fork of AIProxySwift at `../AIProxySwift-MultiPlatform`. The fork strips the hosted-proxy backend and DeviceCheck/StoreKit plumbing, leaving two pure Swift targets:
+
+- **`AIProxy`** — Foundation-only BYOK core (all platforms including Linux)
+- **`AIProxyRealtime`** — OpenAI Realtime API over WebSocket + AVFoundation audio (Apple platforms only)
+
+The SDK uses the `AIProxy` target only. The app may optionally link `AIProxyRealtime` for voice sessions.
+
+## AI Provider Abstraction
+
+`AIConnector` is the single seam wrapping any LLM backend. Connectors translate KT-native types into vendor wire formats internally — call sites never touch vendor shapes directly.
+
+```swift
+public protocol AIConnector: Actor, Sendable {
+    nonisolated var capabilities: AIConnectorCapabilities { get }
+    func completeTurn(
+        messages: [AIMessage],
+        tools: [KeepTalkingActionToolDefinition],
+        model: String,
+        toolChoice: AIToolChoice?,
+        stage: AIStage,
+        configuration: AITurnConfiguration?,
+        toolExecutor: (@Sendable ([AIToolCall]) async throws -> [AIMessage])?
+    ) async throws -> AITurnResult
+}
 ```
 
-Lint all Swift sources:
+Built-in connectors:
 
-```bash
-cd /Users/steven/Developer/Example/KeepTalking
-swift-format lint --recursive Sources
-```
+| Connector | Backends |
+|---|---|
+| `OpenAIConnector` | `.openRouter`, `.openAI`, `.custom(baseURL:)` |
+| `AnthropicConnector` | `.anthropic`, `.custom(baseURL:)` |
 
-## Package For Distribution (macOS)
-
-Create a runnable distribution folder containing `KeepTalking` and `LiveKitWebRTC.framework`:
-
-```bash
-cd /Users/steven/Developer/Example/KeepTalking
-./scripts/package-macos.sh
-```
-
-Output defaults to:
-
-`/Users/steven/Developer/Example/KeepTalking/dist/KeepTalking-macos`
-
-Optional signing identity:
-
-```bash
-KT_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/package-macos.sh
-```
-
-If artifacts are already built and you want to package without rebuilding:
-
-```bash
-KT_SKIP_BUILD=1 ./scripts/package-macos.sh
-```
+The message IR (`AIMessage`, `AIToolCall`, `AIToolChoice`) supports multimodal content — text + image URLs — and maps cleanly to all three vendor formats (OpenAI Chat Completions, Anthropic Messages, Apple FoundationModels).
 
 ## SDK Usage
-
-Add the package and import `KeepTalkingSDK`, then:
 
 ```swift
 import KeepTalkingSDK
@@ -87,49 +106,53 @@ let config = KeepTalkingConfig(
     node: UUID(uuidString: "2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9")!
 )
 
-let kv = KeepTalkingPassKVService(baseURL: URL(string: "https://your-kv.example.com")!)
-let store = try KeepTalkingModelStore()
-
-let client = KeepTalkingClient(config: config, kvService: kv, localStore: store)
-client.onMessage = { message in
-    print("[\(message.senderNodeID)] \(message.text)")
-}
-
+let client = try KeepTalkingClient(config: config, kvService: nil, localStore: store)
 try await client.connect()
-try client.send(text: "hello from sdk")
-
-// Persist/share node metadata + local graph/context snapshots
-try await client.registerCurrentNodeID()
-try client.announceCurrentNode()
-try client.requestPeerState()
-try client.syncLocalState()
-
-let nodeIDs = try await client.fetchNodeIDs()
-let snapshot = try client.loadLocalSnapshot()
 ```
 
-## Run
+## Transport
 
-Interactive mode:
+The transport layer uses `ion-sfu` JSON-RPC signaling (`/ws`) plus WebRTC DataChannels. Each context gets its own SFU session and channel namespace:
+
+| Channel | Label |
+|---|---|
+| Signaling | `keep-talking.signaling` |
+| Chat | `keep-talking.chat.<context-id>` |
+| Action/envelope | `keep-talking.action_call.<context-id>` |
+
+**Prerequisites:** a running ion-sfu JSON-RPC server, e.g.:
+```bash
+docker run --name ion-sfu -d -p 17000:7000 -p 5000-5200:5000-5200/udp \
+  pionwebrtc/ion-sfu:latest-jsonrpc
+```
+
+## Build
 
 ```bash
-swift run KeepTalking --signal-url ws://127.0.0.1:17000/ws --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --context 11111111-2222-3333-4444-555555555555
+swift build
+# Release
+swift build -c release
 ```
 
-Custom DB location:
+## Tests
 
 ```bash
-swift run KeepTalking --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --db-path ~/Library/Application\ Support/KeepTalking/custom.sqlite
+swift test
 ```
 
-One-shot message:
+## CLI
 
+The `KeepTalking` executable is a development tool for exercising the SDK interactively.
+
+**Interactive session:**
 ```bash
-swift run KeepTalking --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --message "hello from swift"
+swift run KeepTalking \
+  --signal-url ws://127.0.0.1:17000/ws \
+  --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 \
+  --context 11111111-2222-3333-4444-555555555555
 ```
 
-Environment variables are supported:
-
+**Environment variables:**
 ```bash
 export KT_SIGNAL_URL="ws://127.0.0.1:17000/ws"
 export KT_NODE="2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9"
@@ -138,24 +161,32 @@ export KT_DB_PATH="$HOME/Library/Application Support/KeepTalking/custom.sqlite"
 swift run KeepTalking
 ```
 
-For P2P upgrade tests, run peers with distinct node IDs:
+**Interactive commands:**
+- `/new` — create and join a new context
+- `/join <context-uuid>` — join an existing context
+- `/trust <node-uuid>` — mark a node relation as trusted
+- `/stats` — send/receive counters + channel state
+- `/p2p` — manually trigger a direct P2P upgrade
+- `/quit` — disconnect
+
+## Formatting and Linting
 
 ```bash
-swift run KeepTalking --context 11111111-2222-3333-4444-555555555555 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
-swift run KeepTalking --context 11111111-2222-3333-4444-555555555555 --node E3BD62F8-4C27-4E66-B9D2-1F7D27F57102
+swift-format format --in-place --recursive Sources
+swift-format lint --recursive Sources
 ```
 
-Interactive commands:
-- `/new` create and join a new context (new sid + channel suffix)
-- `/join <context-uuid>` join another context (sid + channel suffix)
-- `/trust <node-uuid>` mark a node relation as trusted
-- `/stats` show local send/receive counters and outbound channel state
-- `/p2p` manually start a new direct P2P upgrade trial
-- `/quit` disconnect
+## Distribution (macOS)
 
-Notes:
-- Messages are broadcast as context updates; no peer-level `from/to` targeting is used.
-- SDK now supports P2P envelopes for `node`, `context`, `stateBundle`, and `stateRequest`.
-- Local persistence stores `nodes` and `contexts` in Fluent SQLite (`~/Library/Application Support/KeepTalking/state.sqlite`) by default.
-- `KeepTalkingClient` defaults to `KeepTalkingModelStore`; if initialization fails, it falls back to `KeepTalkingInMemoryStore`.
-- `KeepTalkingKVService` is protocol-based; implement your own KV backend, or use `KeepTalkingPassKVService`.
+Package a runnable folder with the `KeepTalking` binary and `LiveKitWebRTC.framework`:
+
+```bash
+./scripts/package-macos.sh
+# Output: dist/KeepTalking-macos/
+
+# Optional code signing
+KT_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/package-macos.sh
+
+# Skip rebuild
+KT_SKIP_BUILD=1 ./scripts/package-macos.sh
+```

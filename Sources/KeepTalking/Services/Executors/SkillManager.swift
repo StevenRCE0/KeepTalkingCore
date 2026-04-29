@@ -5,9 +5,9 @@
 //  Created by 砚渤 on 28/02/2026.
 //
 
+import AIProxy
 import Foundation
 import MCP
-import OpenAI
 
 public enum SkillManagerError: LocalizedError {
     case invalidAction
@@ -140,10 +140,17 @@ public actor SkillManager {
 
     #if os(macOS)
     /// Executes a skill action by planning tool usage with the configured AI connector.
+    ///
+    /// `model` should match the active provider's model identifier (e.g.
+    /// `openai/gpt-5-codex` for OpenRouter, plain `gpt-5-codex` for direct
+    /// OpenAI). Defaults to `gpt-5-codex` for backward compatibility but
+    /// callers routing through the SDK's `KeepTalkingClient` thread the
+    /// configured model through automatically.
     public func callAction(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
-        sandboxPolicy: KTSandboxPolicy? = nil
+        sandboxPolicy: KTSandboxPolicy? = nil,
+        model: String = "gpt-5-codex"
     ) async throws -> (content: [MCP.Tool.Content], isError: Bool?) {
         guard let actionID = action.id else {
             throw SkillManagerError.missingActionID
@@ -179,28 +186,24 @@ public actor SkillManager {
         }
         let resolvedContext = manifestContext
         let tools = makeSkillTools(context: resolvedContext)
-        var messages: [ChatQuery.ChatCompletionMessageParam] = [
-            .developer(
-                .init(
-                    content: .textContent(
-                        makeSkillSystemPrompt(
-                            actionID: actionID,
-                            bundle: skillBundle,
-                            call: call,
-                            manifestContext: resolvedContext
-                        )
-                    )
+        var messages: [AIMessage] = [
+            .system(
+                makeSkillSystemPrompt(
+                    actionID: actionID,
+                    bundle: skillBundle,
+                    call: call,
+                    manifestContext: resolvedContext
                 )
             ),
-            .user(.init(content: .string(makeSkillUserPrompt(call: call)))),
+            .user(makeSkillUserPrompt(call: call)),
         ]
 
         var latestAssistantText: String?
         for _ in 0..<8 {
             let turn = try await aiConnector.completeTurn(
                 messages: messages,
-                tools: OpenAIConnector.toResponseTools(tools: tools),
-                model: "gpt-5-codex",
+                tools: tools,
+                model: model,
                 toolChoice: nil,
                 stage: .execution,
                 toolExecutor: { [weak self] toolCalls in
@@ -233,7 +236,7 @@ public actor SkillManager {
                     skillDirectory: skillBundle.directory,
                     manifestContext: resolvedContext,
                     sandboxPolicy: sandboxPolicy
-                ).map { .tool($0) }
+                )
             )
         }
 

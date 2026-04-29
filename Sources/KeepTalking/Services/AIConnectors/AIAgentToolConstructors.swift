@@ -1,6 +1,6 @@
+import AIProxy
 import Foundation
 import MCP
-import OpenAI
 
 extension KeepTalkingClient {
     func mcpProxyDefinitions(
@@ -264,11 +264,11 @@ extension KeepTalkingClient {
             displayName: bundle.name,
             description:
                 "Read skill metadata for \(bundle.name), including manifest metadata and indexed directories.",
-            parameters: JSONSchema(
-                .type(.object),
-                .properties([:]),
-                .additionalProperties(.boolean(false))
-            )
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([:]),
+                "additionalProperties": .bool(false),
+            ]
         )
     }
 
@@ -290,268 +290,268 @@ extension KeepTalkingClient {
             displayName: bundle.name,
             description:
                 "Read a file from skill bundle \(bundle.name). Paths must stay within the skill directory.",
-            parameters: JSONSchema(
-                .type(.object),
-                .properties([
-                    "path": JSONSchema(
-                        .type(.string),
-                        .description(
-                            "Relative path inside the skill bundle."
-                        )
-                    ),
-                    "max_characters": JSONSchema(
-                        .type(.integer),
-                        .description(
-                            "Optional maximum characters to return."
-                        )
-                    ),
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "path": .object([
+                        "type": .string("string"),
+                        "description": .string("Relative path inside the skill bundle."),
+                    ]),
+                    "max_characters": .object([
+                        "type": .string("integer"),
+                        "description": .string("Optional maximum characters to return."),
+                    ]),
                 ]),
-                .additionalProperties(.boolean(true))
-            )
+                "additionalProperties": .bool(true),
+            ]
         )
     }
 
-    func makeKtSkillMetainfoTool() -> OpenAITool {
-        OpenAITool.functionTool(
-            .init(
-                name: Self.ktSkillMetainfoToolFunctionName,
-                description: AIPromptPresets.ToolDescriptions.ktSkillMetainfo,
-                parameters: JSONSchema(
-                    .type(.object),
-                    .properties([
-                        "action_id": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "The action_id of the skill action to inspect, from the available actions list."
-                            )
-                        )
+    func makeKtSkillMetainfoTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.ktSkillMetainfoToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.ktSkillMetainfo,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "action_id": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "The action_id of the skill action to inspect, from the available actions list."
+                        ),
+                    ])
+                ]),
+                "required": .array([.string("action_id")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
+    func makeContextAttachmentListingTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.contextAttachmentListingToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.contextAttachmentListing,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([:]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
+    func makeContextAttachmentReadTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.contextAttachmentReadToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.contextAttachmentRead,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "attachment_id": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "Attachment identifier returned by kt_list_context_attachments."
+                        ),
                     ]),
-                    .required(["action_id"]),
-                    .additionalProperties(.boolean(false))
-                ),
-                strict: false
-            )
-        )
-    }
-
-    func makeContextAttachmentListingTool() -> OpenAITool {
-        OpenAITool
-            .functionTool(
-                .init(
-                    name: Self.contextAttachmentListingToolFunctionName,
-                    description: AIPromptPresets.ToolDescriptions.contextAttachmentListing,
-                    parameters: JSONSchema(
-                        .type(.object),
-                        .properties([:]),
-                        .additionalProperties(.boolean(false))
-                    ),
-                    strict: false
-                )
-            )
-    }
-
-    func makeContextAttachmentReadTool() -> OpenAITool {
-        OpenAITool
-            .functionTool(
-                .init(
-                    name: Self.contextAttachmentReadToolFunctionName,
-                    description: AIPromptPresets.ToolDescriptions.contextAttachmentRead,
-                    parameters: JSONSchema(
-                        .type(.object),
-                        .properties([
-                            "attachment_id": JSONSchema(
-                                .type(.string),
-                                .description(
-                                    "Attachment identifier returned by kt_list_context_attachments."
-                                )
-                            ),
-                            "mode": JSONSchema(
-                                .type(.string),
-                                .enumValues([
-                                    "metadata",
-                                    "preview_text",
-                                    "native",
-                                ]),
-                                .description(
-                                    "How to inspect the attachment."
-                                )
-                            ),
-                            "max_characters": JSONSchema(
-                                .type(.integer),
-                                .description(
-                                    "Optional maximum preview length for preview_text mode."
-                                )
-                            ),
+                    "mode": .object([
+                        "type": .string("string"),
+                        "enum": .array([
+                            .string("metadata"),
+                            .string("preview_text"),
+                            .string("native"),
                         ]),
-                        .required(["attachment_id", "mode"]),
-                        .additionalProperties(.boolean(false))
-                    ),
-                    strict: false
-                )
-            )
-    }
-
-    func makeMarkTurningPointTool() -> OpenAITool {
-        OpenAITool.functionTool(
-            .init(
-                name: Self.markTurningPointToolFunctionName,
-                description: AIPromptPresets.ToolDescriptions.markTurningPoint,
-                parameters: JSONSchema(
-                    .type(.object),
-                    .properties([
-                        "previous_topic_name": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "Optional only when this message is the first meaningful message of the live thread. Otherwise required. A short 2-5 word label for the topic that ends before this message."
-                            )
-                        ),
-                        "current_topic_name": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "Required. A short 2-5 word label for the live thread topic that starts at this message and should remain active after this tool call."
-                            )
+                        "description": .string("How to inspect the attachment."),
+                    ]),
+                    "max_characters": .object([
+                        "type": .string("integer"),
+                        "description": .string(
+                            "Optional maximum preview length for preview_text mode."
                         ),
                     ]),
-                    .required(["current_topic_name"]),
-                    .additionalProperties(.boolean(false))
-                ),
-                strict: false
-            )
+                ]),
+                "required": .array([.string("attachment_id"), .string("mode")]),
+                "additionalProperties": .bool(false),
+            ]
         )
     }
 
-    func makeMarkChitterChatterTool() -> OpenAITool {
-        OpenAITool.functionTool(
-            .init(
-                name: Self.markChitterChatterToolFunctionName,
-                description: AIPromptPresets.ToolDescriptions.markChitterChatter,
-                parameters: JSONSchema(
-                    .type(.object),
-                    .properties([:]),
-                    .additionalProperties(.boolean(false))
-                ),
-                strict: false
-            )
-        )
-    }
-
-    func makeContextAttachmentUpdateMetadataTool() -> OpenAITool {
-        OpenAITool.functionTool(
-            .init(
-                name: Self.contextAttachmentUpdateMetadataToolFunctionName,
-                description: AIPromptPresets.ToolDescriptions.contextAttachmentUpdateMetadata,
-                parameters: JSONSchema(
-                    .type(.object),
-                    .properties([
-                        "attachment_id": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "Attachment identifier."
-                            )
-                        ),
-                        "image_description": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "A concise description of the image content. Set this after seeing the image via native mode."
-                            )
-                        ),
-                        "text_preview": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "A summary or text preview for non-text files (e.g. PDFs, audio transcripts)."
-                            )
-                        ),
-                        "tags": JSONSchema(
-                            .type(.array),
-                            .items(JSONSchema(.type(.string))),
-                            .description(
-                                "Tags to set on this attachment. Replaces existing tags."
-                            )
+    func makeMarkTurningPointTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.markTurningPointToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.markTurningPoint,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "previous_topic_name": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "Optional only when this message is the first meaningful message of the live thread. Otherwise required. A short 2-5 word label for the topic that ends before this message."
                         ),
                     ]),
-                    .required(["attachment_id"]),
-                    .additionalProperties(.boolean(false))
-                ),
-                strict: false
-            )
-        )
-    }
-
-    func makeSearchThreadsTool() -> OpenAITool {
-        OpenAITool.functionTool(
-            .init(
-                name: Self.searchThreadsToolFunctionName,
-                description: AIPromptPresets.ToolDescriptions.searchThreads,
-                parameters: JSONSchema(
-                    .type(.object),
-                    .properties([
-                        "query": JSONSchema(
-                            .type(.string),
-                            .description(
-                                "Natural-language memory query, phrased as the fact, topic, task, or decision you want to recover from earlier conversation."
-                            )
-                        ),
-                        "top_k": JSONSchema(
-                            .type(.integer),
-                            .description(
-                                "Optional maximum number of memory hits to return. Defaults to 5."
-                            )
+                    "current_topic_name": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "Required. A short 2-5 word label for the live thread topic that starts at this message and should remain active after this tool call."
                         ),
                     ]),
-                    .required(["query"]),
-                    .additionalProperties(.boolean(false))
-                ),
-                strict: false
-            )
+                ]),
+                "required": .array([.string("current_topic_name")]),
+                "additionalProperties": .bool(false),
+            ]
         )
     }
 
-    func makeWebSearchTool(apiMode: OpenAIAPIMode) -> OpenAITool {
-        switch apiMode {
-            case .responses:
-                return OpenAITool.webSearchTool(
-                    .init(_type: .webSearchPreview, searchContextSize: .medium)
-                )
-            case .chatCompletions:
-                return OpenAITool.functionTool(
-                    .init(
-                        name: Self.webSearchFunctionName,
-                        description:
-                            "Search the web for current information, recent events, or factual data not present in your training. Returns a text summary of relevant results.",
-                        parameters: JSONSchema(
-                            .type(.object),
-                            .properties([
-                                "query": JSONSchema(
-                                    .type(.string),
-                                    .description("The search query.")
-                                )
-                            ]),
-                            .required(["query"]),
-                            .additionalProperties(.boolean(false))
-                        ),
-                        strict: false
-                    )
-                )
-        }
+    func makeMarkChitterChatterTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.markChitterChatterToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.markChitterChatter,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([:]),
+                "additionalProperties": .bool(false),
+            ]
+        )
     }
 
-    func openAIParameters(from inputSchema: Value?) -> JSONSchema {
+    func makeContextAttachmentUpdateMetadataTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.contextAttachmentUpdateMetadataToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.contextAttachmentUpdateMetadata,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "attachment_id": .object([
+                        "type": .string("string"),
+                        "description": .string("Attachment identifier."),
+                    ]),
+                    "image_description": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "A concise description of the image content. Set this after seeing the image via native mode."
+                        ),
+                    ]),
+                    "text_preview": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "A summary or text preview for non-text files (e.g. PDFs, audio transcripts)."
+                        ),
+                    ]),
+                    "tags": .object([
+                        "type": .string("array"),
+                        "items": .object([
+                            "type": .string("string")
+                        ]),
+                        "description": .string(
+                            "Tags to set on this attachment. Replaces existing tags."
+                        ),
+                    ]),
+                ]),
+                "required": .array([.string("attachment_id")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
+    func makeSearchThreadsTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.searchThreadsToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.searchThreads,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "query": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "Natural-language memory query, phrased as the fact, topic, task, or decision you want to recover from earlier conversation."
+                        ),
+                    ]),
+                    "top_k": .object([
+                        "type": .string("integer"),
+                        "description": .string(
+                            "Optional maximum number of memory hits to return. Defaults to 5."
+                        ),
+                    ]),
+                ]),
+                "required": .array([.string("query")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
+    func makeWebSearchTool() -> KeepTalkingActionToolDefinition {
+        // Chat Completions only — Responses-API-style web_search_preview was dropped
+        // when the protocol moved off the Responses API.
+        .init(
+            functionName: Self.webSearchFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description:
+                "Search the web for current information, recent events, or factual data not present in your training. Returns a text summary of relevant results.",
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "query": .object([
+                        "type": .string("string"),
+                        "description": .string("The search query."),
+                    ])
+                ]),
+                "required": .array([.string("query")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
+    /// Convert an MCP `Value` schema into the AIProxy `[String: AIProxyJSONValue]`
+    /// shape that `OpenAIChatCompletionRequestBody.Tool.function(parameters:)` expects.
+    func openAIParameters(from inputSchema: Value?) -> [String: AIProxyJSONValue] {
         guard let inputSchema else {
             return KeepTalkingActionToolDefinition.permissiveObjectParameters
         }
-
         let normalized = normalizedSchemaNode(
             inputSchema,
             expectation: .schema,
             forceRootObject: true
         )
-        guard
-            let data = try? JSONEncoder().encode(normalized),
-            let schema = try? JSONDecoder().decode(JSONSchema.self, from: data)
-        else {
+        guard case .object(let dict) = normalized else {
             return KeepTalkingActionToolDefinition.permissiveObjectParameters
         }
-        return schema
+        return dict.mapValues(Self.toAIProxy)
+    }
+
+    private static func toAIProxy(_ value: Value) -> AIProxyJSONValue {
+        switch value {
+            case .null: return .null(NSNull())
+            case .bool(let b): return .bool(b)
+            case .int(let i): return .int(i)
+            case .double(let d): return .double(d)
+            case .string(let s): return .string(s)
+            case .data(_, let d):
+                // Schemas should not contain raw data; surface as base64 string for sanity.
+                return .string(d.base64EncodedString())
+            case .array(let arr): return .array(arr.map(toAIProxy))
+            case .object(let obj): return .object(obj.mapValues(toAIProxy))
+        }
     }
 
     private enum SchemaExpectation {
@@ -680,7 +680,9 @@ extension KeepTalkingClient {
             if normalized["type"] == nil {
                 normalized["type"] = .string("object")
             }
-            if normalized["properties"]?.objectValue == nil {
+            if case .object = normalized["properties"] {
+                // ok
+            } else {
                 normalized["properties"] = .object([:])
             }
             if normalized["additionalProperties"] == nil {
@@ -702,12 +704,14 @@ extension KeepTalkingClient {
     ) -> [KeepTalkingActionToolDefinition] {
         allowedTools.map { tool in
             let opName = tool.operation.rawValue
-            let props = tool.operation.inputSchemaProperties.mapValues { propInfo -> JSONSchema in
-                JSONSchema(
-                    .type(.string),
-                    .description(propInfo["description"] ?? "")
-                )
-            }
+            let propsValue: AIProxyJSONValue = .object(
+                tool.operation.inputSchemaProperties.mapValues { propInfo in
+                    AIProxyJSONValue.object([
+                        "type": .string("string"),
+                        "description": .string(propInfo["description"] ?? ""),
+                    ])
+                }
+            )
             return KeepTalkingActionToolDefinition(
                 functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
                     ownerNodeID: ownerNodeID,
@@ -721,12 +725,14 @@ extension KeepTalkingClient {
                 displayName: opName,
                 supportsWakeAssist: supportsWakeAssist,
                 description: tool.description,
-                parameters: JSONSchema(
-                    .type(.object),
-                    .properties(props),
-                    .required(tool.operation.requiredInputProperties),
-                    .additionalProperties(.boolean(false))
-                )
+                parameters: [
+                    "type": .string("object"),
+                    "properties": propsValue,
+                    "required": .array(
+                        tool.operation.requiredInputProperties.map(AIProxyJSONValue.string)
+                    ),
+                    "additionalProperties": .bool(false),
+                ]
             )
         }
     }

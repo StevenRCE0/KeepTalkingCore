@@ -1,5 +1,5 @@
+import AIProxy
 import Foundation
-import OpenAI
 
 enum AskForFileToolError: Error, Equatable {
     case incompleteTransfer(blobIDs: [String])
@@ -33,14 +33,14 @@ extension KeepTalkingClient {
         runtimeCatalog: KeepTalkingActionRuntimeCatalog,
         context: KeepTalkingContext,
         transferReceiptTimeout: Duration = .seconds(15)
-    ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
+    ) async throws -> [AIMessage] {
         let contextID = try context.requireID()
-        var messages: [ChatQuery.ChatCompletionMessageParam] = []
+        var messages: [AIMessage] = []
 
         for execution in executions {
             guard
                 let route = runtimeCatalog.routesByFunctionName[
-                    execution.toolCall.function.name
+                    execution.toolCall.name
                 ],
                 case .actionProxy(let definition) = route
             else {
@@ -75,15 +75,13 @@ extension KeepTalkingClient {
     }
 }
 
-private extension KeepTalkingClient {
-    func askForFileToolResultPayload(
-        from messages: [ChatQuery.ChatCompletionMessageParam]
+extension KeepTalkingClient {
+    fileprivate func askForFileToolResultPayload(
+        from messages: [AIMessage]
     ) -> AskForFileToolResultPayload? {
         let textContent = messages.compactMap { message -> String? in
-            guard case .tool(let payload) = message else {
-                return nil
-            }
-            return text(from: payload.content)
+            guard message.role == .tool, let content = message.content else { return nil }
+            return text(from: content)
         }
 
         for candidate in textContent {
@@ -123,29 +121,18 @@ private extension KeepTalkingClient {
         return nil
     }
 
-    func text(
-        from content: ChatQuery.ChatCompletionMessageParam.TextContent
-    ) -> String? {
-        switch content {
-            case .textContent(let value):
-                let trimmed = value.trimmingCharacters(
-                    in: CharacterSet.whitespacesAndNewlines
-                )
-                return trimmed.isEmpty ? nil : trimmed
-            case .contentParts(let parts):
-                let joined = parts.map(\.text).joined()
-                let trimmed = joined.trimmingCharacters(
-                    in: CharacterSet.whitespacesAndNewlines
-                )
-                return trimmed.isEmpty ? nil : trimmed
-        }
+    fileprivate func text(from content: AIMessage.Content) -> String? {
+        let trimmed = content.text.trimmingCharacters(
+            in: CharacterSet.whitespacesAndNewlines
+        )
+        return trimmed.isEmpty ? nil : trimmed
     }
 
-    func injectedAskForFileMessages(
+    fileprivate func injectedAskForFileMessages(
         _ attachments: [AskForFileToolResultPayload.Attachment],
         in contextID: UUID,
         timeout: Duration = .seconds(15)
-    ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
+    ) async throws -> [AIMessage] {
         let orderedUniqueAttachments = orderedUniqueInjectableAttachments(
             attachments
         )
@@ -181,7 +168,7 @@ private extension KeepTalkingClient {
                 matches.map(\.blobID)
             )
             var readyBlobIDs: Set<String> = []
-            var injectedMessages: [ChatQuery.ChatCompletionMessageParam] = []
+            var injectedMessages: [AIMessage] = []
             injectedMessages.reserveCapacity(orderedBlobIDs.count)
             for blobID in orderedBlobIDs {
                 guard let attachment = attachmentsByBlobID[blobID],
@@ -220,7 +207,7 @@ private extension KeepTalkingClient {
         }
     }
 
-    func orderedUniqueInjectableAttachments(
+    fileprivate func orderedUniqueInjectableAttachments(
         _ attachments: [AskForFileToolResultPayload.Attachment]
     ) -> [AskForFileToolResultPayload.Attachment] {
         var seenBlobIDs: Set<String> = []

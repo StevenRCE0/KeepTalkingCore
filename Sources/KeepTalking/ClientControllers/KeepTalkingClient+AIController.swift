@@ -1,7 +1,7 @@
+import AIProxy
 import FluentKit
 import Foundation
 import MCP
-import OpenAI
 import UniformTypeIdentifiers
 
 private struct KeepTalkingQueuedPromptPreparationError: LocalizedError, Sendable {
@@ -41,11 +41,11 @@ extension KeepTalkingClient {
         _ prompt: String,
         attachments: [KeepTalkingLocalAttachmentInput] = [],
         in contextID: UUID,
-        model: OpenAIModel = "gpt-5-codex",
-        actModel: OpenAIModel? = nil,
+        model: String = "gpt-5-codex",
+        actModel: String? = nil,
         roleName: String = "ai",
         prefix: String = "@AI ",
-        reasoningEffort: ChatQuery.ReasoningEffort? = nil
+        reasoningEffort: AIReasoning.Effort? = nil
     ) async -> UUID {
         let context = KeepTalkingContext(id: contextID)
         let preview = String(prompt.prefix(120))
@@ -134,8 +134,8 @@ extension KeepTalkingClient {
     public func runAI(
         prompt: String,
         in context: KeepTalkingContext,
-        model: OpenAIModel = "gpt-5-codex",
-        actModel: OpenAIModel? = nil,
+        model: String = "gpt-5-codex",
+        actModel: String? = nil,
         roleName: String = "ai",
         currentPromptAttachments: [KeepTalkingLocalAttachmentInput] = []
     ) async throws -> String {
@@ -155,12 +155,12 @@ extension KeepTalkingClient {
     private func runAI(
         prompt: String,
         in context: KeepTalkingContext,
-        model: OpenAIModel,
-        actModel: OpenAIModel?,
+        model: String,
+        actModel: String?,
         roleName: String,
         preparedPromptAttachments: [KeepTalkingPreparedAttachment],
         agentTurnID: UUID = UUID(),
-        reasoningEffort: ChatQuery.ReasoningEffort? = nil
+        reasoningEffort: AIReasoning.Effort? = nil
     ) async throws -> String {
         guard let aiConnector = try await resolveAIConnector() else {
             throw KeepTalkingClientError.aiNotConfigured
@@ -187,7 +187,7 @@ extension KeepTalkingClient {
         )
 
         // TODO: be able to switch off in the configurations
-        let webSearchTool = makeWebSearchTool(apiMode: aiConnector.apiMode)
+        let webSearchTool = makeWebSearchTool()
         let ktSkillMetainfoTool = makeKtSkillMetainfoTool()
         let attachmentListingTool = makeContextAttachmentListingTool()
         let attachmentReadTool = makeContextAttachmentReadTool()
@@ -201,18 +201,17 @@ extension KeepTalkingClient {
         // kt_run_action is always available — the ACT agent handles action execution
         // end-to-end (tool discovery, argument construction, execution, distillation).
         // The primary loop does not receive direct action tools.
-        let allTools: [OpenAITool] =
-            [
-                makeRunActionTool(),
-                ktSkillMetainfoTool,
-                attachmentListingTool,
-                attachmentReadTool,
-                attachmentUpdateMetadataTool,
-                searchThreadsTool,
-                webSearchTool,
-                markTurningPointTool,
-                markChitterChatterTool,
-            ].compactMap { $0 }
+        let allTools: [KeepTalkingActionToolDefinition] = [
+            makeRunActionTool(),
+            ktSkillMetainfoTool,
+            attachmentListingTool,
+            attachmentReadTool,
+            attachmentUpdateMetadataTool,
+            searchThreadsTool,
+            webSearchTool,
+            markTurningPointTool,
+            markChitterChatterTool,
+        ]
         let skillNameByActionID = skillNamesByActionID(
             routesByFunctionName: runtimeCatalog.routesByFunctionName
         )
@@ -232,8 +231,7 @@ extension KeepTalkingClient {
         )
         let userMessage = try await currentPromptUserMessage(
             prompt: prompt,
-            attachments: preparedPromptAttachments,
-            apiMode: aiConnector.apiMode
+            attachments: preparedPromptAttachments
         )
 
         logInjectedAITools(
@@ -254,41 +252,23 @@ extension KeepTalkingClient {
         let platform = "unknown"
         #endif
 
-        let messages: [ChatQuery.ChatCompletionMessageParam] =
-            [
-                .system(
-                    .init(
-                        content: .textContent(
-                            OpenAIConnector.keepTalkingSystemPrompt(
-                                ktRunActionToolFunctionName:
-                                    Self.runActionToolFunctionName,
-                                ktSkillMetainfoToolFunctionName:
-                                    Self.ktSkillMetainfoToolFunctionName,
-                                attachmentListingToolFunctionName:
-                                    Self.contextAttachmentListingToolFunctionName,
-                                attachmentReaderToolFunctionName:
-                                    Self.contextAttachmentReadToolFunctionName,
-                                searchThreadsToolFunctionName:
-                                    Self.searchThreadsToolFunctionName,
-                                markTurningPointToolFunctionName:
-                                    Self.markTurningPointToolFunctionName,
-                                markChitterChatterToolFunctionName:
-                                    Self.markChitterChatterToolFunctionName,
-                                currentPromptIncludesAttachments:
-                                    hasCurrentPromptAttachments,
-                                currentPromptShouldAvoidAutomaticToolUse:
-                                    hasCurrentPromptAttachments
-                                    && !allowAutomaticToolUse,
-                                contextTranscript: contextTranscript,
-                                currentDate: currentDate,
-                                platform: platform
-                            )
-                        )
-                    )
-                )
-            ] + contextMessages + [
-                userMessage
-            ]
+        let systemPrompt = OpenAIConnector.keepTalkingSystemPrompt(
+            ktRunActionToolFunctionName: Self.runActionToolFunctionName,
+            ktSkillMetainfoToolFunctionName: Self.ktSkillMetainfoToolFunctionName,
+            attachmentListingToolFunctionName: Self.contextAttachmentListingToolFunctionName,
+            attachmentReaderToolFunctionName: Self.contextAttachmentReadToolFunctionName,
+            searchThreadsToolFunctionName: Self.searchThreadsToolFunctionName,
+            markTurningPointToolFunctionName: Self.markTurningPointToolFunctionName,
+            markChitterChatterToolFunctionName: Self.markChitterChatterToolFunctionName,
+            currentPromptIncludesAttachments: hasCurrentPromptAttachments,
+            currentPromptShouldAvoidAutomaticToolUse: hasCurrentPromptAttachments
+                && !allowAutomaticToolUse,
+            contextTranscript: contextTranscript,
+            currentDate: currentDate,
+            platform: platform
+        )
+        let messages: [AIMessage] =
+            [AIMessage.system(systemPrompt)] + contextMessages + [userMessage]
 
         let selfNodeName = aliasLookup.alias(for: .node(config.node))
         let assistantPublisher: AIOrchestrator.AssistantPublisher = { [self] payload in
@@ -304,7 +284,7 @@ extension KeepTalkingClient {
         }
 
         let actAgent = AIOrchestrator.ACTAgent(
-            canHandle: { $0.function.name == Self.runActionToolFunctionName },
+            canHandle: { $0.name == Self.runActionToolFunctionName },
             execute: { [self] toolCalls, activeModel in
                 var executions: [AIOrchestrator.ToolExecution] = []
                 for toolCall in toolCalls {
@@ -317,7 +297,7 @@ extension KeepTalkingClient {
                             toolCall: toolCall,
                             messages: try await executeRunActionToolCall(
                                 toolCallID: toolCallID,
-                                rawArguments: toolCall.function.arguments,
+                                rawArguments: toolCall.argumentsJSON,
                                 runtimeCatalog: runtimeCatalog,
                                 context: persistedContext,
                                 actConnector: aiConnector,
@@ -332,18 +312,20 @@ extension KeepTalkingClient {
             }
         )
 
-        let effort = reasoningEffort
+        let turnConfiguration = AITurnConfiguration(
+            reasoning: reasoningEffort.map { AIReasoning(effort: $0) }
+        )
         let orchestrator = AIOrchestrator(
             dependencies: .init(
                 aiConnector: aiConnector,
-                turnRunner: { [aiConnector] messages, tools, model, toolChoice, stage in
+                turnRunner: { [aiConnector] messages, tools, model, toolChoice, stage, configuration in
                     try await aiConnector.completeTurn(
                         messages: messages,
                         tools: tools,
                         model: model,
                         toolChoice: toolChoice,
                         stage: stage,
-                        reasoningEffort: effort,
+                        configuration: configuration,
                         toolExecutor: nil
                     )
                 },
@@ -399,13 +381,14 @@ extension KeepTalkingClient {
             configuration: .init(maxTurns: Self.maxAgentTurns)
         )
 
-        let resolvedToolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam =
-            allowAutomaticToolUse ? .auto : .none
+        let resolvedToolChoice: AIToolChoice =
+            allowAutomaticToolUse ? .auto : AIToolChoice.none
         return try await orchestrator.run(
             messages: messages,
             tools: allTools,
             model: model,
-            toolChoice: resolvedToolChoice
+            toolChoice: resolvedToolChoice,
+            turnConfiguration: turnConfiguration
         )
     }
 
@@ -462,13 +445,12 @@ extension KeepTalkingClient {
     }
 
     func publishedToolName(
-        for toolCall: ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
-            .ToolCallParam,
+        for toolCall: AIToolCall,
         runtimeCatalog: KeepTalkingActionRuntimeCatalog,
         skillNameByActionID: [UUID: String],
         aliasLookup: KeepTalkingAliasLookup
     ) -> String {
-        let name = toolCall.function.name
+        let name = toolCall.name
         if name == Self.markTurningPointToolFunctionName
             || name == Self.markChitterChatterToolFunctionName
             || name == Self.contextAttachmentUpdateMetadataToolFunctionName
@@ -478,7 +460,7 @@ extension KeepTalkingClient {
         }
         if name == Self.runActionToolFunctionName {
             let args =
-                (try? decodeToolArguments(toolCall.function.arguments)) ?? [:]
+                (try? decodeToolArguments(toolCall.argumentsJSON)) ?? [:]
             if let actionIDString = args["action_id"]?.stringValue,
                 let actionID = UUID(uuidString: actionIDString),
                 let stub = runtimeCatalog.actionStubs.first(where: {
@@ -508,11 +490,10 @@ extension KeepTalkingClient {
     }
 
     func publishedToolHint(
-        for toolCall: ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
-            .ToolCallParam,
+        for toolCall: AIToolCall,
         stage: AIStage
     ) -> AIOrchestrator.ToolHintContext? {
-        let name = toolCall.function.name
+        let name = toolCall.name
         if name == Self.markTurningPointToolFunctionName
             || name == Self.markChitterChatterToolFunctionName
         {
@@ -522,7 +503,7 @@ extension KeepTalkingClient {
         if name == Self.runActionToolFunctionName {
             // Decode action metadata from the tool call arguments so it can be
             // stored in the intermediate message and surfaced in the UI.
-            let args = (try? decodeToolArguments(toolCall.function.arguments)) ?? [:]
+            let args = (try? decodeToolArguments(toolCall.argumentsJSON)) ?? [:]
             let actionID: UUID? = args["action_id"]?.stringValue.flatMap { UUID(uuidString: $0) }
             let targetNodeID: UUID? = args["node_id"]?.stringValue.flatMap { UUID(uuidString: $0) }
 
@@ -564,21 +545,18 @@ extension KeepTalkingClient {
 
     func currentPromptUserMessage(
         prompt: String,
-        attachments: [KeepTalkingPreparedAttachment],
-        apiMode: OpenAIAPIMode
-    ) async throws -> ChatQuery.ChatCompletionMessageParam {
+        attachments: [KeepTalkingPreparedAttachment]
+    ) async throws -> AIMessage {
         guard !attachments.isEmpty else {
-            return .user(.init(content: .string(prompt)))
+            return .user(prompt)
         }
 
-        var contentParts:
-            [ChatQuery.ChatCompletionMessageParam.UserMessageParam
-                .Content.ContentPart] = []
+        var contentParts: [AIMessage.Part] = []
         let trimmedPrompt = prompt.trimmingCharacters(
             in: .whitespacesAndNewlines
         )
         if !trimmedPrompt.isEmpty {
-            contentParts.append(.text(.init(text: trimmedPrompt)))
+            contentParts.append(.text(trimmedPrompt))
         }
         let blobRecords = try await blobRecordsByBlobID(attachments.map(\.blobID))
 
@@ -586,10 +564,7 @@ extension KeepTalkingClient {
             guard attachment.byteCount <= Self.maxAINativeAttachmentBytes else {
                 contentParts.append(
                     .text(
-                        .init(
-                            text:
-                                "Attachment '\(attachment.filename)' was omitted because it exceeds the native AI input budget."
-                        )
+                        "Attachment '\(attachment.filename)' was omitted because it exceeds the native AI input budget."
                     )
                 )
                 continue
@@ -606,76 +581,42 @@ extension KeepTalkingClient {
                 contentsOf: attachmentContentParts(
                     filename: attachment.filename,
                     mimeType: attachment.mimeType,
-                    data: data,
-                    apiMode: apiMode
+                    data: data
                 )
             )
         }
 
         if contentParts.isEmpty {
-            return .user(.init(content: .string(prompt)))
+            return .user(prompt)
         }
-
-        return .user(
-            .init(content: .contentParts(contentParts))
-        )
+        return .user(parts: contentParts)
     }
 
     func attachmentContentParts(
         filename: String,
         mimeType: String,
         data: Data,
-        apiMode: OpenAIAPIMode,
         leadText: String? = nil
-    ) -> [ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content.ContentPart] {
+    ) -> [AIMessage.Part] {
         if mimeType.hasPrefix("image/") {
-            var parts:
-                [ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content
-                    .ContentPart] = []
+            var parts: [AIMessage.Part] = []
             if let leadText = sanitizedAttachmentLeadText(leadText) {
-                parts.append(.text(.init(text: leadText)))
+                parts.append(.text(leadText))
             }
-            parts.append(
-                .image(
-                    .init(
-                        imageUrl: .init(
-                            url:
-                                "data:\(mimeType);base64,\(data.base64EncodedString())",
-                            detail: .auto
-                        )
-                    )
-                )
-            )
+            if let url = URL(string: "data:\(mimeType);base64,\(data.base64EncodedString())") {
+                parts.append(.imageURL(url))
+            }
             return parts
         }
 
-        if apiMode != .responses || mimeType != "application/pdf" {
-            let summary = attachmentTextFallback(
-                filename: filename,
-                mimeType: mimeType,
-                data: data,
-                leadText: leadText
-            )
-            return [.text(.init(text: summary))]
-        }
-
-        var parts:
-            [ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content
-                .ContentPart] = []
-        if let leadText = sanitizedAttachmentLeadText(leadText) {
-            parts.append(.text(.init(text: leadText)))
-        }
-        parts.append(
-            .file(
-                .init(
-                    file: .init(
-                        data: data,
-                        filename: filename
-                    )
-                )
-            )
+        // Chat Completions doesn't support native PDF inputs — text-fallback only.
+        let summary = attachmentTextFallback(
+            filename: filename,
+            mimeType: mimeType,
+            data: data,
+            leadText: leadText
         )
-        return parts
+        return [.text(summary)]
     }
 
     private func attachmentTextFallback(
@@ -899,7 +840,7 @@ extension KeepTalkingClient {
     func publishAgentRunFailure(
         contextID: UUID,
         roleName: String,
-        model: OpenAIModel,
+        model: String,
         message: String
     ) async {
         do {
@@ -927,9 +868,9 @@ extension KeepTalkingClient {
 
     private func logInjectedAITools(
         runtimeCatalog: KeepTalkingActionRuntimeCatalog,
-        allCompletionTools: [OpenAITool],
+        allCompletionTools: [KeepTalkingActionToolDefinition],
         context: KeepTalkingContext,
-        model: OpenAIModel
+        model: String
     ) {
         let contextID = context.id ?? config.contextID
         onLog?(

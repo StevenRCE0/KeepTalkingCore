@@ -1,16 +1,20 @@
+import AIProxy
 import Foundation
-import OpenAI
 
-public enum OpenAIAPIMode: String, Codable, Sendable, CaseIterable {
-    case responses
-    case chatCompletions
-
-    public var displayName: String {
-        switch self {
-            case .responses: return "Responses API"
-            case .chatCompletions: return "Chat Completions API"
-        }
-    }
+/// Backend selection for the connector. Each case is an OpenAI-compatible
+/// `/v1/chat/completions` endpoint — they differ only in the base URL and any
+/// vendor-specific defaults the connector applies.
+public enum OpenAIConnectorBackend: Sendable {
+    /// OpenRouter's OpenAI-compatible endpoint.
+    /// Default base URL: `https://openrouter.ai/api`.
+    case openRouter
+    /// OpenAI directly.
+    /// Default base URL: `https://api.openai.com`.
+    case openAI
+    /// A custom base URL serving the OpenAI Chat Completions shape.
+    /// `baseURL` is the host root (e.g. `https://api.example.com`); the connector
+    /// appends `/v1/chat/completions`.
+    case custom(baseURL: String)
 }
 
 public actor OpenAIConnector: AIConnector {
@@ -48,95 +52,85 @@ public actor OpenAIConnector: AIConnector {
         case missingAPIKey
         case invalidEndpoint(String)
         case emptyResponse
-        case apiError(Int, String)
 
         public var errorDescription: String? {
             switch self {
                 case .missingAPIKey:
-                    return "OPENAI_API_KEY environment variable is not set."
+                    return "No API key provided. Set OPENROUTER_API_KEY (or OPENAI_API_KEY) or pass apiKey explicitly."
                 case .invalidEndpoint(let raw):
-                    return "Invalid OpenAI endpoint URL: \(raw)"
+                    return "Invalid endpoint URL: \(raw)"
                 case .emptyResponse:
-                    return "No response choices received."
-                case .apiError(let code, let message):
-                    return "API error \(code): \(message)"
+                    return "No response choices received from the model."
             }
         }
     }
 
-    private let client: OpenAI
+    private let service: OpenAIService
     private let apiKey: String
-    private let baseURL: URL
-    public nonisolated let apiMode: OpenAIAPIMode
-    public nonisolated let capabilities: AIConnectorCapabilities = .init(supportsNativeToolCalling: true)
+    private let modelsURL: URL
+    public nonisolated let capabilities: AIConnectorCapabilities = .init(
+        supportsNativeToolCalling: true,
+        supportsThinking: true
+    )
 
-    private static let defaultBaseURL = URL(string: "https://api.openai.com/v1")!
+    /// Default request timeout in seconds.
+    private static let defaultTimeoutSeconds: UInt = 60
 
+    /// Construct a connector for the given backend.
+    ///
+    /// - Parameters:
+    ///   - apiKey: A BYOK API key. If `nil`, the connector reads
+    ///             `OPENROUTER_API_KEY`, falling back to `OPENAI_API_KEY`.
+    ///   - endpoint: Optional override for the host root. If `nil`, falls back to
+    ///               environment variables and finally the backend's default URL.
+    ///   - backend: Which provider/endpoint shape to target. Defaults to OpenRouter.
     public init(
         apiKey: String? = nil,
-        organizationID: String? = nil,
         endpoint: String? = nil,
-        apiMode: OpenAIAPIMode = .responses
+        backend: OpenAIConnectorBackend = .openRouter
     ) throws {
         guard
             let key = apiKey
+                ?? ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"]
                 ?? ProcessInfo.processInfo.environment["OPENAI_API_KEY"],
             !key.isEmpty
         else {
-            fatalError(ConnectorError.missingAPIKey.localizedDescription)
+            throw ConnectorError.missingAPIKey
         }
 
-        let endpointURL = try Self.endpointURL(
-            from: endpoint
-                ?? ProcessInfo.processInfo.environment["OPENAI_ENDPOINT"]
-                ?? ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]
-        )
+        let resolvedEndpointString: String
+        if let endpoint, !endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            resolvedEndpointString = endpoint
+        } else if let envEndpoint = Self.envEndpoint(for: backend) {
+            resolvedEndpointString = envEndpoint
+        } else {
+            resolvedEndpointString = backend.defaultBaseURL
+        }
 
-        let configuration = OpenAI.Configuration(
-            token: key,
-            organizationIdentifier: organizationID,
-            host: endpointURL?.host ?? "api.openai.com",
-            port: endpointURL?.port ?? 443,
-            scheme: endpointURL?.scheme ?? "https",
-            basePath: endpointURL?.path.isEmpty == false ? endpointURL!.path : "/v1",
-            timeoutInterval: 60,
-            parsingOptions: .relaxed
-        )
-        self.client = OpenAI(configuration: configuration)
-        self.apiKey = key
-        self.baseURL = endpointURL ?? Self.defaultBaseURL
-        self.apiMode = apiMode
-    }
-
-    private static func endpointURL(from raw: String?) throws -> URL? {
         guard
-            let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
-            !raw.isEmpty
+            let endpointURL = URL(string: resolvedEndpointString),
+            endpointURL.host != nil
         else {
-            return nil
+            throw ConnectorError.invalidEndpoint(resolvedEndpointString)
         }
-        guard let url = URL(string: raw), url.host != nil else {
-            throw ConnectorError.invalidEndpoint(raw)
-        }
-        return url
+
+        self.apiKey = key
+        self.service = AIProxy.openAIDirectService(
+            unprotectedAPIKey: key,
+            baseURL: endpointURL.absoluteString
+        )
+        self.modelsURL = endpointURL.appendingPathComponent("v1/models")
     }
+
+    // MARK: - listModels
 
     public func listModels() async throws -> [String] {
-        struct ModelItem: Decodable {
-            let id: String
-        }
-        struct ModelList: Decodable {
-            let data: [ModelItem]
-        }
-        struct APIErrorDetail: Decodable {
-            let message: String
-        }
-        struct APIErrorWrapper: Decodable {
-            let error: APIErrorDetail
-        }
+        struct ModelItem: Decodable { let id: String }
+        struct ModelList: Decodable { let data: [ModelItem] }
+        struct APIErrorDetail: Decodable { let message: String }
+        struct APIErrorWrapper: Decodable { let error: APIErrorDetail }
 
-        let url = baseURL.appendingPathComponent("models")
-        var request = URLRequest(url: url, timeoutInterval: 30)
+        var request = URLRequest(url: modelsURL, timeoutInterval: 30)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -146,427 +140,214 @@ public actor OpenAIConnector: AIConnector {
                 (try? JSONDecoder().decode(APIErrorWrapper.self, from: data))
                 .map(\.error.message)
                 ?? HTTPURLResponse.localizedString(forStatusCode: statusCode)
-            throw ConnectorError.apiError(statusCode, message)
+            throw AIProxyError.unsuccessfulRequest(
+                statusCode: statusCode,
+                responseBody: message
+            )
         }
         let result = try JSONDecoder().decode(ModelList.self, from: data)
         return result.data.map(\.id).sorted()
     }
 
+    // MARK: - completeTurn
+
     public func completeTurn(
-        messages: [ChatQuery.ChatCompletionMessageParam],
-        tools: [OpenAITool],
-        model: OpenAIModel,
-        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam? = nil,
+        messages: [AIMessage],
+        tools: [KeepTalkingActionToolDefinition],
+        model: String,
+        toolChoice: AIToolChoice? = nil,
         stage: AIStage,
-        reasoningEffort: ChatQuery.ReasoningEffort? = nil,
+        configuration: AITurnConfiguration? = nil,
         toolExecutor: (
-            @Sendable ([ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam]) async throws ->
-                [ChatQuery.ChatCompletionMessageParam.ToolMessageParam]
+            @Sendable ([AIToolCall]) async throws -> [AIMessage]
         )? = nil
     ) async throws -> AITurnResult {
-        switch apiMode {
-            case .responses:
-                return try await completeTurnViaResponses(
-                    messages: messages,
-                    tools: tools,
-                    model: model,
-                    toolChoice: toolChoice,
-                    stage: stage,
-                    reasoningEffort: reasoningEffort
-                )
-            case .chatCompletions:
-                return try await completeTurnViaChatCompletions(
-                    messages: messages,
-                    tools: tools,
-                    model: model,
-                    /// Ignoring this intentionally to improve compatibility
-                    toolChoice: nil,
-                    stage: stage,
-                    reasoningEffort: reasoningEffort
-                )
-        }
-    }
+        let openAIMessages = messages.map(Self.translateMessage(_:))
+        let openAITools = tools.map(Self.translateTool(_:))
+        let resolvedToolChoice: OpenAIChatCompletionRequestBody.ToolChoice? = {
+            if openAITools.isEmpty { return nil }
+            if let toolChoice { return Self.translateToolChoice(toolChoice) }
+            return .auto
+        }()
 
-    // MARK: - Responses API
-
-    private func completeTurnViaResponses(
-        messages: [ChatQuery.ChatCompletionMessageParam],
-        tools: [OpenAITool],
-        model: OpenAIModel,
-        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam?,
-        stage: AIStage,
-        reasoningEffort: ChatQuery.ReasoningEffort?
-    ) async throws -> AITurnResult {
-        let responseInput = toResponseInput(messages: messages)
-        let resolvedToolChoice = toResponseToolChoice(
-            toolChoice ?? (tools.isEmpty ? .none : .auto)
-        )
-        let reasoning = reasoningEffort.map {
-            CreateModelResponseQuery.Schemas
-                .Reasoning(effort: toResponsesReasoningEffort($0))
-        }
-
-        let query = CreateModelResponseQuery(
-            input: .inputItemList(responseInput),
+        let body = OpenAIChatCompletionRequestBody(
             model: model,
-            reasoning: reasoning,
+            messages: openAIMessages,
+            maxCompletionTokens: configuration?.maxOutputTokens,
+            promptCacheKey: configuration?.promptCacheKey,
+            reasoningEffort: configuration?.reasoning?.openAIEffort,
+            responseFormat: configuration?.responseFormat?.openAIResponseFormat,
+            seed: configuration?.seed,
+            stop: configuration?.stop,
+            temperature: configuration?.temperature,
+            tools: openAITools.isEmpty ? nil : openAITools,
             toolChoice: resolvedToolChoice,
-            tools: tools.isEmpty ? nil : tools
+            topP: configuration?.topP,
+            user: configuration?.endUserID
         )
 
-        let result = try await client.responses.createResponse(query: query)
-        let assistantText = extractAssistantText(from: result)
-        let toolCalls = extractToolCalls(from: result)
+        let response = try await service.chatCompletionRequest(
+            body: body,
+            secondsToWait: Self.defaultTimeoutSeconds
+        )
 
-        if assistantText == nil, toolCalls.isEmpty {
+        var turnText: String? = nil
+        var turnThinking: String? = nil
+        var turnToolCalls: [AIToolCall] = []
+
+        for choice in response.choices {
+            let text = choice.message.content
+            if let text, !text.isEmpty {
+                turnText = turnText.map { "\($0)\n\(text)" } ?? text
+            }
+            if let reasoning = choice.message.reasoning, !reasoning.isEmpty {
+                turnThinking = turnThinking.map { "\($0)\n\(reasoning)" } ?? reasoning
+            }
+            if let calls = choice.message.toolCalls {
+                turnToolCalls.append(
+                    contentsOf: calls.map { call in
+                        AIToolCall(
+                            id: call.id,
+                            name: call.function.name,
+                            argumentsJSON: call.function.argumentsRaw ?? "{}"
+                        )
+                    })
+            }
+        }
+
+        if turnText == nil, turnThinking == nil, turnToolCalls.isEmpty {
             throw ConnectorError.emptyResponse
         }
 
         return AITurnResult(
-            assistantText: assistantText,
-            toolCalls: toolCalls
+            assistantText: turnText,
+            thinking: turnThinking,
+            toolCalls: turnToolCalls
         )
     }
 
-    // MARK: - Chat Completions API
+    // MARK: - private translation
 
-    private func completeTurnViaChatCompletions(
-        messages: [ChatQuery.ChatCompletionMessageParam],
-        tools: [OpenAITool],
-        model: OpenAIModel,
-        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam?,
-        stage: AIStage,
-        reasoningEffort: ChatQuery.ReasoningEffort?
-    ) async throws -> AITurnResult {
-        let chatTools = tools.compactMap(Self.toChatCompletionTool)
-        let resolvedToolChoice = toolChoice ?? (chatTools.isEmpty ? .none : .auto)
-
-        let query = ChatQuery(
-            messages: messages,
-            model: model,
-            reasoningEffort: reasoningEffort,
-            toolChoice: chatTools.isEmpty ? nil : resolvedToolChoice,
-            tools: chatTools.isEmpty ? nil : chatTools
-        )
-
-        let result = try await client.chats(query: query)
-        var turnText: String? = nil
-        var turnToolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam] = []
-
-        for choice in result.choices {
-            if let assistantText = choice.message.content {
-                turnText = turnText == nil ? assistantText : turnText! + "\n" + assistantText
-            }
-            if let toolCalls: [ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam] =
-                choice.message.toolCalls
-            {
-                turnToolCalls.append(contentsOf: toolCalls)
-            }
-
-        }
-
-        return .init(assistantText: turnText, toolCalls: turnToolCalls)
-    }
-
-    /// Convert a Responses API `Tool` to a Chat Completions `ChatCompletionToolParam`.
-    /// Non-function tools (web search, MCP, etc.) are Responses-only and return `nil`.
-    private static func toChatCompletionTool(
-        _ tool: OpenAITool
-    ) -> ChatQuery.ChatCompletionToolParam? {
-        switch tool {
-            case .functionTool(let fn):
-                return .init(
-                    function: .init(
-                        name: fn.name,
-                        description: fn.description,
-                        parameters: fn.parameters,
-                        strict: fn.strict
-                    ))
-            default:
-                return nil
-        }
-    }
-
-    private func toResponseInput(
-        messages: [ChatQuery.ChatCompletionMessageParam]
-    ) -> [InputItem] {
-        var input: [InputItem] = []
-        input.reserveCapacity(messages.count)
-
-        for message in messages {
-            switch message {
-                case .developer(let payload):
-                    if let text = text(from: payload.content) {
-                        input.append(
-                            .inputMessage(
-                                .init(role: .developer, content: .textInput(text))
+    private static func translateMessage(
+        _ message: AIMessage
+    ) -> OpenAIChatCompletionRequestBody.Message {
+        switch message.role {
+            case .system:
+                return .system(
+                    content: .text(message.content?.text ?? ""),
+                    name: message.name
+                )
+            case .user:
+                return .user(
+                    content: translateUserContent(message.content),
+                    name: message.name
+                )
+            case .assistant:
+                let toolCalls: [OpenAIChatCompletionRequestBody.Message.ToolCall]? =
+                    message.toolCalls.isEmpty
+                    ? nil
+                    : message.toolCalls.map { call in
+                        .init(
+                            id: call.id,
+                            function: .init(
+                                name: call.name,
+                                arguments: call.argumentsJSON
                             )
                         )
                     }
-                case .system(let payload):
-                    if let text = text(from: payload.content) {
-                        input.append(
-                            .inputMessage(
-                                .init(role: .system, content: .textInput(text))
-                            )
-                        )
-                    }
-                case .user(let payload):
-                    if let content = userContent(from: payload.content) {
-                        input.append(
-                            .inputMessage(
-                                .init(role: .user, content: content)
-                            )
-                        )
-                    }
-                case .assistant(let payload):
-                    if let content = payload.content,
-                        let text = text(from: content)
-                    {
-                        input.append(
-                            .inputMessage(
-                                .init(role: .assistant, content: .textInput(text))
-                            )
-                        )
-                    }
-                    for toolCall in payload.toolCalls ?? [] {
-                        input.append(
-                            .item(
-                                .functionToolCall(
-                                    .init(
-                                        id: nil,
-                                        _type: .functionCall,
-                                        callId: toolCall.id,
-                                        name: toolCall.function.name,
-                                        arguments: toolCall.function.arguments,
-                                        status: .completed
-                                    )
-                                )
-                            )
-                        )
-                    }
-                case .tool(let payload):
-                    if let output = text(from: payload.content) {
-                        input.append(
-                            .item(
-                                .functionCallOutputItemParam(
-                                    .init(
-                                        callId: payload.toolCallId,
-                                        _type: .functionCallOutput,
-                                        output: output
-                                    )
-                                )
-                            )
-                        )
-                    }
-            }
-        }
-
-        return input
-    }
-
-    static func toResponseTool(
-        tool: ChatQuery.ChatCompletionToolParam
-    ) -> Tool {
-        .functionTool(
-            .init(
-                name: tool.function.name,
-                description: tool.function.description,
-                parameters: tool.function.parameters
-                    ?? JSONSchema(
-                        .type(.object),
-                        .properties([:]),
-                        .additionalProperties(.boolean(true))
-                    ),
-                strict: tool.function.strict ?? false
-            )
-        )
-    }
-
-    static func toResponseTools(
-        tools: [ChatQuery.ChatCompletionToolParam]
-    ) -> [Tool] {
-        tools.map(toResponseTool)
-    }
-
-    private func toResponseToolChoice(
-        _ choice: ChatQuery.ChatCompletionFunctionCallOptionParam
-    ) -> CreateModelResponseQuery.ResponseProperties.ToolChoicePayload {
-        switch choice {
-            case .none:
-                return .ToolChoiceOptions(.none)
-            case .auto:
-                return .ToolChoiceOptions(.auto)
-            case .required:
-                return .ToolChoiceOptions(.required)
-            case .function(let name):
-                return .ToolChoiceFunction(
-                    .init(_type: .function, name: name)
+                // Assistant messages don't take multimodal content; collapse to text.
+                let content: OpenAIChatCompletionRequestBody.Message.MessageContent<String, [String]>? =
+                    message.content.map { .text($0.text) }
+                return .assistant(
+                    content: content,
+                    name: message.name,
+                    refusal: nil,
+                    toolCalls: toolCalls
+                )
+            case .tool:
+                return .tool(
+                    content: .text(message.content?.text ?? ""),
+                    toolCallID: message.toolCallID ?? ""
                 )
         }
     }
 
-    private func toResponsesReasoningEffort(
-        _ effort: ChatQuery.ReasoningEffort
-    ) -> Components.Schemas.ReasoningEffort {
-        switch effort {
-            case .none: return .none
-            case .minimal: return .minimal
-            case .low: return .low
-            case .medium: return .medium
-            case .high: return .high
-            case .customValue: return .medium
-        }
-    }
-
-    private func extractAssistantText(from response: ResponseObject) -> String? {
-        let chunks = response.output.compactMap { output -> String? in
-            guard case .outputMessage(let message) = output else {
-                return nil
-            }
-            let textParts = message.content.compactMap { content -> String? in
-                if case .OutputTextContent(let textContent) = content {
-                    return textContent.text
-                }
-                return nil
-            }
-            guard !textParts.isEmpty else {
-                return nil
-            }
-            return textParts.joined()
-        }
-
-        guard !chunks.isEmpty else {
-            return nil
-        }
-        return chunks.joined(separator: "\n")
-    }
-
-    private func extractToolCalls(from response: ResponseObject) -> [ChatQuery.ChatCompletionMessageParam
-        .AssistantMessageParam.ToolCallParam]
+    /// Translates `AIMessage.Content` into the user-message content shape that
+    /// supports OpenAI's vision parts.
+    private static func translateUserContent(
+        _ content: AIMessage.Content?
+    )
+        -> OpenAIChatCompletionRequestBody.Message.MessageContent<
+            String,
+            [OpenAIChatCompletionRequestBody.Message.ContentPart]
+        >
     {
-        response.output.compactMap {
-            output -> ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam? in
-            guard case .functionToolCall(let call) = output else {
-                return nil
-            }
-            // Responses tool outputs must reference function call `call_id`.
-            // `id` is the output-item identifier and is not accepted as toolCallId.
-            let identifier = call.callId
-            return .init(
-                id: identifier,
-                function: .init(
-                    arguments: call.arguments,
-                    name: call.name
-                )
-            )
-        }
-    }
-
-    private func text(
-        from content: ChatQuery.ChatCompletionMessageParam.TextContent
-    ) -> String? {
         switch content {
-            case .textContent(let text):
-                return text
-            case .contentParts(let parts):
-                let joined = parts.map(\.text).joined()
-                return joined.isEmpty ? nil : joined
-        }
-    }
-
-    private func text(
-        from content: ChatQuery.ChatCompletionMessageParam.TextOrRefusalContent
-    ) -> String? {
-        switch content {
-            case .textContent(let text):
-                return text
-            case .contentParts(let parts):
-                let joined = parts.compactMap { part -> String? in
+            case .none:
+                return .text("")
+            case .text(let s):
+                return .text(s)
+            case .parts(let parts):
+                let translated = parts.map { part -> OpenAIChatCompletionRequestBody.Message.ContentPart in
                     switch part {
-                        case .text(let textPart):
-                            return textPart.text
-                        case .refusal(let refusal):
-                            return refusal.refusal
+                        case .text(let s): return .text(s)
+                        case .imageURL(let url): return .imageURL(url, detail: nil)
                     }
-                }.joined()
-                return joined.isEmpty ? nil : joined
+                }
+                return .parts(translated)
         }
     }
 
-    private func userContent(
-        from content: ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content
-    ) -> EasyInputMessage.ContentPayload? {
-        switch content {
-            case .string(let text):
-                guard !text.isEmpty else {
-                    return nil
-                }
-                return .textInput(text)
-            case .contentParts(let parts):
-                let inputParts = parts.compactMap(inputContent(from:))
-                guard !inputParts.isEmpty else {
-                    return nil
-                }
-                return .inputItemContentList(inputParts)
+    private static func translateTool(
+        _ tool: KeepTalkingActionToolDefinition
+    ) -> OpenAIChatCompletionRequestBody.Tool {
+        .function(
+            name: tool.functionName,
+            description: tool.description,
+            parameters: tool.parameters,
+            strict: false
+        )
+    }
+
+    private static func translateToolChoice(
+        _ choice: AIToolChoice
+    ) -> OpenAIChatCompletionRequestBody.ToolChoice {
+        switch choice {
+            case .auto: return .auto
+            case .none: return .none
+            case .required: return .required
+            case .specific(let name): return .specific(functionName: name)
         }
     }
 
-    private func inputContent(
-        from part: ChatQuery.ChatCompletionMessageParam.UserMessageParam.Content
-            .ContentPart
-    ) -> InputContent? {
-        switch part {
-            case .text(let textPart):
-                guard !textPart.text.isEmpty else {
-                    return nil
-                }
-                return .inputText(
-                    .init(
-                        _type: .inputText,
-                        text: textPart.text
-                    )
-                )
-            case .image(let imagePart):
-                return .inputImage(
-                    .init(
-                        _type: .inputImage,
-                        imageUrl: imagePart.imageUrl.url,
-                        detail: inputImageDetail(from: imagePart.imageUrl.detail)
-                    )
-                )
-            case .file(let filePart):
-                guard
-                    filePart.file.fileData != nil || filePart.file.fileId != nil
-                else {
-                    return nil
-                }
-                return .inputFile(
-                    .init(
-                        _type: .inputFile,
-                        fileId: filePart.file.fileId.map {
-                            .init(value1: $0)
-                        },
-                        filename: filePart.file.filename,
-                        fileData: filePart.file.fileData
-                    )
-                )
-            case .audio:
-                return nil
+    // MARK: - private helpers
+
+    private static func envEndpoint(for backend: OpenAIConnectorBackend) -> String? {
+        let env = ProcessInfo.processInfo.environment
+        switch backend {
+            case .openRouter:
+                return env["KT_OPENROUTER_ENDPOINT"]
+                    ?? env["OPENROUTER_BASE_URL"]
+                    ?? env["OPENAI_ENDPOINT"]
+                    ?? env["OPENAI_BASE_URL"]
+            case .openAI:
+                return env["KT_OPENAI_ENDPOINT"]
+                    ?? env["OPENAI_ENDPOINT"]
+                    ?? env["OPENAI_BASE_URL"]
+            case .custom:
+                return env["KT_OPENAI_ENDPOINT"]
+                    ?? env["OPENAI_ENDPOINT"]
+                    ?? env["OPENAI_BASE_URL"]
         }
     }
+}
 
-    private func inputImageDetail(
-        from detail: ChatQuery.ChatCompletionMessageParam
-            .ContentPartImageParam.ImageURL.Detail?
-    ) -> InputImage.DetailPayload {
-        switch detail {
-            case .high:
-                return .high
-            case .low:
-                return .low
-            case .auto, .none:
-                return .auto
+extension OpenAIConnectorBackend {
+    fileprivate var defaultBaseURL: String {
+        switch self {
+            case .openRouter: return "https://openrouter.ai/api"
+            case .openAI: return "https://api.openai.com"
+            case .custom(let baseURL): return baseURL
         }
     }
 }

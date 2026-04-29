@@ -1,5 +1,5 @@
+import AIProxy
 import Foundation
-import OpenAI
 
 public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     Hashable, CaseIterable
@@ -13,7 +13,7 @@ public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     case createAction = "create-action"
 }
 
-public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle {
+public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
     public var id: UUID
     public var name: String
     public var indexDescription: String
@@ -92,12 +92,12 @@ public struct KeepTalkingPrimitiveActionResponse: Sendable {
 }
 
 public struct KeepTalkingPrimitiveRegistry: Sendable {
-    public let toolParameters: @Sendable (KeepTalkingPrimitiveActionKind) -> JSONSchema
+    public let toolParameters: @Sendable (KeepTalkingPrimitiveActionKind) -> [String: AIProxyJSONValue]
     public let callAction:
         @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall) async throws -> KeepTalkingPrimitiveActionResponse
 
     public init(
-        toolParameters: @escaping @Sendable (KeepTalkingPrimitiveActionKind) -> JSONSchema,
+        toolParameters: @escaping @Sendable (KeepTalkingPrimitiveActionKind) -> [String: AIProxyJSONValue],
         callAction:
             @escaping @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall) async throws ->
             KeepTalkingPrimitiveActionResponse

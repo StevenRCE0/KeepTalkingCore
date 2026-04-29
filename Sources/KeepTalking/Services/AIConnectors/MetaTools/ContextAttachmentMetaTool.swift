@@ -1,6 +1,6 @@
+import AIProxy
 import FluentKit
 import Foundation
-import OpenAI
 
 private enum ContextAttachmentReadMode: String {
     case metadata
@@ -38,7 +38,7 @@ extension KeepTalkingClient {
         toolCallID: String,
         rawArguments: String,
         context: KeepTalkingContext
-    ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
+    ) async throws -> [AIMessage] {
         let functionName = Self.contextAttachmentReadToolFunctionName
         let arguments = try decodeToolArguments(rawArguments)
         let attachmentIDText = arguments["attachment_id"]?.stringValue?
@@ -448,23 +448,18 @@ extension KeepTalkingClient {
     func nativeContextAttachmentUserMessage(
         attachment: KeepTalkingContextAttachment,
         data: Data
-    ) -> ChatQuery.ChatCompletionMessageParam {
+    ) -> AIMessage {
         let leadText = AIPromptPresets.attachmentInjectionLeadText(
             filename: attachment.filename,
             isImage: attachment.isImage
         )
 
         return .user(
-            .init(
-                content: .contentParts(
-                    attachmentContentParts(
-                        filename: attachment.filename,
-                        mimeType: attachment.mimeType,
-                        data: data,
-                        apiMode: openAIAPIMode,
-                        leadText: leadText
-                    )
-                )
+            parts: attachmentContentParts(
+                filename: attachment.filename,
+                mimeType: attachment.mimeType,
+                data: data,
+                leadText: leadText
             )
         )
     }

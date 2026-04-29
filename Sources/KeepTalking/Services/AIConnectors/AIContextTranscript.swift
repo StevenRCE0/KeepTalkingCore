@@ -1,6 +1,6 @@
+import AIProxy
 import FluentKit
 import Foundation
-import OpenAI
 
 extension KeepTalkingClient {
 
@@ -127,7 +127,7 @@ extension KeepTalkingClient {
     func agentContextMessages(
         _ context: KeepTalkingContext,
         excludingMessageID: UUID? = nil
-    ) async throws -> [ChatQuery.ChatCompletionMessageParam] {
+    ) async throws -> [AIMessage] {
         guard let contextID = context.id else {
             return []
         }
@@ -135,24 +135,20 @@ extension KeepTalkingClient {
         let (_, _, selected) = try await loadContextSelection(contextID: contextID)
         let aliasLookup = try await aliasLookup()
 
-        return selected.flatMap(\.messages).compactMap { message in
+        return selected.flatMap(\.messages).compactMap { message -> AIMessage? in
             if let excludeID = excludingMessageID, message.id == excludeID {
                 return nil
             }
             guard case .message = message.type else { return nil }
             switch message.sender {
                 case .autonomous:
-                    return .assistant(
-                        .init(content: .textContent(message.content))
-                    )
+                    return .assistant(message.content)
                 case .node(let nodeID):
                     let name =
                         aliasLookup
                         .resolve(.node(nodeID))
                         .primary(.uppercase)
-                    return .user(
-                        .init(content: .string("[\(name)] \(message.content)"))
-                    )
+                    return .user("[\(name)] \(message.content)")
             }
         }
     }

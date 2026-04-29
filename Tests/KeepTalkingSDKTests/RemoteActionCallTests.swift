@@ -1,6 +1,6 @@
+import AIProxy
 import Foundation
 import MCP
-import OpenAI
 import Testing
 
 @testable import KeepTalkingSDK
@@ -651,7 +651,7 @@ struct RemoteActionCallTests {
                 node: selfNodeID
             ),
             primitiveRegistry: KeepTalkingPrimitiveRegistry(
-                toolParameters: { _ in JSONSchema(.type(.object)) },
+                toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
                 callAction: { _, _ in KeepTalkingPrimitiveActionResponse(text: "opened") }
             ),
             localStore: localStore

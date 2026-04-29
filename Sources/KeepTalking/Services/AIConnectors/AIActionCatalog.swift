@@ -1,7 +1,7 @@
+import AIProxy
 import FluentKit
 import Foundation
 import MCP
-import OpenAI
 
 struct KeepTalkingAICatalogCacheKey: Hashable, Sendable {
     let nodeID: UUID

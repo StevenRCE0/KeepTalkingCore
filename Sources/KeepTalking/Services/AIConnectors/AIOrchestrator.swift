@@ -1,17 +1,16 @@
 import Foundation
-import OpenAI
 
 public struct AIOrchestrator {
-    public typealias ToolCall =
-        ChatQuery.ChatCompletionMessageParam.AssistantMessageParam.ToolCallParam
-    public typealias Message = ChatQuery.ChatCompletionMessageParam
+    public typealias ToolCall = AIToolCall
+    public typealias Message = AIMessage
     public typealias TurnRunner =
         (
             [Message],
-            [OpenAITool],
-            OpenAIModel,
-            ChatQuery.ChatCompletionFunctionCallOptionParam?,
-            AIStage
+            [KeepTalkingActionToolDefinition],
+            String,
+            AIToolChoice?,
+            AIStage,
+            AITurnConfiguration?
         ) async throws -> AITurnResult
     public typealias AssistantMessageBuilder =
         (AITurnResult) -> Message?
@@ -39,6 +38,10 @@ public struct AIOrchestrator {
         @Sendable (String, KeepTalkingContextMessage.MessageType, UUID) async throws ->
         Void
     public typealias ToolNameResolver = (ToolCall) -> String
+
+    /// The orchestrator filters tool-result messages out of the executor output
+    /// so they can be passed to the connector's optional `toolExecutor`. With
+    /// the KT-native `AIMessage` IR, "tool result" simply means `role == .tool`.
 
     /// Rich context returned by `ToolHintResolver`; carries optional action metadata
     /// for population into `MessageType.intermediate`.
@@ -69,7 +72,7 @@ public struct AIOrchestrator {
     public struct ACTAgent: Sendable {
         public typealias CanHandle = @Sendable (ToolCall) -> Bool
         public typealias Executor =
-            @Sendable ([ToolCall], OpenAIModel) async throws -> [ToolExecution]
+            @Sendable ([ToolCall], String) async throws -> [ToolExecution]
 
         public let canHandle: CanHandle
         public let execute: Executor
@@ -121,27 +124,26 @@ public struct AIOrchestrator {
             toolTranscriptAdapter: @escaping ToolTranscriptAdapter = { _ in [] },
             actAgent: ACTAgent? = nil,
             assistantPublisher: @escaping AssistantPublisher,
-            toolNameResolver: @escaping ToolNameResolver = { $0.function.name },
+            toolNameResolver: @escaping ToolNameResolver = { $0.name },
             toolHintResolver: @escaping ToolHintResolver = { _, _ in .init(hint: .toolUse) },
             toolRetryObserver: ToolRetryObserver? = nil
         ) {
             self.aiConnector = aiConnector
             self.turnRunner =
                 turnRunner
-                ?? { messages, tools, model, toolChoice, stage in
+                ?? { messages, tools, model, toolChoice, stage, configuration in
                     return try await aiConnector.completeTurn(
                         messages: messages,
                         tools: tools,
                         model: model,
                         toolChoice: toolChoice,
                         stage: stage,
+                        configuration: configuration,
                         toolExecutor: { calls in
                             let executions = try await toolExecutor(calls)
-                            return executions.flatMap { $0.messages }.compactMap { msg in
-                                if case .tool(let toolMsg) = msg {
-                                    return toolMsg
-                                }
-                                return nil
+                            // Pass through only the tool-result messages (one per call).
+                            return executions.flatMap(\.messages).filter { msg in
+                                msg.role == .tool
                             }
                         }
                     )
@@ -170,9 +172,10 @@ public struct AIOrchestrator {
 
     public func run(
         messages: [Message],
-        tools initialTools: [OpenAITool],
-        model: OpenAIModel,
-        toolChoice: ChatQuery.ChatCompletionFunctionCallOptionParam = .auto
+        tools initialTools: [KeepTalkingActionToolDefinition],
+        model: String,
+        toolChoice: AIToolChoice = .auto,
+        turnConfiguration: AITurnConfiguration? = nil
     ) async throws -> String {
         var transcript = messages
         var latestAssistantText = ""
@@ -185,8 +188,20 @@ public struct AIOrchestrator {
                 initialTools,
                 model,
                 toolChoice,
-                .execution
+                .execution,
+                turnConfiguration
             )
+
+            // Publish reasoning content first (if surfaced by the connector) so
+            // the UI can render the model's thinking before the answer lands.
+            if let thinking = turn.thinking?.trimmingCharacters(in: .whitespacesAndNewlines),
+                !thinking.isEmpty
+            {
+                try Task.checkCancellation()
+                try await dependencies.assistantPublisher(
+                    (thinking, .thinking)
+                )
+            }
 
             if let assistantMessage =
                 dependencies.assistantMessageBuilder(turn)
@@ -239,7 +254,7 @@ public struct AIOrchestrator {
 
     private func executeWithRetry(
         toolCalls: [ToolCall],
-        model: OpenAIModel,
+        model: String,
         maxRetries: Int
     ) async throws -> [ToolExecution] {
         var lastError: (any Error)?
@@ -261,7 +276,7 @@ public struct AIOrchestrator {
 
     private func executeToolCalls(
         _ toolCalls: [ToolCall],
-        model: OpenAIModel
+        model: String
     ) async throws -> [ToolExecution] {
         guard let actAgent = dependencies.actAgent else {
             return try await dependencies.toolExecutor(toolCalls)

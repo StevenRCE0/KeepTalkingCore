@@ -1,20 +1,19 @@
+import AIProxy
 import Foundation
-import OpenAI
 
 extension KeepTalkingClient {
     func toolNameForChatText(
-        _ toolCall: ChatQuery.ChatCompletionMessageParam.AssistantMessageParam
-            .ToolCallParam,
+        _ toolCall: AIToolCall,
         routesByFunctionName: [String: KeepTalkingAgentToolRoute],
         skillNameByActionID: [UUID: String],
         nodeAliasResolver: ((UUID) -> String?)? = nil
     ) -> String {
-        let functionName = toolCall.function.name
+        let functionName = toolCall.name
         if functionName == Self.contextAttachmentListingToolFunctionName {
             return "list context files"
         }
         if functionName == Self.contextAttachmentReadToolFunctionName {
-            let arguments = try? decodeToolArguments(toolCall.function.arguments)
+            let arguments = try? decodeToolArguments(toolCall.argumentsJSON)
             switch arguments?["mode"]?.stringValue {
                 case "native":
                     return "inspect context file"
@@ -45,7 +44,7 @@ extension KeepTalkingClient {
                 if definition.source == .mcp,
                     let arguments = try? parsedActionCallArguments(
                         definition: definition,
-                        rawArguments: toolCall.function.arguments
+                        rawArguments: toolCall.argumentsJSON
                     ),
                     let selectedTool = arguments["tool"]?.stringValue?
                         .trimmingCharacters(in: .whitespacesAndNewlines),

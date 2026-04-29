@@ -1,6 +1,7 @@
+import AIProxy
 import XCTest
+
 @testable import KeepTalking
-import OpenAI
 
 final class AIOrchestratorTests: XCTestCase {
     func testRunExecutesToolCallsInOrder() async throws {

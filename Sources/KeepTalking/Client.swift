@@ -174,7 +174,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let rtcClient: any KeepTalkingTransportClient
     let kvService: (any KeepTalkingKVService)?
     public let localStore: any KeepTalkingLocalStore
-    let openAIAPIMode: OpenAIAPIMode
+    let openAIBackend: OpenAIConnectorBackend
+    /// Default model identifier passed to internally-driven agent loops
+    /// (`SkillManager.callAction`, etc.) when the caller does not supply one
+    /// explicitly. Set this to the active provider's model so OpenRouter and
+    /// other providers don't 404 on the OpenAI-style default.
+    public let openAIModel: String?
     let livenessState: KeepTalkingContextLivenessState
     let mcpManager: MCPManager
     let skillManager: SkillManager
@@ -238,7 +243,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
     ///   - kvService: Optional KV backend used for node discovery and metadata.
     ///   - openAIAPIKey: Explicit OpenAI API key override.
     ///   - openAIEndpoint: Optional OpenAI-compatible endpoint override.
-    ///   - openAIAPIMode: Which OpenAI API to use (`.responses` or `.chatCompletions`).
+    ///   - openAIBackend: Which OpenAI-compatible backend to target. Defaults to OpenRouter.
+    ///   - openAIModel: Default model identifier sent to the connector when
+    ///                  the SDK runs internal agent loops (e.g. skill execution
+    ///                  on incoming action calls). Should match the active
+    ///                  provider's model — for OpenRouter this is provider-prefixed
+    ///                  (e.g. `openai/gpt-5-codex`).
     ///   - stdioTransportLauncher: Optional stdio transport launcher used for
     ///     MCP stdio actions.
     ///   - skillScriptExecutor: Optional skill script executor used for skill
@@ -251,7 +261,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
         kvService: (any KeepTalkingKVService)? = nil,
         openAIAPIKey: String? = nil,
         openAIEndpoint: String? = nil,
-        openAIAPIMode: OpenAIAPIMode = .responses,
+        openAIBackend: OpenAIConnectorBackend = .openRouter,
+        openAIModel: String? = nil,
         aiConnector: (any AIConnector)? = nil,
         stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
             DefaultMCPStdioTransportLauncher.current,
@@ -266,7 +277,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.kvService = kvService
         self.localStore = localStore
         self.logon = logon
-        self.openAIAPIMode = openAIAPIMode
+        self.openAIBackend = openAIBackend
+        let trimmedModel = openAIModel?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.openAIModel = (trimmedModel?.isEmpty == false) ? trimmedModel : nil
         self.blobStore = KeepTalkingBlobStore.makeDefault(for: localStore)
         livenessState = KeepTalkingContextLivenessState(
             localNode: config.node
@@ -296,7 +309,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
             if let apiKey, !apiKey.isEmpty {
                 self.aiConnector =
-                    try? OpenAIConnector(apiKey: apiKey, endpoint: endpoint, apiMode: openAIAPIMode)
+                    try? OpenAIConnector(apiKey: apiKey, endpoint: endpoint, backend: openAIBackend)
             } else {
                 self.aiConnector = nil
             }
