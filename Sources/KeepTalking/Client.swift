@@ -236,6 +236,29 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     let blobFrameProcessor = KeepTalkingBlobFrameProcessor()
 
+    // MARK: Teardown serialization
+    // `rtcClient.stop()` synchronously closes WebRTC peer connections, which
+    // joins worker threads and can block for hundreds of milliseconds. We run
+    // it on a detached task so MainActor callers don't freeze the UI, and
+    // gate `connect()` on any in-flight teardown so a tight disconnect→connect
+    // sequence still serializes correctly.
+    private let teardownLock = NSLock()
+    private var pendingTeardown: Task<Void, Never>?
+
+    private func takePendingTeardown() -> Task<Void, Never>? {
+        teardownLock.lock()
+        defer { teardownLock.unlock() }
+        let task = pendingTeardown
+        pendingTeardown = nil
+        return task
+    }
+
+    private func setPendingTeardown(_ task: Task<Void, Never>) {
+        teardownLock.lock()
+        pendingTeardown = task
+        teardownLock.unlock()
+    }
+
     /// Creates a client with its transport, storage, and optional AI integrations.
     ///
     /// - Parameters:
@@ -463,6 +486,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     /// Starts transports, persists local node state, and registers local actions.
     public func connect() async throws {
+        // Ensure any in-flight teardown from a previous disconnect() completes
+        // before bringing the transport back up.
+        if let teardown = takePendingTeardown() {
+            await teardown.value
+        }
+
         await mcpManager.setHTTPAuthURLHandler(mcpHTTPAuthURLHandler)
         _ = try await ensure(config.contextID, for: KeepTalkingContext.self)
 
@@ -484,12 +513,38 @@ public final class KeepTalkingClient: @unchecked Sendable {
     }
 
     /// Stops transports and fails any pending remote requests.
+    ///
+    /// Lightweight bookkeeping (failing pending continuations, cancelling
+    /// debounce tasks) runs synchronously. The WebRTC teardown is dispatched
+    /// to a detached task because `peer.close()` synchronously joins WebRTC
+    /// worker threads — calling it from MainActor would freeze the UI for
+    /// hundreds of milliseconds. A subsequent `connect()` will await the
+    /// in-flight teardown before restarting the transport.
     public func disconnect() {
         failAllPendingActionCalls(error: SignalError.closed)
         failAllPendingActionCatalogRequests(error: SignalError.closed)
         failAllPendingContextSync(error: SignalError.closed)
         cancelDebouncedNodeStateBroadcast()
-        rtcClient.stop()
+
+        let rtc = rtcClient
+        let previous = takePendingTeardown()
+        let teardown = Task.detached(priority: .userInitiated) {
+            if let previous {
+                await previous.value
+            }
+            rtc.stop()
+        }
+        setPendingTeardown(teardown)
+    }
+
+    /// Awaitable variant of `disconnect()` that returns once the WebRTC
+    /// transport has fully torn down. Prefer this when the caller needs to
+    /// observe a fully-stopped state (e.g. tests, or a controlled shutdown).
+    public func disconnectAndWait() async {
+        disconnect()
+        if let teardown = takePendingTeardown() {
+            await teardown.value
+        }
     }
 
     /// Installs a callback for HTTP-based MCP authorization flows.

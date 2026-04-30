@@ -381,13 +381,17 @@ extension KeepTalkingClient {
             configuration: .init(maxTurns: Self.maxAgentTurns)
         )
 
-        let resolvedToolChoice: AIToolChoice =
-            allowAutomaticToolUse ? .auto : AIToolChoice.none
+        // Always send `.auto`. `tool_choice: "none"` has poor cross-provider
+        // compatibility (some OpenAI-compatible backends reject or misroute
+        // it, especially in the attachments path). When we want to discourage
+        // automatic tool use we instead steer the model via the system prompt
+        // — see `currentPromptShouldAvoidAutomaticToolUse` above, which
+        // injects guidance into `keepTalkingSystemPrompt`.
         return try await orchestrator.run(
             messages: messages,
             tools: allTools,
             model: model,
-            toolChoice: resolvedToolChoice,
+            toolChoice: .auto,
             turnConfiguration: turnConfiguration
         )
     }

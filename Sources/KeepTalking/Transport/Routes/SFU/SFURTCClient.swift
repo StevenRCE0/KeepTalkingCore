@@ -64,6 +64,16 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     /// Stored separately because it is not part of RTCChannelSet.
     private var ionSFUAPIChannel: LKRTCDataChannel?
 
+    /// Cached ICE connection states keyed by `Target.publisher`/`Target.subscriber`.
+    /// Reading `LKRTCPeerConnection.iceConnectionState` directly dispatches
+    /// synchronously to WebRTC's signaling thread; under reconnect storms that
+    /// thread is busy and the getter blocks the caller. `runtimeStats()` is
+    /// invoked from MainActor (via `transportStatus(for:)` in the UI), so a
+    /// blocking read there freezes the UI. We update the cache from the
+    /// delegate callback (`peerConnection didChange newState:`) and only the
+    /// cache is read at stats time.
+    private var cachedIceConnectionStates: [Int: LKRTCIceConnectionState] = [:]
+
     private func reportTransportDegraded(_ reason: String) {
         guard !didReportDegrade else { return }
         didReportDegrade = true
@@ -219,6 +229,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             retainedChannels.removeAll()
             pendingCandidates.removeAll()
             notifiedConnectedPeers.removeAll()
+            cachedIceConnectionStates.removeAll()
         }
         signal.close()
     }
@@ -296,8 +307,11 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     func runtimeStats() -> KeepTalkingRuntimeStats {
         let retainedChannelCount = withState { retainedChannels.count }
         let outChat = channels.preferred(for: .chat)
-        let pubIce = withState { peerPool[Target.publisher]?.iceConnectionState }
-        let subIce = withState { peerPool[Target.subscriber]?.iceConnectionState }
+        // Read the cached ICE state instead of `peer.iceConnectionState` —
+        // the latter blocks on WebRTC's signaling thread (see
+        // `cachedIceConnectionStates` doc).
+        let pubIce = withState { cachedIceConnectionStates[Target.publisher] }
+        let subIce = withState { cachedIceConnectionStates[Target.subscriber] }
         return KeepTalkingRuntimeStats(
             sent: sentMessageCount,
             received: recvMessageCount,
@@ -591,6 +605,9 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
         newState: LKRTCIceConnectionState
     ) {
         let target = target(for: peerConnection) ?? -1
+        if target >= 0 {
+            withState { cachedIceConnectionStates[target] = newState }
+        }
         debug(
             "ice connection state target=\(target) state=\(newState.rawValue)"
         )

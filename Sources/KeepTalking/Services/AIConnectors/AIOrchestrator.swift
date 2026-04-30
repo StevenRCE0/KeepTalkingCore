@@ -242,6 +242,46 @@ public struct AIOrchestrator {
             for execution in toolExecutions {
                 transcript.append(contentsOf: execution.messages)
             }
+
+            // Publish a collapsed "Output" intermediate per execution so the
+            // user can see what came back from each tool — the real tool-call
+            // message above shows what's *being* run, this is the result
+            // panel that pairs with it. Whenever the result text already
+            // looks like a structured script result we split it into named
+            // parameters (`command` / `exit_code` / `stdout` / `stderr`);
+            // otherwise we surface the raw text under a single `result` key
+            // so MCP/primitive/skill replies are still inspectable.
+            for execution in toolExecutions {
+                // Skip the outer ACT dispatcher itself — its result is just
+                // the inner skill agent's wrapper text, which is already
+                // surfaced as `summary:` on the inner script Output card.
+                // Showing it here would be redundant noise above the actual
+                // tool calls.
+                if execution.toolCall.name == "kt_run_action" {
+                    continue
+                }
+                guard let resultText = Self.extractToolResultText(execution.messages) else {
+                    continue
+                }
+                var parameters = Self.parseScriptResultParameters(resultText)
+                if parameters.isEmpty {
+                    parameters = ["result": resultText]
+                }
+                let toolName = dependencies.toolNameResolver(execution.toolCall)
+                try Task.checkCancellation()
+                try await dependencies.assistantPublisher(
+                    (
+                        toolName,
+                        .intermediate(
+                            hint: "Output",
+                            targetNodeID: nil,
+                            actionID: nil,
+                            actionName: toolName,
+                            parameters: parameters
+                        )
+                    )
+                )
+            }
             transcript.append(
                 contentsOf: try await dependencies.toolTranscriptAdapter(
                     toolExecutions
@@ -380,6 +420,58 @@ public struct AIOrchestrator {
         }
 
         return names.isEmpty ? rawNames : names
+    }
+
+    /// Pull the text from the first `.tool` role message in `messages`. That's
+    /// the raw result string the executor returned for this tool call — the
+    /// model sees it; we surface it (collapsed) to the user too.
+    private static func extractToolResultText(_ messages: [AIMessage]) -> String? {
+        for message in messages where message.role == .tool {
+            // `content` is `Content?`; bind through the optional with `?`.
+            // Also fall through to `.parts` so we don't drop multi-part
+            // results that happen to carry a text leg.
+            if case .text(let str)? = message.content {
+                let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            } else if let content = message.content {
+                let projection = content.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !projection.isEmpty { return projection }
+            }
+        }
+        return nil
+    }
+
+    /// Parse the structured result text emitted by `SkillManager+ToolCalls.swift`
+    /// (`command: ... \nexit_code: N\nstdout: ...\nstderr: ...`) into a flat
+    /// parameters dict the chat's intermediate-message renderer can show
+    /// behind a chevron. Returns `[:]` for tool results that don't follow this
+    /// shape so we don't litter the UI with garbled output panels.
+    static func parseScriptResultParameters(_ text: String) -> [String: String] {
+        // `summary:` is appended by SkillManager when a script ran inside a
+        // skill action — it carries the inner agent's prose reply alongside
+        // the raw command/stdout/stderr fields.
+        let keys = ["command", "exit_code", "stdout", "stderr", "summary"]
+        // Cheap header check — only handle the shape SkillManager emits.
+        guard text.hasPrefix("command:") else { return [:] }
+
+        var ranges: [(key: String, range: Range<String.Index>)] = []
+        for key in keys {
+            if let r = text.range(of: "\n\(key):") ?? text.range(of: "\(key):") {
+                ranges.append((key, r))
+            }
+        }
+        guard !ranges.isEmpty else { return [:] }
+        ranges.sort { $0.range.lowerBound < $1.range.lowerBound }
+
+        var result: [String: String] = [:]
+        for (i, entry) in ranges.enumerated() {
+            let valueStart = entry.range.upperBound
+            let valueEnd = i + 1 < ranges.count ? ranges[i + 1].range.lowerBound : text.endIndex
+            let raw = text[valueStart..<valueEnd]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            result[entry.key] = raw.isEmpty ? "<empty>" : raw
+        }
+        return result
     }
 
     public enum IntermediateMessageHints: String, Equatable, Sendable {

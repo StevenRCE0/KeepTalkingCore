@@ -560,10 +560,15 @@ extension KeepTalkingClient {
         }
 
         let statusContext = try await ensure(status.contextID, for: KeepTalkingContext.self)
+        // The grant's effective context is `status.contextID` — that's the
+        // contract on the receiver side. Don't re-gate on the broadcaster's
+        // relationship.allows(statusContext): the broadcaster encodes its
+        // outgoing relationship as a single field, and skew between that
+        // field and the per-grant scope (e.g. the broadcaster having
+        // .trusted([Z]) while broadcasting in Y after a context handover)
+        // would silently drop legitimate grants.
         let grantsForLocal = status.nodeRelations.filter {
-            $0.toNodeID == config.node
-                && $0.relationship.isTrustedOrOwner
-                && $0.relationship.allows(context: statusContext)
+            $0.toNodeID == config.node && $0.relationship.isTrustedOrOwner
         }
         guard !grantsForLocal.isEmpty else {
             return
@@ -588,22 +593,42 @@ extension KeepTalkingClient {
         // `preferredTrustedRelation(allowing:)` would exclude .trusted([甲]) when processing
         // context 乙 (because allows(context:nil) is false for .trusted), causing the guard
         // to fail and silently skip the auth merge for every context after the first.
-        guard
-            let incomingRelation =
-                try await KeepTalkingNodeRelation
-                .query(on: localStore.database)
-                .filter(\.$from.$id, .equal, remoteNodeID)
-                .filter(\.$to.$id, .equal, config.node)
-                .all()
-                .sorted(by: {
-                    Self.relationPriority($0.relationship)
-                        > Self.relationPriority($1.relationship)
-                })
-                .first(where: {
-                    $0.relationship.isTrustedOrOwner || $0.relationship == .pending
-                }),
-            let incomingRelationID = incomingRelation.id
-        else {
+        let existingIncomingRelation =
+            try await KeepTalkingNodeRelation
+            .query(on: localStore.database)
+            .filter(\.$from.$id, .equal, remoteNodeID)
+            .filter(\.$to.$id, .equal, config.node)
+            .all()
+            .sorted(by: {
+                Self.relationPriority($0.relationship)
+                    > Self.relationPriority($1.relationship)
+            })
+            .first(where: {
+                $0.relationship.isTrustedOrOwner || $0.relationship == .pending
+            })
+
+        let incomingRelation: KeepTalkingNodeRelation
+        if let existingIncomingRelation {
+            incomingRelation = existingIncomingRelation
+        } else {
+            // Grant arrived before the lure/identity-key handshake recorded
+            // the incoming relation row. Materialize it as .pending so the
+            // trust-elevation branch below can promote it to .trusted in
+            // statusContext, instead of silently dropping the grant.
+            let remoteNode = try await ensure(
+                remoteNodeID,
+                for: KeepTalkingNode.self
+            )
+            let selfNode = try await getCurrentNodeInstance()
+            let createdRelation = try KeepTalkingNodeRelation(
+                from: remoteNode,
+                to: selfNode,
+                relationship: .pending
+            )
+            try await createdRelation.save(on: localStore.database)
+            incomingRelation = createdRelation
+        }
+        guard let incomingRelationID = incomingRelation.id else {
             return
         }
 
@@ -657,7 +682,14 @@ extension KeepTalkingClient {
                     existing: existingLink.approvingContext,
                     adding: statusContext
                 )
-                existingLink.wakeHandles = wakeRoutesByActionID[actionID]
+                // Only update wakeHandles when the broadcast actually carried
+                // new routes for this action. A broadcaster without push
+                // routing for a given action sends nothing, and we'd
+                // otherwise nil-out routes that were learned from a prior
+                // broadcast.
+                if let routes = wakeRoutesByActionID[actionID] {
+                    existingLink.wakeHandles = routes
+                }
                 try await existingLink.save(on: localStore.database)
             } else {
                 let link = try KeepTalkingNodeRelationActionRelation(
@@ -665,7 +697,9 @@ extension KeepTalkingClient {
                     action: action,
                     approvingContext: approvingContext
                 )
-                link.wakeHandles = wakeRoutesByActionID[actionID]
+                if let routes = wakeRoutesByActionID[actionID] {
+                    link.wakeHandles = routes
+                }
                 try await link.save(on: localStore.database)
             }
         }

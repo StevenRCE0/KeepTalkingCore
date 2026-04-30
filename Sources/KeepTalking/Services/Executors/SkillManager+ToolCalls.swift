@@ -2,6 +2,41 @@ import AIProxy
 import Foundation
 import MCP
 
+/// Captures the structured output of every script the inner skill agent
+/// runs so the outer chat can surface real `command/stdout/stderr` fields
+/// instead of only the inner LLM's prose summary. Reference type so the
+/// inner loop can append from inside `async` calls without `inout`.
+final class SkillScriptTraceCollector: @unchecked Sendable {
+    struct Entry {
+        let toolName: String
+        let result: String
+    }
+
+    private var entries: [Entry] = []
+    private let lock = NSLock()
+
+    func append(toolName: String, structuredResult: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries.append(Entry(toolName: toolName, result: structuredResult))
+    }
+
+    func snapshot() -> [Entry] {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries
+    }
+
+    /// Last script trace formatted as the canonical script result block
+    /// (`command:\n…\nexit_code: N\nstdout:\n…\nstderr:\n…`). Returns
+    /// nil when no script ran.
+    func lastResultBlock() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.last?.result
+    }
+}
+
 extension SkillManager {
     func assistantMessage(
         from turn: AITurnResult
@@ -25,7 +60,8 @@ extension SkillManager {
         actionID: UUID,
         skillDirectory: URL?,
         manifestContext: SkillManifestContext,
-        sandboxPolicy: KTSandboxPolicy? = nil
+        sandboxPolicy: KTSandboxPolicy? = nil,
+        scriptTrace: SkillScriptTraceCollector? = nil
     ) async throws -> [AIMessage] {
         var messages: [AIMessage] = []
         for toolCall in toolCalls {
@@ -69,6 +105,12 @@ extension SkillManager {
                     parameters: parameters,
                     sandboxPolicy: sandboxPolicy
                 )
+                // The skill loop reports its final answer back to the outer
+                // chat as one tool result; without this, the structured
+                // command/stdout/stderr fields would only live in the inner
+                // transcript and the user would see just the inner LLM's
+                // prose summary in the Output card.
+                scriptTrace?.append(toolName: functionName, structuredResult: payload)
             } else {
                 payload = "Tool '\(functionName)' is not declared in this skill's manifest."
             }

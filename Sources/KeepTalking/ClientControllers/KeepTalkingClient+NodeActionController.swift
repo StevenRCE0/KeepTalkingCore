@@ -1009,7 +1009,16 @@ extension KeepTalkingClient {
                 fallbackDescription: fallbackDescription
             )
 
-            persistedAction.$node.id = incomingAction.ownerNodeID
+            // Only adopt the advertised owner when we don't already know one,
+            // and never overwrite a known owner with nil — a stale or partial
+            // advertisement otherwise orphans the action and the catalog drops
+            // it (guard let ownerNodeID = action.$node.id).
+            if let advertisedOwnerID = incomingAction.ownerNodeID,
+                persistedAction.$node.id == nil
+                    || persistedAction.$node.id == advertisedOwnerID
+            {
+                persistedAction.$node.id = advertisedOwnerID
+            }
             persistedAction.descriptor = resolvedDescriptor
             persistedAction.payload = existingPayload ?? materializedPayload ?? resolvedPayload
             persistedAction.remoteAuthorisable =

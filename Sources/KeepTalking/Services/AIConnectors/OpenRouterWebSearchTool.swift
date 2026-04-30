@@ -35,7 +35,12 @@ public struct OpenRouterWebSearchTool: KeepTalkingWebSearchTool {
         }
 
         struct Tool: Encodable {
+            struct Parameters: Encodable {
+                let engine: String?
+                let max_results: Int?
+            }
             let type: String
+            let parameters: Parameters?
         }
 
         let model: String
@@ -145,16 +150,25 @@ public struct OpenRouterWebSearchTool: KeepTalkingWebSearchTool {
                         ),
                         .init(role: "user", content: query),
                     ],
-                    tools: [.init(type: "openrouter:web_search")]
+                    tools: [
+                        .init(
+                            type: "openrouter:web_search",
+                            parameters: .init(engine: "exa", max_results: 5)
+                        )
+                    ]
                 )
             )
 
             let (data, response) = try await URLSession.shared.data(for: request)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 200
             guard statusCode == 200 else {
-                let message =
+                let parsed =
                     (try? JSONDecoder().decode(APIErrorBody.self, from: data))
                     .map(\.error.message)
+                let raw = String(data: data, encoding: .utf8)
+                let message =
+                    parsed
+                    ?? raw
                     ?? HTTPURLResponse.localizedString(forStatusCode: statusCode)
                 throw OpenRouterWebSearchToolError.apiError(
                     statusCode,
@@ -173,10 +187,17 @@ public struct OpenRouterWebSearchTool: KeepTalkingWebSearchTool {
         }
     }
 
+    /// The connector treats the configured endpoint as the host root (e.g.
+    /// `https://openrouter.ai/api`) and lets AIProxy append
+    /// `/v1/chat/completions`. Match that contract here so we share the same
+    /// endpoint string the main connector uses, instead of inventing our own.
     private static func chatCompletionsURL(from baseURL: URL) -> URL {
         var url = baseURL
         if url.path.hasSuffix("/chat/completions") {
             return url
+        }
+        if !url.path.contains("/v1") {
+            url.appendPathComponent("v1")
         }
         url.appendPathComponent("chat")
         url.appendPathComponent("completions")

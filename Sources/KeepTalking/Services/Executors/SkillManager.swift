@@ -199,6 +199,7 @@ public actor SkillManager {
         ]
 
         var latestAssistantText: String?
+        let scriptTrace = SkillScriptTraceCollector()
         for _ in 0..<8 {
             let turn = try await aiConnector.completeTurn(
                 messages: messages,
@@ -213,7 +214,8 @@ public actor SkillManager {
                         actionID: actionID,
                         skillDirectory: skillBundle.directory,
                         manifestContext: resolvedContext,
-                        sandboxPolicy: sandboxPolicy
+                        sandboxPolicy: sandboxPolicy,
+                        scriptTrace: scriptTrace
                     )
                 }
             )
@@ -235,12 +237,24 @@ public actor SkillManager {
                     actionID: actionID,
                     skillDirectory: skillBundle.directory,
                     manifestContext: resolvedContext,
-                    sandboxPolicy: sandboxPolicy
+                    sandboxPolicy: sandboxPolicy,
+                    scriptTrace: scriptTrace
                 )
             )
         }
 
-        let finalText = latestAssistantText ?? "Skill execution completed."
+        // If a script actually ran, return its structured result block as
+        // the final tool content. The outer chat's Output parser splits
+        // `command:\n…\nexit_code: N\nstdout:\n…\nstderr:\n…` into the
+        // collapsible parameter rows so the user sees real terminal
+        // output instead of just the inner agent's prose summary.
+        let summary = latestAssistantText ?? "Skill execution completed."
+        let finalText: String
+        if let block = scriptTrace.lastResultBlock() {
+            finalText = "\(block)\n\nsummary: \(summary)"
+        } else {
+            finalText = summary
+        }
         return (
             content: [.text(text: finalText, annotations: nil, _meta: nil)],
             isError: false

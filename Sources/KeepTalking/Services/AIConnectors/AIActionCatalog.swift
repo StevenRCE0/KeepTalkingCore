@@ -65,12 +65,31 @@ final class KeepTalkingActionRuntimeCatalog: @unchecked Sendable {
     /// Appends lazily-discovered tool definitions and their routes into the catalog.
     /// Called after MCP/skill schemas are fetched so subsequent runAI calls (with
     /// this cached instance) already include these tools in allTools from the start.
+    ///
+    /// Dedupes by `functionName` so callers can safely re-publish a definition
+    /// without introducing duplicate tool names — important because the skill
+    /// action proxy is now registered both eagerly during catalog build and
+    /// lazily on first metadata load. The newer definition wins (latest write).
     func append(
         definitions: [KeepTalkingActionToolDefinition],
         routes: [String: KeepTalkingAgentToolRoute]
     ) {
+        var byName: [String: KeepTalkingActionToolDefinition] = [:]
+        var order: [String] = []
+        for existing in catalog.definitions {
+            if byName[existing.functionName] == nil {
+                order.append(existing.functionName)
+            }
+            byName[existing.functionName] = existing
+        }
+        for incoming in definitions {
+            if byName[incoming.functionName] == nil {
+                order.append(incoming.functionName)
+            }
+            byName[incoming.functionName] = incoming
+        }
         catalog = KeepTalkingActionToolCatalog(
-            definitions: catalog.definitions + definitions
+            definitions: order.compactMap { byName[$0] }
         )
         for (name, route) in routes {
             routesByFunctionName[name] = route
@@ -247,6 +266,21 @@ extension KeepTalkingClient {
                             supportsWakeAssist: supportsWakeAssist,
                             isCurrentNode: isCurrentNode
                         ))
+                    // Without this, skill actions never reach the remote
+                    // tool catalog — callers see the stub but no callable
+                    // tool. Mirror the primitive registration pattern.
+                    let skillActionDefinition =
+                        makeSkillActionProxyDefinition(
+                            actionID: actionID,
+                            ownerNodeID: ownerNodeID,
+                            bundle: bundle,
+                            descriptor: action.descriptor,
+                            supportsWakeAssist: supportsWakeAssist
+                        )
+                    definitionsByName[skillActionDefinition.functionName] =
+                        skillActionDefinition
+                    routesByFunctionName[skillActionDefinition.functionName] =
+                        .actionProxy(skillActionDefinition)
 
                 case .primitive(let bundle):
                     let description =

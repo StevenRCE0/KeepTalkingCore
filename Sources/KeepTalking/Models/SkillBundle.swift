@@ -28,6 +28,10 @@ public struct KeepTalkingSkillBundle: KeepTalkingActionBundle {
     /// Labelled directory keys the skill needs access to (e.g. "project_root").
     /// Keys only — the user supplies actual paths via `parameters`.
     public var requiredDirectories: [String]
+    /// Labelled file keys the skill needs the user to point at (e.g. "entry_script",
+    /// "config_file"). Distinct from `requiredDirectories` so the host can present
+    /// a file picker rather than a folder picker. Values flow through `parameters`.
+    public var requiredFiles: [String]
     /// Network hosts the skill needs egress to (e.g. "api.github.com").
     /// Whether the user actually granted each host is reflected in `grantedNetworkHosts`.
     public var requiredNetworkHosts: [String]
@@ -44,6 +48,7 @@ public struct KeepTalkingSkillBundle: KeepTalkingActionBundle {
         atomicTools: [KTSkillAtomicCommand] = [],
         requiredEnv: [String] = [],
         requiredDirectories: [String] = [],
+        requiredFiles: [String] = [],
         requiredNetworkHosts: [String] = [],
         grantedNetworkHosts: [String] = []
     ) {
@@ -56,8 +61,31 @@ public struct KeepTalkingSkillBundle: KeepTalkingActionBundle {
         self.atomicTools = atomicTools
         self.requiredEnv = requiredEnv
         self.requiredDirectories = requiredDirectories
+        self.requiredFiles = requiredFiles
         self.requiredNetworkHosts = requiredNetworkHosts
         self.grantedNetworkHosts = grantedNetworkHosts
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, indexDescription, directory, parameters, toolsAnalysed,
+            atomicTools, requiredEnv, requiredDirectories, requiredFiles,
+            requiredNetworkHosts, grantedNetworkHosts
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        self.name = try c.decode(String.self, forKey: .name)
+        self.indexDescription = (try? c.decode(String.self, forKey: .indexDescription)) ?? ""
+        self.directory = try? c.decode(URL.self, forKey: .directory)
+        self.parameters = (try? c.decode([String: String].self, forKey: .parameters)) ?? [:]
+        self.toolsAnalysed = (try? c.decode(Bool.self, forKey: .toolsAnalysed)) ?? false
+        self.atomicTools = (try? c.decode([KTSkillAtomicCommand].self, forKey: .atomicTools)) ?? []
+        self.requiredEnv = (try? c.decode([String].self, forKey: .requiredEnv)) ?? []
+        self.requiredDirectories = (try? c.decode([String].self, forKey: .requiredDirectories)) ?? []
+        self.requiredFiles = (try? c.decode([String].self, forKey: .requiredFiles)) ?? []
+        self.requiredNetworkHosts = (try? c.decode([String].self, forKey: .requiredNetworkHosts)) ?? []
+        self.grantedNetworkHosts = (try? c.decode([String].self, forKey: .grantedNetworkHosts)) ?? []
     }
 }
 

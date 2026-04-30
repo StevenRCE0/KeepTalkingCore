@@ -176,9 +176,10 @@ extension KeepTalkingClient {
                 } else {
                     route = await runtimeCatalog.lazyRegistry.route(for: functionName)
                 }
+                var extraInlineMessages: [AIMessage] = []
                 switch route {
                     case .actionProxy(let definition):
-                        payload = try await executeActionProxyToolCall(
+                        let proxyResult = try await executeActionProxyToolCall(
                             functionName: functionName,
                             definition: definition,
                             rawArguments: toolCall.argumentsJSON,
@@ -186,6 +187,8 @@ extension KeepTalkingClient {
                             agentTurnID: agentTurnID,
                             agentIntention: agentIntention
                         )
+                        payload = proxyResult.payload
+                        extraInlineMessages = proxyResult.inlineMessages
                     case .skillMetadata(let skillContext):
                         payload = renderSkillMetadataPayload(
                             functionName: functionName,
@@ -217,15 +220,17 @@ extension KeepTalkingClient {
                             "function_name": functionName,
                         ])
                 }
+                var resultMessages: [AIMessage] = [
+                    toolMessage(
+                        payload: payload,
+                        toolCallID: toolCallID
+                    )
+                ]
+                resultMessages.append(contentsOf: extraInlineMessages)
                 executions.append(
                     .init(
                         toolCall: toolCall,
-                        messages: [
-                            toolMessage(
-                                payload: payload,
-                                toolCallID: toolCallID
-                            )
-                        ]
+                        messages: resultMessages
                     )
                 )
             } catch {
@@ -258,6 +263,11 @@ extension KeepTalkingClient {
         .tool(payload, toolCallID: toolCallID)
     }
 
+    struct AgentToolProxyResult {
+        let payload: String
+        let inlineMessages: [AIMessage]
+    }
+
     func executeActionProxyToolCall(
         functionName: String,
         definition: KeepTalkingActionToolDefinition,
@@ -265,7 +275,7 @@ extension KeepTalkingClient {
         context: KeepTalkingContext,
         agentTurnID: UUID? = nil,
         agentIntention: String? = nil
-    ) async throws -> String {
+    ) async throws -> AgentToolProxyResult {
         let arguments = try parsedActionCallArguments(
             definition: definition,
             rawArguments: rawArguments
@@ -330,23 +340,52 @@ extension KeepTalkingClient {
     func renderAgentToolPayload(
         functionName: String,
         result: KeepTalkingActionCallResult
-    ) -> String {
-        let renderedContent = result.content.map { content -> String in
+    ) -> AgentToolProxyResult {
+        var inlineMessages: [AIMessage] = []
+        var renderedContent: [String] = []
+        renderedContent.reserveCapacity(result.content.count)
+        for (index, content) in result.content.enumerated() {
             switch content {
                 case .text(let text, _, _):
-                    // TODO: we'll probably add metadata support here
-                    return text
-                default:
-                    if let data = try? JSONEncoder().encode(content),
-                        let json = String(data: data, encoding: .utf8)
-                    {
-                        return json
+                    renderedContent.append(text)
+                case .image(let data, let mimeType, _, _):
+                    if let part = imagePart(base64: data, mimeType: mimeType) {
+                        inlineMessages.append(
+                            inlineUserMessage(
+                                lead:
+                                    "Tool result image #\(index + 1) from \(functionName) (\(mimeType)):",
+                                imagePart: part
+                            )
+                        )
+                        renderedContent.append(
+                            "<image:\(mimeType) attached as user message>")
+                    } else {
+                        renderedContent.append("<image:\(mimeType) (failed to inline)>")
                     }
-                    return "<non-text content>"
+                case .audio(_, let mimeType, _, _):
+                    renderedContent.append(
+                        "<audio:\(mimeType) (not inlined; provider does not accept audio in tool results)>"
+                    )
+                case .resource(let resource, _, _):
+                    renderedContent.append(
+                        renderEmbeddedResource(
+                            resource,
+                            functionName: functionName,
+                            index: index,
+                            inlineMessages: &inlineMessages
+                        )
+                    )
+                case .resourceLink(let uri, let name, _, let description, let mimeType, _):
+                    var parts: [String] = ["<resource_link uri=\"\(uri)\" name=\"\(name)\""]
+                    if let mimeType { parts.append("mime=\"\(mimeType)\"") }
+                    if let description, !description.isEmpty {
+                        parts.append("description=\"\(description)\"")
+                    }
+                    renderedContent.append(parts.joined(separator: " ") + ">")
             }
         }
 
-        return jsonString([
+        let payload = jsonString([
             "ok": !result.isError,
             "function_name": functionName,
             "request_id": result.requestID.uuidString.lowercased(),
@@ -356,19 +395,108 @@ extension KeepTalkingClient {
             "error_message": result.errorMessage ?? "",
             "content": renderedContent,
         ])
+        return AgentToolProxyResult(payload: payload, inlineMessages: inlineMessages)
+    }
+
+    private func imagePart(base64: String, mimeType: String) -> AIMessage.Part? {
+        // `base64` may already be a data URL (`data:image/png;base64,...`).
+        if base64.hasPrefix("data:"), let url = URL(string: base64) {
+            return .imageURL(url)
+        }
+        let cleaned = base64.replacingOccurrences(of: "\n", with: "")
+        guard let url = URL(string: "data:\(mimeType);base64,\(cleaned)") else {
+            return nil
+        }
+        return .imageURL(url)
+    }
+
+    private func inlineUserMessage(
+        lead: String,
+        imagePart: AIMessage.Part
+    ) -> AIMessage {
+        .user(parts: [.text(lead), imagePart])
+    }
+
+    private func renderEmbeddedResource(
+        _ resource: MCP.Resource.Content,
+        functionName: String,
+        index: Int,
+        inlineMessages: inout [AIMessage]
+    ) -> String {
+        let mime = resource.mimeType ?? "application/octet-stream"
+        if let text = resource.text, !text.isEmpty {
+            return text
+        }
+        if let blob = resource.blob, !blob.isEmpty {
+            if mime.hasPrefix("image/"),
+                let part = imagePart(base64: blob, mimeType: mime)
+            {
+                inlineMessages.append(
+                    inlineUserMessage(
+                        lead:
+                            "Tool result resource #\(index + 1) from \(functionName) (\(resource.uri), \(mime)):",
+                        imagePart: part
+                    )
+                )
+                return "<resource uri=\"\(resource.uri)\" mime=\"\(mime)\" attached as user message>"
+            }
+            let bytes = (Data(base64Encoded: blob)?.count) ?? 0
+            return
+                "<resource uri=\"\(resource.uri)\" mime=\"\(mime)\" size=\(bytes) (binary, not inlined)>"
+        }
+        return "<resource uri=\"\(resource.uri)\" mime=\"\(mime)\" (empty)>"
     }
 
     func renderSkillMetadataPayload(
         functionName: String,
         context: KeepTalkingSkillCatalogContext
     ) -> String {
-        // Expose parameter names (not values) so the outer AI knows what's configured
+        // Expose parameter names (not values) so the outer AI knows what's configured.
+        // Required-directory / required-env *names* are intentionally surfaced;
+        // their *values* (paths and secrets) stay local to the action host and
+        // are never serialized into this payload.
         let dirParams = context.bundle.parameters.keys
             .filter { context.bundle.parameters[$0]?.hasPrefix("/") == true }
             .sorted()
         let otherParams = context.bundle.parameters.keys
             .filter { context.bundle.parameters[$0]?.hasPrefix("/") != true }
             .sorted()
+
+        // `context.manifestPath` is the action host's absolute on-disk path
+        // (e.g. /Users/alice/Library/Application Support/KeepTalking/Skills/foo/manifest.yaml).
+        // Remote callers must not see it — strip to the leaf filename so they
+        // still know how the manifest is named without learning where it lives.
+        let safeManifestPath: String = {
+            guard !context.manifestPath.isEmpty else { return "" }
+            return (context.manifestPath as NSString).lastPathComponent
+        }()
+
+        // Analysed state from the planner. Only field NAMES are surfaced —
+        // the actual env values and directory paths live in
+        // `bundle.parameters` and stay local to the action host. Network
+        // hosts are not secret (they're already part of the skill manifest)
+        // so they're exposed verbatim.
+        let analysedTools: [[String: Any]] = context.bundle.atomicTools
+            .sorted { $0.index < $1.index }
+            .map { cmd in
+                var entry: [String: Any] = [
+                    "index": cmd.index,
+                    "intent": cmd.intent,
+                ]
+                if let verb = cmd.descriptor.action?.verbs?.first {
+                    entry["verb"] = verb.rawValue
+                }
+                if let toolName = cmd.toolName, !toolName.isEmpty {
+                    entry["tool_name"] = toolName
+                }
+                // Script paths are relative to the skill directory (e.g.
+                // "scripts/foo.py"); the skill directory itself is local-only,
+                // so a relative path doesn't leak the host's filesystem.
+                if let scriptPath = cmd.scriptPath, !scriptPath.isEmpty {
+                    entry["script_path"] = scriptPath
+                }
+                return entry
+            }
 
         return jsonString([
             "ok": context.loadError == nil,
@@ -377,7 +505,7 @@ extension KeepTalkingClient {
             "action_id": context.actionID.uuidString.lowercased(),
             "owner_node_id": context.ownerNodeID.uuidString.lowercased(),
             "skill_name": context.bundle.name,
-            "manifest_path": context.manifestPath,
+            "manifest_path": safeManifestPath,
             "manifest_metadata": context.manifestMetadata,
             "references_files": context.referencesFiles,
             "scripts": context.scripts,
@@ -385,6 +513,13 @@ extension KeepTalkingClient {
             "manifest_preview": context.manifestPreview,
             "configured_directories": dirParams,
             "configured_parameters": otherParams,
+            "tools_analysed": context.bundle.toolsAnalysed,
+            "analysed_tools": analysedTools,
+            "required_env": context.bundle.requiredEnv.sorted(),
+            "required_directories": context.bundle.requiredDirectories.sorted(),
+            "required_files": context.bundle.requiredFiles.sorted(),
+            "required_network_hosts": context.bundle.requiredNetworkHosts.sorted(),
+            "granted_network_hosts": context.bundle.grantedNetworkHosts.sorted(),
             "error_message": context.loadError ?? "",
         ])
     }
