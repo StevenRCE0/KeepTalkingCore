@@ -242,46 +242,6 @@ public struct AIOrchestrator {
             for execution in toolExecutions {
                 transcript.append(contentsOf: execution.messages)
             }
-
-            // Publish a collapsed "Output" intermediate per execution so the
-            // user can see what came back from each tool — the real tool-call
-            // message above shows what's *being* run, this is the result
-            // panel that pairs with it. Whenever the result text already
-            // looks like a structured script result we split it into named
-            // parameters (`command` / `exit_code` / `stdout` / `stderr`);
-            // otherwise we surface the raw text under a single `result` key
-            // so MCP/primitive/skill replies are still inspectable.
-            for execution in toolExecutions {
-                // Skip the outer ACT dispatcher itself — its result is just
-                // the inner skill agent's wrapper text, which is already
-                // surfaced as `summary:` on the inner script Output card.
-                // Showing it here would be redundant noise above the actual
-                // tool calls.
-                if execution.toolCall.name == "kt_run_action" {
-                    continue
-                }
-                guard let resultText = Self.extractToolResultText(execution.messages) else {
-                    continue
-                }
-                var parameters = Self.parseScriptResultParameters(resultText)
-                if parameters.isEmpty {
-                    parameters = ["result": resultText]
-                }
-                let toolName = dependencies.toolNameResolver(execution.toolCall)
-                try Task.checkCancellation()
-                try await dependencies.assistantPublisher(
-                    (
-                        toolName,
-                        .intermediate(
-                            hint: "Output",
-                            targetNodeID: nil,
-                            actionID: nil,
-                            actionName: toolName,
-                            parameters: parameters
-                        )
-                    )
-                )
-            }
             transcript.append(
                 contentsOf: try await dependencies.toolTranscriptAdapter(
                     toolExecutions

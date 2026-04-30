@@ -191,6 +191,7 @@ extension KeepTalkingClient {
 
         var summary = ""
         let maxACTTurns = 4
+        var stepIndex = 0
 
         for _ in 0..<maxACTTurns {
             let turn = try await actConnector.completeTurn(
@@ -206,37 +207,27 @@ extension KeepTalkingClient {
                 actTranscript.append(assistantMsg)
             }
 
-            if !turn.toolCalls.isEmpty,
-                let chatText = AIOrchestrator.chatText(
-                    for: .init(
-                        assistantText: nil,
-                        thinking: nil,
-                        toolCalls: turn.toolCalls
-                    ),
-                    stage: .execution,
-                    toolNameResolver: { [self] toolCall in
-                        publishedToolName(
-                            for: toolCall,
-                            runtimeCatalog: runtimeCatalog,
-                            skillNameByActionID: skillNameByActionID,
-                            aliasLookup: aliasLookup
-                        )
-                    },
-                    toolHintResolver: { [self] toolCall, stage in
-                        publishedToolHint(for: toolCall, stage: stage)
-                    }
-                )
-            {
-                try await publisher(chatText)
-            }
-
+            // Capture intermediate "thinking" text the inner agent produced
+            // alongside its tool calls; we publish it per-turn so the user
+            // can watch progress fold into the parent "Inspecting · <action>"
+            // row instead of waiting for the loop to finish.
             if let text = turn.assistantText?.trimmingCharacters(in: .whitespacesAndNewlines),
                 !text.isEmpty
             {
                 summary = text
             }
 
-            guard !turn.toolCalls.isEmpty else { break }
+            guard !turn.toolCalls.isEmpty else {
+                // No tool calls → done. Publish a final summary row.
+                if !summary.isEmpty {
+                    try await publishACTTraceUpdate(
+                        publisher: publisher,
+                        parentActionName: stub.name,
+                        params: ["summary": summary]
+                    )
+                }
+                break
+            }
 
             // Execute the action tool calls directly (no recursive ACT invocation).
             let executions = try await executeAgentToolCalls(
@@ -262,6 +253,33 @@ extension KeepTalkingClient {
                 transferReceiptTimeout: .seconds(0)  // blobs already synced
             )
             actTranscript.append(contentsOf: injected)
+
+            // Fold this step's call+result into the parent's expand. The
+            // chat renderer merges Output intermediates with matching
+            // (actionName, agentTurnID) into the originating tool-call row,
+            // so each step appears as additional rows under the parent
+            // "Inspecting · <action>" without spawning standalone entries.
+            for (toolCall, exec) in zip(turn.toolCalls, executions) {
+                stepIndex += 1
+                let displayName = publishedToolName(
+                    for: toolCall,
+                    runtimeCatalog: runtimeCatalog,
+                    skillNameByActionID: skillNameByActionID,
+                    aliasLookup: aliasLookup
+                )
+                let resultText = ACTAgentResultExtractor.text(from: exec.messages) ?? ""
+                let params = ACTAgentResultExtractor.parameters(
+                    stepIndex: stepIndex,
+                    toolDisplayName: displayName,
+                    arguments: toolCall.argumentsJSON,
+                    resultText: resultText
+                )
+                try await publishACTTraceUpdate(
+                    publisher: publisher,
+                    parentActionName: stub.name,
+                    params: params
+                )
+            }
         }
 
         if summary.isEmpty {
@@ -757,5 +775,110 @@ extension KeepTalkingClient {
 
     private func actLog(_ message: String) {
         onLog?("[ACT] \(message)")
+    }
+
+    /// Publish a trace update keyed to the outer "Inspecting · <action>"
+    /// row. The chat's mergedOutputParams logic folds every Output
+    /// intermediate sharing the same (actionName, agentTurnID) into the
+    /// parent tool-call row's expand — so successive ACT steps accumulate
+    /// as additional rows there without spawning standalone entries.
+    fileprivate func publishACTTraceUpdate(
+        publisher: AIOrchestrator.AssistantPublisher,
+        parentActionName: String,
+        params: [String: String]
+    ) async throws {
+        try await publisher(
+            (
+                parentActionName,
+                .intermediate(
+                    hint: "Output",
+                    targetNodeID: nil,
+                    actionID: nil,
+                    actionName: parentActionName,
+                    parameters: params
+                )
+            )
+        )
+    }
+}
+
+/// Helper functions to extract structured fields from inner-tool execution
+/// results so the ACT mini-loop can fold step-by-step traces into the
+/// parent's "Inspecting · <action>" row. Kept as a free enum so the logic
+/// is unit-testable without spinning up the full ACT machinery.
+enum ACTAgentResultExtractor {
+    /// Pull the first `.tool`-role message's text out of a list of messages.
+    static func text(from messages: [AIMessage]) -> String? {
+        for message in messages where message.role == .tool {
+            if case .text(let str)? = message.content {
+                let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            } else if let content = message.content {
+                let projection = content.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !projection.isEmpty { return projection }
+            }
+        }
+        return nil
+    }
+
+    /// Build the per-step parameters dict published to the parent row.
+    /// Compact arg summary on top, then the structured script-result fields
+    /// (command/exit_code/stdout/stderr) when present, otherwise the raw
+    /// reply text under a single `result` key.
+    static func parameters(
+        stepIndex: Int,
+        toolDisplayName: String,
+        arguments: String,
+        resultText: String
+    ) -> [String: String] {
+        let prefix = String(format: "%02d", stepIndex)
+        var out: [String: String] = [
+            "\(prefix). \(toolDisplayName)": shortArguments(arguments)
+        ]
+
+        if resultText.hasPrefix("command:") {
+            // Surface the actual script run with its raw stdout/stderr.
+            for (key, value) in parseScriptResultBlock(resultText) {
+                out["\(prefix). \(key)"] = value
+            }
+        } else if !resultText.isEmpty {
+            out["\(prefix). result"] = resultText
+        }
+        return out
+    }
+
+    /// One-line summary of a tool-call's arguments JSON, capped at 200
+    /// chars. Used as the value next to the call's display name.
+    private static func shortArguments(_ json: String) -> String {
+        let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == "{}" { return "(no arguments)" }
+        return trimmed.count > 200
+            ? String(trimmed.prefix(200)) + "…"
+            : trimmed
+    }
+
+    /// Parse the canonical `command:\n…\nexit_code: N\nstdout:\n…\nstderr:\n…`
+    /// block emitted by `SkillManager.executeRunScript`. Mirrors the parser
+    /// in `AIOrchestrator.parseScriptResultParameters` but kept local so
+    /// this extractor has no orchestrator dependency.
+    private static func parseScriptResultBlock(_ text: String) -> [(String, String)] {
+        let keys = ["command", "exit_code", "stdout", "stderr", "summary"]
+        var ranges: [(key: String, range: Range<String.Index>)] = []
+        for key in keys {
+            if let r = text.range(of: "\n\(key):") ?? text.range(of: "\(key):") {
+                ranges.append((key, r))
+            }
+        }
+        guard !ranges.isEmpty else { return [] }
+        ranges.sort { $0.range.lowerBound < $1.range.lowerBound }
+        var out: [(String, String)] = []
+        for (i, entry) in ranges.enumerated() {
+            let valueStart = entry.range.upperBound
+            let valueEnd = i + 1 < ranges.count ? ranges[i + 1].range.lowerBound : text.endIndex
+            let raw = text[valueStart..<valueEnd]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            out.append((entry.key, raw.isEmpty ? "<empty>" : raw))
+        }
+        return out
     }
 }
