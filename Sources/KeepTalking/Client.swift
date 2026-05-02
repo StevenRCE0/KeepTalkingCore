@@ -231,6 +231,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
     var pendingContextSyncSummaries: [UUID: CheckedContinuation<KeepTalkingContextSyncSummaryResult, Error>] = [:]
     var pendingContextSyncMessages: [UUID: CheckedContinuation<KeepTalkingContextSyncMessagesResult, Error>] = [:]
 
+    // MARK: Trust handshake properties
+    let trustQueue = DispatchQueue(
+        label: "KeepTalking.client.trust"
+    )
+    var pendingTrustSessions: [UUID: KeepTalkingPendingTrustSession] = [:]
+    var incomingTrustHandler: KeepTalkingIncomingTrustHandler?
+
     // MARK: Blob request/response properties
     let blobTransportQueue = KeepTalkingBlobTransportQueue()
 
@@ -427,6 +434,11 @@ public final class KeepTalkingClient: @unchecked Sendable {
                         "[client] failed handling envelope error=\(error.localizedDescription)"
                     )
                 }
+            }
+        }
+        rtcClient.onTrustEnvelope = { [weak self] envelope in
+            Task {
+                await self?.handleIncomingTrustEnvelope(envelope)
             }
         }
         rtcClient.onPeerConnect = { [weak self] nodeID in

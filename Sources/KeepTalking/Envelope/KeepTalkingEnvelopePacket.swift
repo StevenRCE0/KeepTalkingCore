@@ -126,6 +126,26 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
                     try cast(KeepTalkingP2PPresencePayload.self),
                     forKey: .payload
                 )
+            case .trustRequest:
+                try container.encode(
+                    try cast(KeepTalkingTrustRequestPayload.self),
+                    forKey: .payload
+                )
+            case .trustAccept:
+                try container.encode(
+                    try cast(KeepTalkingTrustAcceptPayload.self),
+                    forKey: .payload
+                )
+            case .trustComplete:
+                try container.encode(
+                    try cast(KeepTalkingTrustCompletePayload.self),
+                    forKey: .payload
+                )
+            case .trustReject:
+                try container.encode(
+                    try cast(KeepTalkingTrustRejectPayload.self),
+                    forKey: .payload
+                )
         }
     }
 
@@ -247,6 +267,26 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
             case .p2pPresence:
                 return try container.decode(
                     KeepTalkingP2PPresencePayload.self,
+                    forKey: .payload
+                )
+            case .trustRequest:
+                return try container.decode(
+                    KeepTalkingTrustRequestPayload.self,
+                    forKey: .payload
+                )
+            case .trustAccept:
+                return try container.decode(
+                    KeepTalkingTrustAcceptPayload.self,
+                    forKey: .payload
+                )
+            case .trustComplete:
+                return try container.decode(
+                    KeepTalkingTrustCompletePayload.self,
+                    forKey: .payload
+                )
+            case .trustReject:
+                return try container.decode(
+                    KeepTalkingTrustRejectPayload.self,
                     forKey: .payload
                 )
         }

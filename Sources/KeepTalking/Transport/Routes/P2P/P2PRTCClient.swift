@@ -42,6 +42,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     ]
 
     var onEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)?
+    var onTrustEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?

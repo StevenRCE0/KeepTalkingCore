@@ -26,6 +26,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     // MARK: - KeepTalkingTransportClient conformance
 
     var onEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)?
+    var onTrustEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
@@ -270,6 +271,14 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     // MARK: - P2P signaling (consumed internally)
 
     private func handleP2PSignaling(_ envelope: any KeepTalkingEnvelope) {
+        switch envelope.kind {
+            case .trustRequest, .trustAccept, .trustComplete, .trustReject:
+                onTrustEnvelope?(envelope)
+                return
+            default:
+                break
+        }
+
         var handlers = KeepTalkingEnvelopeHandlers()
         handlers.registerP2PSignalHandler(for: self)
         handlers.registerP2PPresenceHandler(for: self)

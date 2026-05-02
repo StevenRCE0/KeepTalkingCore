@@ -21,6 +21,10 @@ public enum KeepTalkingEnvelopeKind: String, Codable, Sendable {
     case encryptedAgentTurnContinuationResponse
     case p2pSignal
     case p2pPresence
+    case trustRequest
+    case trustAccept
+    case trustComplete
+    case trustReject
 }
 
 extension KeepTalkingEnvelopeKind {
@@ -46,14 +50,24 @@ extension KeepTalkingEnvelopeKind {
                 .encryptedActionCatalogResult,
                 .encryptedAgentTurnContinuationResponse:
                 return .actionCall
-            case .p2pSignal, .p2pPresence:
+            case .p2pSignal,
+                .p2pPresence,
+                .trustRequest,
+                .trustAccept,
+                .trustComplete,
+                .trustReject:
                 return .signaling
         }
     }
 
     public var preferredRoutes: [KeepTalkingTransportRoute] {
         switch self {
-            case .p2pSignal, .p2pPresence:
+            case .p2pSignal,
+                .p2pPresence,
+                .trustRequest,
+                .trustAccept,
+                .trustComplete,
+                .trustReject:
                 return [.sfu]
             case .node,
                 .nodeStatus,
@@ -98,7 +112,12 @@ extension KeepTalkingEnvelopeKind {
                 .encryptedActionCatalogResult,
                 .encryptedAgentTurnContinuationResponse:
                 return .service
-            case .p2pSignal, .p2pPresence:
+            case .p2pSignal,
+                .p2pPresence,
+                .trustRequest,
+                .trustAccept,
+                .trustComplete,
+                .trustReject:
                 return .p2pSignaling
         }
     }

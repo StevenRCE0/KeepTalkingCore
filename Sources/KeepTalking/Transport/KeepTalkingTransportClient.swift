@@ -5,6 +5,7 @@ typealias KeepTalkingTransportBlobDataHandler = @Sendable (Data) -> Void
 
 protocol KeepTalkingTransportClient: AnyObject {
     var onEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)? { get set }
+    var onTrustEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)? { get set }
     var onBlobData: KeepTalkingTransportBlobDataHandler? { get set }
     var onRawMessage: (@Sendable (String) -> Void)? { get set }
     var onPeerConnect: (@Sendable (UUID) -> Void)? { get set }
