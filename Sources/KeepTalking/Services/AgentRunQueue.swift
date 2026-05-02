@@ -7,6 +7,7 @@ public struct KeepTalkingAgentRunSnapshot: Sendable, Identifiable {
         case queued
         case running
         case suspended
+        case failed(message: String)
     }
 
     public let id: UUID
@@ -31,6 +32,10 @@ actor AgentRunQueue {
         let promptPreview: String
         let createdAt: Date
         let work: @Sendable () async throws -> Void
+        /// Closure used to re-execute this run after a failure. May skip steps
+        /// that were already side-effected (e.g. the user prompt was already
+        /// persisted to the context). If nil, retry falls back to `work`.
+        let retryWork: (@Sendable () async throws -> Void)?
         let onCompleted: (@Sendable (Error?) -> Void)?
     }
 
@@ -45,6 +50,12 @@ actor AgentRunQueue {
         [UUID: CheckedContinuation<KeepTalkingAgentTurnContinuationResponse, any Error>] = [:]
     /// Continuation responses that arrived before the run suspended, keyed by agentTurnID.
     private var earlyResponses: [UUID: KeepTalkingAgentTurnContinuationResponse] = [:]
+    /// Failed runs that the UI is still showing (with retry/dismiss buttons).
+    private var failed: [UUID: (item: RunItem, message: String)] = [:]
+    /// Run IDs that were cancelled by the user — their slot has already been
+    /// freed and a new run may have started; the cancelled task's `finish`
+    /// callback must NOT touch the slot when this set contains its ID.
+    private var cancelledRunIDs: Set<UUID> = []
 
     /// Called on every state transition with the current flat snapshot list.
     nonisolated(unsafe) var onChanged: (@Sendable ([KeepTalkingAgentRunSnapshot]) -> Void)?
@@ -61,6 +72,7 @@ actor AgentRunQueue {
         agentTurnID: UUID? = nil,
         promptPreview: String,
         work: @escaping @Sendable () async throws -> Void,
+        retryWork: (@Sendable () async throws -> Void)? = nil,
         onCompleted: (@Sendable (Error?) -> Void)? = nil
     ) -> UUID {
         let item = RunItem(
@@ -70,6 +82,7 @@ actor AgentRunQueue {
             promptPreview: String(promptPreview.prefix(120)),
             createdAt: Date(),
             work: work,
+            retryWork: retryWork,
             onCompleted: onCompleted
         )
         if active[contextID] == nil {
@@ -81,15 +94,33 @@ actor AgentRunQueue {
         return id
     }
 
-    /// Cancels a run by ID regardless of whether it is active or queued.
-    /// Cancelling an active run stops its `Task`; the prompt message already
-    /// sent to chat stays, but no further AI output appears.
-    /// Cancelling a queued run removes it silently (no prompt is sent).
+    /// Cancels a run by ID regardless of whether it is active, queued, or
+    /// suspended. The user-facing snapshot for the run disappears
+    /// immediately; the underlying task continues unwinding in the
+    /// background but its slot is freed so any queued run can start.
+    /// Idempotent — repeated calls are no-ops.
     func cancel(runID: UUID) {
-        for (_, entry) in active where entry.item.id == runID {
-            entry.task.cancel()
+        // Active run: free the slot immediately, cancel its task, resolve any
+        // suspended continuation, and start the next queued run if there is
+        // one. The cancelled task's `finish` callback will see the run ID in
+        // `cancelledRunIDs` and skip slot cleanup.
+        if let entry = active.first(where: { $0.value.item.id == runID }) {
+            let contextID = entry.key
+            let runItem = entry.value.item
+            guard !cancelledRunIDs.contains(runID) else { return }
+            cancelledRunIDs.insert(runID)
+            entry.value.task.cancel()
+            active[contextID] = nil
+            if let turnID = runItem.agentTurnID,
+                let continuation = suspensionContinuations.removeValue(forKey: turnID)
+            {
+                continuation.resume(throwing: CancellationError())
+            }
+            startNextQueued(contextID: contextID)
+            emit()
             return
         }
+        // Queued run: drop silently.
         for contextID in queued.keys {
             guard
                 let idx = queued[contextID]?.firstIndex(where: { $0.id == runID })
@@ -99,6 +130,46 @@ actor AgentRunQueue {
             emit()
             return
         }
+        // Failed run is dismissed via `dismiss(runID:)`, not cancel — but if a
+        // caller does invoke cancel on a failed entry, treat it as dismiss.
+        if failed.removeValue(forKey: runID) != nil {
+            emit()
+        }
+    }
+
+    /// Removes a failed run from the queue (the user clicked Dismiss).
+    func dismiss(runID: UUID) {
+        if failed.removeValue(forKey: runID) != nil {
+            emit()
+        }
+    }
+
+    /// Re-runs a previously failed entry. Returns false if no failed entry
+    /// exists for `runID`. Uses the captured `retryWork` closure if present
+    /// (which typically skips the prompt-persist step) — otherwise the
+    /// original `work` closure.
+    @discardableResult
+    func retry(runID: UUID) -> Bool {
+        guard let entry = failed.removeValue(forKey: runID) else { return false }
+        let original = entry.item
+        let work = original.retryWork ?? original.work
+        let newItem = RunItem(
+            id: original.id,
+            contextID: original.contextID,
+            agentTurnID: original.agentTurnID,
+            promptPreview: original.promptPreview,
+            createdAt: Date(),
+            work: work,
+            retryWork: original.retryWork,
+            onCompleted: original.onCompleted
+        )
+        if active[original.contextID] == nil {
+            start(newItem)
+        } else {
+            queued[original.contextID, default: []].append(newItem)
+        }
+        emit()
+        return true
     }
 
     var currentSnapshots: [KeepTalkingAgentRunSnapshot] { makeSnapshots() }
@@ -121,6 +192,12 @@ actor AgentRunQueue {
         if let early = earlyResponses.removeValue(forKey: agentTurnID) {
             return early
         }
+
+        // Close the early-cancel race: if the parent task is already cancelled
+        // before we install the continuation, throw immediately rather than
+        // suspending forever (the onCancel handler can't see a continuation
+        // that hasn't been installed yet).
+        try Task.checkCancellation()
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -169,19 +246,36 @@ actor AgentRunQueue {
                 workError = error
             }
             item.onCompleted?(workError)
-            finish(contextID: item.contextID)
+            finish(item: item, error: workError)
         }
         active[item.contextID] = (item: item, task: task)
     }
 
-    private func finish(contextID: UUID) {
-        active[contextID] = nil
-        if var queue = queued[contextID], !queue.isEmpty {
-            let next = queue.removeFirst()
-            queued[contextID] = queue.isEmpty ? nil : queue
-            start(next)
+    private func finish(item: RunItem, error: (any Error)?) {
+        // If this run was cancelled by the user, the slot was already freed
+        // (and possibly reassigned to a new active run). Don't touch state.
+        if cancelledRunIDs.remove(item.id) != nil {
+            emit()
+            return
         }
+
+        active[item.contextID] = nil
+
+        // Park failures so the UI can offer Retry / Dismiss.
+        if let error, !(error is CancellationError) {
+            failed[item.id] = (item: item, message: error.localizedDescription)
+        }
+
+        startNextQueued(contextID: item.contextID)
         emit()
+    }
+
+    private func startNextQueued(contextID: UUID) {
+        guard active[contextID] == nil else { return }
+        guard var queue = queued[contextID], !queue.isEmpty else { return }
+        let next = queue.removeFirst()
+        queued[contextID] = queue.isEmpty ? nil : queue
+        start(next)
     }
 
     private func makeSnapshots() -> [KeepTalkingAgentRunSnapshot] {
@@ -225,10 +319,31 @@ actor AgentRunQueue {
                     agentTurnID: item.agentTurnID
                 ))
         }
-        result.sort {
-            if $0.state == .running, $1.state != .running { return true }
-            if $0.state != .running, $1.state == .running { return false }
-            return $0.createdAt < $1.createdAt
+        for (_, entry) in failed {
+            result.append(
+                KeepTalkingAgentRunSnapshot(
+                    id: entry.item.id,
+                    contextID: entry.item.contextID,
+                    promptPreview: entry.item.promptPreview,
+                    createdAt: entry.item.createdAt,
+                    state: .failed(message: entry.message),
+                    agentTurnID: entry.item.agentTurnID
+                ))
+        }
+        result.sort { lhs, rhs in
+            // running first, then suspended/queued by createdAt, failed last.
+            func order(_ s: KeepTalkingAgentRunSnapshot.State) -> Int {
+                switch s {
+                    case .running: return 0
+                    case .suspended: return 1
+                    case .queued: return 2
+                    case .failed: return 3
+                }
+            }
+            let lo = order(lhs.state)
+            let ro = order(rhs.state)
+            if lo != ro { return lo < ro }
+            return lhs.createdAt < rhs.createdAt
         }
         return result
     }

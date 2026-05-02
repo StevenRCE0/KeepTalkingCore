@@ -139,6 +139,17 @@ extension KeepTalkingContextMessage {
             encryptedPayload: Data,
             state: AgentTurnContinuationState = .pending
         )
+
+        /// User-visible status marker emitted when an agent run terminates
+        /// abnormally — e.g. a connector error or a user-initiated cancel.
+        /// Body text is a short generic string; the detailed error is shown
+        /// on the failed queue entry in the composer, not in this message.
+        case haywire(reason: HaywireReason)
+    }
+
+    public enum HaywireReason: String, Codable, Sendable, Hashable {
+        case failed
+        case cancelled
     }
 
     /// Lifecycle state of an agent turn continuation.

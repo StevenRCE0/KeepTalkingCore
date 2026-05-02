@@ -301,6 +301,10 @@ public struct AIOrchestrator {
         }
 
         for toolCall in toolCalls {
+            // Honour cancellation between tools so a multi-tool turn aborts
+            // promptly when the user clicks cancel mid-batch instead of
+            // running every queued tool to completion first.
+            try Task.checkCancellation()
             let shouldUseACT = actAgent.canHandle(toolCall)
             if !batch.isEmpty && shouldUseACT != batchUsesACT {
                 try await flush()

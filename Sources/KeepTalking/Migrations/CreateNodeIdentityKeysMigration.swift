@@ -15,7 +15,6 @@ struct CreateNodeIdentityKeysMigration: AsyncMigration {
                 )
             )
             .field("public_key", .string, .required)
-            .field("private_key", .data)
             .field("created_at", .datetime)
             .create()
     }

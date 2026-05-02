@@ -450,6 +450,7 @@ extension KeepTalkingClient {
             localNodeID: config.node,
             remoteNodeID: envelope.senderNodeID,
             on: localStore.database,
+            keychain: keychain,
             purpose: purpose,
             debug: { [rtcClient] message in
                 rtcClient.debug(message)
@@ -463,6 +464,7 @@ extension KeepTalkingClient {
         localNodeID: UUID,
         remoteNodeID: UUID,
         on database: any Database,
+        keychain: any KeepTalkingKeychainStore,
         purpose: String,
         debug: ((String) -> Void)? = nil
     ) async throws -> Data {
@@ -479,7 +481,8 @@ extension KeepTalkingClient {
         let localKeyMaterial = try await localKeyAgreementMaterial(
             localNodeID: localNodeID,
             remoteNodeID: remoteNodeID,
-            on: database
+            on: database,
+            keychain: keychain
         )
         let senderPublicKeys = try await remoteKeyAgreementPublicKeys(
             nodeID: remoteNodeID,
@@ -541,7 +544,8 @@ extension KeepTalkingClient {
         return try await Self.localKeyAgreementMaterial(
             localNodeID: config.node,
             remoteNodeID: nodeID,
-            on: localStore.database
+            on: localStore.database,
+            keychain: keychain
         )
     }
 
@@ -554,20 +558,23 @@ extension KeepTalkingClient {
         return try await Self.localKeyAgreementMaterials(
             localNodeID: config.node,
             remoteNodeID: nodeID,
-            on: localStore.database
+            on: localStore.database,
+            keychain: keychain
         )
     }
 
     static func localKeyAgreementMaterial(
         localNodeID: UUID,
         remoteNodeID: UUID,
-        on database: any Database
+        on database: any Database,
+        keychain: any KeepTalkingKeychainStore
     ) async throws -> LocalKeyAgreementMaterial {
         guard
             let material = try await localKeyAgreementMaterials(
                 localNodeID: localNodeID,
                 remoteNodeID: remoteNodeID,
-                on: database
+                on: database,
+                keychain: keychain
             ).first
         else {
             throw KeepTalkingClientError.localIdentityPrivateKeyMissing
@@ -588,7 +595,8 @@ extension KeepTalkingClient {
     static func localKeyAgreementMaterials(
         localNodeID: UUID,
         remoteNodeID: UUID,
-        on database: any Database
+        on database: any Database,
+        keychain: any KeepTalkingKeychainStore
     ) async throws -> [LocalKeyAgreementMaterial] {
         let relations = try await KeepTalkingNodeRelation.query(on: database)
             .filter(\.$from.$id, .equal, localNodeID)
@@ -611,7 +619,9 @@ extension KeepTalkingClient {
 
             for key in keypairs {
                 guard
-                    let privateKeyData = key.privateKey,
+                    let privateKeyData = try await keychain.get(
+                        .nodeIdentityPriv(relationID: relationID)
+                    ),
                     !privateKeyData.isEmpty
                 else {
                     continue
@@ -651,9 +661,9 @@ extension KeepTalkingClient {
         on database: any Database
     ) async throws -> [RemotePublicKeyCandidate] {
         let relations = try await KeepTalkingNodeRelation.query(on: database)
-        .filter(\.$from.$id, .equal, nodeID)
-        .filter(\.$to.$id, .equal, localNodeID)
-        .all()
+            .filter(\.$from.$id, .equal, nodeID)
+            .filter(\.$to.$id, .equal, localNodeID)
+            .all()
         let relationIDs = relations.compactMap(\.id)
         guard !relationIDs.isEmpty else {
             throw KeepTalkingClientError.remoteIdentityPublicKeyMissing(nodeID)
@@ -663,14 +673,10 @@ extension KeepTalkingClient {
 
         for relationID in relationIDs {
             let keys = try await KeepTalkingNodeIdentityKey.query(on: database)
-            .filter(\.$relation.$id, .equal, relationID)
-            .sort(\.$createdAt, .descending)
-            .all()
+                .filter(\.$relation.$id, .equal, relationID)
+                .sort(\.$createdAt, .descending)
+                .all()
             for key in keys {
-                let privateKeyData = key.privateKey ?? Data()
-                guard privateKeyData.isEmpty else {
-                    continue
-                }
                 guard let publicKeyData = Data(base64Encoded: key.publicKey) else {
                     continue
                 }

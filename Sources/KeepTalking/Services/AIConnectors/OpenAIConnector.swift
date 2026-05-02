@@ -186,10 +186,27 @@ public actor OpenAIConnector: AIConnector {
             user: configuration?.endUserID
         )
 
-        let response = try await service.chatCompletionRequest(
-            body: body,
-            secondsToWait: Self.defaultTimeoutSeconds
-        )
+        // Run the HTTP call in a child task so cancellation can be propagated
+        // to AIProxy's URLSession data task on parent cancel — without this,
+        // `entry.task.cancel()` only sets a flag and the request keeps
+        // streaming until its 60s timeout.
+        let request = Task<OpenAIChatCompletionResponseBody, Error> {
+            try await service.chatCompletionRequest(
+                body: body,
+                secondsToWait: Self.defaultTimeoutSeconds
+            )
+        }
+        let response: OpenAIChatCompletionResponseBody
+        do {
+            response = try await withTaskCancellationHandler {
+                try await request.value
+            } onCancel: {
+                request.cancel()
+            }
+        } catch is CancellationError {
+            request.cancel()
+            throw CancellationError()
+        }
 
         var turnText: String? = nil
         var turnThinking: String? = nil

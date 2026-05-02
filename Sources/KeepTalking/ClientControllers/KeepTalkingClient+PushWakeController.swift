@@ -178,7 +178,8 @@ extension KeepTalkingClient {
             envelope,
             localNodeID: config.node,
             remoteNodeID: envelope.senderNodeID,
-            on: localStore.database
+            on: localStore.database,
+            keychain: keychain
         )
     }
 
@@ -186,7 +187,8 @@ extension KeepTalkingClient {
         _ envelope: KeepTalkingAsymmetricCipherEnvelope,
         localNodeID: UUID,
         remoteNodeID: UUID,
-        on database: any Database
+        on database: any Database,
+        keychain: any KeepTalkingKeychainStore
     ) async throws -> KeepTalkingPushWakeActionPayload {
         let payload = try await decryptAsymmetricPayload(
             envelope,
@@ -194,6 +196,7 @@ extension KeepTalkingClient {
             localNodeID: localNodeID,
             remoteNodeID: remoteNodeID,
             on: database,
+            keychain: keychain,
             purpose: "push-wake-action"
         )
         return try JSONDecoder().decode(

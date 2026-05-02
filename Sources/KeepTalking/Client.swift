@@ -174,6 +174,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let rtcClient: any KeepTalkingTransportClient
     let kvService: (any KeepTalkingKVService)?
     public let localStore: any KeepTalkingLocalStore
+    public let keychain: any KeepTalkingKeychainStore
     let openAIBackend: OpenAIConnectorBackend
     /// Default model identifier passed to internally-driven agent loops
     /// (`SkillManager.callAction`, etc.) when the caller does not supply one
@@ -301,11 +302,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
         primitiveRegistry: KeepTalkingPrimitiveRegistry? = nil,
         logon: UUID = UUID(),
         localStore: any KeepTalkingLocalStore =
-            KeepTalkingClient.makeDefaultLocalStore()
+            KeepTalkingClient.makeDefaultLocalStore(),
+        keychain: any KeepTalkingKeychainStore = KeepTalkingInMemoryKeychainStore()
     ) {
         self.config = config
         self.kvService = kvService
         self.localStore = localStore
+        self.keychain = keychain
         self.logon = logon
         self.openAIBackend = openAIBackend
         let trimmedModel = openAIModel?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -593,5 +596,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     func debug(_ message: String) {
         rtcClient.debug(message)
+    }
+
+    /// Wipes all local persisted state — drops Fluent tables and clears every
+    /// keychain entry the SDK owns (group secrets, identity private keys,
+    /// login credentials). The transport must be disconnected before calling.
+    public func eraseLocalState() async throws {
+        try await localStore.reset()
+        try await keychain.deleteAll()
     }
 }

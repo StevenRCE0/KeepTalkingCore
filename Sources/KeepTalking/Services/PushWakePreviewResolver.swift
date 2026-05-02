@@ -28,13 +28,13 @@ public struct KeepTalkingResolvedPushWakeAction: Sendable, Hashable {
 public enum KeepTalkingPushWakePreviewResolver {
     public static func resolve(
         _ envelope: KeepTalkingPushWakeContextEnvelope,
-        on database: any Database
+        on database: any Database,
+        keychain: any KeepTalkingKeychainStore
     ) async throws -> KeepTalkingResolvedPushWakePreview? {
         guard
-            let secret = try await KeepTalkingContextGroupSecret.query(on: database)
-                .filter(\.$id, .equal, envelope.contextID)
-                .first()?
-                .secret
+            let secret = try await keychain.get(
+                .groupSecret(contextID: envelope.contextID)
+            )
         else {
             return nil
         }

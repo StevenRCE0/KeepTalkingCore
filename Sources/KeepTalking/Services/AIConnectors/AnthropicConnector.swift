@@ -156,10 +156,27 @@ public actor AnthropicConnector: AIConnector {
             topP: configuration?.topP
         )
 
-        let response = try await service.messageRequest(
-            body: body,
-            secondsToWait: Self.defaultTimeoutSeconds
-        )
+        // Run the HTTP call in a child task so cancellation can be propagated
+        // to AIProxy's URLSession data task on parent cancel — without this,
+        // `entry.task.cancel()` only sets a flag and the request keeps
+        // streaming until its 60s timeout.
+        let request = Task<AnthropicMessage, Error> {
+            try await service.messageRequest(
+                body: body,
+                secondsToWait: Self.defaultTimeoutSeconds
+            )
+        }
+        let response: AnthropicMessage
+        do {
+            response = try await withTaskCancellationHandler {
+                try await request.value
+            } onCancel: {
+                request.cancel()
+            }
+        } catch is CancellationError {
+            request.cancel()
+            throw CancellationError()
+        }
 
         return Self.translateResponse(response)
     }

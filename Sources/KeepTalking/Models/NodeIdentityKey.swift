@@ -13,9 +13,6 @@ public final class KeepTalkingNodeIdentityKey: Model, @unchecked Sendable {
     @Field(key: "public_key")
     public var publicKey: String
 
-    @OptionalField(key: "private_key")
-    public var privateKey: Data?
-
     @Timestamp(key: "created_at", on: .create)
     public var createdAt: Date?
 
@@ -24,12 +21,10 @@ public final class KeepTalkingNodeIdentityKey: Model, @unchecked Sendable {
     public init(
         id: UUID = UUID(),
         relation: KeepTalkingNodeRelation,
-        publicKey: String,
-        privateKey: Data? = nil
+        publicKey: String
     ) throws {
         self.id = id
         self.$relation.id = try relation.requireID()
         self.publicKey = publicKey
-        self.privateKey = privateKey
     }
 }

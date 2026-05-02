@@ -66,7 +66,8 @@ extension KeepTalkingClient {
             scope: scope,
             own: own,
             localNode: getCurrentNodeInstance(),
-            on: localStore.database
+            on: localStore.database,
+            keychain: keychain
         )
         let contextID: UUID? = {
             switch scope {
@@ -94,7 +95,8 @@ extension KeepTalkingClient {
         scope: KeepTalkingNodeTrustScope = .allContexts,
         own: Bool = false,
         localNode: KeepTalkingNode,
-        on database: any Database
+        on database: any Database,
+        keychain: any KeepTalkingKeychainStore
     ) async throws -> String {
         let localNodeID = try localNode.requireID()
 
@@ -153,8 +155,55 @@ extension KeepTalkingClient {
 
         return try await Self.ensureOutgoingIdentityKeypair(
             for: relation,
-            on: database
+            on: database,
+            keychain: keychain
         ).publicKey
+    }
+
+    /// Static variant used during early bootstrap (e.g. from app code that
+    /// doesn't yet have a `KeepTalkingClient` instance) and from
+    /// `trust(node:scope:own:)`. Mirrors the instance method's keychain wiring.
+    static func ensureOutgoingIdentityKeypair(
+        for relation: KeepTalkingNodeRelation,
+        on database: any Database,
+        keychain: any KeepTalkingKeychainStore
+    ) async throws -> KeepTalkingNodeIdentityKey {
+        guard let relationID = relation.id else {
+            throw KeepTalkingClientError.missingRelation
+        }
+
+        if let existingKeypair = try await KeepTalkingNodeIdentityKey.query(on: database)
+            .filter(\.$relation.$id, .equal, relationID)
+            .sort(\.$createdAt, .descending)
+            .first()
+        {
+            if try await keychain.get(.nodeIdentityPriv(relationID: relationID)) != nil {
+                return existingKeypair
+            }
+            let regenerated = Curve25519.KeyAgreement.PrivateKey()
+            try await keychain.set(
+                .nodeIdentityPriv(relationID: relationID),
+                value: Data(regenerated.rawRepresentation)
+            )
+            existingKeypair.publicKey = Data(regenerated.publicKey.rawRepresentation)
+                .base64EncodedString()
+            try await existingKeypair.save(on: database)
+            return existingKeypair
+        }
+
+        let privateKey = Curve25519.KeyAgreement.PrivateKey()
+        let publicKey = Data(privateKey.publicKey.rawRepresentation)
+            .base64EncodedString()
+        let keypair = try KeepTalkingNodeIdentityKey(
+            relation: relation,
+            publicKey: publicKey
+        )
+        try await keypair.save(on: database)
+        try await keychain.set(
+            .nodeIdentityPriv(relationID: relationID),
+            value: Data(privateKey.rawRepresentation)
+        )
+        return keypair
     }
 
     public func lure(node sourceNodeID: UUID, publicKey: String, overwrite: Bool = false) async throws {
@@ -208,8 +257,7 @@ extension KeepTalkingClient {
 
         let identityKey = try KeepTalkingNodeIdentityKey(
             relation: relation,
-            publicKey: trimmedPublicKey,
-            privateKey: Data()
+            publicKey: trimmedPublicKey
         )
         try await identityKey.save(on: database)
     }
@@ -268,14 +316,7 @@ extension KeepTalkingClient {
             on: database
         )
 
-        if let existingKey = existingKeys.first(where: {
-            guard let privateKey = $0.privateKey else { return true }
-            return privateKey.isEmpty
-        }) {
-            return (relation, existingKey)
-        } else {
-            return (relation, nil)
-        }
+        return (relation, existingKeys.first)
     }
 
     static public func eraseRemoteNodeRelationsAndNonLocalActionRelations(
@@ -1134,37 +1175,11 @@ extension KeepTalkingClient {
     private func ensureOutgoingIdentityKeypair(for relation: KeepTalkingNodeRelation) async throws
         -> KeepTalkingNodeIdentityKey
     {
-        try await Self.ensureOutgoingIdentityKeypair(for: relation, on: localStore.database)
-    }
-
-    private static func ensureOutgoingIdentityKeypair(for relation: KeepTalkingNodeRelation, on database: any Database)
-        async throws
-        -> KeepTalkingNodeIdentityKey
-    {
-        guard let relationID = relation.id else {
-            throw KeepTalkingClientError.missingRelation
-        }
-
-        if let existingKeypair = try await KeepTalkingNodeIdentityKey.query(
-            on: database
+        try await Self.ensureOutgoingIdentityKeypair(
+            for: relation,
+            on: localStore.database,
+            keychain: keychain
         )
-        .filter(\.$relation.$id, .equal, relationID)
-        .sort(\.$createdAt, .descending)
-        .first() {
-            return existingKeypair
-        }
-
-        let privateKey = Curve25519.KeyAgreement.PrivateKey()
-        let publicKey = Data(privateKey.publicKey.rawRepresentation)
-            .base64EncodedString()
-        let keypair = try KeepTalkingNodeIdentityKey(
-            relation: relation,
-            publicKey: publicKey,
-            privateKey: Data(privateKey.rawRepresentation)
-        )
-
-        try await keypair.save(on: database)
-        return keypair
     }
 
     func handleIncomingP2PPresence(

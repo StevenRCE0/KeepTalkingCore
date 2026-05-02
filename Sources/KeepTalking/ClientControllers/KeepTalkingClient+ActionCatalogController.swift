@@ -113,41 +113,50 @@ extension KeepTalkingClient {
         requestID: UUID,
         timeoutSeconds: TimeInterval
     ) async throws -> KeepTalkingActionCatalogResult {
-        try await withThrowingTaskGroup(of: KeepTalkingActionCatalogResult.self) { group in
-            group.addTask { [weak self] in
-                guard let self else {
-                    throw KeepTalkingClientError.actionCatalogTimeout(requestID)
-                }
-                return try await withCheckedThrowingContinuation {
-                    (
-                        continuation: CheckedContinuation<
-                            KeepTalkingActionCatalogResult, Error
-                        >
-                    ) in
-                    self.actionCatalogQueue.sync {
-                        self.pendingActionCatalogResults[requestID] =
-                            continuation
+        try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: KeepTalkingActionCatalogResult.self) { group in
+                group.addTask { [weak self] in
+                    guard let self else {
+                        throw KeepTalkingClientError.actionCatalogTimeout(requestID)
+                    }
+                    return try await withCheckedThrowingContinuation {
+                        (
+                            continuation: CheckedContinuation<
+                                KeepTalkingActionCatalogResult, Error
+                            >
+                        ) in
+                        self.actionCatalogQueue.sync {
+                            self.pendingActionCatalogResults[requestID] =
+                                continuation
+                        }
                     }
                 }
-            }
 
-            group.addTask { [weak self] in
-                try await Task.sleep(
-                    nanoseconds: UInt64(timeoutSeconds * 1_000_000_000)
-                )
-                self?.failPendingActionCatalogRequest(
-                    requestID: requestID,
-                    error: KeepTalkingClientError.actionCatalogTimeout(requestID)
-                )
-                throw KeepTalkingClientError.actionCatalogTimeout(requestID)
-            }
+                group.addTask { [weak self] in
+                    try await Task.sleep(
+                        nanoseconds: UInt64(timeoutSeconds * 1_000_000_000)
+                    )
+                    self?.failPendingActionCatalogRequest(
+                        requestID: requestID,
+                        error: KeepTalkingClientError.actionCatalogTimeout(requestID)
+                    )
+                    throw KeepTalkingClientError.actionCatalogTimeout(requestID)
+                }
 
-            let first = try await group.next()
-            group.cancelAll()
-            guard let first else {
-                throw KeepTalkingClientError.actionCatalogTimeout(requestID)
+                let first = try await group.next()
+                group.cancelAll()
+                guard let first else {
+                    throw KeepTalkingClientError.actionCatalogTimeout(requestID)
+                }
+                return first
             }
-            return first
+        } onCancel: { [weak self] in
+            // Resolve the pending continuation with CancellationError so the
+            // run terminates promptly when the user cancels mid-wait.
+            self?.failPendingActionCatalogRequest(
+                requestID: requestID,
+                error: CancellationError()
+            )
         }
     }
 

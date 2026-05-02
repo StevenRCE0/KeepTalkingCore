@@ -44,7 +44,6 @@ extension KeepTalkingClient {
         model: String = "gpt-5-codex",
         actModel: String? = nil,
         roleName: String = "ai",
-        prefix: String = "@AI ",
         reasoningEffort: AIReasoning.Effort? = nil
     ) async -> UUID {
         let context = KeepTalkingContext(id: contextID)
@@ -66,25 +65,15 @@ extension KeepTalkingClient {
         }
 
         let agentTurnID = UUID()
-        let work: @Sendable () async throws -> Void = { [self, preparedAttachmentsResult] in
+
+        // The "AI-only" closure used by both the initial run (after we send
+        // the user prompt) and by retry (where the prompt is already in chat
+        // from the first attempt). Captures parameters so it stays callable
+        // after the failed entry has been parked.
+        let runAIClosure: @Sendable () async throws -> Void = {
+            [self, preparedAttachmentsResult] in
             try Task.checkCancellation()
             let preparedAttachments = try preparedAttachmentsResult.get()
-            let trimmedPrompt = prompt.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            )
-            let outgoingPrompt: String
-            if trimmedPrompt.isEmpty {
-                outgoingPrompt = prefix.trimmingCharacters(
-                    in: .whitespacesAndNewlines
-                )
-            } else {
-                outgoingPrompt = prefix + prompt.trimmingPrefix(prefix)
-            }
-            try await send(
-                outgoingPrompt,
-                preparedAttachments: preparedAttachments,
-                in: context
-            )
             try Task.checkCancellation()
             _ = try await runAI(
                 prompt: prompt,
@@ -98,11 +87,28 @@ extension KeepTalkingClient {
             )
         }
 
+        let work: @Sendable () async throws -> Void = { [self, preparedAttachmentsResult] in
+            try Task.checkCancellation()
+            let preparedAttachments = try preparedAttachmentsResult.get()
+            try Task.checkCancellation()
+            // Tag the user's prompt message with this run's `agentTurnID` so
+            // the UI can identify it as an AI prompt and apply the purple
+            // stroke + shadow treatment — no in-band "@AI " text marker.
+            try await send(
+                prompt,
+                preparedAttachments: preparedAttachments,
+                in: context,
+                agentTurnID: agentTurnID
+            )
+            try await runAIClosure()
+        }
+
         return await agentRunQueue.enqueue(
             contextID: contextID,
             agentTurnID: agentTurnID,
             promptPreview: preview,
             work: work,
+            retryWork: runAIClosure,
             onCompleted: { [self] error in
                 if let error {
                     let errorMessage = error.localizedDescription
@@ -124,9 +130,33 @@ extension KeepTalkingClient {
         )
     }
 
-    /// Cancels a queued or running agent run by ID.
+    /// Cancels a queued or running agent run by ID. The queue snapshot drops
+    /// the run immediately; a `.haywire(.cancelled)` marker is published into
+    /// the context so the conversation has a permanent record of where the
+    /// run was cancelled.
     public func cancelAgentRun(_ runID: UUID) {
-        Task { await agentRunQueue.cancel(runID: runID) }
+        Task { [self] in
+            // Resolve the contextID from the current snapshots BEFORE
+            // cancelling — once we cancel, the run vanishes from snapshots.
+            let snapshots = await agentRunQueue.currentSnapshots
+            let contextID = snapshots.first { $0.id == runID }?.contextID
+            await agentRunQueue.cancel(runID: runID)
+            if let contextID {
+                await publishAgentRunCancellation(contextID: contextID)
+            }
+        }
+    }
+
+    /// Re-runs a previously failed agent run. The user-prompt message is
+    /// already in the context from the first attempt, so retry only re-runs
+    /// the AI side — no duplicate user message is appended.
+    public func retryAgentRun(_ runID: UUID) {
+        Task { await agentRunQueue.retry(runID: runID) }
+    }
+
+    /// Removes a failed agent run from the queue (no further side effects).
+    public func dismissAgentRun(_ runID: UUID) {
+        Task { await agentRunQueue.dismiss(runID: runID) }
     }
 
     // MARK: - Direct execution (CLI / internal)
@@ -849,14 +879,36 @@ extension KeepTalkingClient {
     ) async {
         do {
             try await send(
-                "Agent run failed: \(message)",
+                "AI error",
                 in: contextID,
                 sender: .autonomous(name: roleName, model: model),
+                type: .haywire(reason: .failed),
                 emitLocalEnvelope: true
             )
         } catch {
             onLog?(
                 "[ai] failed to publish run failure context=\(contextID.uuidString.lowercased()) error=\(error.localizedDescription)"
+            )
+        }
+        // The detailed message stays in logs so it can be cross-referenced;
+        // the UI surfaces it via the failed queue entry's localized message.
+        onLog?(
+            "[ai] run failed context=\(contextID.uuidString.lowercased()) message=\(message)"
+        )
+    }
+
+    func publishAgentRunCancellation(contextID: UUID) async {
+        do {
+            try await send(
+                "Cancelled",
+                in: contextID,
+                sender: .autonomous(name: "ai", model: ""),
+                type: .haywire(reason: .cancelled),
+                emitLocalEnvelope: true
+            )
+        } catch {
+            onLog?(
+                "[ai] failed to publish run cancellation context=\(contextID.uuidString.lowercased()) error=\(error.localizedDescription)"
             )
         }
     }

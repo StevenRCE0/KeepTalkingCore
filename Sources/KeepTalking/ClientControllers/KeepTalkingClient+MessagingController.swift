@@ -734,22 +734,14 @@ extension KeepTalkingClient {
 
     /// Returns the symmetric key for a context, creating one if needed.
     public func ensureGroupChatSecret(for contextID: UUID) async throws -> Data {
-        if let existing = try await KeepTalkingContextGroupSecret.query(
-            on: localStore.database
-        )
-        .filter(\.$id, .equal, contextID)
-        .first() {
-            return existing.secret
+        if let existing = try await keychain.get(.groupSecret(contextID: contextID)) {
+            return existing
         }
 
         _ = try await upsertContext(KeepTalkingContext(id: contextID))
         let key = SymmetricKey(size: .bits256)
         let secret = key.withUnsafeBytes { Data($0) }
-        let contextSecret = KeepTalkingContextGroupSecret(
-            contextID: contextID,
-            secret: secret
-        )
-        try await contextSecret.save(on: localStore.database)
+        try await keychain.set(.groupSecret(contextID: contextID), value: secret)
         return secret
     }
 
@@ -762,28 +754,11 @@ extension KeepTalkingClient {
         }
 
         _ = try await upsertContext(KeepTalkingContext(id: contextID))
-        if let existing = try await KeepTalkingContextGroupSecret.query(
-            on: localStore.database
-        )
-        .filter(\.$id, .equal, contextID)
-        .first() {
-            existing.secret = secret
-            try await existing.save(on: localStore.database)
-            return
-        }
-
-        let contextSecret = KeepTalkingContextGroupSecret(
-            contextID: contextID,
-            secret: secret
-        )
-        try await contextSecret.save(on: localStore.database)
+        try await keychain.set(.groupSecret(contextID: contextID), value: secret)
     }
 
     func loadGroupChatSecret(for contextID: UUID) async throws -> Data? {
-        try await KeepTalkingContextGroupSecret.query(on: localStore.database)
-            .filter(\.$id, .equal, contextID)
-            .first()?
-            .secret
+        try await keychain.get(.groupSecret(contextID: contextID))
     }
 
     private func pushWakePreview(
@@ -818,23 +793,26 @@ extension KeepTalkingClient {
     ) async {
         let candidates = messages.compactMap { msg -> (UUID, KeepTalkingContextMessage.AgentTurnContinuationState)? in
             guard let id = msg.id,
-                  case .agentTurnContinuation(_, _, _, _, _, let state) = msg.type,
-                  state != .pending
+                case .agentTurnContinuation(_, _, _, _, _, let state) = msg.type,
+                state != .pending
             else { return nil }
             return (id, state)
         }
         guard !candidates.isEmpty else { return }
 
         let candidateIDs = candidates.map(\.0)
-        let existing = (try? await KeepTalkingContextMessage.query(on: localStore.database)
-            .filter(\.$id ~~ candidateIDs)
-            .all()) ?? []
+        let existing =
+            (try? await KeepTalkingContextMessage.query(on: localStore.database)
+                .filter(\.$id ~~ candidateIDs)
+                .all()) ?? []
 
         for existing in existing {
             guard let id = existing.id,
-                  case .agentTurnContinuation(let toolCallID, let actionID, let targetNodeID, let kind, let payload, let currentState) = existing.type,
-                  currentState == .pending,
-                  let newState = candidates.first(where: { $0.0 == id })?.1
+                case .agentTurnContinuation(
+                    let toolCallID, let actionID, let targetNodeID, let kind, let payload, let currentState) = existing
+                    .type,
+                currentState == .pending,
+                let newState = candidates.first(where: { $0.0 == id })?.1
             else { continue }
 
             existing.type = .agentTurnContinuation(
@@ -850,4 +828,3 @@ extension KeepTalkingClient {
         }
     }
 }
-

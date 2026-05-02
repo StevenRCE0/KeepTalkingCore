@@ -52,7 +52,6 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
         try await self.manager.autoMigrate()
     }
 
-
     private static func defaultDatabaseURL(for fileName: String? = nil) -> URL {
         let fm = FileManager.default
         let baseDir =
@@ -93,7 +92,6 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             CreateKeepTalkingThreadsMigration(),
             CreateKeepTalkingMappingsMigration(),
             CreateKeepTalkingOperatorContextsMigration(),
-            CreateContextGroupSecretsMigration(),
             CreateKeepTalkingContextMessagesMigration(),
             CreateKeepTalkingContextAttachmentsMigration(),
             CreateKeepTalkingBlobRecordsMigration(),
