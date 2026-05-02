@@ -2,11 +2,29 @@ import Foundation
 
 /// Per-grant permission, stored as a single JSON column on the grant relation row.
 ///
+/// One case per grantable action kind. Each case carries the *capability
+/// selector* the grant narrows; the *scope values* (filesystem `rootPath`,
+/// per-key calendar names, etc.) live host-side on the action's bundle.
+///
 /// - `.filesystem`: R/W/X bitmask scoping access to filesystem operations.
 /// - `.mcp`: explicit tool allowlist; `nil` tools means all tools are permitted.
+/// - `.primitive`: which scope keys from the bundle's `scopeSchema` are exposed
+///   to the caller; `nil` means all keys, `[]` means none.
 public enum KeepTalkingGrantPermission: Codable, Sendable, Hashable {
     case filesystem(KeepTalkingActionPermissionMask)
     case mcp(allowedTools: [String]?)
+    case primitive(allowedScopeKeys: [String]?)
+
+    /// True when this permission imposes no narrowing on its axis. Callers
+    /// store `nil` rather than a permission row in this case (the unified
+    /// resolver treats a missing row as unrestricted on the kind's axis).
+    public var isUnrestricted: Bool {
+        switch self {
+            case .filesystem(let mask): return mask == .all
+            case .mcp(let tools): return tools == nil
+            case .primitive(let keys): return keys == nil
+        }
+    }
 }
 
 /// R/W/X bitmask for **filesystem** action grants.

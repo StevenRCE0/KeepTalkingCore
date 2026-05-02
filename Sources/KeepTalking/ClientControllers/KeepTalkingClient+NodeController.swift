@@ -394,8 +394,17 @@ extension KeepTalkingClient {
                 )
             )
 
-            let outgoingActions = relationActions.compactMap {
-                advertisedAction(from: $0)
+            let recipientNode = KeepTalkingNode(id: relatedNodeID)
+            var outgoingActions: [KeepTalkingAdvertisedAction] = []
+            outgoingActions.reserveCapacity(relationActions.count)
+            for action in relationActions {
+                if let advertised = await advertisedAction(
+                    from: action,
+                    recipient: recipientNode,
+                    context: currentContext
+                ) {
+                    outgoingActions.append(advertised)
+                }
             }
 
             let relationActionLinks: [KeepTalkingNodeRelationActionRelation]
@@ -525,7 +534,10 @@ extension KeepTalkingClient {
             status.nodeRelations.flatMap(\.actions)
         )
 
-        try await mergeNodeActions(advertisedActions)
+        try await mergeNodeActions(
+            advertisedActions,
+            broadcasterNodeID: status.node.id
+        )
         try await mergeIncomingActionAuthorisations(
             from: status,
             advertisedActions: advertisedActions
@@ -888,11 +900,20 @@ extension KeepTalkingClient {
         )
     }
 
-    private func advertisedAction(from action: KeepTalkingAction)
-        -> KeepTalkingAdvertisedAction?
-    {
+    private func advertisedAction(
+        from action: KeepTalkingAction,
+        recipient: KeepTalkingNode? = nil,
+        context: KeepTalkingContext? = nil
+    ) async -> KeepTalkingAdvertisedAction? {
         let payload = action.payload
         guard let actionID = action.id else {
+            return nil
+        }
+
+        // Skip un-analysed local skills. We never want to ship a skill to a
+        // peer until our analyser has filled in `atomicTools` etc., otherwise
+        // they materialise an empty stub that the planner can't dispatch.
+        if case .skill(let bundle) = payload, !bundle.toolsAnalysed {
             return nil
         }
 
@@ -928,6 +949,59 @@ extension KeepTalkingClient {
                 )
         }
 
+        let isDisabled = action.disabled ?? false
+        let availability: KeepTalkingAdvertisedActionAvailability
+        var advertisedTools: [String]? = nil
+
+        switch payload {
+            case .mcpBundle:
+                if isDisabled {
+                    availability = .disabled
+                } else {
+                    let health = await mcpManager.actionHealth(actionID: actionID)
+                    switch health {
+                        case .connected(let tools):
+                            availability = .available
+                            // Filter by the recipient's per-grant tool allowlist
+                            // so we never advertise tools they aren't permitted
+                            // to call. `nil` allowlist == owner / unrestricted.
+                            if let recipient {
+                                let grant = try? await resolveGrantPermission(
+                                    node: recipient,
+                                    action: action,
+                                    context: context
+                                )
+                                if case .mcp(let allowed) = grant, let allowed {
+                                    let allowedSet = Set(allowed)
+                                    advertisedTools = tools.filter {
+                                        allowedSet.contains($0)
+                                    }
+                                } else {
+                                    advertisedTools = tools
+                                }
+                            } else {
+                                advertisedTools = tools
+                            }
+                        case .connecting:
+                            availability = .connecting
+                        case .failed(let reason):
+                            availability = .failed(reason: reason)
+                        case .disabled:
+                            availability = .disabled
+                        case .virtualRemote, .notRegistered:
+                            // Owner is this node but server isn't up yet;
+                            // describe as connecting rather than failing so
+                            // recipients retry rather than treat it as broken.
+                            availability = .connecting
+                    }
+                }
+            case .skill, .primitive, .filesystem, .semanticRetrieval:
+                // Non-MCP payloads have no per-server runtime health: the
+                // action is live whenever this node is reachable. The
+                // user-disabled flag still gates them.
+                availability = isDisabled ? .disabled : .notApplicable
+        }
+
         return KeepTalkingAdvertisedAction(
             actionID: actionID,
             ownerNodeID: action.$node.id,
@@ -935,7 +1009,8 @@ extension KeepTalkingClient {
             payloadSummary: payloadSummary,
             remoteAuthorisable: action.remoteAuthorisable ?? true,
             blockingAuthorisation: action.blockingAuthorisation ?? false,
-            disabled: action.disabled ?? false,
+            availability: availability,
+            tools: advertisedTools,
             createdAt: action.createdAt,
             lastUsed: action.lastUsed
         )

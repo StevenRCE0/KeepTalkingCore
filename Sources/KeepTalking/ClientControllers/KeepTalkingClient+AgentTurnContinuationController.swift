@@ -223,6 +223,13 @@ extension KeepTalkingClient {
             throw KeepTalkingClientError.notAuthorized
         }
 
+        // Mark fulfilled immediately on the local node so the UI reflects the
+        // response without waiting for decrypt + execute to complete.
+        await updateContinuationMessageState(
+            continuationMessageID: continuationMessageID,
+            state: .fulfilled
+        )
+
         // 2. Decrypt ActionCallRequest
         let cipher = KeepTalkingAsymmetricCipherEnvelope(
             senderNodeID: originNodeID,

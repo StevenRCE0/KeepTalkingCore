@@ -70,7 +70,8 @@ struct RemoteActionCallTests {
                                 action: .openURLInBrowser
                             ),
                             remoteAuthorisable: false,
-                            blockingAuthorisation: false
+                            blockingAuthorisation: false,
+                            availability: .notApplicable
                         )
                     ]
                 )
@@ -157,7 +158,8 @@ struct RemoteActionCallTests {
                                 action: .openURLInBrowser
                             ),
                             remoteAuthorisable: false,
-                            blockingAuthorisation: false
+                            blockingAuthorisation: false,
+                            availability: .notApplicable
                         )
                     ]
                 )
@@ -321,7 +323,8 @@ struct RemoteActionCallTests {
                                 action: .openURLInBrowser
                             ),
                             remoteAuthorisable: false,
-                            blockingAuthorisation: false
+                            blockingAuthorisation: false,
+                            availability: .notApplicable
                         )
                     ]
                 )

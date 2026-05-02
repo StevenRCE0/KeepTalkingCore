@@ -269,11 +269,17 @@ extension KeepTalkingClient {
                     )
                     // Filter by the caller's per-grant tool allowlist.
                     // nil allowedTools → all tools visible; non-nil → explicit set.
-                    let allowedTools = try await effectiveAllowedMCPTools(
+                    let grant = try await resolveGrantPermission(
                         node: remoteNode,
                         action: action,
                         context: context
                     )
+                    let allowedTools: Set<String>?
+                    if case .mcp(let tools) = grant {
+                        allowedTools = tools.map { Set($0) }
+                    } else {
+                        allowedTools = nil
+                    }
                     let projectedTools = tools.compactMap { tool -> KeepTalkingActionCatalogMCPTool? in
                         if let allowedTools, !allowedTools.contains(tool.name) { return nil }
                         return KeepTalkingActionCatalogMCPTool(
@@ -320,11 +326,17 @@ extension KeepTalkingClient {
                     guard case .filesystem(let bundle) = action.payload else {
                         throw KeepTalkingClientError.unsupportedActionPayload
                     }
-                    let callerMask = try await effectiveGrantMask(
+                    let grant = try await resolveGrantPermission(
                         node: remoteNode,
                         action: action,
                         context: context
                     )
+                    let callerMask: KeepTalkingActionPermissionMask
+                    if case .filesystem(let mask) = grant {
+                        callerMask = mask
+                    } else {
+                        callerMask = []
+                    }
                     let tools = await filesystemActionManager.availableTools(
                         bundle: bundle,
                         mask: callerMask

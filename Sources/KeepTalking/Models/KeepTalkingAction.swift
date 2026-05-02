@@ -168,10 +168,7 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
     }
 
     public var beautifulLabel: String {
-        actionLabel
-            .replacingOccurrences(of: "-", with: " ")
-            .replacingOccurrences(of: "_", with: " ")
-            .capitalized(with: .autoupdatingCurrent)
+        actionLabel.beautifulName
     }
 
     public var wakeDescription: String {
@@ -234,5 +231,28 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
         self.payload = payload
         self.remoteAuthorisable = remoteAuthorisable
         self.blockingAuthorisation = blockingAuthorisation
+    }
+}
+
+extension KeepTalkingGrantPermission {
+    /// Default unrestricted permission for an action payload — used for action
+    /// owners, for the fallback when a grant row carries no `permission`, and
+    /// as the seed value when an editor binding starts from "no narrowing".
+    public static func unrestricted(for payload: KeepTalkingAction.Payload) -> KeepTalkingGrantPermission {
+        switch payload {
+            case .filesystem: return .filesystem(.all)
+            case .mcpBundle: return .mcp(allowedTools: nil)
+            case .primitive: return .primitive(allowedScopeKeys: nil)
+            case .skill, .semanticRetrieval: return .filesystem(.all)
+        }
+    }
+}
+
+extension String {
+    public var beautifulName: String {
+        self
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .capitalized(with: .autoupdatingCurrent)
     }
 }

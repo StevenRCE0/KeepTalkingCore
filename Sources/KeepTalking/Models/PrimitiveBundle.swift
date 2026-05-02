@@ -12,8 +12,11 @@ public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     /// Prompts the action host's user to create a new action and grant it to the caller.
     case createAction = "create-action"
     /// Access the user's calendar with read (list events) and write (add event) operations.
-    /// Operations are selected by the tool's `operation` argument; calendar scope
-    /// is controlled by `KeepTalkingPrimitiveBundle.allowedCalendarNames`.
+    /// Operations are selected by the tool's `operation` argument; per-operation
+    /// calendar scope lives on `KeepTalkingPrimitiveBundle.scope` keyed by
+    /// `"read"` / `"write"` (each value is a list of calendar titles). The grant
+    /// further narrows which keys the caller may invoke via
+    /// `KeepTalkingGrantPermission.primitive(allowedScopeKeys:)`.
     case accessCalendar = "access-calendar"
 }
 
@@ -31,7 +34,7 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
     /// for documenting the scope keys it understands via its `scopeSchema` and
     /// for enforcing them at call time. `nil` or empty means no scoping.
     ///
-    /// Example (calendar): `["calendars": ["Work", "Personal"]]`.
+    /// Example (calendar): `["read": ["Work", "Personal"], "write": ["Personal"]]`.
     public var scope: [String: [String]]?
     /// When true, remote calls use the blocking-authorisation continuation model
     /// (the remote user must interactively respond before the action returns).
@@ -114,13 +117,20 @@ extension KeepTalkingPrimitiveActionKind {
         switch self {
             case .accessCalendar:
                 return [
-                    "calendars": .object([
+                    "read": .object([
                         "type": .string("array"),
                         "items": .object(["type": .string("string")]),
                         "description": .string(
-                            "Calendar titles this action may read from and write to. Empty/omitted means no scoping (full access to every calendar on the host)."
+                            "Calendar titles this action may list events from. Empty/omitted means no read scoping."
                         ),
-                    ])
+                    ]),
+                    "write": .object([
+                        "type": .string("array"),
+                        "items": .object(["type": .string("string")]),
+                        "description": .string(
+                            "Calendar titles this action may add events to. Empty/omitted means no write scoping."
+                        ),
+                    ]),
                 ]
             case .openURLInBrowser, .addToReadingList, .askForFile,
                 .getCurrentlyPlayingMusic, .runMacOSShortcut, .createAction:
@@ -141,14 +151,20 @@ public struct KeepTalkingPrimitiveActionResponse: Sendable {
 
 public struct KeepTalkingPrimitiveRegistry: Sendable {
     public let toolParameters: @Sendable (KeepTalkingPrimitiveActionKind) -> [String: AIProxyJSONValue]
+    /// Executes a primitive call. `allowedScopeKeys` is the resolved per-grant
+    /// scope-key allowlist (`nil` = no narrowing beyond the bundle's own scope).
     public let callAction:
-        @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall) async throws -> KeepTalkingPrimitiveActionResponse
+        @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall, _ allowedScopeKeys: [String]?) async throws ->
+            KeepTalkingPrimitiveActionResponse
 
     public init(
         toolParameters: @escaping @Sendable (KeepTalkingPrimitiveActionKind) -> [String: AIProxyJSONValue],
         callAction:
-            @escaping @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall) async throws ->
-            KeepTalkingPrimitiveActionResponse
+            @escaping @Sendable (
+                KeepTalkingPrimitiveBundle,
+                KeepTalkingActionCall,
+                _ allowedScopeKeys: [String]?
+            ) async throws -> KeepTalkingPrimitiveActionResponse
     ) {
         self.toolParameters = toolParameters
         self.callAction = callAction

@@ -38,6 +38,18 @@ extension KeepTalkingClient {
         return isNodeOnline(deliveryNodeID)
     }
 
+    /// Live MCP runtime health for a locally-owned action. Use this in the
+    /// app's action settings panel to show "Connected", "Connecting…",
+    /// "Failed: <reason>", "Disabled", etc. — the same signal that
+    /// node-status broadcasts encode in `KeepTalkingAdvertisedAction.availability`.
+    ///
+    /// Non-MCP payloads always return `.notRegistered` since MCPManager only
+    /// tracks MCP-backed actions; callers should fall back to `disabled` and
+    /// reachability for those.
+    public func mcpHealth(for actionID: UUID) async -> MCPActionHealth {
+        await mcpManager.actionHealth(actionID: actionID)
+    }
+
     func enqueueIncomingActionCallRequest(
         _ request: KeepTalkingActionCallRequest
     ) {
@@ -95,10 +107,9 @@ extension KeepTalkingClient {
             nil
     ) async -> KeepTalkingActionCallResult {
         let action: KeepTalkingAction
-        let callerMask: KeepTalkingActionPermissionMask
-        let allowedMCPTools: Set<String>?
+        let grant: KeepTalkingGrantPermission
         do {
-            (action, callerMask, allowedMCPTools) = try await prepareActionCallExecution(
+            (action, grant) = try await prepareActionCallExecution(
                 request,
                 context: context
             )
@@ -129,10 +140,16 @@ extension KeepTalkingClient {
             let callResult: (content: [Tool.Content], isError: Bool?)
             switch action.payload {
                 case .mcpBundle:
+                    let allowedTools: Set<String>?
+                    if case .mcp(let tools) = grant {
+                        allowedTools = tools.map { Set($0) }
+                    } else {
+                        allowedTools = nil
+                    }
                     callResult = try await mcpManager.callAction(
                         action: action,
                         call: request.call,
-                        allowedTools: allowedMCPTools
+                        allowedTools: allowedTools
                     )
                 case .skill:
                     #if os(macOS)
@@ -148,11 +165,24 @@ extension KeepTalkingClient {
                 case .primitive:
                     var call = request.call
                     call.metadata.fields["caller_id"] = .string(request.callerNodeID.uuidString.lowercased())
+                    let allowedScopeKeys: [String]?
+                    if case .primitive(let keys) = grant {
+                        allowedScopeKeys = keys
+                    } else {
+                        allowedScopeKeys = nil
+                    }
                     callResult = try await primitiveActionManager.callAction(
                         action: action,
-                        call: call
+                        call: call,
+                        allowedScopeKeys: allowedScopeKeys
                     )
                 case .filesystem:
+                    let callerMask: KeepTalkingActionPermissionMask
+                    if case .filesystem(let mask) = grant {
+                        callerMask = mask
+                    } else {
+                        callerMask = .all
+                    }
                     callResult = try await filesystemActionManager.callAction(
                         action: action,
                         call: request.call,
@@ -220,7 +250,7 @@ extension KeepTalkingClient {
     private func prepareActionCallExecution(
         _ request: KeepTalkingActionCallRequest,
         context: KeepTalkingContext?
-    ) async throws -> (KeepTalkingAction, KeepTalkingActionPermissionMask, Set<String>?) {
+    ) async throws -> (KeepTalkingAction, KeepTalkingGrantPermission) {
         let action = try await resolveLocalActionForExecution(
             actionID: request.call.action
         )
@@ -237,13 +267,23 @@ extension KeepTalkingClient {
             )
         }
 
-        let callerMask = try await effectiveGrantMask(
-            node: callerNode,
-            action: action,
-            context: context
-        )
+        guard
+            let grant = try await resolveGrantPermission(
+                node: callerNode,
+                action: action,
+                context: context
+            )
+        else {
+            throw KeepTalkingClientError.actionCallNotAuthorized(
+                action: request.call.action,
+                caller: request.callerNodeID,
+                context: request.contextID
+            )
+        }
 
-        guard callerMask != [] else {
+        // For filesystem grants an empty mask means "no operations allowed" —
+        // treat as denied so we don't dispatch to the executor with a zero mask.
+        if case .filesystem(let mask) = grant, mask == [] {
             throw KeepTalkingClientError.actionCallNotAuthorized(
                 action: request.call.action,
                 caller: request.callerNodeID,
@@ -276,18 +316,7 @@ extension KeepTalkingClient {
             }
         }
 
-        let allowedMCPTools: Set<String>?
-        if case .mcpBundle = action.payload {
-            allowedMCPTools = try await effectiveAllowedMCPTools(
-                node: callerNode,
-                action: action,
-                context: context
-            )
-        } else {
-            allowedMCPTools = nil
-        }
-
-        return (action, callerMask, allowedMCPTools)
+        return (action, grant)
     }
 
     func handleIncomingActionCallRequest(

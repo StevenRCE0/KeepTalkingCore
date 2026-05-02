@@ -63,6 +63,28 @@ public enum KeepTalkingMCPHTTPAuthResult: Sendable {
     case declined
 }
 
+/// Live runtime health of an MCP-backed action inside `MCPManager`.
+///
+/// Exposed publicly so node-status assembly and the app UI can surface real
+/// availability rather than a binary registered/unregistered guess.
+public enum MCPActionHealth: Sendable, Equatable {
+    /// MCPManager has no record of this action — it has never been registered
+    /// or has been torn down.
+    case notRegistered
+    /// User has flipped `KeepTalkingAction.disabled = true`. The MCP server is
+    /// not running. Persisted; survives across app launches.
+    case disabled
+    /// Connection handshake in progress. Receivers may briefly retry.
+    case connecting
+    /// Server is connected. `tools` is the cached tool-name set from the
+    /// most recent `listTools` (or tool-list-changed notification).
+    case connected(tools: [String])
+    /// Server registered but failed to come up. `reason` is suitable for UI.
+    case failed(reason: String)
+    /// Action is a virtual remote stub on this node — no local server runs.
+    case virtualRemote
+}
+
 /// Manages MCP action registration, transport connections, and tool invocation.
 public actor MCPManager {
     private actor IncrementingRequestIDTransport: Transport {
@@ -269,6 +291,7 @@ public actor MCPManager {
     private var clientsByActionID: [UUID: Client] = [:]
     private var stdioProcessesByActionID: [UUID: StdioProcessHandle] = [:]
     private var virtualToolNamesByActionID: [UUID: [String]] = [:]
+    private var healthByActionID: [UUID: MCPActionHealth] = [:]
     private var onActionToolsChanged: (@Sendable (UUID) async -> Void)?
     private var onLog: (@Sendable (String) -> Void)?
     private var onHTTPAuthURL: (@Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult)?
@@ -317,8 +340,21 @@ public actor MCPManager {
 
         if isVirtualRemoteAction(action) {
             virtualToolNamesByActionID[actionID] = virtualToolNames(for: action)
+            healthByActionID[actionID] = .virtualRemote
         } else {
             virtualToolNamesByActionID.removeValue(forKey: actionID)
+            // Preserve `.connected`/`.failed` if a live client is already
+            // tracked; otherwise mark it pending so the next `registerIfNeeded`
+            // transitions it to `.connecting`.
+            if action.disabled == true {
+                healthByActionID[actionID] = .disabled
+            } else if case .connected = healthByActionID[actionID] {
+                // keep
+            } else if case .failed = healthByActionID[actionID] {
+                // keep
+            } else {
+                healthByActionID[actionID] = .notRegistered
+            }
         }
 
         // Action metadata is source-of-truth in Fluent models. We only
@@ -335,6 +371,9 @@ public actor MCPManager {
             clientsByActionID.removeValue(forKey: actionID)
         }
         terminateStdioProcess(for: actionID)
+        // Reset prior health so registerMCPAction starts from a clean slate
+        // rather than preserving a stale `.connected`/`.failed`.
+        healthByActionID.removeValue(forKey: actionID)
         try await registerMCPAction(action)
     }
 
@@ -346,12 +385,51 @@ public actor MCPManager {
         terminateStdioProcess(for: actionID)
         clientsByActionID.removeValue(forKey: actionID)
         virtualToolNamesByActionID.removeValue(forKey: actionID)
+        healthByActionID.removeValue(forKey: actionID)
+    }
+
+    /// Tears down any live client/process for a user-disabled action while
+    /// keeping the manager aware that the action exists. Used by the action
+    /// controller when the persisted `disabled` flag flips to true.
+    public func disableAction(actionID: UUID) async {
+        if let client = clientsByActionID[actionID] {
+            await client.disconnect()
+        }
+        terminateStdioProcess(for: actionID)
+        clientsByActionID.removeValue(forKey: actionID)
+        virtualToolNamesByActionID.removeValue(forKey: actionID)
+        healthByActionID[actionID] = .disabled
+    }
+
+    /// Live runtime health for an MCP action. Returns `.notRegistered` when
+    /// the manager has never seen this action ID.
+    public func actionHealth(actionID: UUID) -> MCPActionHealth {
+        healthByActionID[actionID] ?? .notRegistered
+    }
+
+    /// Live runtime health for a batch of actions. Convenience for the
+    /// node-status builder so it can compute availability for the entire
+    /// outgoing relation in one actor hop.
+    public func actionHealthMap(
+        actionIDs: some Sequence<UUID>
+    ) -> [UUID: MCPActionHealth] {
+        var out: [UUID: MCPActionHealth] = [:]
+        for id in actionIDs {
+            out[id] = healthByActionID[id] ?? .notRegistered
+        }
+        return out
     }
 
     /// Ensures an MCP action is registered and connected before use.
     public func registerIfNeeded(_ action: KeepTalkingAction) async throws {
         guard let actionID = action.id else {
             throw MCPManagerError.missingActionID
+        }
+        // Honour the user's disable flag — never spin a server up for an
+        // action the user has explicitly turned off.
+        if action.disabled == true {
+            await disableAction(actionID: actionID)
+            return
         }
         try await registerMCPAction(action)
         if virtualToolNamesByActionID[actionID] != nil {
@@ -665,6 +743,8 @@ public actor MCPManager {
             throw MCPManagerError.invalidAction
         }
 
+        healthByActionID[actionID] = .connecting
+
         let client = Client(
             name: "KeepTalking:\(nodeConfig.node.uuidString):\(actionID.uuidString)",
             version: "1.0.0",
@@ -675,38 +755,45 @@ public actor MCPManager {
             configuration: .default
         )
 
-        switch mcpBundle.service {
-            case .stdio(let command, let environment):
-                try await connectStdioAction(
-                    actionID: actionID,
-                    client: client,
-                    command: command,
-                    environment: environment
-                )
-            case .http(let url, _, let headers, _):
-                let transportConfiguration = URLSessionConfiguration.default
-                let sanitizedHeaders = Self.sanitizedHTTPHeaders(headers)
+        do {
+            switch mcpBundle.service {
+                case .stdio(let command, let environment):
+                    try await connectStdioAction(
+                        actionID: actionID,
+                        client: client,
+                        command: command,
+                        environment: environment
+                    )
+                case .http(let url, _, let headers, _):
+                    let transportConfiguration = URLSessionConfiguration.default
+                    let sanitizedHeaders = Self.sanitizedHTTPHeaders(headers)
 
-                let transport = HTTPClientTransport(
-                    endpoint: url,
-                    configuration: transportConfiguration,
-                    streaming: true,
-                    requestModifier: { request in
-                        var modifiedRequest = request
-                        for (key, value) in sanitizedHeaders {
-                            modifiedRequest.setValue(
-                                value,
-                                forHTTPHeaderField: key
-                            )
+                    let transport = HTTPClientTransport(
+                        endpoint: url,
+                        configuration: transportConfiguration,
+                        streaming: true,
+                        requestModifier: { request in
+                            var modifiedRequest = request
+                            for (key, value) in sanitizedHeaders {
+                                modifiedRequest.setValue(
+                                    value,
+                                    forHTTPHeaderField: key
+                                )
+                            }
+                            return modifiedRequest
                         }
-                        return modifiedRequest
-                    }
-                )
-                try await Self.connectClient(
-                    client,
-                    transport: IncrementingRequestIDTransport(base: transport),
-                    timeoutSeconds: connectTimeoutSeconds
-                )
+                    )
+                    try await Self.connectClient(
+                        client,
+                        transport: IncrementingRequestIDTransport(base: transport),
+                        timeoutSeconds: connectTimeoutSeconds
+                    )
+            }
+        } catch {
+            // Surface the failure so node-status sync can advertise the
+            // action as `.failed(reason:)` instead of silently going dark.
+            healthByActionID[actionID] = .failed(reason: Self.failureReason(error))
+            throw error
         }
 
         await registerToolListChangeHandler(
@@ -714,6 +801,22 @@ public actor MCPManager {
             client: client
         )
         clientsByActionID[actionID] = client
+
+        // Cache initial tool list eagerly so node-status broadcasts can
+        // include `tools` without paying a network round-trip per build.
+        // Failure here downgrades to `.connected(tools: [])` rather than
+        // `.failed` — the connection itself is up.
+        let initialTools = (try? await client.listTools().tools.map(\.name).sorted()) ?? []
+        healthByActionID[actionID] = .connected(tools: initialTools)
+    }
+
+    private static func failureReason(_ error: any Error) -> String {
+        if let localized = (error as? LocalizedError)?.errorDescription,
+            !localized.isEmpty
+        {
+            return localized
+        }
+        return error.localizedDescription
     }
 
     private func registerToolListChangeHandler(
@@ -727,8 +830,13 @@ public actor MCPManager {
     }
 
     private func notifyActionToolsChanged(actionID: UUID) async {
-        guard clientsByActionID[actionID] != nil else {
+        guard let client = clientsByActionID[actionID] else {
             return
+        }
+        // Refresh the cached tool list so health stays consistent with what
+        // node-status will advertise on the next broadcast.
+        if let refreshed = try? await client.listTools().tools.map(\.name).sorted() {
+            healthByActionID[actionID] = .connected(tools: refreshed)
         }
         guard let onActionToolsChanged else {
             return

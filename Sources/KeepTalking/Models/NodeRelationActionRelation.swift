@@ -66,15 +66,4 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
         }
     }
 
-    /// Effective filesystem R/W/X mask. Falls back to `.all` when no permission is set.
-    public var effectiveFilesystemMask: KeepTalkingActionPermissionMask {
-        if case .filesystem(let mask) = permission { return mask }
-        return .all
-    }
-
-    /// Effective MCP tool allowlist. `nil` means all tools are permitted.
-    public var effectiveMCPAllowedTools: [String]? {
-        if case .mcp(let tools) = permission { return tools }
-        return nil
-    }
 }

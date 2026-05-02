@@ -270,9 +270,16 @@ extension KeepTalkingClient {
         }
 
         try await action.save(on: localStore.database)
+        // A freshly-saved action with `disabled = true` should not spin up
+        // any runtime — register the metadata, then immediately tear down the
+        // server so it lands in `.disabled` instead of `.connected`.
+        let isDisabledAtSave = action.disabled == true
         switch payload {
             case .mcpBundle:
                 try await mcpManager.registerMCPAction(action)
+                if isDisabledAtSave, let actionID = action.id {
+                    await mcpManager.disableAction(actionID: actionID)
+                }
             case .skill:
                 try await skillManager.registerSkillAction(action)
             case .primitive:
@@ -340,9 +347,20 @@ extension KeepTalkingClient {
 
         try await action.save(on: localStore.database)
 
+        let isDisabledNow = action.disabled == true
         switch action.payload {
             case .mcpBundle:
-                try await mcpManager.refreshMCPAction(action)
+                if isDisabledNow {
+                    // User just turned the action off — tear the live MCP
+                    // server down rather than reconnecting it. Health flips
+                    // to `.disabled`, which the next node-status broadcast
+                    // surfaces to peers.
+                    await mcpManager.disableAction(actionID: actionID)
+                } else {
+                    // Either still enabled, or just re-enabled — refresh
+                    // (re)spins up the connection.
+                    try await mcpManager.refreshMCPAction(action)
+                }
             case .skill:
                 try await skillManager.refreshSkillAction(action)
             case .primitive:
@@ -356,6 +374,15 @@ extension KeepTalkingClient {
         await invalidateActionToolCatalog(
             reason: "modify_action action=\(actionID.uuidString.lowercased())"
         )
+
+        // Push the change out so peers see the new availability state
+        // (disabled, available, failed, etc.) without waiting for the next
+        // periodic sync.
+        Task { [weak self] in
+            await self?.broadcastLocalNodeState(
+                reason: "modify_action action=\(actionID.uuidString.lowercased())"
+            )
+        }
 
         return action
     }
@@ -713,22 +740,27 @@ extension KeepTalkingClient {
         }
     }
 
-    /// Returns the effective permission mask a node has for a given action in context.
+    /// Resolves the effective grant permission a node has for `action` in `context`.
     ///
-    /// The mask is the union of all applicable grant relations. If the caller is
-    /// the owner node itself, `.all` is returned unconditionally.
-    /// Returns `[]` (empty) if the action is not granted to the node.
-    func effectiveGrantMask(
+    /// The returned case is selected by the action's payload kind:
+    ///  - filesystem → `.filesystem(mask)` with mask = union of applicable grant masks
+    ///  - mcp        → `.mcp(allowedTools:)` with allowlist = union (`nil` if any grant is unrestricted)
+    ///  - primitive  → `.primitive(allowedScopeKeys:)` with keys = union (`nil` if any grant is unrestricted)
+    ///  - skill / semanticRetrieval → `.filesystem(.all)` sentinel "granted, no narrowing"
+    ///
+    /// Returns `nil` when the caller has no applicable grant (i.e. denied).
+    /// The owner of the action always receives an unrestricted permission of the right case.
+    func resolveGrantPermission(
         node: KeepTalkingNode,
         action: KeepTalkingAction,
         context: KeepTalkingContext?
-    ) async throws -> KeepTalkingActionPermissionMask {
+    ) async throws -> KeepTalkingGrantPermission? {
         let nodeID = try node.requireID()
-        guard let ownerNodeID = action.$node.id else { return [] }
+        guard let ownerNodeID = action.$node.id else { return nil }
 
-        // Owner always has full access to their own actions.
+        // Owner always has unrestricted access to their own actions.
         if nodeID == ownerNodeID {
-            return .all
+            return Self.unrestrictedPermission(for: action.payload)
         }
 
         let selfNode = try await getCurrentNodeInstance()
@@ -742,7 +774,7 @@ extension KeepTalkingClient {
                 on: localStore.database
             )
         else {
-            return []
+            return nil
         }
 
         let approvals =
@@ -752,14 +784,77 @@ extension KeepTalkingClient {
             .filter(\.$action.$id, .equal, try action.requireID())
             .all()
 
-        var merged: KeepTalkingActionPermissionMask = []
-        var anyApplicable = false
-        for approval in approvals where approval.applicable(in: context) {
-            anyApplicable = true
-            merged.formUnion(approval.effectiveFilesystemMask)
-        }
+        let applicable = approvals.filter { $0.applicable(in: context) }
+        guard !applicable.isEmpty else { return nil }
 
-        return anyApplicable ? merged : []
+        return Self.foldGrantPermissions(
+            applicable.map(\.permission),
+            for: action.payload
+        )
+    }
+
+    private static func unrestrictedPermission(
+        for payload: KeepTalkingAction.Payload
+    ) -> KeepTalkingGrantPermission {
+        KeepTalkingGrantPermission.unrestricted(for: payload)
+    }
+
+    /// Folds a list of applicable `permission` values into one resolved permission.
+    /// Union semantics per case; a missing or off-case permission row is treated as
+    /// "no narrowing" (unrestricted) on the relevant axis.
+    private static func foldGrantPermissions(
+        _ permissions: [KeepTalkingGrantPermission?],
+        for payload: KeepTalkingAction.Payload
+    ) -> KeepTalkingGrantPermission {
+        switch payload {
+            case .filesystem:
+                var merged: KeepTalkingActionPermissionMask = []
+                for permission in permissions {
+                    if case .filesystem(let mask) = permission {
+                        merged.formUnion(mask)
+                    } else {
+                        // No filesystem narrowing recorded → grant is unrestricted on this axis.
+                        merged = .all
+                        break
+                    }
+                }
+                return .filesystem(merged)
+
+            case .mcpBundle:
+                var merged: Set<String> = []
+                var anyUnrestricted = false
+                for permission in permissions {
+                    if case .mcp(let tools) = permission {
+                        if let tools {
+                            merged.formUnion(tools)
+                        } else {
+                            anyUnrestricted = true
+                        }
+                    } else {
+                        anyUnrestricted = true
+                    }
+                }
+                return .mcp(allowedTools: anyUnrestricted ? nil : Array(merged))
+
+            case .primitive:
+                var merged: Set<String> = []
+                var anyUnrestricted = false
+                for permission in permissions {
+                    if case .primitive(let keys) = permission {
+                        if let keys {
+                            merged.formUnion(keys)
+                        } else {
+                            anyUnrestricted = true
+                        }
+                    } else {
+                        anyUnrestricted = true
+                    }
+                }
+                return .primitive(allowedScopeKeys: anyUnrestricted ? nil : Array(merged))
+
+            case .skill, .semanticRetrieval:
+                return unrestrictedPermission(for: payload)
+        }
     }
 
     /// Lists the tool names currently exposed by a locally-hosted MCP action.
@@ -788,61 +883,6 @@ extension KeepTalkingClient {
         bundle.cachedTools = toolNames
         action.payload = .mcpBundle(bundle)
         try? await action.save(on: localStore.database)
-    }
-
-    /// Returns the effective MCP tool allowlist for a caller on a given action in context.
-    ///
-    /// Returns `nil` if all tools are permitted (owner access or no restriction set).
-    /// Returns an empty set if the action is not granted.
-    /// Returns a non-nil set when at least one grant has an explicit allowlist;
-    /// the result is the union of all applicable allowlists.
-    func effectiveAllowedMCPTools(
-        node: KeepTalkingNode,
-        action: KeepTalkingAction,
-        context: KeepTalkingContext?
-    ) async throws -> Set<String>? {
-        let nodeID = try node.requireID()
-        guard let ownerNodeID = action.$node.id else { return Set() }
-
-        if nodeID == ownerNodeID { return nil }
-
-        let selfNode = try await getCurrentNodeInstance()
-
-        guard
-            let relation = try await Self.preferredTrustedRelation(
-                from: ownerNodeID,
-                to: nodeID,
-                allowing: context,
-                allowPending: ownerNodeID != (try? selfNode.requireID()),
-                on: localStore.database
-            )
-        else {
-            return Set()
-        }
-
-        let approvals =
-            try await KeepTalkingNodeRelationActionRelation
-            .query(on: localStore.database)
-            .filter(\.$relation.$id == (try relation.requireID()))
-            .filter(\.$action.$id, .equal, try action.requireID())
-            .all()
-
-        var merged: Set<String> = []
-        var anyApplicable = false
-        var anyUnrestricted = false
-
-        for approval in approvals where approval.applicable(in: context) {
-            anyApplicable = true
-            let tools = approval.effectiveMCPAllowedTools
-            if tools == nil {
-                anyUnrestricted = true
-            } else {
-                merged.formUnion(tools!)
-            }
-        }
-
-        guard anyApplicable else { return Set() }
-        return anyUnrestricted ? nil : merged
     }
 
     static public func revokeActionPermission(
@@ -953,10 +993,67 @@ extension KeepTalkingClient {
         )
     }
 
-    func mergeNodeActions(_ actions: [KeepTalkingAdvertisedAction]) async throws {
+    /// Reconciles the local persisted action graph with a node-status snapshot.
+    ///
+    /// Definitive sync: every action owned by `broadcasterNodeID` that does
+    /// not appear in `actions` is treated as deleted at the source and torn
+    /// down locally. Actions that do appear are upserted. Actions owned by
+    /// other nodes are untouched — the broadcaster has no authority over them.
+    /// Pass `broadcasterNodeID = nil` to skip pruning (used by call sites that
+    /// can't attribute the snapshot to a single owner).
+    func mergeNodeActions(
+        _ actions: [KeepTalkingAdvertisedAction],
+        broadcasterNodeID: UUID? = nil
+    ) async throws {
         let advertisedActions = deduplicatedAndSortedActions(
             actions
         )
+
+        // Stale-action pruning. Actions persisted as owned by the broadcaster
+        // but missing from this snapshot have been disabled/removed at the
+        // source — drop them locally so the catalog stays in sync. Skip self
+        // (we never accept remote authority over our own action rows).
+        if let broadcasterNodeID, broadcasterNodeID != config.node {
+            let advertisedIDs = Set(advertisedActions.map(\.actionID))
+            let staleActions = try await KeepTalkingAction.query(
+                on: localStore.database
+            )
+            .filter(\.$node.$id, .equal, broadcasterNodeID)
+            .all()
+            .filter { action in
+                guard let id = action.id else { return false }
+                return !advertisedIDs.contains(id)
+            }
+            for stale in staleActions {
+                guard let staleID = stale.id else { continue }
+                // Mirror removeMCPAction: drop runtime registrations first so
+                // the catalog doesn't keep referencing a torn-down server, then
+                // delete the persisted row + its grant edges.
+                switch stale.payload {
+                    case .mcpBundle:
+                        await mcpManager.unregisterAction(actionID: staleID)
+                    case .skill:
+                        await skillManager.unregisterAction(actionID: staleID)
+                    case .primitive:
+                        await primitiveActionManager.unregisterAction(
+                            actionID: staleID
+                        )
+                    case .filesystem:
+                        await filesystemActionManager.unregisterAction(
+                            actionID: staleID
+                        )
+                    case .semanticRetrieval:
+                        await semanticRetrievalActionManager.unregisterAction(
+                            actionID: staleID
+                        )
+                }
+                try await KeepTalkingNodeRelationActionRelation
+                    .query(on: localStore.database)
+                    .filter(\.$action.$id, .equal, staleID)
+                    .delete()
+                try await stale.delete(on: localStore.database)
+            }
+        }
 
         for incomingAction in advertisedActions {
             let actionID = incomingAction.actionID
@@ -1081,7 +1178,13 @@ extension KeepTalkingClient {
             directory: URL(
                 fileURLWithPath:
                     "/__kt_remote_skill__/\(actionID.uuidString.lowercased())"
-            )
+            ),
+            // Remote skills only enter the wire when the owner has analysed
+            // them (we filter un-analysed skills out at the broadcaster), so
+            // ingestion can treat them as analysed unconditionally — the UI
+            // shouldn't show an "analyse this" prompt for something we can
+            // only ever invoke remotely.
+            toolsAnalysed: true
         )
     }
 

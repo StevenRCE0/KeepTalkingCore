@@ -63,7 +63,8 @@ public actor PrimitiveActionManager {
 
     public func callAction(
         action: KeepTalkingAction,
-        call: KeepTalkingActionCall
+        call: KeepTalkingActionCall,
+        allowedScopeKeys: [String]?
     ) async throws -> (content: [Tool.Content], isError: Bool?) {
         guard case .primitive(let primitiveBundle) = action.payload else {
             throw PrimitiveActionManagerError.invalidAction
@@ -73,7 +74,7 @@ public actor PrimitiveActionManager {
         }
         try await registerIfNeeded(action)
 
-        let response = try await registry.callAction(primitiveBundle, call)
+        let response = try await registry.callAction(primitiveBundle, call, allowedScopeKeys)
         return (
             content: [.text(text: response.text, annotations: nil, _meta: nil)],
             isError: response.isError
