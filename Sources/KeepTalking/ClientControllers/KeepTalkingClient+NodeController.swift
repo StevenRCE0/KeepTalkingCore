@@ -55,6 +55,81 @@ extension KeepTalkingClient {
         return try await kvService.loadNodeIDs()
     }
 
+    /// Replace the current node-trust scope for an existing relation.
+    ///
+    /// Unlike `trust(node:scope:)` which only ever *grows* the trusted-context
+    /// set, this method writes the desired final state. Use it from UIs that
+    /// let the user toggle individual contexts on/off.
+    ///
+    /// - Parameters:
+    ///   - targetNodeID: Remote node to update. Must already have a
+    ///     non-pending outgoing relation (call `trust(...)` first if not).
+    ///   - allContexts: When `true`, sets the relationship to
+    ///     `.trustedInAllContext`, ignoring `contextIDs`.
+    ///   - contextIDs: Set of context UUIDs to be trusted in. When empty
+    ///     and `allContexts == false`, the call throws — use
+    ///     `revokeRelationship(...)` (or delete the relation directly) for
+    ///     "no trust at all".
+    ///
+    /// Owner relationships are preserved (this method is a no-op against
+    /// `.owner`); ownership must be revoked through the dedicated path.
+    public func updateTrustedContexts(
+        node targetNodeID: UUID,
+        allContexts: Bool,
+        contextIDs: Set<UUID>
+    ) async throws {
+        try await Self.updateTrustedContexts(
+            node: targetNodeID,
+            allContexts: allContexts,
+            contextIDs: contextIDs,
+            localNodeID: config.node,
+            on: localStore.database
+        )
+
+        await invalidateActionToolCatalog(
+            contextID: nil,
+            reason: "update_trust_scope target=\(targetNodeID.uuidString.lowercased())"
+        )
+    }
+
+    /// Static variant of `updateTrustedContexts(node:allContexts:contextIDs:)`
+    /// — does not require an active client. Mirrors the `trust(...)` /
+    /// `lure(...)` static helpers so callers (UI view-models) can mutate
+    /// the trust graph using just the local node id + database.
+    public static func updateTrustedContexts(
+        node targetNodeID: UUID,
+        allContexts: Bool,
+        contextIDs: Set<UUID>,
+        localNodeID: UUID,
+        on database: any Database
+    ) async throws {
+        guard
+            let relation = try await KeepTalkingNodeRelation.query(on: database)
+                .filter(\.$from.$id, .equal, localNodeID)
+                .filter(\.$to.$id, .equal, targetNodeID)
+                .first()
+        else {
+            throw KeepTalkingClientError.missingRelation
+        }
+
+        if case .owner = relation.relationship {
+            // Don't silently downgrade ownership.
+            return
+        }
+
+        if allContexts {
+            relation.relationship = .trustedInAllContext
+        } else if contextIDs.isEmpty {
+            throw KeepTalkingClientError.invalidTrustScope
+        } else {
+            let contexts = try await KeepTalkingContext.query(on: database)
+                .filter(\.$id ~~ Array(contextIDs))
+                .all()
+            relation.relationship = .trusted(contexts)
+        }
+        try await relation.save(on: database)
+    }
+
     @discardableResult
     public func trust(
         node targetNodeID: UUID,

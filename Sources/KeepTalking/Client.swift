@@ -40,6 +40,7 @@ public enum KeepTalkingClientError: LocalizedError {
     case invalidTurningPoint(UUID)
     case invalidContinuationMessage
     case notAuthorized
+    case invalidTrustScope
 
     public var errorDescription: String? {
         switch self {
@@ -111,6 +112,9 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Agent turn continuation message is invalid or expired."
             case .notAuthorized:
                 return "Operation not authorized."
+            case .invalidTrustScope:
+                return
+                    "Trust scope must include at least one context (or use \"all contexts\")."
         }
     }
 }
