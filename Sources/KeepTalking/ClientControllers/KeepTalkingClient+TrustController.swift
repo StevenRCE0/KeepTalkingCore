@@ -9,6 +9,18 @@ public struct KeepTalkingIncomingTrustRequest: Sendable {
     public let fromNodeID: UUID
     public let contextID: UUID
     public let scope: KeepTalkingNodeTrustScope
+
+    public init(
+        sessionID: UUID,
+        fromNodeID: UUID,
+        contextID: UUID,
+        scope: KeepTalkingNodeTrustScope
+    ) {
+        self.sessionID = sessionID
+        self.fromNodeID = fromNodeID
+        self.contextID = contextID
+        self.scope = scope
+    }
 }
 
 public enum KeepTalkingTrustDecision: Sendable {
