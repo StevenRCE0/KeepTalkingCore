@@ -14,7 +14,6 @@ public struct KeepTalkingTrustRequestPayload: Codable, Sendable {
     public let from: UUID
     public let to: UUID
     public let contextID: UUID
-    public let scope: KeepTalkingTrustScopeWire
     public let initiatorEphemeralPub: Data
 
     public init(
@@ -22,14 +21,12 @@ public struct KeepTalkingTrustRequestPayload: Codable, Sendable {
         from: UUID,
         to: UUID,
         contextID: UUID,
-        scope: KeepTalkingTrustScopeWire,
         initiatorEphemeralPub: Data
     ) {
         self.sessionID = sessionID
         self.from = from
         self.to = to
         self.contextID = contextID
-        self.scope = scope
         self.initiatorEphemeralPub = initiatorEphemeralPub
     }
 }
@@ -47,6 +44,9 @@ public struct KeepTalkingTrustAcceptPayload: Codable, Sendable {
     public let from: UUID
     public let to: UUID
     public let contextID: UUID
+    /// Trust scope chosen by the responder. The initiator persists its own
+    /// outgoing relation against this scope after verifying the seal.
+    public let scope: KeepTalkingTrustScopeWire
     public let responderEphemeralPub: Data
     /// AES-GCM-sealed inner payload containing the responder's long-term
     /// identity public key (Base64) and a signature/HMAC over the transcript.
@@ -57,6 +57,7 @@ public struct KeepTalkingTrustAcceptPayload: Codable, Sendable {
         from: UUID,
         to: UUID,
         contextID: UUID,
+        scope: KeepTalkingTrustScopeWire,
         responderEphemeralPub: Data,
         sealedIdentity: Data
     ) {
@@ -64,6 +65,7 @@ public struct KeepTalkingTrustAcceptPayload: Codable, Sendable {
         self.from = from
         self.to = to
         self.contextID = contextID
+        self.scope = scope
         self.responderEphemeralPub = responderEphemeralPub
         self.sealedIdentity = sealedIdentity
     }

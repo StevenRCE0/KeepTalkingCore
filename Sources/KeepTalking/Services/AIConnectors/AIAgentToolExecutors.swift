@@ -167,6 +167,40 @@ extension KeepTalkingClient {
                         )
                     )
                     continue
+                } else if functionName == Self.updateSideNoteToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: try await executeUpdateSideNoteToolCall(
+                                        toolCallID: toolCallID,
+                                        rawArguments: toolCall.argumentsJSON,
+                                        context: context
+                                    ),
+                                    toolCallID: toolCallID
+                                )
+                            ]
+                        )
+                    )
+                    continue
+                } else if functionName == Self.archiveSideNoteToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: try await executeArchiveSideNoteToolCall(
+                                        toolCallID: toolCallID,
+                                        rawArguments: toolCall.argumentsJSON,
+                                        context: context
+                                    ),
+                                    toolCallID: toolCallID
+                                )
+                            ]
+                        )
+                    )
+                    continue
                 }
 
                 let payload: String
@@ -1064,5 +1098,67 @@ extension KeepTalkingClient {
             return nested
         }
         return arguments
+    }
+
+    // MARK: - Side note handlers
+
+    func executeUpdateSideNoteToolCall(
+        toolCallID: String,
+        rawArguments: String,
+        context: KeepTalkingContext
+    ) async throws -> String {
+        guard
+            let data = rawArguments.data(using: .utf8),
+            let args = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+            let key = args["key"],
+            let value = args["value"],
+            !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return "Error: missing or invalid arguments. Expected {\"key\": string, \"value\": string}."
+        }
+
+        let contextID = try context.requireID()
+        if let existing = try await context.$sideNotes
+            .query(on: localStore.database)
+            .filter(\.$key == key)
+            .first()
+        {
+            existing.value = value
+            existing.isArchived = false
+            try await existing.save(on: localStore.database)
+        } else {
+            let note = KeepTalkingSideNote(contextID: contextID, key: key, value: value)
+            try await note.save(on: localStore.database)
+        }
+
+        return "Side note '\(key)' updated."
+    }
+
+    func executeArchiveSideNoteToolCall(
+        toolCallID: String,
+        rawArguments: String,
+        context: KeepTalkingContext
+    ) async throws -> String {
+        guard
+            let data = rawArguments.data(using: .utf8),
+            let args = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+            let key = args["key"],
+            !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return "Error: missing or invalid arguments. Expected {\"key\": string}."
+        }
+
+        guard
+            let note = try await context.$sideNotes
+                .query(on: localStore.database)
+                .filter(\.$key == key)
+                .first()
+        else {
+            return "Side note '\(key)' not found."
+        }
+
+        note.isArchived = true
+        try await note.save(on: localStore.database)
+        return "Side note '\(key)' archived."
     }
 }

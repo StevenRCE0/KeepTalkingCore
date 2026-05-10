@@ -23,6 +23,8 @@ extension KeepTalkingClient {
     static let searchThreadsToolFunctionName = "kt_search_threads"
     /// Function name used for web search in chat-completions mode (e.g. OpenRouter).
     /// In Responses API mode the built-in webSearchPreview tool is used instead.
+    static let updateSideNoteToolFunctionName = "kt_update_side_note"
+    static let archiveSideNoteToolFunctionName = "kt_archive_side_note"
     static let webSearchFunctionName = "web_search"
     static let maxAgentTurns = 32
     static let maxAINativeAttachmentBytes = 8 * 1024 * 1024
@@ -241,6 +243,8 @@ extension KeepTalkingClient {
             webSearchTool,
             markTurningPointTool,
             markChitterChatterTool,
+            makeUpdateSideNoteTool(),
+            makeArchiveSideNoteTool(),
         ]
         let skillNameByActionID = skillNamesByActionID(
             routesByFunctionName: runtimeCatalog.routesByFunctionName
@@ -282,6 +286,13 @@ extension KeepTalkingClient {
         let platform = "unknown"
         #endif
 
+        let activeSideNotes =
+            (try? await persistedContext.$sideNotes
+                .query(on: localStore.database)
+                .filter(\.$isArchived == false)
+                .all()
+                .compactMap { KeepTalkingSideNoteDTO($0) }) ?? []
+
         let systemPrompt = OpenAIConnector.keepTalkingSystemPrompt(
             ktRunActionToolFunctionName: Self.runActionToolFunctionName,
             ktSkillMetainfoToolFunctionName: Self.ktSkillMetainfoToolFunctionName,
@@ -293,6 +304,7 @@ extension KeepTalkingClient {
             currentPromptIncludesAttachments: hasCurrentPromptAttachments,
             currentPromptShouldAvoidAutomaticToolUse: hasCurrentPromptAttachments
                 && !allowAutomaticToolUse,
+            sideNotes: activeSideNotes,
             contextTranscript: contextTranscript,
             currentDate: currentDate,
             platform: platform

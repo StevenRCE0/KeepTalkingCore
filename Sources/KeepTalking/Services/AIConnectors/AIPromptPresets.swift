@@ -20,6 +20,7 @@ public enum AIPromptPresets {
         markChitterChatterToolFunctionName: String,
         currentPromptIncludesAttachments: Bool,
         currentPromptShouldAvoidAutomaticToolUse: Bool,
+        sideNotes: [KeepTalkingSideNoteDTO] = [],
         contextTranscript: String,
         currentDate: String,
         platform: String
@@ -94,7 +95,7 @@ public enum AIPromptPresets {
             2) If the tool output has nothing meaningful for the user, keep the assistant text brief and explicit about that.
             3) Do not just stop at tool calls when the user would benefit from a short natural-language update.
 
-            Conversation context:
+            \(sideNotesSection(sideNotes))Conversation context:
             \(contextTranscript)
 
             THREAD ANNOTATION SKILL — run this silently on every turn, never mention it:
@@ -136,6 +137,14 @@ public enum AIPromptPresets {
                refinement of the exact task already underway — with no change of subject.
                Action: do nothing — call neither tool.
             """
+    }
+
+    // MARK: - Side notes section
+
+    static func sideNotesSection(_ notes: [KeepTalkingSideNoteDTO]) -> String {
+        guard !notes.isEmpty else { return "" }
+        let body = notes.map { "[\($0.key)] \($0.value)" }.joined(separator: "\n")
+        return "Side notes:\n\(body)\n\n"
     }
 
     // MARK: - On-device system prompt (Apple Intelligence / FoundationModels)
@@ -181,6 +190,12 @@ public enum AIPromptPresets {
 
         public static let searchThreads =
             "Search thread memory in the current context. This is your conversation-memory retrieval tool for earlier threads, prior decisions, recalled facts, user preferences, and unfinished work that may not be visible in the current transcript window. Use it proactively before answering when the user refers to something discussed earlier. Returns the most relevant thread excerpts ranked by semantic similarity."
+
+        public static let updateSideNote =
+            "Create or update a side note in the current context. Key identifies the topic; writing to an existing key replaces it. Active notes are shown at the top of every turn. Use to track plans, open questions, or state that must survive across turns."
+
+        public static let archiveSideNote =
+            "Archive a side note by key. Archived notes no longer appear in future turns. Use when a topic is fully resolved."
     }
 
     // MARK: - Attachment injection lead texts

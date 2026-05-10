@@ -237,6 +237,7 @@ public struct KeepTalkingContextSyncMessagesResult: Codable, Sendable {
     public let responder: UUID
     public let messages: [KeepTalkingContextMessage]
     public let attachments: [KeepTalkingContextAttachmentDTO]
+    public let sideNotes: [KeepTalkingSideNoteDTO]
 
     public init(
         request: UUID,
@@ -244,7 +245,8 @@ public struct KeepTalkingContextSyncMessagesResult: Codable, Sendable {
         requester: UUID,
         responder: UUID,
         messages: [KeepTalkingContextMessage],
-        attachments: [KeepTalkingContextAttachmentDTO] = []
+        attachments: [KeepTalkingContextAttachmentDTO] = [],
+        sideNotes: [KeepTalkingSideNoteDTO] = []
     ) {
         self.request = request
         self.context = context
@@ -252,6 +254,7 @@ public struct KeepTalkingContextSyncMessagesResult: Codable, Sendable {
         self.responder = responder
         self.messages = messages
         self.attachments = attachments
+        self.sideNotes = sideNotes
     }
 }
 

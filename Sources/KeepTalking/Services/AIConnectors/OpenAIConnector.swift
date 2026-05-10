@@ -28,6 +28,7 @@ public actor OpenAIConnector: AIConnector {
         markChitterChatterToolFunctionName: String,
         currentPromptIncludesAttachments: Bool,
         currentPromptShouldAvoidAutomaticToolUse: Bool,
+        sideNotes: [KeepTalkingSideNoteDTO] = [],
         contextTranscript: String,
         currentDate: String,
         platform: String
@@ -42,6 +43,7 @@ public actor OpenAIConnector: AIConnector {
             markChitterChatterToolFunctionName: markChitterChatterToolFunctionName,
             currentPromptIncludesAttachments: currentPromptIncludesAttachments,
             currentPromptShouldAvoidAutomaticToolUse: currentPromptShouldAvoidAutomaticToolUse,
+            sideNotes: sideNotes,
             contextTranscript: contextTranscript,
             currentDate: currentDate,
             platform: platform

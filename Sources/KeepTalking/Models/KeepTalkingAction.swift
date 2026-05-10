@@ -144,6 +144,21 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
             if case .filesystem(let bundle) = self { return bundle }
             return nil
         }
+
+        public var typeName: String {
+            switch self {
+                case .mcpBundle:
+                    "MCP"
+                case .skill:
+                    "Skill"
+                case .primitive:
+                    "Primitive"
+                case .semanticRetrieval:
+                    "Memory"
+                case .filesystem:
+                    "File"
+            }
+        }
     }
 
     public var isSemanticRetrieval: Bool {

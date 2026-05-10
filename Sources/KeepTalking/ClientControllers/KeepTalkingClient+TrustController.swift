@@ -8,23 +8,23 @@ public struct KeepTalkingIncomingTrustRequest: Sendable {
     public let sessionID: UUID
     public let fromNodeID: UUID
     public let contextID: UUID
-    public let scope: KeepTalkingNodeTrustScope
 
     public init(
         sessionID: UUID,
         fromNodeID: UUID,
-        contextID: UUID,
-        scope: KeepTalkingNodeTrustScope
+        contextID: UUID
     ) {
         self.sessionID = sessionID
         self.fromNodeID = fromNodeID
         self.contextID = contextID
-        self.scope = scope
     }
 }
 
+/// The responder's verdict on an incoming trust request. Scope is chosen
+/// by the responder at accept time — the request itself is scope-free, so
+/// the responder controls how widely they trust the peer.
 public enum KeepTalkingTrustDecision: Sendable {
-    case accept
+    case accept(scope: KeepTalkingNodeTrustScope)
     case decline
 }
 
@@ -79,8 +79,11 @@ struct KeepTalkingPendingTrustSession: Sendable {
     let role: KeepTalkingPendingTrustRole
     let peerNodeID: UUID
     let contextID: UUID
-    let scope: KeepTalkingNodeTrustScope
-    let scopeWire: KeepTalkingTrustScopeWire
+    /// Filled on the responder side when the local user picks at accept
+    /// time, and on the initiator side when the responder's `.trustAccept`
+    /// envelope arrives. Nil until then.
+    var scope: KeepTalkingNodeTrustScope?
+    var scopeWire: KeepTalkingTrustScopeWire?
     let localEphemeralPriv: Curve25519.KeyAgreement.PrivateKey
     let localEphemeralPub: Data
     /// Set once we know the other side's ephemeral public key.
@@ -106,28 +109,22 @@ extension KeepTalkingClient {
     /// Initiate a bidirectional trust handshake with `peerNodeID` over the
     /// shared `contextID`'s signaling channel.
     ///
-    /// On success, both sides will have persisted each other's long-term
-    /// identity public key in their local trust graph (`KeepTalkingNodeRelation`
-    /// + `KeepTalkingNodeIdentityKey`) under the requested `scope`.
+    /// The request itself carries no scope — the responder picks how widely
+    /// to trust the initiator at accept time, and the chosen scope flows
+    /// back in `.trustAccept`. On success, both sides persist each other's
+    /// long-term identity public key under the responder-chosen scope.
     @discardableResult
     public func requestTrust(
         with peerNodeID: UUID,
-        in contextID: UUID,
-        scope: KeepTalkingNodeTrustScope
+        in contextID: UUID
     ) async throws -> KeepTalkingTrustOutcome {
         let context = try await ensure(contextID, for: KeepTalkingContext.self)
         guard try await loadGroupChatSecret(for: contextID) != nil else {
             throw KeepTalkingTrustError.contextSecretMissing(contextID)
         }
 
-        // Make sure we have our own outgoing relation + keypair for this peer
-        // so we can publish our long-term pubkey at the .trustAccept /
-        // .trustComplete step. This is a no-op if already trusted.
-        _ = try await trust(node: peerNodeID, scope: scope)
-
         let ephemeral = TrustHandshakeCrypto.generateEphemeral()
         let sessionID = UUID()
-        let scopeWire = Self.wireScope(from: scope)
 
         let outcome = try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<KeepTalkingTrustOutcome, Error>) in
@@ -136,8 +133,8 @@ extension KeepTalkingClient {
                 role: .initiator,
                 peerNodeID: peerNodeID,
                 contextID: contextID,
-                scope: scope,
-                scopeWire: scopeWire,
+                scope: nil,
+                scopeWire: nil,
                 localEphemeralPriv: ephemeral.privateKey,
                 localEphemeralPub: ephemeral.publicKeyBytes,
                 peerEphemeralPub: nil,
@@ -152,7 +149,6 @@ extension KeepTalkingClient {
                 from: config.node,
                 to: peerNodeID,
                 contextID: contextID,
-                scope: scopeWire,
                 initiatorEphemeralPub: ephemeral.publicKeyBytes
             )
 
@@ -205,12 +201,10 @@ extension KeepTalkingClient {
         guard payload.to == config.node else { return }
         guard payload.from != config.node else { return }
 
-        let context = try await ensure(payload.contextID, for: KeepTalkingContext.self)
+        _ = try await ensure(payload.contextID, for: KeepTalkingContext.self)
         guard let contextSecret = try await loadGroupChatSecret(for: payload.contextID) else {
             throw KeepTalkingTrustError.contextSecretMissing(payload.contextID)
         }
-
-        let scope = Self.modelScope(from: payload.scope, context: context)
 
         guard let handler = trustQueue.sync(execute: { incomingTrustHandler }) else {
             // No app handler installed: explicitly reject so the peer doesn't
@@ -229,8 +223,7 @@ extension KeepTalkingClient {
         let request = KeepTalkingIncomingTrustRequest(
             sessionID: payload.sessionID,
             fromNodeID: payload.from,
-            contextID: payload.contextID,
-            scope: scope
+            contextID: payload.contextID
         )
 
         let decision = await handler(request)
@@ -245,7 +238,7 @@ extension KeepTalkingClient {
                         contextID: payload.contextID
                     )
                 )
-            case .accept:
+            case .accept(let scope):
                 try await acceptTrustRequest(
                     payload: payload,
                     contextSecret: contextSecret,
@@ -264,6 +257,7 @@ extension KeepTalkingClient {
         let myLongTermPubKey = try await trust(node: payload.from, scope: scope)
 
         let ephemeral = TrustHandshakeCrypto.generateEphemeral()
+        let scopeWire = Self.wireScope(from: scope)
         let transcript = TrustHandshakeCrypto.transcript(
             sessionID: payload.sessionID,
             contextID: payload.contextID,
@@ -271,7 +265,7 @@ extension KeepTalkingClient {
             responderNodeID: config.node,
             initiatorEphemeralPub: payload.initiatorEphemeralPub,
             responderEphemeralPub: ephemeral.publicKeyBytes,
-            scopeTag: payload.scope.rawValue
+            scopeTag: scopeWire.rawValue
         )
 
         let sessionKey = try TrustHandshakeCrypto.deriveSessionKey(
@@ -296,7 +290,7 @@ extension KeepTalkingClient {
             peerNodeID: payload.from,
             contextID: payload.contextID,
             scope: scope,
-            scopeWire: payload.scope,
+            scopeWire: scopeWire,
             localEphemeralPriv: ephemeral.privateKey,
             localEphemeralPub: ephemeral.publicKeyBytes,
             peerEphemeralPub: payload.initiatorEphemeralPub,
@@ -311,6 +305,7 @@ extension KeepTalkingClient {
             from: config.node,
             to: payload.from,
             contextID: payload.contextID,
+            scope: scopeWire,
             responderEphemeralPub: ephemeral.publicKeyBytes,
             sealedIdentity: sealedIdentity
         )
@@ -320,7 +315,7 @@ extension KeepTalkingClient {
     private func onTrustAccept(_ payload: KeepTalkingTrustAcceptPayload) async throws {
         guard payload.to == config.node else { return }
 
-        guard let session = trustQueue.sync(execute: { pendingTrustSessions[payload.sessionID] })
+        guard var session = trustQueue.sync(execute: { pendingTrustSessions[payload.sessionID] })
         else {
             throw KeepTalkingTrustError.sessionNotFound(payload.sessionID)
         }
@@ -331,6 +326,15 @@ extension KeepTalkingClient {
             throw KeepTalkingTrustError.contextSecretMissing(payload.contextID)
         }
 
+        // The responder's chosen scope arrives here. Resolve into the
+        // model + cache on the pending session so the rest of the flow
+        // (transcript binding, persistence) sees the same value.
+        let context = try await ensure(payload.contextID, for: KeepTalkingContext.self)
+        let scope = Self.modelScope(from: payload.scope, context: context)
+        session.scope = scope
+        session.scopeWire = payload.scope
+        trustQueue.sync { pendingTrustSessions[payload.sessionID] = session }
+
         let transcript = TrustHandshakeCrypto.transcript(
             sessionID: session.sessionID,
             contextID: session.contextID,
@@ -338,7 +342,7 @@ extension KeepTalkingClient {
             responderNodeID: session.peerNodeID,
             initiatorEphemeralPub: session.localEphemeralPub,
             responderEphemeralPub: payload.responderEphemeralPub,
-            scopeTag: session.scopeWire.rawValue
+            scopeTag: payload.scope.rawValue
         )
 
         let sessionKey = try TrustHandshakeCrypto.deriveSessionKey(
@@ -360,17 +364,16 @@ extension KeepTalkingClient {
             throw KeepTalkingTrustError.identityVerificationFailed
         }
 
-        // Persist peer's long-term pubkey into our local trust graph.
+        // Persist peer's long-term pubkey into our local trust graph,
+        // creating our outgoing relation under the responder's chosen scope.
+        let myLongTermPubKey = try await trust(
+            node: session.peerNodeID,
+            scope: scope
+        )
         try await lure(
             node: session.peerNodeID,
             publicKey: inner.identityPublicKey,
             overwrite: true
-        )
-
-        // Now seal our own identity for the .trustComplete step.
-        let myLongTermPubKey = try await trust(
-            node: session.peerNodeID,
-            scope: session.scope
         )
         let myInner = KeepTalkingTrustIdentityInner(
             nodeID: config.node,
@@ -416,6 +419,9 @@ extension KeepTalkingClient {
             throw KeepTalkingTrustError.contextSecretMissing(payload.contextID)
         }
 
+        guard let scopeWire = session.scopeWire else {
+            throw KeepTalkingTrustError.alreadySettled
+        }
         let transcript = TrustHandshakeCrypto.transcript(
             sessionID: session.sessionID,
             contextID: session.contextID,
@@ -423,7 +429,7 @@ extension KeepTalkingClient {
             responderNodeID: config.node,
             initiatorEphemeralPub: peerEphemeralPub,
             responderEphemeralPub: session.localEphemeralPub,
-            scopeTag: session.scopeWire.rawValue
+            scopeTag: scopeWire.rawValue
         )
 
         let sessionKey = try TrustHandshakeCrypto.deriveSessionKey(

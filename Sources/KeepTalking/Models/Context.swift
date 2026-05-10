@@ -70,6 +70,9 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     @Children(for: \.$context)
     public var threads: [KeepTalkingThread]
 
+    @Children(for: \.$context)
+    public var sideNotes: [KeepTalkingSideNote]
+
     public init() {}
 
     public init(

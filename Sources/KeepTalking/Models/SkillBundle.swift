@@ -95,7 +95,9 @@ extension KeepTalkingSkillBundle {
         var result: [String: String] = [:]
         for tool in atomicTools {
             if let name = tool.toolName, let path = tool.scriptPath {
-                result[name] = path
+                let sanitized = String(
+                    name.map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "_" })
+                if !sanitized.isEmpty { result[sanitized] = path }
             }
         }
         return result

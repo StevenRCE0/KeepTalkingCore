@@ -53,7 +53,9 @@ extension SkillManager {
             metadata
             .filter { $0.key.hasPrefix("scripts.") }
             .reduce(into: [String: String]()) { result, pair in
-                let toolName = String(pair.key.dropFirst("scripts.".count))
+                let raw = String(pair.key.dropFirst("scripts.".count))
+                let toolName = String(
+                    raw.map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "_" })
                 if !toolName.isEmpty { result[toolName] = pair.value }
             }
 

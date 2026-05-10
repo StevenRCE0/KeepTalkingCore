@@ -382,13 +382,15 @@ extension KeepTalkingClient {
     ) async throws -> KeepTalkingContextSyncMessagesResult {
         let snapshot = try await contextSyncSnapshot(for: request.context)
         let messages = snapshot.messages(after: request.senders)
+        let sideNotes = try await allSideNoteDTOs(for: request.context)
         return KeepTalkingContextSyncMessagesResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
             messages: messages,
-            attachments: snapshot.attachments(for: messages)
+            attachments: snapshot.attachments(for: messages),
+            sideNotes: sideNotes
         )
     }
 
@@ -397,14 +399,53 @@ extension KeepTalkingClient {
     ) async throws -> KeepTalkingContextSyncMessagesResult {
         let snapshot = try await contextSyncSnapshot(for: request.context)
         let messages = snapshot.messages(in: request.chunks)
+        let sideNotes = try await allSideNoteDTOs(for: request.context)
         return KeepTalkingContextSyncMessagesResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
             messages: messages,
-            attachments: snapshot.attachments(for: messages)
+            attachments: snapshot.attachments(for: messages),
+            sideNotes: sideNotes
         )
+    }
+
+    private func allSideNoteDTOs(for contextID: UUID) async throws -> [KeepTalkingSideNoteDTO] {
+        let context = try await ensure(contextID, for: KeepTalkingContext.self)
+        return try await context.$sideNotes
+            .query(on: localStore.database)
+            .all()
+            .compactMap { KeepTalkingSideNoteDTO($0) }
+    }
+
+    private func mergeSideNotes(
+        _ incoming: [KeepTalkingSideNoteDTO],
+        contextID: UUID
+    ) async throws {
+        for dto in incoming {
+            if let existing = try await KeepTalkingSideNote.query(on: localStore.database)
+                .filter(\.$context.$id == contextID)
+                .filter(\.$key == dto.key)
+                .first()
+            {
+                let localUpdatedAt = existing.updatedAt ?? .distantPast
+                let remoteUpdatedAt = dto.updatedAt ?? .distantPast
+                guard remoteUpdatedAt > localUpdatedAt else { continue }
+                existing.value = dto.value
+                existing.isArchived = dto.isArchived
+                try await existing.save(on: localStore.database)
+            } else {
+                let note = KeepTalkingSideNote(
+                    id: dto.id,
+                    contextID: contextID,
+                    key: dto.key,
+                    value: dto.value,
+                    isArchived: dto.isArchived
+                )
+                try await note.save(on: localStore.database)
+            }
+        }
     }
 
     private func persistContextSyncMessagesResult(
@@ -422,6 +463,9 @@ extension KeepTalkingClient {
                 for: savedAttachments,
                 in: result.context
             )
+        }
+        if !result.sideNotes.isEmpty {
+            try await mergeSideNotes(result.sideNotes, contextID: result.context)
         }
         // Apply any mark messages that arrived from remote nodes.
         try await consumePendingMarks(in: result.context)

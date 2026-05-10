@@ -384,14 +384,29 @@ public actor KeepTalkingSkillPlanner {
 
                     case Self.registerScriptTool:
                         let toolName = string(args["tool_name"]) ?? ""
-                        let scriptPath = string(args["script_path"]) ?? ""
+                        var scriptPath = string(args["script_path"]) ?? ""
+                        if !scriptPath.isEmpty && !scriptPath.hasPrefix("scripts/") {
+                            scriptPath =
+                                "scripts/"
+                                + scriptPath.trimmingCharacters(
+                                    in: CharacterSet(charactersIn: "/"))
+                        }
                         _ = await onEvent?(.registeringScript(toolName: toolName, path: scriptPath))
-                        if !toolName.isEmpty && !scriptPath.isEmpty { toolDeclarations[toolName] = scriptPath }
+                        if !toolName.isEmpty && !scriptPath.isEmpty {
+                            toolDeclarations[toolName] = scriptPath
+                        }
                         result = "Registered."
 
                     case Self.suggestScriptTool:
-                        let path = string(args["path"]) ?? ""
+                        var path = string(args["path"]) ?? ""
                         let content = string(args["content"]) ?? ""
+                        if !path.isEmpty && !path.hasPrefix("scripts/")
+                            && !path.hasPrefix("references/") && !path.hasPrefix("assets/")
+                        {
+                            path =
+                                "scripts/"
+                                + path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                        }
                         _ = await onEvent?(.suggestingScript(path: path))
                         if !path.isEmpty { suggestedScripts[path] = content }
                         result = "Recorded."

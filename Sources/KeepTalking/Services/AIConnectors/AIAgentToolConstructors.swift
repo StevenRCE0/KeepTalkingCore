@@ -522,6 +522,54 @@ extension KeepTalkingClient {
         )
     }
 
+    func makeUpdateSideNoteTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.updateSideNoteToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.updateSideNote,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "key": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "Topic identifier for the note. Unique per context — writing to an existing key replaces its value."
+                        ),
+                    ]),
+                    "value": .object([
+                        "type": .string("string"),
+                        "description": .string("Content of the note."),
+                    ]),
+                ]),
+                "required": .array([.string("key"), .string("value")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
+    func makeArchiveSideNoteTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.archiveSideNoteToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.archiveSideNote,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "key": .object([
+                        "type": .string("string"),
+                        "description": .string("Topic identifier of the note to archive."),
+                    ])
+                ]),
+                "required": .array([.string("key")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
     /// Convert an MCP `Value` schema into the AIProxy `[String: AIProxyJSONValue]`
     /// shape that `OpenAIChatCompletionRequestBody.Tool.function(parameters:)` expects.
     func openAIParameters(from inputSchema: Value?) -> [String: AIProxyJSONValue] {
