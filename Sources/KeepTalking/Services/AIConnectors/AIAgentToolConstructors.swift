@@ -2,6 +2,7 @@ import AIProxy
 import Foundation
 import MCP
 
+/// Includes tool normalisation and predefined meta tools.
 extension KeepTalkingClient {
     func mcpProxyDefinitions(
         for action: KeepTalkingAction,

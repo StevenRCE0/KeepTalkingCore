@@ -75,6 +75,15 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     /// cache is read at stats time.
     private var cachedIceConnectionStates: [Int: LKRTCIceConnectionState] = [:]
 
+    /// Reassembles inbound fragmented envelope payloads. See `PacketFragmenter`
+    /// for the wire format. Blob channel buffers bypass this and go through
+    /// `onBlobData` directly.
+    private let fragmentReassembler = PacketFragmenter.Reassembler()
+    /// Per-fragment send ceiling. Starts at the conservative default and is
+    /// raised after `setRemoteDescription` if the peer's SDP advertises a
+    /// larger `a=max-message-size`. Written under `stateQueue`.
+    private var negotiatedMaxFragmentBytes: Int = PacketFragmenter.defaultMaxFragmentBytes
+
     private func reportTransportDegraded(_ reason: String) {
         guard !didReportDegrade else { return }
         didReportDegrade = true
@@ -194,6 +203,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             on: publisher,
             invalidSdpTypeError: RTCError.invalidSdpType
         )
+        applyRemoteSDPMaxMessageSize(answerPayload.sdp)
         // Flush immediately so ICE checks can start against the server's candidates
         // without waiting on the API channel poll below.
         flushPendingCandidates(for: Target.publisher)
@@ -268,14 +278,21 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
                 localNodeID: config.node,
                 contextSecretProvider: contextSecretProvider
             )
-        let packet = LKRTCDataBuffer(data: payload, isBinary: false)
-        debug(
-            "send envelope kind=\(envelope) bytes=\(payload.count) label=\(sendChannel.label) channelState=\(sendChannel.readyState.rawValue)"
+        let cap = withState { negotiatedMaxFragmentBytes }
+        let frames = PacketFragmenter.fragments(
+            for: payload,
+            maxFragmentBytes: cap
         )
-        if !sendChannel.sendData(packet) {
-            throw RTCError.dataChannelNotOpen(sendChannel.label)
+        debug(
+            "send envelope kind=\(envelope) bytes=\(payload.count) frames=\(frames.count) cap=\(cap) label=\(sendChannel.label) channelState=\(sendChannel.readyState.rawValue)"
+        )
+        for frame in frames {
+            let packet = LKRTCDataBuffer(data: frame, isBinary: false)
+            if !sendChannel.sendData(packet) {
+                throw RTCError.dataChannelNotOpen(sendChannel.label)
+            }
         }
-        sentMessageCount += 1
+        sentMessageCount += frames.count
     }
 
     /// Maximum bytes allowed in the SCTP send buffer before we wait for it
@@ -386,6 +403,17 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
 
     // MARK: - SDP / ICE
 
+    /// Reads `a=max-message-size` out of the peer's SDP and raises the send
+    /// fragment cap accordingly. Silently keeps the default when absent.
+    private func applyRemoteSDPMaxMessageSize(_ sdp: String) {
+        guard let advertised = PacketFragmenter.parseMaxMessageSize(fromSDP: sdp) else {
+            return
+        }
+        let resolved = min(advertised, PacketFragmenter.absoluteMaxFragmentBytes)
+        withState { negotiatedMaxFragmentBytes = resolved }
+        debug("negotiated SCTP max-message-size advertised=\(advertised) using=\(resolved)")
+    }
+
     private func acceptRemoteOffer(_ payload: SessionDescriptionPayload) {
         guard let subscriber = peer(for: Target.subscriber) else {
             debug("drop remote offer: subscriber missing")
@@ -404,6 +432,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
                     on: subscriber,
                     invalidSdpTypeError: RTCError.invalidSdpType
                 )
+                applyRemoteSDPMaxMessageSize(payload.sdp)
                 flushPendingCandidates(for: Target.subscriber)
 
                 let answer = try await RTCShared.createAnswer(
@@ -763,11 +792,33 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
             return
         }
 
+        // Blob channel uses raw binary frames with its own higher-level
+        // chunking — never fragmented at this layer.
+        if dataChannel.label == config.blobChannelLabel {
+            debug(
+                "recv blob bytes=\(buffer.data.count) label=\(dataChannel.label) channelState=\(dataChannel.readyState.rawValue)"
+            )
+            onBlobData?(buffer.data)
+            return
+        }
+
+        // Envelope channels are always fragmented (single-fragment sends are
+        // wrapped too). Anything that doesn't carry the fragment magic is
+        // silently dropped.
+        guard let payload = fragmentReassembler.feed(buffer.data) else {
+            if PacketFragmenter.parseFrame(buffer.data) == nil {
+                debug(
+                    "dropped non-fragment buffer label=\(dataChannel.label) bytes=\(buffer.data.count)"
+                )
+            }
+            return
+        }
+
         do {
             if let envelope =
                 try KeepTalkingPacketTransportCrypto
                 .inboundEnvelope(
-                    from: buffer.data,
+                    from: payload,
                     contextSecretProvider: contextSecretProvider
                 )
             {
@@ -787,27 +838,17 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
                 return
             }
         } catch {
-            if dataChannel.label != config.blobChannelLabel {
-                debug(
-                    "envelope decode failed; encrypted envelope error=\(error.localizedDescription)"
-                )
-            }
-        }
-
-        if dataChannel.label == config.blobChannelLabel {
             debug(
-                "recv blob bytes=\(buffer.data.count) label=\(dataChannel.label) channelState=\(dataChannel.readyState.rawValue)"
+                "envelope decode failed; encrypted envelope error=\(error.localizedDescription)"
             )
-            onBlobData?(buffer.data)
-            return
         }
 
-        if let text = String(data: buffer.data, encoding: .utf8) {
+        if let text = String(data: payload, encoding: .utf8) {
             debug("envelope decode failed; raw utf8=\(text)")
             onRawMessage?(text)
         } else {
-            debug("envelope decode failed; non-utf8 bytes=\(buffer.data.count)")
-            onRawMessage?("<\(buffer.data.count) bytes>")
+            debug("envelope decode failed; non-utf8 bytes=\(payload.count)")
+            onRawMessage?("<\(payload.count) bytes>")
         }
     }
 

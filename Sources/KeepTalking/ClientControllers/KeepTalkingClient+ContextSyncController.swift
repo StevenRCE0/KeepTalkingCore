@@ -53,6 +53,19 @@ extension KeepTalkingClient {
                 try await persistContextSyncMessagesResult(chunkResult)
             }
 
+            // Side notes use full-sync semantics: pull the entire set from the
+            // peer and merge by `(key, updatedAt)`. Transparently chunked at
+            // the transport layer when payload exceeds the SCTP per-message
+            // ceiling, so there's no chunking decision to make here.
+            let sideNotesResult = try await dispatchContextSyncSideNotesRequest(
+                to: node,
+                contextID: contextID
+            )
+            try await mergeSideNotes(
+                sideNotesResult.sideNotes,
+                contextID: contextID
+            )
+
             Task.detached(priority: .background) { [self] in
                 if config.recentAttachmentSyncLookback > 0 {
                     try await requestRecentMissingAttachmentBlobs(
@@ -121,6 +134,19 @@ extension KeepTalkingClient {
                     return
                 }
                 try await respondToContextSyncAttachmentRequest(request)
+            case .sideNotesRequest(let request):
+                guard request.recipient == config.node else {
+                    return
+                }
+                let result = try await executeContextSyncSideNotesRequest(request)
+                try rtcClient.sendEnvelope(
+                    KeepTalkingContextSyncEnvelope.sideNotesResult(result)
+                )
+            case .sideNotesResult(let result):
+                guard result.requester == config.node else {
+                    return
+                }
+                _ = resolvePendingContextSyncSideNotes(result)
         }
     }
 
@@ -162,6 +188,29 @@ extension KeepTalkingClient {
             send: { [weak self] in
                 try self?.rtcClient.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.tailRequest(request)
+                )
+            }
+        )
+    }
+
+    func dispatchContextSyncSideNotesRequest(
+        to node: UUID,
+        contextID: UUID
+    ) async throws -> KeepTalkingContextSyncSideNotesResult {
+        let request = KeepTalkingContextSyncSideNotesRequest(
+            context: contextID,
+            requester: config.node,
+            recipient: node
+        )
+        if node == config.node {
+            return try await executeContextSyncSideNotesRequest(request)
+        }
+        return try await waitForContextSyncSideNotes(
+            request: request.request,
+            timeoutSeconds: Self.contextSyncResultTimeoutSeconds,
+            send: { [weak self] in
+                try self?.rtcClient.sendEnvelope(
+                    KeepTalkingContextSyncEnvelope.sideNotesRequest(request)
                 )
             }
         )
@@ -291,6 +340,88 @@ extension KeepTalkingClient {
         }
     }
 
+    func waitForContextSyncSideNotes(
+        request: UUID,
+        timeoutSeconds: TimeInterval,
+        send: @escaping @Sendable () throws -> Void = {}
+    ) async throws -> KeepTalkingContextSyncSideNotesResult {
+        try await withThrowingTaskGroup(
+            of: KeepTalkingContextSyncSideNotesResult.self
+        ) { group in
+            group.addTask { [weak self] in
+                guard let self else {
+                    throw KeepTalkingClientError.contextSyncTimeout(request)
+                }
+                return try await withCheckedThrowingContinuation {
+                    (
+                        continuation: CheckedContinuation<
+                            KeepTalkingContextSyncSideNotesResult, Error
+                        >
+                    ) in
+                    do {
+                        self.contextSyncQueue.sync {
+                            self.pendingContextSyncSideNotes[request] =
+                                continuation
+                        }
+                        try send()
+                    } catch {
+                        self.failPendingContextSyncSideNotes(
+                            request: request,
+                            error: error
+                        )
+                    }
+                }
+            }
+
+            group.addTask { [weak self] in
+                try await Task.sleep(
+                    nanoseconds: UInt64(timeoutSeconds * 1_000_000_000)
+                )
+                self?.failPendingContextSyncSideNotes(
+                    request: request,
+                    error: KeepTalkingClientError.contextSyncTimeout(request)
+                )
+                throw KeepTalkingClientError.contextSyncTimeout(request)
+            }
+
+            let first = try await group.next()
+            group.cancelAll()
+            guard let first else {
+                throw KeepTalkingClientError.contextSyncTimeout(request)
+            }
+            return first
+        }
+    }
+
+    func resolvePendingContextSyncSideNotes(
+        _ result: KeepTalkingContextSyncSideNotesResult
+    ) -> Bool {
+        contextSyncQueue.sync {
+            guard
+                let continuation = pendingContextSyncSideNotes.removeValue(
+                    forKey: result.request
+                )
+            else {
+                return false
+            }
+            continuation.resume(returning: result)
+            return true
+        }
+    }
+
+    func failPendingContextSyncSideNotes(request: UUID, error: Error) {
+        contextSyncQueue.sync {
+            guard
+                let continuation = pendingContextSyncSideNotes.removeValue(
+                    forKey: request
+                )
+            else {
+                return
+            }
+            continuation.resume(throwing: error)
+        }
+    }
+
     func resolvePendingContextSyncMessages(
         _ result: KeepTalkingContextSyncMessagesResult
     ) -> Bool {
@@ -353,12 +484,17 @@ extension KeepTalkingClient {
         contextSyncQueue.sync {
             let summaries = pendingContextSyncSummaries
             let messages = pendingContextSyncMessages
+            let sideNotes = pendingContextSyncSideNotes
             pendingContextSyncSummaries.removeAll()
             pendingContextSyncMessages.removeAll()
+            pendingContextSyncSideNotes.removeAll()
             for continuation in summaries.values {
                 continuation.resume(throwing: error)
             }
             for continuation in messages.values {
+                continuation.resume(throwing: error)
+            }
+            for continuation in sideNotes.values {
                 continuation.resume(throwing: error)
             }
         }
@@ -382,15 +518,13 @@ extension KeepTalkingClient {
     ) async throws -> KeepTalkingContextSyncMessagesResult {
         let snapshot = try await contextSyncSnapshot(for: request.context)
         let messages = snapshot.messages(after: request.senders)
-        let sideNotes = try await allSideNoteDTOs(for: request.context)
         return KeepTalkingContextSyncMessagesResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
             messages: messages,
-            attachments: snapshot.attachments(for: messages),
-            sideNotes: sideNotes
+            attachments: snapshot.attachments(for: messages)
         )
     }
 
@@ -399,14 +533,25 @@ extension KeepTalkingClient {
     ) async throws -> KeepTalkingContextSyncMessagesResult {
         let snapshot = try await contextSyncSnapshot(for: request.context)
         let messages = snapshot.messages(in: request.chunks)
-        let sideNotes = try await allSideNoteDTOs(for: request.context)
         return KeepTalkingContextSyncMessagesResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
             messages: messages,
-            attachments: snapshot.attachments(for: messages),
+            attachments: snapshot.attachments(for: messages)
+        )
+    }
+
+    private func executeContextSyncSideNotesRequest(
+        _ request: KeepTalkingContextSyncSideNotesRequest
+    ) async throws -> KeepTalkingContextSyncSideNotesResult {
+        let sideNotes = try await allSideNoteDTOs(for: request.context)
+        return KeepTalkingContextSyncSideNotesResult(
+            request: request.request,
+            context: request.context,
+            requester: request.requester,
+            responder: config.node,
             sideNotes: sideNotes
         )
     }
@@ -419,7 +564,7 @@ extension KeepTalkingClient {
             .compactMap { KeepTalkingSideNoteDTO($0) }
     }
 
-    private func mergeSideNotes(
+    func mergeSideNotes(
         _ incoming: [KeepTalkingSideNoteDTO],
         contextID: UUID
     ) async throws {
@@ -463,9 +608,6 @@ extension KeepTalkingClient {
                 for: savedAttachments,
                 in: result.context
             )
-        }
-        if !result.sideNotes.isEmpty {
-            try await mergeSideNotes(result.sideNotes, contextID: result.context)
         }
         // Apply any mark messages that arrived from remote nodes.
         try await consumePendingMarks(in: result.context)

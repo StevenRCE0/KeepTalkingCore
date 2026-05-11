@@ -72,6 +72,15 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     private var didReportDegrade = false
     private var notifiedConnectedPeers = Set<UUID>()
 
+    /// Reassembles inbound fragmented envelope payloads. See `PacketFragmenter`
+    /// for the wire format. Blob channel buffers bypass this and go through
+    /// `onBlobData` directly.
+    private let fragmentReassembler = PacketFragmenter.Reassembler()
+    /// Per-fragment send ceiling. Starts at the conservative default and is
+    /// raised after `setRemoteDescription` if the peer's SDP advertises a
+    /// larger `a=max-message-size`.
+    private var negotiatedMaxFragmentBytes: Int = PacketFragmenter.defaultMaxFragmentBytes
+
     init(
         config: KeepTalkingConfig,
         localNodeID: UUID,
@@ -200,12 +209,29 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
                 localNodeID: localNodeID,
                 contextSecretProvider: contextSecretProvider
             )
-        let packet = LKRTCDataBuffer(data: payload, isBinary: false)
-        if !dataChannel.sendData(packet) {
-            reportTransportDegraded("sendData returned false")
-            throw P2PError.dataChannelNotOpen(dataChannel.label)
+        let frames = PacketFragmenter.fragments(
+            for: payload,
+            maxFragmentBytes: negotiatedMaxFragmentBytes
+        )
+        for frame in frames {
+            let packet = LKRTCDataBuffer(data: frame, isBinary: false)
+            if !dataChannel.sendData(packet) {
+                reportTransportDegraded("sendData returned false")
+                throw P2PError.dataChannelNotOpen(dataChannel.label)
+            }
         }
-        sentMessageCount += 1
+        sentMessageCount += frames.count
+    }
+
+    /// Reads `a=max-message-size` out of the peer's SDP and raises the send
+    /// fragment cap accordingly. Silently keeps the default when absent.
+    private func applyRemoteSDPMaxMessageSize(_ sdp: String) {
+        guard let advertised = PacketFragmenter.parseMaxMessageSize(fromSDP: sdp) else {
+            return
+        }
+        let resolved = min(advertised, PacketFragmenter.absoluteMaxFragmentBytes)
+        negotiatedMaxFragmentBytes = resolved
+        debug("negotiated SCTP max-message-size advertised=\(advertised) using=\(resolved)")
     }
 
     private static let maxBufferedAmount: UInt64 = 128 * 1024
@@ -453,6 +479,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
                             on: peerConnection,
                             invalidSdpTypeError: P2PError.invalidSdpType
                         )
+                        applyRemoteSDPMaxMessageSize(payload.sdp)
                         flushPendingRemoteCandidates()
                         let answer = try await RTCShared.createAnswer(
                             on: peerConnection,
@@ -487,6 +514,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
                             on: peerConnection,
                             invalidSdpTypeError: P2PError.invalidSdpType
                         )
+                        applyRemoteSDPMaxMessageSize(payload.sdp)
                         flushPendingRemoteCandidates()
                         debug("answer applied")
                     } catch {
@@ -668,11 +696,30 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
         recvMessageCount += 1
         guard isKnownChannel(dataChannel.label) else { return }
 
+        // Blob channel uses raw binary frames with its own higher-level
+        // chunking — never fragmented at this layer.
+        if dataChannel.label == config.blobChannelLabel {
+            onBlobData?(buffer.data)
+            return
+        }
+
+        // Envelope channels are always fragmented (single-fragment sends are
+        // wrapped too). Anything that doesn't carry the fragment magic is
+        // silently dropped.
+        guard let payload = fragmentReassembler.feed(buffer.data) else {
+            if PacketFragmenter.parseFrame(buffer.data) == nil {
+                debug(
+                    "dropped non-fragment buffer label=\(dataChannel.label) bytes=\(buffer.data.count)"
+                )
+            }
+            return
+        }
+
         do {
             if let envelope =
                 try KeepTalkingPacketTransportCrypto
                 .inboundEnvelope(
-                    from: buffer.data,
+                    from: payload,
                     contextSecretProvider: contextSecretProvider
                 )
             {
@@ -687,22 +734,15 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
                 return
             }
         } catch {
-            if dataChannel.label != config.blobChannelLabel {
-                debug(
-                    "envelope decode failed; encrypted envelope error=\(error.localizedDescription)"
-                )
-            }
+            debug(
+                "envelope decode failed; encrypted envelope error=\(error.localizedDescription)"
+            )
         }
 
-        if dataChannel.label == config.blobChannelLabel {
-            onBlobData?(buffer.data)
-            return
-        }
-
-        if let text = String(data: buffer.data, encoding: .utf8) {
+        if let text = String(data: payload, encoding: .utf8) {
             onRawMessage?(text)
         } else {
-            onRawMessage?("<\(buffer.data.count) bytes>")
+            onRawMessage?("<\(payload.count) bytes>")
         }
     }
 

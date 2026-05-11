@@ -235,6 +235,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     )
     var pendingContextSyncSummaries: [UUID: CheckedContinuation<KeepTalkingContextSyncSummaryResult, Error>] = [:]
     var pendingContextSyncMessages: [UUID: CheckedContinuation<KeepTalkingContextSyncMessagesResult, Error>] = [:]
+    var pendingContextSyncSideNotes: [UUID: CheckedContinuation<KeepTalkingContextSyncSideNotesResult, Error>] = [:]
 
     // MARK: Trust handshake properties
     let trustQueue = DispatchQueue(

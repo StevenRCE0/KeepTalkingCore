@@ -15,6 +15,10 @@ extension KeepTalkingContextSyncEnvelope {
                 return [result.requester, result.responder]
             case .attachmentRequest(let request):
                 return [request.requester]
+            case .sideNotesRequest(let request):
+                return [request.requester, request.recipient]
+            case .sideNotesResult(let result):
+                return [result.requester, result.responder]
         }
     }
 
@@ -32,6 +36,10 @@ extension KeepTalkingContextSyncEnvelope {
                 return result.context
             case .attachmentRequest(let request):
                 return request.context
+            case .sideNotesRequest(let request):
+                return request.context
+            case .sideNotesResult(let result):
+                return result.context
         }
     }
 }

@@ -237,7 +237,6 @@ public struct KeepTalkingContextSyncMessagesResult: Codable, Sendable {
     public let responder: UUID
     public let messages: [KeepTalkingContextMessage]
     public let attachments: [KeepTalkingContextAttachmentDTO]
-    public let sideNotes: [KeepTalkingSideNoteDTO]
 
     public init(
         request: UUID,
@@ -245,8 +244,7 @@ public struct KeepTalkingContextSyncMessagesResult: Codable, Sendable {
         requester: UUID,
         responder: UUID,
         messages: [KeepTalkingContextMessage],
-        attachments: [KeepTalkingContextAttachmentDTO] = [],
-        sideNotes: [KeepTalkingSideNoteDTO] = []
+        attachments: [KeepTalkingContextAttachmentDTO] = []
     ) {
         self.request = request
         self.context = context
@@ -254,6 +252,49 @@ public struct KeepTalkingContextSyncMessagesResult: Codable, Sendable {
         self.responder = responder
         self.messages = messages
         self.attachments = attachments
+    }
+}
+
+/// Pull request for the responder's side-note set. Side notes use full-sync
+/// semantics — the responder always returns every side note it knows about
+/// for the context, and the requester merges by `(key, updatedAt)`.
+public struct KeepTalkingContextSyncSideNotesRequest: Codable, Sendable, Equatable {
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let recipient: UUID
+
+    public init(
+        request: UUID = UUID(),
+        context: UUID,
+        requester: UUID,
+        recipient: UUID
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.recipient = recipient
+    }
+}
+
+public struct KeepTalkingContextSyncSideNotesResult: Codable, Sendable {
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let responder: UUID
+    public let sideNotes: [KeepTalkingSideNoteDTO]
+
+    public init(
+        request: UUID,
+        context: UUID,
+        requester: UUID,
+        responder: UUID,
+        sideNotes: [KeepTalkingSideNoteDTO]
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.responder = responder
         self.sideNotes = sideNotes
     }
 }
@@ -304,6 +345,8 @@ public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
     case chunkRequest(KeepTalkingContextSyncChunkRequest)
     case messagesResult(KeepTalkingContextSyncMessagesResult)
     case attachmentRequest(KeepTalkingContextSyncAttachmentRequest)
+    case sideNotesRequest(KeepTalkingContextSyncSideNotesRequest)
+    case sideNotesResult(KeepTalkingContextSyncSideNotesResult)
 }
 
 public struct KeepTalkingContextSyncSnapshot: Sendable {
