@@ -31,12 +31,9 @@ let package = Package(
             url: "https://github.com/modelcontextprotocol/swift-sdk.git",
             from: "0.12.0"
         ),
-        // KeepTalking-only fork of AIProxySwift, slimmed for multiplatform use.
-        // See ./MIGRATION_AIPROXY.md for context. Local path during the migration;
-        // switch to a Git URL + tag before any release.
         .package(
-            name: "AIProxyMultiPlatform",
-            path: "../AIProxySwift-MultiPlatform"
+            url: "https://github.com/StevenRCE0/AIProxySwift-MultiPlatform.git",
+            branch: "main"
         ),
     ],
     targets: [
@@ -50,7 +47,7 @@ let package = Package(
                     package: "fluent-sqlite-driver"
                 ),
                 .product(name: "MCP", package: "swift-sdk"),
-                .product(name: "AIProxy", package: "AIProxyMultiPlatform"),
+                .product(name: "AIProxy", package: "AIProxySwift-MultiPlatform"),
             ],
             path: "Sources/KeepTalking"
         ),
