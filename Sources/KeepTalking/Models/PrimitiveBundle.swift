@@ -86,7 +86,7 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
         KeepTalkingPrimitiveBundle(
             name: "create-action",
             indexDescription:
-                "Prompts the user to create a new action and grant it to the caller's context.",
+                "Prompts the user to create a new action and grant it to the caller's context. Keep the proposed action's `description` short (one sentence, ≤12 words) and limited to what the action does — you cannot see the host environment, existing actions, or how the user will discover it, so do not speculate about implementations, detailed scripts, callers, triggers, or surrounding UI. User on the other end would double check and modify the action if necessary before adding it to the system and grant it to you in the current conversation.",
             action: .createAction,
             blockingAuthorisation: true
         ),

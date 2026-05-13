@@ -1,6 +1,15 @@
 {
-  "originHash" : "76504372159e77ac33ebf6df52c6d10a00cd1d36b840921771ace104d9d64f94",
+  "originHash" : "050a00bd51e1880d6c1ff3938b68648a5052f3f9919ce4e2030a657c49204c0d",
   "pins" : [
+    {
+      "identity" : "aiproxyswift-multiplatform",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/StevenRCE0/AIProxySwift-MultiPlatform.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "759decb430d3e7ac9e268d59e831570ea24e9483"
+      }
+    },
     {
       "identity" : "async-kit",
       "kind" : "remoteSourceControl",
