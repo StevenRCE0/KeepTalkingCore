@@ -30,6 +30,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
+    var onBroadcastReady: (@Sendable () -> Void)?
     var onLog: (@Sendable (String) -> Void)?
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider?
 
@@ -234,6 +235,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         broadcast.onStateChange = { [weak self] in
             if self?.broadcast.isReady ?? false {
                 self?.bindBroadcastBlobCallback()
+                self?.onBroadcastReady?()
             }
             self?.debug("broadcast state changed to \(self?.broadcast.state.description ?? "?")")
         }

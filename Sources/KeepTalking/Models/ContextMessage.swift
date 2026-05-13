@@ -46,6 +46,14 @@ public final class KeepTalkingContextMessage: Model, Hashable, @unchecked Sendab
     @OptionalField(key: "agent_turn_id")
     public var agentTurnID: UUID?
 
+    @Children(for: \.$parentMessage)
+    public var attachments: [KeepTalkingContextAttachment]
+
+    /// At most one — uniqueness enforced at the table level. Present iff
+    /// the message is still queued for active transport push.
+    @Children(for: \.$contextMessage)
+    public var outboxEntries: [KeepTalkingOutboxEntry]
+
     public init() {}
 
     public init(

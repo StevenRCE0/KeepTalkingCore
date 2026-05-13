@@ -73,6 +73,9 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     @Children(for: \.$context)
     public var sideNotes: [KeepTalkingSideNote]
 
+    @Children(for: \.$context)
+    public var outboxEntries: [KeepTalkingOutboxEntry]
+
     public init() {}
 
     public init(

@@ -46,6 +46,7 @@ final class KeepTalkingP2PRTCClient: NSObject, KeepTalkingTransportClient,
     var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
+    var onBroadcastReady: (@Sendable () -> Void)?
     var onLog: (@Sendable (String) -> Void)?
     var onTransportDegraded: (@Sendable (String) -> Void)?
     /// Called when ICE transitions to `.connected` or `.completed`.

@@ -37,6 +37,7 @@ final class KeepTalkingRTCClient: NSObject, KeepTalkingTransportClient,
     var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
+    var onBroadcastReady: (@Sendable () -> Void)?
     var onLog: (@Sendable (String) -> Void)? {
         didSet {
             signal.onLog = onLog

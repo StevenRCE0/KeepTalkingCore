@@ -9,6 +9,10 @@ protocol KeepTalkingTransportClient: AnyObject {
     var onBlobData: KeepTalkingTransportBlobDataHandler? { get set }
     var onRawMessage: (@Sendable (String) -> Void)? { get set }
     var onPeerConnect: (@Sendable (UUID) -> Void)? { get set }
+    /// Fires when the broadcast (SFU) channel transitions to a state
+    /// capable of accepting `sendEnvelope`. The outbox controller uses
+    /// this to drain queued messages as soon as a route opens.
+    var onBroadcastReady: (@Sendable () -> Void)? { get set }
     var onLog: (@Sendable (String) -> Void)? { get set }
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider? { get set }
 

@@ -641,6 +641,9 @@ extension KeepTalkingClient {
             reason: "peer-connect node=\(nodeIDText)"
         )
         await syncCurrentContext(with: nodeID)
+        // A fresh channel is the headline trigger for draining the outbox:
+        // any queued envelopes have a real path to a peer now.
+        await drainOutbox()
     }
 
     func mergeDiscoveredNodeStatus(_ status: KeepTalkingNodeStatus) async throws {

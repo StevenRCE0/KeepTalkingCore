@@ -44,6 +44,22 @@ public struct KeepTalkingLocalAttachmentInput: Sendable, Equatable {
     }
 }
 
+/// Reference to a blob that has already been written to the blob store and
+/// `kt_blob_records` table by another process (e.g. the share extension).
+/// `byteCount` is recovered from the existing record, so only blob identity
+/// + per-message metadata is required here.
+public struct KeepTalkingExistingBlobReference: Sendable, Equatable, Codable {
+    public let blobID: String
+    public let filename: String
+    public let mimeType: String
+
+    public init(blobID: String, filename: String, mimeType: String) {
+        self.blobID = blobID
+        self.filename = filename
+        self.mimeType = mimeType
+    }
+}
+
 struct KeepTalkingPreparedAttachment: Sendable, Equatable {
     let blobID: String
     let filename: String

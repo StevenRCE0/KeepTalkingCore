@@ -150,6 +150,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public var onBlobAvailabilityChange: BlobAvailabilityHandler?
     public var onPeerConnect: PeerConnectHandler?
     public var onContextSync: ContextSyncHandler?
+    /// Notifies the app when the outbox set of pending message IDs changes
+    /// (entry added, removed on successful drain, or cancelled by user).
+    public var onOutboxChanged: (@Sendable () -> Void)?
     public var onThreadsChanged: (@Sendable () -> Void)?
     public var onMappingsChanged: (@Sendable () -> Void)?
     public var onAgentRunsChanged: (@Sendable ([KeepTalkingAgentRunSnapshot]) -> Void)? {
@@ -453,6 +456,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
             Task {
                 await self?.handlePeerConnect(nodeID: nodeID)
             }
+        }
+        rtcClient.onBroadcastReady = { [weak self] in
+            // Broadcast just opened — drain anything queued on the outbox
+            // even before any peer is observed, since SFU forwarding can
+            // deliver to peers who joined the room while we were offline.
+            Task { await self?.drainOutbox() }
         }
     }
 

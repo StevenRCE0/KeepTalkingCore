@@ -56,6 +56,50 @@ extension KeepTalkingClient {
         )
     }
 
+    /// Sends a message that attaches blobs already written to the local
+    /// blob store and `kt_blob_records` table — e.g. by the share extension
+    /// before handing control to the app. Skips the file-read + hash + upsert
+    /// pass that `send(_:attachments:in:)` performs, so the caller must
+    /// guarantee each blob row exists with availability `.ready`.
+    public func send(
+        _ text: String,
+        existingBlobs: [KeepTalkingExistingBlobReference],
+        in context: KeepTalkingContext,
+        sender: KeepTalkingContextMessage.Sender? = nil,
+        type: KeepTalkingContextMessage.MessageType = .message,
+        agentTurnID: UUID? = nil,
+        emitLocalEnvelope: Bool = false
+    ) async throws {
+        let prepared = try await preparedAttachments(from: existingBlobs)
+        try await send(
+            text,
+            preparedAttachments: prepared,
+            in: context,
+            sender: sender,
+            type: type,
+            agentTurnID: agentTurnID,
+            emitLocalEnvelope: emitLocalEnvelope
+        )
+    }
+
+    private func preparedAttachments(
+        from references: [KeepTalkingExistingBlobReference]
+    ) async throws -> [KeepTalkingPreparedAttachment] {
+        guard !references.isEmpty else { return [] }
+        let records = try await blobRecordsByBlobID(references.map(\.blobID))
+        return try references.map { ref in
+            guard let record = records[ref.blobID] else {
+                throw KeepTalkingBlobStoreError.blobNotFound(ref.blobID)
+            }
+            return KeepTalkingPreparedAttachment(
+                blobID: ref.blobID,
+                filename: ref.filename,
+                mimeType: ref.mimeType,
+                byteCount: record.byteCount
+            )
+        }
+    }
+
     func send(
         _ text: String,
         preparedAttachments: [KeepTalkingPreparedAttachment],
@@ -96,14 +140,33 @@ extension KeepTalkingClient {
         }
 
         _ = try await ensureGroupChatSecret(for: persistedContext.requireID())
-        try rtcClient.sendEnvelope(message)
-        for attachment in savedAttachments {
-            guard let attachmentDTO = KeepTalkingContextAttachmentDTO(attachment) else {
-                continue
+
+        // From here on, transport failures don't throw — the message is
+        // already persisted locally, so we enqueue it on the outbox and
+        // let it drain later when channels open. Context sync will also
+        // eventually replicate it through normal sync if the outbox row
+        // is dismissed by the user. See `KeepTalkingClient+OutboxController`.
+        let messageID = try message.requireID()
+        await enqueueOutboxEntry(
+            contextMessage: message,
+            context: persistedContext
+        )
+        do {
+            try rtcClient.sendEnvelope(message)
+            for attachment in savedAttachments {
+                guard let attachmentDTO = KeepTalkingContextAttachmentDTO(attachment) else {
+                    continue
+                }
+                try rtcClient.sendEnvelope(attachmentDTO)
             }
-            try rtcClient.sendEnvelope(attachmentDTO)
+            scheduleOutgoingBlobTransfers(for: savedAttachments)
+            await clearOutboxEntry(contextMessageID: messageID)
+        } catch {
+            await recordOutboxFailure(contextMessageID: messageID, error: error)
+            onLog?(
+                "[client/send] initial transport push failed messageID=\(messageID.uuidString.lowercased()) error=\(error.localizedDescription) — left in outbox"
+            )
         }
-        scheduleOutgoingBlobTransfers(for: savedAttachments)
         guard message.type == .message else {
             return
         }
@@ -155,6 +218,32 @@ extension KeepTalkingClient {
         try await send(
             text,
             attachments: attachments,
+            in: targetContext,
+            sender: sender,
+            type: type,
+            agentTurnID: agentTurnID,
+            emitLocalEnvelope: emitLocalEnvelope
+        )
+    }
+
+    /// Convenience overload of `send(_:existingBlobs:in:)` that takes the
+    /// target context's identifier directly.
+    public func send(
+        _ text: String,
+        existingBlobs: [KeepTalkingExistingBlobReference],
+        in context: UUID,
+        sender: KeepTalkingContextMessage.Sender? = nil,
+        type: KeepTalkingContextMessage.MessageType = .message,
+        agentTurnID: UUID? = nil,
+        emitLocalEnvelope: Bool = false
+    ) async throws {
+        let targetContext = try await ensure(
+            context,
+            for: KeepTalkingContext.self
+        )
+        try await send(
+            text,
+            existingBlobs: existingBlobs,
             in: targetContext,
             sender: sender,
             type: type,
