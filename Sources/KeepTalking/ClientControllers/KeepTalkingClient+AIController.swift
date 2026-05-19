@@ -21,6 +21,7 @@ extension KeepTalkingClient {
     static let contextAttachmentUpdateMetadataToolFunctionName =
         "kt_update_context_attachment_metadata"
     static let searchThreadsToolFunctionName = "kt_search_threads"
+    static let evaluateJSToolFunctionName = "kt_evaluate_js"
     /// Function name used for web search in chat-completions mode (e.g. OpenRouter).
     /// In Responses API mode the built-in webSearchPreview tool is used instead.
     static let updateSideNoteToolFunctionName = "kt_update_side_note"
@@ -228,6 +229,7 @@ extension KeepTalkingClient {
         let attachmentUpdateMetadataTool =
             makeContextAttachmentUpdateMetadataTool()
         let searchThreadsTool = makeSearchThreadsTool()
+        let evaluateJSTool = makeEvaluateJSTool()
 
         // Layer 0: meta tools + primitives (static schemas, no server I/O).
         // kt_run_action is always available — the ACT agent handles action execution
@@ -240,6 +242,7 @@ extension KeepTalkingClient {
             attachmentReadTool,
             attachmentUpdateMetadataTool,
             searchThreadsTool,
+            evaluateJSTool,
             webSearchTool,
             markTurningPointTool,
             markChitterChatterTool,
@@ -312,13 +315,12 @@ extension KeepTalkingClient {
         let messages: [AIMessage] =
             [AIMessage.system(systemPrompt)] + contextMessages + [userMessage]
 
-        let selfNodeName = aliasLookup.alias(for: .node(config.node))
         let assistantPublisher: AIOrchestrator.AssistantPublisher = { [self] payload in
             let (assistantText, messageType) = payload
             try await send(
                 assistantText,
                 in: persistedContext,
-                sender: .autonomous(name: roleName, nodeName: selfNodeName, model: model),
+                sender: .autonomous(name: roleName, node: config.node, model: model),
                 type: messageType,
                 agentTurnID: agentTurnID,
                 emitLocalEnvelope: true
@@ -581,9 +583,41 @@ extension KeepTalkingClient {
 
         switch name {
             case Self.searchThreadsToolFunctionName:
-                return .init(hint: .searchingMemory)
+                let args = (try? decodeToolArguments(toolCall.argumentsJSON)) ?? [:]
+                let query =
+                    args["query"]?.stringValue?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let topK = args["top_k"]?.intValue
+                var params: [String: String] = [:]
+                if !query.isEmpty { params["query"] = query }
+                if let topK { params["top_k"] = String(topK) }
+                return .init(
+                    hint: .searchingMemory,
+                    actionName: query.isEmpty
+                        ? nil : String(query.prefix(80)),
+                    parameters: params.isEmpty ? nil : params
+                )
             case Self.webSearchFunctionName:
-                return .init(hint: .searchingWeb)
+                let args = (try? decodeToolArguments(toolCall.argumentsJSON)) ?? [:]
+                let query =
+                    args["query"]?.stringValue?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return .init(
+                    hint: .searchingWeb,
+                    actionName: query.isEmpty
+                        ? nil : String(query.prefix(80)),
+                    parameters: query.isEmpty ? nil : ["query": query]
+                )
+            case Self.evaluateJSToolFunctionName:
+                let args = (try? decodeToolArguments(toolCall.argumentsJSON)) ?? [:]
+                let code =
+                    args["code"]?.stringValue?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return .init(
+                    hint: .computing,
+                    actionName: nil,
+                    parameters: code.isEmpty ? nil : ["code": code]
+                )
             default:
                 return .init(hint: .toolUse)
         }
@@ -893,7 +927,7 @@ extension KeepTalkingClient {
             try await send(
                 "AI error",
                 in: contextID,
-                sender: .autonomous(name: roleName, model: model),
+                sender: .autonomous(name: roleName, node: config.node, model: model),
                 type: .haywire(reason: .failed),
                 emitLocalEnvelope: true
             )
@@ -914,7 +948,7 @@ extension KeepTalkingClient {
             try await send(
                 "Cancelled",
                 in: contextID,
-                sender: .autonomous(name: "ai", model: ""),
+                sender: .autonomous(name: "ai", node: config.node, model: ""),
                 type: .haywire(reason: .cancelled),
                 emitLocalEnvelope: true
             )
@@ -974,7 +1008,7 @@ extension KeepTalkingClient {
             "[ai/tools] meta_tools=\(Self.runActionToolFunctionName),\(Self.ktSkillMetainfoToolFunctionName)"
         )
         onLog?(
-            "[ai/tools] built_ins=\(Self.contextAttachmentListingToolFunctionName),\(Self.contextAttachmentReadToolFunctionName),\(Self.contextAttachmentUpdateMetadataToolFunctionName),\(Self.searchThreadsToolFunctionName),web_search_preview,\(Self.markTurningPointToolFunctionName),\(Self.markChitterChatterToolFunctionName)"
+            "[ai/tools] built_ins=\(Self.contextAttachmentListingToolFunctionName),\(Self.contextAttachmentReadToolFunctionName),\(Self.contextAttachmentUpdateMetadataToolFunctionName),\(Self.searchThreadsToolFunctionName),\(Self.evaluateJSToolFunctionName),web_search_preview,\(Self.markTurningPointToolFunctionName),\(Self.markChitterChatterToolFunctionName)"
         )
     }
 }

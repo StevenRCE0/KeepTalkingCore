@@ -139,6 +139,21 @@ extension KeepTalkingClient {
                         )
                     )
                     continue
+                } else if functionName == Self.evaluateJSToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: try await executeEvaluateJSToolCall(
+                                        rawArguments: toolCall.argumentsJSON
+                                    ),
+                                    toolCallID: toolCallID
+                                )
+                            ]
+                        )
+                    )
+                    continue
                 } else if functionName == Self.webSearchFunctionName {
                     executions.append(
                         .init(

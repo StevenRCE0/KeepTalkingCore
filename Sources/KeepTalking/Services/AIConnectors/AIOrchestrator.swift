@@ -215,18 +215,24 @@ public struct AIOrchestrator {
                 latestAssistantText = assistantText
             }
 
-            if let chatText = Self.chatText(
+            if let assistantText = turn.assistantText?.trimmingCharacters(in: .whitespacesAndNewlines),
+                !assistantText.isEmpty
+            {
+                if latestAssistantText.isEmpty {
+                    latestAssistantText = assistantText
+                }
+                try Task.checkCancellation()
+                try await dependencies.assistantPublisher((assistantText, .message))
+            }
+
+            if let hint = Self.toolHint(
                 for: turn,
                 stage: .execution,
                 toolNameResolver: dependencies.toolNameResolver,
                 toolHintResolver: dependencies.toolHintResolver
             ) {
-                if latestAssistantText.isEmpty {
-                    latestAssistantText = chatText.0
-                }
                 try Task.checkCancellation()
-                try await dependencies
-                    .assistantPublisher(chatText)
+                try await dependencies.assistantPublisher(hint)
             }
 
             guard !turn.toolCalls.isEmpty else {
@@ -319,18 +325,12 @@ public struct AIOrchestrator {
         return executions
     }
 
-    static func chatText(
+    static func toolHint(
         for turn: AITurnResult,
         stage: AIStage,
         toolNameResolver: ToolNameResolver,
         toolHintResolver: ToolHintResolver
     ) -> (String, KeepTalkingContextMessage.MessageType)? {
-        if let assistantText = turn.assistantText?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !assistantText.isEmpty
-        {
-            return (assistantText, .message)
-        }
         guard !turn.toolCalls.isEmpty else {
             return nil
         }
@@ -338,17 +338,14 @@ public struct AIOrchestrator {
             turn.toolCalls.map(toolNameResolver)
         )
 
-        // Use a specific hint context if all calls in this turn share one.
         let contexts = turn.toolCalls.compactMap { toolHintResolver($0, stage) }
         guard !contexts.isEmpty else {
             return nil
         }
 
-        // If all calls agree on the same hint enum, use it; otherwise fall back to .toolUse.
         let dominantHint: IntermediateMessageHints =
             contexts.allSatisfy({ $0.hint == contexts[0].hint }) ? contexts[0].hint : .toolUse
 
-        // Carry action metadata only when there is exactly one call (avoids ambiguity).
         let singleContext = contexts.count == 1 ? contexts[0] : nil
 
         let displayName: String
@@ -441,8 +438,9 @@ public struct AIOrchestrator {
     public enum IntermediateMessageHints: String, Equatable, Sendable {
         case toolUse = "Using tool"
         case reasoning = "Reasoning"
-        case searchingMemory = "Searching memory"
-        case searchingWeb = "Searching web"
+        case searchingMemory = "Searching for"
+        case searchingWeb = "Searching the web for"
         case inspecting = "Inspecting"
+        case computing = "Calculating"
     }
 }

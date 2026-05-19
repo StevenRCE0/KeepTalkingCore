@@ -205,6 +205,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let primitiveRegistry: KeepTalkingPrimitiveRegistry?
     var semanticSearchCallback: SemanticSearchCallback?
     var webSearchProvider: WebSearchProvider?
+    var jsRuntime: (any KeepTalkingJSRuntime)?
 
     // MARK: Agent Run Queue
     let agentRunQueue = AgentRunQueue()
@@ -494,6 +495,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     public func setWebSearchProvider(_ provider: WebSearchProvider?) {
         webSearchProvider = provider
+    }
+
+    /// Installs (or removes) the JavaScript runtime that backs the
+    /// `kt_evaluate_js` meta tool. When `nil`, the tool returns a
+    /// "runtime not configured" error to the agent on call.
+    public func setJSRuntime(_ runtime: (any KeepTalkingJSRuntime)?) {
+        jsRuntime = runtime
     }
 
     func notifyContextDidSync(_ context: UUID) {

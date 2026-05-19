@@ -90,20 +90,18 @@ public struct KeepTalkingAliasLookup: Sendable {
         switch sender {
             case .node(let node):
                 return resolve(.node(node), fallback: fallback)
-            case .autonomous(let name, let nodeName, let model):
-                // Build a descriptive fallback: "roleName · Node Alias · model" when available.
-                var components: [String] = [name]
-                if let nodeName, !nodeName.isEmpty {
-                    components.append(nodeName)
+            case .autonomous(let name, let node, _):
+                let label: String
+                if let node {
+                    let nodeName = resolve(.node(node)).primary()
+                    label = "\(name) · \(nodeName)"
+                } else {
+                    label = name
                 }
-                if let model, !model.isEmpty {
-                    components.append(model)
-                }
-
                 return KeepTalkingAliasResolution(
-                    alias: nil,
+                    alias: label,
                     id: nil,
-                    fallback: fallback ?? components.joined(separator: " · ")
+                    fallback: fallback
                 )
         }
     }

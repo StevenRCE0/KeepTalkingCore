@@ -29,6 +29,9 @@ extension KeepTalkingClient {
         if functionName == Self.searchThreadsToolFunctionName {
             return "search thread memory"
         }
+        if functionName == Self.evaluateJSToolFunctionName {
+            return "evaluate JavaScript"
+        }
         guard let route = routesByFunctionName[functionName] else {
             return friendlyToolCallPhrase(
                 toolName: functionName,

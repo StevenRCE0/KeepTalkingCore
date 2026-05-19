@@ -53,7 +53,6 @@ public actor OpenAIConnector: AIConnector {
     public enum ConnectorError: Error, LocalizedError {
         case missingAPIKey
         case invalidEndpoint(String)
-        case emptyResponse
 
         public var errorDescription: String? {
             switch self {
@@ -61,8 +60,6 @@ public actor OpenAIConnector: AIConnector {
                     return "No API key provided. Set OPENROUTER_API_KEY (or OPENAI_API_KEY) or pass apiKey explicitly."
                 case .invalidEndpoint(let raw):
                     return "Invalid endpoint URL: \(raw)"
-                case .emptyResponse:
-                    return "No response choices received from the model."
             }
         }
     }
@@ -232,10 +229,6 @@ public actor OpenAIConnector: AIConnector {
                         )
                     })
             }
-        }
-
-        if turnText == nil, turnThinking == nil, turnToolCalls.isEmpty {
-            throw ConnectorError.emptyResponse
         }
 
         return AITurnResult(

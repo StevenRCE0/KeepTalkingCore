@@ -80,11 +80,11 @@ extension KeepTalkingContextMessage {
     ///
     /// - `node`: A peer node identified by UUID.
     /// - `autonomous`: An AI agent. `name` is the role label (e.g. "ai").
-    ///   `nodeName` is the human-readable alias of the node that ran the agent (nil if unknown).
+    ///   `node` is the UUID of the node that ran the agent (nil if unknown).
     ///   `model` is the OpenAI model string (e.g. "gpt-4o", nil if unknown).
     public enum Sender: Codable, Sendable, Hashable {
         case node(node: UUID)
-        case autonomous(name: String, nodeName: String? = nil, model: String? = nil)
+        case autonomous(name: String, node: UUID? = nil, model: String? = nil)
 
         public var nodeID: UUID? {
             if case .node(let id) = self { return id }

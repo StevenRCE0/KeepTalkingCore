@@ -499,6 +499,29 @@ extension KeepTalkingClient {
         )
     }
 
+    func makeEvaluateJSTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.evaluateJSToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.evaluateJS,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "code": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "JavaScript source. The returned value is the value of the last expression; use console.log for additional output. No network, no filesystem, no shared state between calls."
+                        ),
+                    ])
+                ]),
+                "required": .array([.string("code")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
     func makeWebSearchTool() -> KeepTalkingActionToolDefinition {
         // Chat Completions only — Responses-API-style web_search_preview was dropped
         // when the protocol moved off the Responses API.

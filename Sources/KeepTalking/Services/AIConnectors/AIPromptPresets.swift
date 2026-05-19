@@ -191,6 +191,16 @@ public enum AIPromptPresets {
         public static let searchThreads =
             "Search thread memory in the current context. This is your conversation-memory retrieval tool for earlier threads, prior decisions, recalled facts, user preferences, and unfinished work that may not be visible in the current transcript window. Use it proactively before answering when the user refers to something discussed earlier. Returns the most relevant thread excerpts ranked by semantic similarity."
 
+        public static let evaluateJS = """
+            Run JavaScript locally for cheap computation: date arithmetic ("what \
+            weekday was 2026-02-14"), numeric reductions, regex on a snippet, \
+            JSON reshaping, unit conversion, string manipulation. The value of \
+            the last expression is returned; use `console.log` for additional \
+            output. Each call runs in a fresh sandbox — no variables, no \
+            network, no filesystem, no access to KeepTalking data. Prefer this \
+            over guessing when a small program would give the exact answer.
+            """
+
         public static let updateSideNote =
             "Create or update a side note in the current context. Key identifies the topic; writing to an existing key replaces it. Active notes are shown at the top of every turn. Use to track plans, open questions, or state that must survive across turns."
 
