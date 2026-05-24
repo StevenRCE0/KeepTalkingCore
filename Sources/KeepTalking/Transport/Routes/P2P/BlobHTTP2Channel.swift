@@ -1,6 +1,5 @@
 import Foundation
 import KeepTalkingSFUClient
-import KeepTalkingSFUProtocol
 import NIOCore
 import NIOFoundationCompat
 import NIOHPACK
@@ -308,16 +307,13 @@ public final class KeepTalkingBlobHTTP2Channel: @unchecked Sendable {
     // MARK: - TLS contexts
 
     private static func makeServerTLSContext() throws -> NIOSSLContext {
-        guard let pkcs12 = Data(base64Encoded: SFULabIdentity.pkcs12Base64) else {
-            throw Error.identityDecodeFailed
-        }
-        let bundle = try NIOSSLPKCS12Bundle(
-            buffer: Array(pkcs12),
-            passphrase: Array(SFULabIdentity.passphrase.utf8)
-        )
+        // Per-session self-signed cert: every listener presents a unique
+        // P-256 cert generated in-process; private key never touches
+        // disk. See P2PSessionIdentity and DESIGN_P2P_TLS.md.
+        let identity = try P2PSessionIdentity.make()
         var config = TLSConfiguration.makeServerConfiguration(
-            certificateChain: bundle.certificateChain.map { .certificate($0) },
-            privateKey: .privateKey(bundle.privateKey)
+            certificateChain: [.certificate(identity.certificate)],
+            privateKey: .privateKey(identity.privateKey)
         )
         config.applicationProtocols = ["h2"]
         config.minimumTLSVersion = .tlsv12
@@ -337,7 +333,6 @@ public final class KeepTalkingBlobHTTP2Channel: @unchecked Sendable {
 
     public enum Error: Swift.Error, Sendable {
         case notConnected
-        case identityDecodeFailed
     }
 }
 

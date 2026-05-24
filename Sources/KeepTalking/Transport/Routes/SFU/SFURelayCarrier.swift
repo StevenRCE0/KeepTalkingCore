@@ -2,9 +2,9 @@ import Foundation
 import KeepTalkingSFUProtocol
 
 /// Carries application-frame payloads between two peers through an
-/// SFU-mediated relay channel. Replaces the role coturn used to play —
-/// the SFU is already authenticated end-to-end and has presence info, so
-/// it can forward opaque relay payloads without a separate TURN process.
+/// SFU-mediated relay channel. The SFU is already authenticated
+/// end-to-end and has presence info, so it can forward opaque relay
+/// payloads directly.
 ///
 /// Wire shape on the SFU is `RELAY_DATA` frames whose payload is whatever
 /// the caller passes to `send`. Length framing is the SFU frame's own
