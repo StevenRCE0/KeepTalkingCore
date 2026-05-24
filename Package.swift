@@ -35,6 +35,11 @@ let package = Package(
             url: "https://github.com/StevenRCE0/AIProxySwift-MultiPlatform.git",
             branch: "main"
         ),
+        .package(path: "../KeepTalkingSFU"),
+        .package(url: "https://github.com/StevenRCE0/swift-libjuice.git", from: "1.7.1"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
+        .package(url: "https://github.com/apple/swift-nio-http2.git", from: "1.30.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
     ],
     targets: [
         .target(
@@ -48,6 +53,15 @@ let package = Package(
                 ),
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "AIProxy", package: "AIProxySwift-MultiPlatform"),
+                .product(name: "KeepTalkingSFUClient", package: "KeepTalkingSFU"),
+                .product(name: "KeepTalkingSFUProtocol", package: "KeepTalkingSFU"),
+                .product(name: "SwiftJUICE", package: "swift-libjuice"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOFoundationCompat", package: "swift-nio"),
+                .product(name: "NIOHTTP2", package: "swift-nio-http2"),
+                .product(name: "NIOHPACK", package: "swift-nio-http2"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
             ],
             path: "Sources/KeepTalking"
         ),

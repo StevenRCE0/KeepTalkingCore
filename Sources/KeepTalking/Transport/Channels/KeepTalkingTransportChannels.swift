@@ -4,6 +4,27 @@ import Foundation
 
 /// Shared interface for any transport channel (broadcast or direct).
 /// ContextTransport depends ONLY on this protocol — never on concrete transport types.
+///
+/// ## Liveness contract
+///
+/// Conforming channels MUST surface connection loss via `onStateChange`
+/// (with `isReady` flipping to `false`) within a bounded delay — not
+/// "eventually when an OS-level keepalive trips." The expected upper
+/// bound is roughly **5 seconds** of total silence on the wire.
+///
+/// Concrete carriers implement this with:
+///   - `SO_KEEPALIVE` on the underlying socket (coarse fallback);
+///   - NIO's `HTTP2KeepAliveHandler` (this repo) — emits an HTTP/2 PING
+///     every 2s on idle and closes the channel after 5s of no inbound
+///     bytes (the peer auto-ACKs PINGs per RFC 7540 so the read counter
+///     stays warm under normal conditions);
+///   - the carrier wires the channel's `closeFuture` to flip state to
+///     `.failed`, which propagates through `onStateChange` to the
+///     `BroadcastChannelStateMachine` or `DirectChannelStateMachine`.
+///
+/// The state machines drive reconnect/backoff/abandon from the flipped
+/// `isReady`. They do *not* probe carriers themselves — readiness is
+/// a *signal pushed by the carrier*, not pulled by the state machine.
 protocol KeepTalkingTransportChannelProtocol: AnyObject, Sendable {
     /// Whether the channel is currently able to send messages.
     var isReady: Bool { get }
@@ -23,7 +44,9 @@ protocol KeepTalkingTransportChannelProtocol: AnyObject, Sendable {
     /// Called when the channel receives inbound blob bytes.
     var onBlobData: KeepTalkingTransportBlobDataHandler? { get set }
 
-    /// Called when the channel's readiness state changes.
+    /// Called when the channel's readiness state changes. This is the
+    /// primary liveness signal — see the type-level "Liveness contract"
+    /// note above.
     var onStateChange: (@Sendable () -> Void)? { get set }
 
     /// Optional debug log sink shared by transport channels.
@@ -76,11 +99,14 @@ protocol KeepTalkingPeerTransportChannel: KeepTalkingTransportChannelProtocol {
 
 enum KeepTalkingTransportError: LocalizedError {
     case allChannelsUnavailable
+    case sfuEndpointMissing
 
     var errorDescription: String? {
         switch self {
             case .allChannelsUnavailable:
                 return "All transport channels are unavailable."
+            case .sfuEndpointMissing:
+                return "KeepTalkingSFU endpoint is not configured."
         }
     }
 }

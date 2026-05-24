@@ -110,7 +110,6 @@ struct LureTests {
 
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(
-                signalURL: try #require(URL(string: "ws://127.0.0.1")),
                 contextID: UUID(),
                 node: localNodeID
             ),

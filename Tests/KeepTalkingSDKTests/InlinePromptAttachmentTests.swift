@@ -114,7 +114,6 @@ struct InlinePromptAttachmentTests {
     ) -> KeepTalkingClient {
         KeepTalkingClient(
             config: KeepTalkingConfig(
-                signalURL: URL(string: "ws://127.0.0.1")!,
                 contextID: UUID(uuidString: "F0000000-0000-0000-0000-000000000001")!,
                 node: UUID(uuidString: "A0000000-0000-0000-0000-000000000001")!
             ),

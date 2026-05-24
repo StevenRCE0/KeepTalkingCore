@@ -158,7 +158,8 @@ struct TransportRoutingTests {
                 KeepTalkingTrustedEnvelopeCryptor(
                     encrypt: { plainEnvelope in
                         guard let request = plainEnvelope.actionCallRequest else {
-                            throw KeepTalkingTrustedEnvelopeCryptorError
+                            throw
+                                KeepTalkingTrustedEnvelopeCryptorError
                                 .unsupportedEnvelope(plainEnvelope.kind)
                         }
                         return KeepTalkingEncryptedActionCallRequestEnvelope(
@@ -235,7 +236,7 @@ struct TransportRoutingTests {
     @Test("broadcast send failures stay at the transport layer")
     func broadcastSendFailureDoesNotLeakDataChannelErrors() async throws {
         let harness = makeHarness()
-        harness.broadcast.sendError = P2PError.dataChannelNotOpen("keep-talking.chat.test")
+        harness.broadcast.sendError = KeepTalkingTransportError.allChannelsUnavailable
         try await harness.transport.start()
         defer { harness.transport.stop() }
 
@@ -317,16 +318,6 @@ struct TransportRoutingTests {
 }
 
 struct ChannelStateMachineTests {
-    @Test("rtc configuration can force relay-only ice policy")
-    func rtcConfigurationSupportsRelayOnlyPolicy() {
-        let config = RTCShared.makeRTCConfiguration(
-            iceServerURLs: ["turn:relay.example.com:3478?transport=tcp"],
-            iceTransportPolicy: .relay
-        )
-
-        #expect(config.iceTransportPolicy == .relay)
-    }
-
     @Test("broadcast state machine reconnects and recovers")
     func broadcastReconnectsAndRecovers() {
         var machine = BroadcastChannelStateMachine()
@@ -435,9 +426,9 @@ private func makeActionCallRequestEnvelope(
 
 private func makeHarness() -> TransportHarness {
     let config = KeepTalkingConfig(
-        signalURL: URL(string: "ws://127.0.0.1")!,
         contextID: UUID(uuidString: "01000000-0000-0000-0000-000000000000")!,
-        node: UUID(uuidString: "02000000-0000-0000-0000-000000000000")!
+        node: UUID(uuidString: "02000000-0000-0000-0000-000000000000")!,
+        sfuEndpoint: .init(host: "127.0.0.1", port: 9701)
     )
     let livenessState = KeepTalkingContextLivenessState(localNode: config.node)
     let broadcast = FakeBroadcastChannel()

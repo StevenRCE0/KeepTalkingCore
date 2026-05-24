@@ -8,7 +8,6 @@ struct EnvelopeChannelTests {
     func configExposesBlobChannelLabel() throws {
         let contextID = UUID(uuidString: "01000000-0000-0000-0000-000000000000")!
         let config = KeepTalkingConfig(
-            signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: contextID,
             node: UUID(uuidString: "02000000-0000-0000-0000-000000000000")!
         )

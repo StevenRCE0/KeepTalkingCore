@@ -41,6 +41,9 @@ public enum KeepTalkingClientError: LocalizedError {
     case invalidContinuationMessage
     case notAuthorized
     case invalidTrustScope
+    /// In-flight call/sync/request rejected because the client is being
+    /// torn down (e.g. `disconnect()`).
+    case clientDisconnected
 
     public var errorDescription: String? {
         switch self {
@@ -115,6 +118,8 @@ public enum KeepTalkingClientError: LocalizedError {
             case .invalidTrustScope:
                 return
                     "Trust scope must include at least one context (or use \"all contexts\")."
+            case .clientDisconnected:
+                return "Client is disconnecting; in-flight operation cancelled."
         }
     }
 }
@@ -558,9 +563,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// hundreds of milliseconds. A subsequent `connect()` will await the
     /// in-flight teardown before restarting the transport.
     public func disconnect() {
-        failAllPendingActionCalls(error: SignalError.closed)
-        failAllPendingActionCatalogRequests(error: SignalError.closed)
-        failAllPendingContextSync(error: SignalError.closed)
+        failAllPendingActionCalls(error: KeepTalkingClientError.clientDisconnected)
+        failAllPendingActionCatalogRequests(error: KeepTalkingClientError.clientDisconnected)
+        failAllPendingContextSync(error: KeepTalkingClientError.clientDisconnected)
         cancelDebouncedNodeStateBroadcast()
 
         let rtc = rtcClient

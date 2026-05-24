@@ -18,7 +18,6 @@ struct RemoteActionCallTests {
 
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(
-                signalURL: try #require(URL(string: "ws://127.0.0.1")),
                 contextID: contextID,
                 node: localNodeID
             ),
@@ -110,7 +109,6 @@ struct RemoteActionCallTests {
 
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(
-                signalURL: try #require(URL(string: "ws://127.0.0.1")),
                 contextID: grantedContextID,
                 node: localNodeID
             ),
@@ -197,7 +195,6 @@ struct RemoteActionCallTests {
 
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(
-                signalURL: try #require(URL(string: "ws://127.0.0.1")),
                 contextID: contextID,
                 node: ownerNodeID
             ),
@@ -270,7 +267,6 @@ struct RemoteActionCallTests {
 
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(
-                signalURL: try #require(URL(string: "ws://127.0.0.1")),
                 contextID: contextID,
                 node: localNodeID
             ),
@@ -501,7 +497,6 @@ struct RemoteActionCallTests {
 
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(
-                signalURL: try #require(URL(string: "ws://127.0.0.1")),
                 contextID: contextID,
                 node: ownerNodeID
             ),
@@ -574,7 +569,6 @@ struct RemoteActionCallTests {
         let actionID = UUID(uuidString: "50000000-0000-0000-0000-000000000000")!
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(
-                signalURL: try #require(URL(string: "ws://127.0.0.1")),
                 contextID: contextID,
                 node: callerNodeID
             ),
@@ -612,7 +606,6 @@ struct RemoteActionCallTests {
         let actionID = UUID(uuidString: "A0000000-0000-0000-0000-000000000000")!
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(
-                signalURL: try #require(URL(string: "ws://127.0.0.1")),
                 contextID: contextID,
                 node: callerNodeID
             ),
@@ -649,7 +642,6 @@ struct RemoteActionCallTests {
         let contextID = UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000003")!
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(
-                signalURL: try #require(URL(string: "ws://127.0.0.1")),
                 contextID: contextID,
                 node: selfNodeID
             ),

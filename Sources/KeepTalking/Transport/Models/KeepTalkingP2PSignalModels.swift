@@ -1,5 +1,9 @@
 import Foundation
 
+/// Opaque blob exchanged through the SFU broadcast to bootstrap a direct
+/// P2P session. Fields are named after the libjuice SDP/ICE-candidate
+/// shape but are also reused for raw "h2-port" exchanges — readers
+/// dispatch on `kind`.
 public struct KeepTalkingP2PSignalData: Codable, Sendable {
     public let kind: String
     public let type: String?

@@ -1020,7 +1020,7 @@ extension KeepTalkingClient {
         return " message=\(trimmed)"
     }
 
-    private func runPrimitiveActionPostResultHookIfNeeded(
+    func runPrimitiveActionPostResultHookIfNeeded(
         actionID: UUID,
         call: KeepTalkingActionCall,
         result: KeepTalkingActionCallResult

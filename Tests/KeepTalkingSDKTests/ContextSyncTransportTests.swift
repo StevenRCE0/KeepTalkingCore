@@ -10,7 +10,6 @@ struct ContextSyncTransportTests {
         let contextID = UUID(uuidString: "30000000-0000-0000-0000-000000000000")!
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(
-                signalURL: try #require(URL(string: "ws://127.0.0.1")),
                 contextID: contextID,
                 node: UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000000")!
             ),
@@ -29,7 +28,6 @@ struct ContextSyncTransportTests {
     func summaryDispatchReturnsMetadata() async throws {
         let localStore = try await KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
-            signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: UUID(uuidString: "40000000-0000-0000-0000-000000000000")!,
             node: UUID(uuidString: "AAAAAAAA-1111-1111-1111-111111111111")!
         )
@@ -182,7 +180,6 @@ struct ContextSyncTransportTests {
     func chunkDispatchReturnsChunkTail() async throws {
         let localStore = try await KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
-            signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: UUID(uuidString: "70000000-0000-0000-0000-000000000000")!,
             node: UUID(uuidString: "33333333-9999-9999-9999-999999999999")!
         )
@@ -282,7 +279,6 @@ struct ContextSyncTransportTests {
     func saveIncomingMessagesSkipsExistingRows() async throws {
         let localStore = try await KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
-            signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: UUID(uuidString: "80000000-0000-0000-0000-000000000000")!,
             node: UUID(uuidString: "AAAAAAAA-9999-9999-9999-999999999999")!
         )
@@ -356,7 +352,6 @@ struct ContextSyncTransportTests {
     func saveIncomingAttachmentDTOCreatesPlaceholder() async throws {
         let localStore = try await KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
-            signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: UUID(uuidString: "81000000-0000-0000-0000-000000000000")!,
             node: UUID(uuidString: "AAAAAAAA-8888-8888-8888-888888888888")!
         )
@@ -428,7 +423,6 @@ struct ContextSyncTransportTests {
     func immediateSummaryReplyDoesNotRaceThePendingWait() async throws {
         let localStore = try await KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
-            signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: UUID(uuidString: "90000000-0000-0000-0000-000000000000")!,
             node: UUID(uuidString: "CCCCCCCC-9999-9999-9999-999999999999")!
         )
@@ -465,7 +459,6 @@ struct ContextSyncTransportTests {
     func attachmentRequestReturnsRecentMissingHashes() async throws {
         let localStore = try await KeepTalkingInMemoryStore()
         let config = KeepTalkingConfig(
-            signalURL: try #require(URL(string: "ws://127.0.0.1")),
             contextID: UUID(uuidString: "A0000000-0000-0000-0000-000000000000")!,
             node: UUID(uuidString: "EEEEEEEE-1111-1111-1111-111111111111")!
         )

@@ -8,45 +8,34 @@ public struct KeepTalkingConfig: Sendable {
     public static let blobChannelPrefix = "keep-talking.blob"
     public static let actionCallChannelPrefix = "keep-talking.action_call"
 
-    public let signalURL: URL
     public let contextID: UUID
     public let node: UUID
-    public let p2pPreferredRemoteID: String?
     public let p2pAttemptTimeoutSeconds: TimeInterval
-    public let p2pStunServers: [String]
-    /// ICE servers (STUN/TURN) used for the SFU transport path.
-    /// Include at least one TURN URL with `transport=tcp` for clients behind
-    /// restrictive NATs.  Omit credentials when coturn runs with `no-auth`.
-    public let sfuIceServers: [String]
+    public let sfuEndpoint: SFUEndpoint?
     public let recentAttachmentSyncLookback: TimeInterval
 
+    public struct SFUEndpoint: Sendable, Hashable {
+        public let host: String
+        public let port: UInt16
+
+        public init(host: String, port: UInt16 = 9701) {
+            self.host = host
+            self.port = port
+        }
+    }
+
     /// Creates a configuration for a single KeepTalking node session.
-    ///
-    /// - Parameters:
-    ///   - signalURL: Signaling server endpoint.
-    ///   - contextID: Active context identifier used to scope channels.
-    ///   - node: Local node identifier.
-    ///   - p2pPreferredRemoteID: Preferred peer identifier for direct P2P attempts.
-    ///   - p2pAttemptTimeoutSeconds: Maximum duration to wait for a P2P attempt.
-    ///   - p2pStunServers: STUN servers used during P2P ICE negotiation.
-    ///   - sfuIceServers: STUN/TURN servers used during SFU ICE negotiation.
     public init(
-        signalURL: URL,
         contextID: UUID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!,
         node: UUID = UUID(),
-        p2pPreferredRemoteID: String? = nil,
         p2pAttemptTimeoutSeconds: TimeInterval = 5,
-        p2pStunServers: [String] = ["stun:stun.l.google.com:19302"],
-        sfuIceServers: [String] = [],
+        sfuEndpoint: SFUEndpoint? = nil,
         recentAttachmentSyncLookback: TimeInterval = 14 * 24 * 60 * 60
     ) {
-        self.signalURL = signalURL
         self.contextID = contextID
         self.node = node
-        self.p2pPreferredRemoteID = p2pPreferredRemoteID
         self.p2pAttemptTimeoutSeconds = p2pAttemptTimeoutSeconds
-        self.p2pStunServers = p2pStunServers
-        self.sfuIceServers = sfuIceServers
+        self.sfuEndpoint = sfuEndpoint
         self.recentAttachmentSyncLookback = max(0, recentAttachmentSyncLookback)
     }
 
@@ -73,27 +62,10 @@ public struct KeepTalkingConfig: Sendable {
     /// Returns a copy of the configuration scoped to a different context.
     public func withContextID(_ contextID: UUID) -> KeepTalkingConfig {
         KeepTalkingConfig(
-            signalURL: signalURL,
             contextID: contextID,
             node: node,
-            p2pPreferredRemoteID: p2pPreferredRemoteID,
             p2pAttemptTimeoutSeconds: p2pAttemptTimeoutSeconds,
-            p2pStunServers: p2pStunServers,
-            sfuIceServers: sfuIceServers,
-            recentAttachmentSyncLookback: recentAttachmentSyncLookback
-        )
-    }
-
-    /// Returns a copy of the configuration targeting a specific remote peer for P2P negotiation.
-    public func withP2PPreferredRemoteID(_ remoteID: String?) -> KeepTalkingConfig {
-        KeepTalkingConfig(
-            signalURL: signalURL,
-            contextID: contextID,
-            node: node,
-            p2pPreferredRemoteID: remoteID,
-            p2pAttemptTimeoutSeconds: p2pAttemptTimeoutSeconds,
-            p2pStunServers: p2pStunServers,
-            sfuIceServers: sfuIceServers,
+            sfuEndpoint: sfuEndpoint,
             recentAttachmentSyncLookback: recentAttachmentSyncLookback
         )
     }

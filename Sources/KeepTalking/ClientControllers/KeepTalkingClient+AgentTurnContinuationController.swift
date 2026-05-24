@@ -243,6 +243,11 @@ extension KeepTalkingClient {
         let contextID = request.contextID
         let context = try await upsertContext(KeepTalkingContext(id: contextID))
         let result = await executeActionCallRequest(request, context: context)
+        await runPrimitiveActionPostResultHookIfNeeded(
+            actionID: request.call.action,
+            call: request.call,
+            result: result
+        )
 
         // 4. Respond back to origin
         try await respondToAgentTurnContinuation(

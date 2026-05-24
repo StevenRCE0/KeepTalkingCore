@@ -25,6 +25,10 @@ final class KeepTalkingCLIController {
     static func main() async {
         do {
             let cliConfig = try CliConfig.parse()
+            if let sfuJuice = cliConfig.sfuJuiceEndpoint {
+                await SFUJuiceCommand.run(cliConfig: cliConfig, endpoint: sfuJuice)
+                return  // SFUJuiceCommand exits the process; unreachable
+            }
             let localStore = try makeLocalStore(databaseURL: cliConfig.databaseURL)
             let controller = KeepTalkingCLIController(
                 cliConfig: cliConfig,
@@ -123,19 +127,18 @@ final class KeepTalkingCLIController {
     }
 
     func printRuntimeConfig(_ config: KeepTalkingConfig) {
-        print("Connecting to \(config.signalURL.absoluteString)")
+        if let endpoint = config.sfuEndpoint {
+            print("Connecting to KeepTalkingSFU \(endpoint.host):\(endpoint.port)")
+        } else {
+            print("KeepTalkingSFU endpoint is not configured")
+        }
         print(
             "Session=\(config.scopedSessionID) Node=\(config.node.uuidString.lowercased()) Context=\(config.contextID.uuidString.lowercased())"
         )
         print(
             "Channels: signaling=\(config.signalingChannelLabel) chat=\(config.chatChannelLabel) action_call=\(config.actionCallChannelLabel)"
         )
-        print(
-            "P2P upgrade timeout=\(Int(config.p2pAttemptTimeoutSeconds))s stun=\(config.p2pStunServers.joined(separator: ","))"
-        )
-        if let peer = config.p2pPreferredRemoteID {
-            print("P2P preferred peer=\(peer)")
-        }
+        print("P2P HTTP/2 upgrade timeout=\(Int(config.p2pAttemptTimeoutSeconds))s")
         if let databaseURL = cliConfig.databaseURL {
             print("DB=\(databaseURL.path)")
         }

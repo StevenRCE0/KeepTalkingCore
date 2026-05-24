@@ -3,36 +3,24 @@ import KeepTalkingSDK
 
 let keepTalkingUsage = """
     Usage:
-      KeepTalking [--signal-url <ws-url>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--openai-endpoint <url>] [--openai-api-key <key>] [--mcp <list|remove|add-http|add-stdio> ...] [--skill <list|remove|add-directory> ...] [--p2p-peer <peer-id>] [--p2p-timeout <seconds>] [--stun-url <stun-url>] [--ice-server <url>] [--diagnose]
+      KeepTalking [--sfu host:port] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--openai-endpoint <url>] [--openai-api-key <key>] [--mcp <list|remove|add-http|add-stdio> ...] [--skill <list|remove|add-directory> ...] [--p2p-timeout <seconds>]
 
     Environment fallbacks:
-      KT_SIGNAL_URL (default: ws://127.0.0.1:17000/ws)
+      KT_SFU        (optional host:port, default port 9701)
       KT_NODE       (default: random UUID)
       KT_CONTEXT    (default: 00000000-0000-0000-0000-000000000000)
       KT_DB_PATH    (optional, local sqlite file path)
-      KT_P2P_PEER_ID    (optional, preferred remote peer ID)
       KT_P2P_TIMEOUT    (default: 5)
-      KT_STUN_URL       (default: stun:stun.l.google.com:19302)
-      KT_SFU_ICE_SERVERS (comma-separated TURN/STUN URLs for SFU transport)
       OPENAI_API_KEY    (optional, enables /ai)
       KT_OPENAI_ENDPOINT / OPENAI_ENDPOINT / OPENAI_BASE_URL (optional, OpenAI-compatible API endpoint)
 
-    Diagnose mode (--diagnose):
-      Connects to the SFU, probes ICE connectivity, dumps candidates and selected
-      pairs, then exits 0 (pass) or 1 (fail/timeout). Defaults to production infra
-      when --signal-url and --ice-server are not specified.
-        KT_SFU_SIGNAL_URL  (default: wss://signal.rcex.live/ws)
-        KT_SFU_ICE_SERVERS (default: turn:turn.rcex.live:49372?transport=tcp)
-
     Examples:
+      KeepTalking --sfu 127.0.0.1:9701 --context 11111111-2222-3333-4444-555555555555
       KeepTalking --context 11111111-2222-3333-4444-555555555555 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
-      KeepTalking --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --message "hello from ion-sfu"
+      KeepTalking --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --message "hello"
       KeepTalking --mcp add-http linear https://mcp.linear.app --header Authorization=Bearer_token
       KeepTalking --mcp add-stdio foo --env OPENAI_API_KEY=sk-... --env MODEL=gpt-4.1 -- npx -y @modelcontextprotocol/server-github
       KeepTalking --skill add-directory doc-summarizer ~/.codex/skills/doc-summarizer "Local documentation summarizer"
-      KeepTalking --diagnose
-      KeepTalking --diagnose --signal-url wss://signal.rcex.live/ws --ice-server turn:turn.rcex.live:49372?transport=tcp
-
     Interactive commands:
       /new         create and join a new context
       /join <id>   join an existing context (prompts for encryption key)
@@ -151,24 +139,22 @@ struct CliConfig {
     /// When true, run ICE connectivity probe then exit instead of entering
     /// interactive / one-shot mode.
     let diagnose: Bool
+    /// `--sfu host:port` — KeepTalkingSFU endpoint for envelope transport.
+    let sfuJuiceEndpoint: SFUJuiceEndpoint?
+
+    struct SFUJuiceEndpoint: Sendable {
+        let host: String
+        let port: UInt16
+    }
 
     static func parse() throws -> CliConfig {
         let env = ProcessInfo.processInfo.environment
-        var signalURLRaw = env["KT_SIGNAL_URL"] ?? "ws://127.0.0.1:17000/ws"
-        var signalURLExplicit = false
         var nodeIDRaw = env["KT_NODE"] ?? UUID().uuidString
         var contextIDRaw =
             env["KT_CONTEXT"]
             ?? "00000000-0000-0000-0000-000000000000"
         var databasePathRaw = env["KT_DB_PATH"]
-        var p2pPeerID = env["KT_P2P_PEER_ID"]
         var p2pTimeoutRaw = env["KT_P2P_TIMEOUT"] ?? "5"
-        var stunURLs = [env["KT_STUN_URL"] ?? "stun:stun.l.google.com:19302"]
-        var sfuIceServers: [String] =
-            (env["KT_SFU_ICE_SERVERS"] ?? "")
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
         var openAIAPIKey = env["OPENAI_API_KEY"]
         var openAIEndpointRaw =
             env["KT_OPENAI_ENDPOINT"]
@@ -178,6 +164,7 @@ struct CliConfig {
         var mcpCommand: MCPManagementCommand?
         var skillCommand: SkillManagementCommand?
         var diagnose = false
+        var sfuJuiceEndpoint = env["KT_SFU"].flatMap(Self.parseSFUEndpoint)
 
         let args = Array(CommandLine.arguments.dropFirst())
         var index = 0
@@ -189,15 +176,13 @@ struct CliConfig {
                     Foundation.exit(0)
                 case "--diagnose":
                     diagnose = true
-                case "--ice-server":
+                case "--sfu", "--sfu-juice":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
-                    sfuIceServers.append(args[index])
-                case "--signal-url":
-                    index += 1
-                    guard index < args.count else { throw CliError.missingValue(arg) }
-                    signalURLRaw = args[index]
-                    signalURLExplicit = true
+                    guard let endpoint = Self.parseSFUEndpoint(args[index]) else {
+                        throw CliError.unknownFlag("\(arg) expects host:port, got \(args[index])")
+                    }
+                    sfuJuiceEndpoint = endpoint
                 case "--node", "--id":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
@@ -210,18 +195,10 @@ struct CliConfig {
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
                     databasePathRaw = args[index]
-                case "--p2p-peer":
-                    index += 1
-                    guard index < args.count else { throw CliError.missingValue(arg) }
-                    p2pPeerID = args[index]
                 case "--p2p-timeout":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
                     p2pTimeoutRaw = args[index]
-                case "--stun-url":
-                    index += 1
-                    guard index < args.count else { throw CliError.missingValue(arg) }
-                    stunURLs.append(args[index])
                 case "--message":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
@@ -368,26 +345,6 @@ struct CliConfig {
             throw CliError.conflictingManagementCommands
         }
 
-        // In diagnose mode, default signal URL and ICE servers to production
-        // infra unless the user explicitly overrode them.
-        if diagnose {
-            if !signalURLExplicit {
-                signalURLRaw =
-                    env["KT_SFU_SIGNAL_URL"] ?? "wss://signal.rcex.live/ws"
-            }
-            if sfuIceServers.isEmpty {
-                sfuIceServers =
-                    (env["KT_SFU_ICE_SERVERS"]?
-                        .split(separator: ",")
-                        .map { $0.trimmingCharacters(in: .whitespaces) }
-                        .filter { !$0.isEmpty })
-                    ?? ["turn:turn.rcex.live:49372?transport=tcp"]
-            }
-        }
-
-        guard let signalURL = URL(string: signalURLRaw) else {
-            throw CliError.invalidSignalURL(signalURLRaw)
-        }
         guard let p2pTimeout = TimeInterval(p2pTimeoutRaw), p2pTimeout > 0 else {
             throw CliError.invalidP2PTimeout(p2pTimeoutRaw)
         }
@@ -398,20 +355,18 @@ struct CliConfig {
             throw CliError.invalidContextID(contextIDRaw)
         }
         let databaseURL = try resolveDatabaseURL(databasePathRaw)
-        stunURLs = Array(Set(stunURLs.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })).sorted()
         let openAIEndpoint = try normalizeOpenAIEndpoint(openAIEndpointRaw)
         let normalizedOpenAIAPIKey =
             openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return CliConfig(
             sdkConfig: KeepTalkingConfig(
-                signalURL: signalURL,
                 contextID: contextID,
                 node: nodeID,
-                p2pPreferredRemoteID: p2pPeerID,
                 p2pAttemptTimeoutSeconds: p2pTimeout,
-                p2pStunServers: stunURLs,
-                sfuIceServers: sfuIceServers
+                sfuEndpoint: sfuJuiceEndpoint.map {
+                    KeepTalkingConfig.SFUEndpoint(host: $0.host, port: $0.port)
+                }
             ),
             databaseURL: databaseURL,
             singleMessage: singleMessage,
@@ -421,8 +376,22 @@ struct CliConfig {
             openAIEndpoint: openAIEndpoint,
             mcpCommand: mcpCommand,
             skillCommand: skillCommand,
-            diagnose: diagnose
+            diagnose: diagnose,
+            sfuJuiceEndpoint: sfuJuiceEndpoint
         )
+    }
+
+    private static func parseSFUEndpoint(_ raw: String) -> SFUJuiceEndpoint? {
+        let parts = raw.split(separator: ":", maxSplits: 1).map(String.init)
+        guard !parts.isEmpty, !parts[0].isEmpty else { return nil }
+        let port: UInt16
+        if parts.count == 2 {
+            guard let parsed = UInt16(parts[1]) else { return nil }
+            port = parsed
+        } else {
+            port = 9701
+        }
+        return SFUJuiceEndpoint(host: parts[0], port: port)
     }
 
     private static func resolveDatabaseURL(_ raw: String?) throws -> URL? {
