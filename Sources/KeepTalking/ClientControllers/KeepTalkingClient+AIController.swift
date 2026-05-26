@@ -162,6 +162,50 @@ extension KeepTalkingClient {
         Task { await agentRunQueue.dismiss(runID: runID) }
     }
 
+    /// Executes one already-dequeued durable app queue item.
+    ///
+    /// Unlike `enqueueAIPrompt`, this method does not add work to the
+    /// SDK's in-memory `AgentRunQueue`; callers that need persistence across
+    /// navigation, app switching, or process death should own the durable
+    /// queue and call this only when the item reaches the head.
+    public func runDequeuedAIPrompt(
+        _ prompt: String,
+        attachments: [KeepTalkingLocalAttachmentInput] = [],
+        in contextID: UUID,
+        model: String = "gpt-5-codex",
+        actModel: String? = nil,
+        roleName: String = "ai",
+        reasoningEffort: AIReasoning.Effort? = nil,
+        sendPromptMessage: Bool = true,
+        onPromptMessageSent: (() async -> Void)? = nil
+    ) async throws {
+        let context = KeepTalkingContext(id: contextID)
+        let agentTurnID = UUID()
+        let preparedAttachments = try await prepareLocalAttachments(attachments)
+        try Task.checkCancellation()
+        if sendPromptMessage {
+            try await send(
+                prompt,
+                preparedAttachments: preparedAttachments,
+                in: context,
+                agentTurnID: agentTurnID
+            )
+            await onPromptMessageSent?()
+        }
+        try Task.checkCancellation()
+        _ = try await runAI(
+            prompt: prompt,
+            in: context,
+            model: model,
+            actModel: actModel,
+            roleName: roleName,
+            preparedPromptAttachments: preparedAttachments,
+            agentTurnID: agentTurnID,
+            reasoningEffort: reasoningEffort
+        )
+        await cancelStaleContinuations(agentTurnID: agentTurnID, in: contextID)
+    }
+
     // MARK: - Direct execution (CLI / internal)
 
     public func runAI(

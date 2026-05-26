@@ -16,6 +16,22 @@ public struct KeepTalkingAgentRunSnapshot: Sendable, Identifiable {
     public let createdAt: Date
     public let state: State
     public let agentTurnID: UUID?
+
+    public init(
+        id: UUID,
+        contextID: UUID,
+        promptPreview: String,
+        createdAt: Date,
+        state: State,
+        agentTurnID: UUID?
+    ) {
+        self.id = id
+        self.contextID = contextID
+        self.promptPreview = promptPreview
+        self.createdAt = createdAt
+        self.state = state
+        self.agentTurnID = agentTurnID
+    }
 }
 
 // MARK: - Queue actor
