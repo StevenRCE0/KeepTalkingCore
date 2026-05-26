@@ -139,10 +139,8 @@ struct InlinePromptAttachmentTests {
         return fileURL
     }
 
-    private func userText(
-        from message: OpenAIChatCompletionRequestBody.Message
-    ) -> String? {
-        guard case .user(let content, _) = message else {
+    private func userText(from message: AIMessage) -> String? {
+        guard message.role == .user, let content = message.content else {
             return nil
         }
 

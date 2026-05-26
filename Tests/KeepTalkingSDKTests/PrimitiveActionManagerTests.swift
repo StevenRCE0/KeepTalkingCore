@@ -25,20 +25,25 @@ struct PrimitiveActionManagerTests {
 
         let registry = KeepTalkingPrimitiveRegistry(
             toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
-            callAction: { primitive, incomingCall in
+            callAction: { primitive, incomingCall, allowedScopeKeys in
                 #expect(primitive == bundle)
                 #expect(incomingCall.action == call.action)
                 #expect(incomingCall.arguments["url"]?.stringValue == "https://example.com")
+                #expect(allowedScopeKeys == ["browser"])
                 return KeepTalkingPrimitiveActionResponse(text: "opened", isError: true)
             }
         )
         let manager = PrimitiveActionManager(registry: registry)
 
-        let response = try await manager.callAction(action: action, call: call)
+        let response = try await manager.callAction(
+            action: action,
+            call: call,
+            allowedScopeKeys: ["browser"]
+        )
 
         #expect(response.isError == true)
         #expect(response.content.count == 1)
-        if case .text(let text, _, _) = try #require(response.content.first) {
+        if case .text(text: let text, annotations: _, _meta: _) = try #require(response.content.first) {
             #expect(text == "opened")
         } else {
             Issue.record("Expected text content from primitive action registry")
@@ -57,7 +62,11 @@ struct PrimitiveActionManagerTests {
         let manager = PrimitiveActionManager(registry: nil)
 
         await #expect(throws: PrimitiveActionManagerError.self) {
-            _ = try await manager.callAction(action: action, call: call)
+            _ = try await manager.callAction(
+                action: action,
+                call: call,
+                allowedScopeKeys: nil
+            )
         }
     }
 
@@ -75,7 +84,7 @@ struct PrimitiveActionManagerTests {
         )
         let registry = KeepTalkingPrimitiveRegistry(
             toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
-            callAction: { _, _ in KeepTalkingPrimitiveActionResponse(text: "unused") }
+            callAction: { _, _, _ in KeepTalkingPrimitiveActionResponse(text: "unused") }
         )
         let manager = PrimitiveActionManager(registry: registry)
 

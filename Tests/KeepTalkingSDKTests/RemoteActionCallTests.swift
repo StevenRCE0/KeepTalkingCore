@@ -560,6 +560,67 @@ struct RemoteActionCallTests {
         #expect(pendingApproval == nil)
     }
 
+    @Test("grant action permission accepts context scoped trust for context grants")
+    func grantActionPermissionAcceptsContextScopedTrustForContextGrants()
+        async throws
+    {
+        let localStore = KeepTalkingInMemoryStore()
+        let ownerNodeID = UUID(uuidString: "BBBBBBB0-0000-0000-0000-000000000001")!
+        let targetNodeID = UUID(uuidString: "BBBBBBB0-0000-0000-0000-000000000002")!
+        let contextID = UUID(uuidString: "BBBBBBB0-0000-0000-0000-000000000003")!
+
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(
+                contextID: contextID,
+                node: ownerNodeID
+            ),
+            localStore: localStore
+        )
+
+        let ownerNode = KeepTalkingNode(id: ownerNodeID)
+        let targetNode = KeepTalkingNode(id: targetNodeID)
+        let context = KeepTalkingContext(id: contextID)
+
+        try await ownerNode.save(on: localStore.database)
+        try await targetNode.save(on: localStore.database)
+        try await context.save(on: localStore.database)
+
+        let trustedRelation = try KeepTalkingNodeRelation(
+            from: ownerNode,
+            to: targetNode,
+            relationship: .trusted([context])
+        )
+        try await trustedRelation.save(on: localStore.database)
+
+        let action = try await KeepTalkingClient.registerAction(
+            payload: .primitive(
+                KeepTalkingPrimitiveBundle(
+                    name: "open-url-in-browser",
+                    indexDescription: "Open a URL",
+                    action: .openURLInBrowser
+                )
+            ),
+            node: ownerNode,
+            on: localStore.database
+        )
+
+        try await client.grantActionPermission(
+            actionID: try #require(action.id),
+            toNodeID: targetNodeID,
+            scope: .context(context)
+        )
+
+        let approval =
+            try await KeepTalkingNodeRelationActionRelation
+            .query(on: localStore.database)
+            .filter(\.$relation.$id, .equal, try #require(trustedRelation.id))
+            .filter(\.$action.$id, .equal, try #require(action.id))
+            .first()
+
+        #expect(approval != nil)
+        #expect(approval?.applicable(in: context) == true)
+    }
+
     @Test("early remote action result is cached until the caller waits for it")
     func earlyRemoteActionResultIsCached() async throws {
         let requestID = UUID(uuidString: "10000000-0000-0000-0000-000000000000")!
@@ -647,7 +708,7 @@ struct RemoteActionCallTests {
             ),
             primitiveRegistry: KeepTalkingPrimitiveRegistry(
                 toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
-                callAction: { _, _ in KeepTalkingPrimitiveActionResponse(text: "opened") }
+                callAction: { _, _, _ in KeepTalkingPrimitiveActionResponse(text: "opened") }
             ),
             localStore: localStore
         )

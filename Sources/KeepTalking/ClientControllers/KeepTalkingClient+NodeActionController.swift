@@ -621,16 +621,24 @@ extension KeepTalkingClient {
             authorizingNode: node,
             on: database
         )
+        let grantContext: KeepTalkingContext? = {
+            switch scope {
+                case .all:
+                    return nil
+                case .context(let context):
+                    return context
+            }
+        }()
 
         guard
             let hostNodeID = hostNode.id,
             let relation = try await preferredTrustedRelation(
                 from: hostNodeID,
                 to: toNodeID,
+                allowing: grantContext,
                 on: database
             )
         else {
-            // TODO: The error is inaccurate
             throw KeepTalkingClientError.relationNotTrustedOrOwned(toNodeID)
         }
 

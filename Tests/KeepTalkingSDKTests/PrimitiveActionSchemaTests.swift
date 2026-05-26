@@ -31,7 +31,7 @@ struct PrimitiveActionSchemaTests {
             ),
             primitiveRegistry: KeepTalkingPrimitiveRegistry(
                 toolParameters: { _ in askForFileParameters },
-                callAction: { _, _ in KeepTalkingPrimitiveActionResponse(text: "") }
+                callAction: { _, _, _ in KeepTalkingPrimitiveActionResponse(text: "") }
             ),
             localStore: KeepTalkingInMemoryStore()
         )

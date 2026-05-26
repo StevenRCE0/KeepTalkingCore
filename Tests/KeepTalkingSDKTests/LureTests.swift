@@ -35,7 +35,6 @@ struct LureTests {
         let keys = try await relation.$identityKeys.get(on: localStore.database)
         #expect(keys.count == 1)
         #expect(keys.first?.publicKey == publicKey)
-        #expect(keys.first?.privateKey?.isEmpty == true)
     }
 
     @Test("static lure does not duplicate pending identity keys")

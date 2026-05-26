@@ -74,7 +74,7 @@ struct ContextAttachmentAIToolTests {
             ),
             primitiveRegistry: KeepTalkingPrimitiveRegistry(
                 toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
-                callAction: { _, _ in
+                callAction: { _, _, _ in
                     KeepTalkingPrimitiveActionResponse(
                         text: """
                             {"status":"sent_to_context","context_id":"\(contextID.uuidString.lowercased())","attachments":[{"blob_id":"\(blobID)","size":3}]}
@@ -144,7 +144,7 @@ struct ContextAttachmentAIToolTests {
         let payload = try await client.executeActionProxyToolCall(
             functionName: definition.functionName,
             definition: definition,
-            rawArguments: toolCall.function.arguments ?? "",
+            rawArguments: toolCall.argumentsJSON,
             context: context
         )
         let executions = [
@@ -152,7 +152,7 @@ struct ContextAttachmentAIToolTests {
                 toolCall: toolCall,
                 messages: [
                     client.toolMessage(
-                        payload: payload,
+                        payload: payload.payload,
                         toolCallID: toolCall.id
                     )
                 ]
@@ -165,7 +165,8 @@ struct ContextAttachmentAIToolTests {
         )
 
         #expect(messages.count == 1)
-        guard case .user(let content, _) = try #require(messages.first) else {
+        let message = try #require(messages.first)
+        guard message.role == .user, let content = message.content else {
             Issue.record("Expected a native user message for the picked file")
             return
         }
@@ -202,7 +203,7 @@ struct ContextAttachmentAIToolTests {
             ),
             primitiveRegistry: KeepTalkingPrimitiveRegistry(
                 toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
-                callAction: { _, _ in
+                callAction: { _, _, _ in
                     KeepTalkingPrimitiveActionResponse(
                         text: """
                             {"status":"sent_to_context","context_id":"\(contextID.uuidString.lowercased())","attachments":[{"blob_id":"\(blobID)","size":3}]}
@@ -258,7 +259,7 @@ struct ContextAttachmentAIToolTests {
         let payload = try await client.executeActionProxyToolCall(
             functionName: definition.functionName,
             definition: definition,
-            rawArguments: toolCall.function.arguments ?? "",
+            rawArguments: toolCall.argumentsJSON,
             context: context
         )
         let executions = [
@@ -266,7 +267,7 @@ struct ContextAttachmentAIToolTests {
                 toolCall: toolCall,
                 messages: [
                     client.toolMessage(
-                        payload: payload,
+                        payload: payload.payload,
                         toolCallID: toolCall.id
                     )
                 ]
@@ -368,10 +369,11 @@ struct ContextAttachmentAIToolTests {
         name: String,
         arguments: String,
         id: String = "tool-call-1"
-    ) -> OpenAIChatCompletionRequestBody.Message.ToolCall {
-        .init(
+    ) -> AIToolCall {
+        AIToolCall(
             id: id,
-            function: .init(name: name, arguments: arguments)
+            name: name,
+            argumentsJSON: arguments
         )
     }
 
@@ -383,10 +385,10 @@ struct ContextAttachmentAIToolTests {
     }
 
     private func toolPayload(
-        from messages: [OpenAIChatCompletionRequestBody.Message]
+        from messages: [AIMessage]
     ) throws -> [String: Any] {
         let firstMessage = try #require(messages.first)
-        guard case .tool(let content, _) = firstMessage else {
+        guard firstMessage.role == .tool, let content = firstMessage.content else {
             throw FixtureError.missingToolMessage
         }
         let text: String
@@ -394,7 +396,13 @@ struct ContextAttachmentAIToolTests {
             case .text(let value):
                 text = value
             case .parts(let parts):
-                text = parts.joined()
+                text = parts.compactMap { part in
+                    if case .text(let value) = part {
+                        return value
+                    }
+                    return nil
+                }
+                .joined()
         }
         guard let data = text.data(using: .utf8),
             let payload = try JSONSerialization.jsonObject(with: data)
