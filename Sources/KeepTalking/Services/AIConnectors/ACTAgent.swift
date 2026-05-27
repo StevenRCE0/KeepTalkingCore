@@ -31,9 +31,11 @@ extension KeepTalkingClient {
             source: .primitive,
             description: """
                 Delegate a KeepTalking action to the ACT (Action-Calling) agent.
-                The agent will autonomously discover the action's tools, call the
-                appropriate one with arguments derived from the conversation, and
-                return a concise summary of the result.
+                Choose the action_id from the full Available actions list before
+                calling this. The ACT agent only receives that selected action,
+                then autonomously discovers its tools, calls the appropriate one
+                with arguments derived from the conversation, and returns a
+                concise summary of the result.
                 """,
             parameters: [
                 "type": .string("object"),
@@ -41,13 +43,13 @@ extension KeepTalkingClient {
                     "action_id": .object([
                         "type": .string("string"),
                         "description": .string(
-                            "UUID of the action to run, taken from the Available actions list."
+                            "UUID of the best matching action from the full Available actions list. Match by user intent, node, action name, type, and description before delegating."
                         ),
                     ]),
                     "task": .object([
                         "type": .string("string"),
                         "description": .string(
-                            "Natural-language description of what the user wants accomplished."
+                            "Natural-language description of what the selected action should accomplish, including any target node/action context the user implied."
                         ),
                     ]),
                 ]),

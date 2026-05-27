@@ -145,6 +145,18 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
             return nil
         }
 
+        /// Whether `GrantPermissionEditor` would render any controls for this
+        /// payload — i.e. whether per-grant permission narrowing is meaningful.
+        /// False for skill / semanticRetrieval (no editor) and for primitives
+        /// whose action kind declares an empty `scopeSchema`.
+        public var hasGrantPermissionEditor: Bool {
+            switch self {
+                case .filesystem, .mcpBundle: return true
+                case .primitive(let bundle): return !bundle.action.scopeSchema.isEmpty
+                case .skill, .semanticRetrieval: return false
+            }
+        }
+
         public var typeName: String {
             switch self {
                 case .mcpBundle:
