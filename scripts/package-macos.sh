@@ -36,35 +36,24 @@ else
   BIN_DIR="$("$SWIFT_BIN" build "${SWIFT_COMMON_ARGS[@]}" -c "$CONFIG" --show-bin-path)"
 fi
 BIN_SRC="$BIN_DIR/KeepTalking"
-FW_SRC="$BIN_DIR/LiveKitWebRTC.framework"
 
 if [[ ! -x "$BIN_SRC" ]]; then
   echo "error: expected executable not found at $BIN_SRC" >&2
   exit 1
 fi
 
-if [[ ! -d "$FW_SRC" ]]; then
-  echo "error: expected framework not found at $FW_SRC" >&2
-  exit 1
-fi
-
 echo "Creating distribution at $OUTPUT_DIR..."
 mkdir -p "$OUTPUT_DIR"
-rm -rf "$OUTPUT_DIR/LiveKitWebRTC.framework"
 cp "$BIN_SRC" "$OUTPUT_DIR/KeepTalking"
-cp -R "$FW_SRC" "$OUTPUT_DIR/"
 
 echo "Code-signing artifacts with identity: $SIGN_IDENTITY"
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
-  codesign --force --sign - "$OUTPUT_DIR/LiveKitWebRTC.framework"
   codesign --force --sign - "$OUTPUT_DIR/KeepTalking"
 else
-  codesign --force --sign "$SIGN_IDENTITY" --options runtime "$OUTPUT_DIR/LiveKitWebRTC.framework"
   codesign --force --sign "$SIGN_IDENTITY" --options runtime "$OUTPUT_DIR/KeepTalking"
 fi
 
 echo "Verifying signatures..."
-codesign --verify --verbose=2 "$OUTPUT_DIR/LiveKitWebRTC.framework"
 codesign --verify --verbose=2 "$OUTPUT_DIR/KeepTalking"
 
 echo "Smoke-test launch..."

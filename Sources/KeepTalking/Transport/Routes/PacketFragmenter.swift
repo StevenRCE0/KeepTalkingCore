@@ -6,7 +6,7 @@ import Foundation
 /// 16 KB depending on the libwebrtc/browser implementation. Encrypted
 /// envelopes — particularly `messagesResult` carrying chat history with
 /// large tool outputs or `sideNotesResult` with many notes — easily exceed
-/// this and get silently dropped by `LKRTCDataChannel.sendData`.
+/// this and get silently dropped by the underlying data-channel send.
 ///
 /// `PacketFragmenter` splits outgoing encrypted payloads into fixed-size
 /// frames prefixed with a small header (group UUID + index + total) and the

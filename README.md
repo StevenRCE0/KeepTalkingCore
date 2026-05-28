@@ -54,7 +54,6 @@ Sources/KeepTalking/
 | Dependency | Purpose |
 |---|---|
 | `FluentKit` + `FluentSQLiteDriver` | ORM + SQLite persistence |
-| `LiveKitWebRTC` | WebRTC for P2P data channels (ion-sfu compatible) |
 | `swift-sdk` (MCP) | MCP server/client for tool integration |
 | `AIProxyMultiPlatform` | Chat completions + embeddings client (local fork — see below) |
 
@@ -178,7 +177,7 @@ swift-format lint --recursive Sources
 
 ## Distribution (macOS)
 
-Package a runnable folder with the `KeepTalking` binary and `LiveKitWebRTC.framework`:
+Package a runnable folder with the `KeepTalking` binary:
 
 ```bash
 ./scripts/package-macos.sh

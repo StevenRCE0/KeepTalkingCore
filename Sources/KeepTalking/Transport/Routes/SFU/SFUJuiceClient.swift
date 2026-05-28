@@ -3,9 +3,8 @@ import Foundation
 import KeepTalkingSFUClient
 import KeepTalkingSFUProtocol
 
-/// `KeepTalkingTransportClient` over the new Swift `KeepTalkingSFU` server.
-/// Carries opaque, encrypted KT envelopes through `SFUClient` rather than
-/// over LiveKitWebRTC data channels.
+/// `KeepTalkingTransportClient` over the Swift `KeepTalkingSFU` server.
+/// Carries opaque, encrypted KT envelopes through `SFUClient`.
 ///
 /// Phase-1 semantics:
 ///   * Single context membership = `config.contextID`.

@@ -16,10 +16,6 @@ let package = Package(
     ],
     dependencies: [
         .package(
-            url: "https://github.com/livekit/webrtc-xcframework.git",
-            exact: "137.7151.12"
-        ),
-        .package(
             url: "https://github.com/vapor/fluent-kit.git",
             from: "1.55.0"
         ),
@@ -47,7 +43,6 @@ let package = Package(
         .target(
             name: "KeepTalkingSDK",
             dependencies: [
-                .product(name: "LiveKitWebRTC", package: "webrtc-xcframework"),
                 .product(name: "FluentKit", package: "fluent-kit"),
                 .product(
                     name: "FluentSQLiteDriver",

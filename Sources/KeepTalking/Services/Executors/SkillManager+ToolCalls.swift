@@ -206,14 +206,12 @@ extension SkillManager {
                 let envString = env.keys.sorted().map { "\($0)=\(env[$0] ?? "")" }.joined(separator: " ")
                 let msg = "[ACT/env] \(envString)"
                 onLog?(msg)
-                print(msg)
             }
             if let directories = sandboxPolicy.descriptor.directories, !directories.isEmpty {
                 let dirString = directories.keys.sorted().map { "\($0)=\(directories[$0]?.path ?? "")" }.joined(
                     separator: " ")
                 let msg = "[ACT/dirs] \(dirString)"
                 onLog?(msg)
-                print(msg)
             }
         }
         #else
@@ -241,17 +239,14 @@ extension SkillManager {
 
         let logMsg = "[ACT] command='\(joinedCommand)' exit=\(execution.exitCode)"
         onLog?(logMsg)
-        print(logMsg)
 
         if !stdout.isEmpty {
             let outMsg = "[ACT/stdout] \(stdout)"
             onLog?(outMsg)
-            print(outMsg)
         }
         if !stderr.isEmpty {
             let errMsg = "[ACT/stderr] \(stderr)"
             onLog?(errMsg)
-            print(errMsg)
         }
         return """
             command: \(joinedCommand)

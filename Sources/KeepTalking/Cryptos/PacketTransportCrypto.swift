@@ -1,5 +1,4 @@
 import Foundation
-import LiveKitWebRTC
 
 struct KeepTalkingEncryptedPacketTransportEnvelope: Codable, Sendable {
     static let kindValue = "keep-talking.encrypted-packet.v1"
@@ -68,26 +67,23 @@ enum KeepTalkingPacketTransportCrypto {
         }
 
         let plaintext = try JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope))
-        let cryptor = try makeCryptor(secret: secret)
-        let senderIdentity = localNodeID.uuidString.lowercased()
-        guard
-            let encrypted = cryptor.encrypt(
-                senderIdentity,
-                keyIndex: 0,
-                data: plaintext
+        let encrypted: (iv: Data, ciphertext: Data)
+        do {
+            encrypted = try KeepTalkingFrameTransportCrypto.seal(
+                secret: secret,
+                plaintext: plaintext
             )
-        else {
-            throw KeepTalkingPacketTransportCryptoError
-                .encryptionFailed
+        } catch {
+            throw KeepTalkingPacketTransportCryptoError.encryptionFailed
         }
 
         let transportEnvelope =
             KeepTalkingEncryptedPacketTransportEnvelope(
                 senderNodeID: localNodeID,
                 contextID: contextID,
-                keyIndex: encrypted.keyIndex,
+                keyIndex: 0,
                 iv: encrypted.iv,
-                ciphertext: encrypted.data
+                ciphertext: encrypted.ciphertext
             )
         return try JSONEncoder().encode(transportEnvelope)
     }
@@ -125,22 +121,15 @@ enum KeepTalkingPacketTransportCrypto {
                 .missingContextSecret(encryptedEnvelope.contextID)
         }
 
-        let cryptor = try makeCryptor(secret: secret)
-        let senderIdentity =
-            encryptedEnvelope.senderNodeID.uuidString.lowercased()
-        let encryptedPacket = LKRTCEncryptedPacket(
-            data: encryptedEnvelope.ciphertext,
-            iv: encryptedEnvelope.iv,
-            keyIndex: encryptedEnvelope.keyIndex
-        )
-        guard
-            let plaintext = cryptor.decrypt(
-                senderIdentity,
-                encryptedPacket: encryptedPacket
+        let plaintext: Data
+        do {
+            plaintext = try KeepTalkingFrameTransportCrypto.open(
+                secret: secret,
+                iv: encryptedEnvelope.iv,
+                ciphertext: encryptedEnvelope.ciphertext
             )
-        else {
-            throw KeepTalkingPacketTransportCryptoError
-                .decryptionFailed
+        } catch {
+            throw KeepTalkingPacketTransportCryptoError.decryptionFailed
         }
 
         let envelope = try JSONDecoder().decode(
@@ -156,18 +145,6 @@ enum KeepTalkingPacketTransportCrypto {
         }
 
         return envelope
-    }
-
-    private static func makeCryptor(secret: Data) throws
-        -> LKRTCDataPacketCryptor
-    {
-        do {
-            return try KeepTalkingFrameTransportCrypto.makePacketCryptor(
-                secret: secret
-            )
-        } catch {
-            throw KeepTalkingPacketTransportCryptoError.encryptionFailed
-        }
     }
 
     private static func loadContextSecret(

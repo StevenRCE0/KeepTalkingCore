@@ -1,10 +1,8 @@
 import Foundation
 import SwiftJUICE
 
-/// Public P2P session backed by `swift-libjuice`. The whole point is to
-/// prove a KT client can move bytes peer-to-peer with no LiveKitWebRTC
-/// in the picture — just ICE for connectivity + raw UDP datagrams from
-/// libjuice for the payload.
+/// Public P2P session backed by `swift-libjuice`: ICE for connectivity +
+/// raw UDP datagrams from libjuice for the payload.
 ///
 /// Phase-1 surface area: manual SDP exchange (same pattern Voice Lab uses
 /// for WebRTC). The session emits its local SDP once gathering completes;
