@@ -7,10 +7,17 @@ import Foundation
 public struct KeepTalkingVoiceCallStartedPayload: Codable, Sendable {
     public let from: UUID
     public let contextID: UUID
+    /// The sender's *effective* transport at the moment they announced —
+    /// `"p2p"` or `"sfu"`. Lets the receiver detect a mismatch (one side
+    /// doing ICE while the other only relays) and converge before the
+    /// call half-opens. Optional so a `started` from a peer that predates
+    /// this field decodes cleanly; a `nil` value is treated as P2P-capable.
+    public let effectiveTransport: String?
 
-    public init(from: UUID, contextID: UUID) {
+    public init(from: UUID, contextID: UUID, effectiveTransport: String? = nil) {
         self.from = from
         self.contextID = contextID
+        self.effectiveTransport = effectiveTransport
     }
 }
 

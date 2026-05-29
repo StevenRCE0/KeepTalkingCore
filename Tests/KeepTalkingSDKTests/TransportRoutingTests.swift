@@ -29,7 +29,7 @@ struct TransportRoutingTests {
         #expect(harness.broadcast.sentSequenced.isEmpty)
     }
 
-    @Test("context sync envelopes prefer p2p before sfu")
+    @Test("context sync envelopes use preferDirect strategy")
     func contextSyncPrefersDirectBeforeBroadcast() {
         let envelope = makeContextSyncEnvelope(
             contextID: UUID(uuidString: "10000000-0000-0000-0000-000000000000")!,
@@ -37,7 +37,7 @@ struct TransportRoutingTests {
             recipient: UUID(uuidString: "30000000-0000-0000-0000-000000000000")!
         )
 
-        #expect(envelope.preferredRoutes == [.p2p, .sfu])
+        #expect(envelope.routingStrategy == .preferDirect)
     }
 
     @Test("presence upgrades direct channel without trust gating")
@@ -366,6 +366,28 @@ struct ChannelStateMachineTests {
 
         guard case .backingOff = firstBackoff else {
             Issue.record("expected first failure to enter backingOff")
+            return
+        }
+    }
+
+    @Test("direct state machine enters failure path on iceFailed while ready")
+    func directIceFailedWhileReadyDoesNotStick() {
+        var machine = DirectChannelStateMachine()
+
+        // Drive to .ready
+        #expect(machine.handle(.upgradeRequested) == .beginHandshake)
+        #expect(machine.handle(.iceConnected) == .none)
+        #expect(machine.state == .ready)
+
+        // H2 keepalive fires iceFailed while the state machine is .ready.
+        // Before the fix this fell to `default: .none` and the channel
+        // stayed .ready forever, pinning the dead peer "online".
+        let effect = machine.handle(.iceFailed)
+        #expect(machine.state != .ready, "iceFailed must leave .ready")
+        // First failure → backoff (not abandoned yet).
+        #expect(machine.failureCount == 1)
+        guard case .scheduleBackoff = effect else {
+            Issue.record("expected scheduleBackoff, got \(effect)")
             return
         }
     }

@@ -194,7 +194,8 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
     private func broadcastStarted() {
         let payload = KeepTalkingVoiceCallStartedPayload(
             from: localNodeID,
-            contextID: config.contextID
+            contextID: config.contextID,
+            effectiveTransport: effectiveTransport.rawValue
         )
         do {
             try sendEnvelope(payload)
@@ -245,7 +246,10 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         }
         switch envelope {
             case let started as KeepTalkingVoiceCallStartedPayload:
-                handlePeerStarted(nodeID: started.from)
+                handlePeerStarted(
+                    nodeID: started.from,
+                    remoteTransport: EffectiveTransport(rawValue: started.effectiveTransport ?? "")
+                )
             case let ended as KeepTalkingVoiceCallEndedPayload:
                 handlePeerEnded(nodeID: ended.from)
             case let signal as KeepTalkingVoiceCallSignalPayload where signal.to == localNodeID:
@@ -265,9 +269,19 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         case kept  // live/in-flight connection — `started` is an echo
     }
 
-    private func handlePeerStarted(nodeID: UUID) {
+    private func handlePeerStarted(nodeID: UUID, remoteTransport: EffectiveTransport? = nil) {
         guard nodeID != localNodeID else { return }
         evaluateAutoMeshCap(forIncomingNodeID: nodeID)
+        // SFU wins. If the remote announced it's relaying through the SFU
+        // while we're still trying P2P, ICE between us can never complete:
+        // the SFU side drops our SDP signals (it only relays). Converge the
+        // whole session to SFU so the pairing can't half-open with one side
+        // "live" on the relay and the other stuck "waiting for peer". The
+        // decision is symmetric — the SFU side stays put, the P2P side moves
+        // — so both independently arrive at SFU.
+        if remoteTransport == .sfu, effectiveTransport == .p2p {
+            convergeToSFU(reason: "peer \(nodeID.uuidString.prefix(8)) is on SFU relay")
+        }
         // A peer that dropped without a clean `voiceCallEnded` leaves a
         // stale entry behind (failed ICE, or `.iceConnected` whose agent
         // has since closed). Treat a `started` on top of such an entry as
@@ -406,6 +420,31 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
     }
 
     private func upgradeAutoToSFU(reason: String) {
+        let migrated = migrateToSFU()
+        emitLog("auto: upgraded to SFU (\(reason)); \(migrated) peer\(migrated == 1 ? "" : "s") migrated")
+        emitPeersChanged()
+    }
+
+    /// Forced convergence to SFU triggered by a transport-mode mismatch
+    /// with a peer (see `handlePeerStarted`). Distinct from the auto-mesh
+    /// upgrade: it can fire even when `mode` is explicitly `.p2p`, because
+    /// a working relayed call beats a half-open P2P one. Sets the same
+    /// sticky flag so we don't bounce back to P2P, and re-announces our
+    /// new transport so a late-joining peer sees it.
+    private func convergeToSFU(reason: String) {
+        let migrated = migrateToSFU()
+        emitLog("converged to SFU (\(reason)); \(migrated) peer\(migrated == 1 ? "" : "s") migrated")
+        emitPeersChanged()
+        // Re-announce so the now-current `effectiveTransport=sfu` reaches
+        // peers; otherwise a third P2P peer joining later would also try
+        // (and fail) ICE against us.
+        broadcastStarted()
+    }
+
+    /// Shared teardown for both the auto-mesh upgrade and forced
+    /// convergence: flips the session to SFU, marks every peer as a relay,
+    /// and closes any live ICE agents. Returns the migrated peer count.
+    private func migrateToSFU() -> Int {
         let entries = lock.withLock { () -> [PeerEntry] in
             autoStickySFU = true
             effectiveTransport = .sfu
@@ -426,8 +465,7 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
                 entry.ice = nil
             }
         }
-        emitLog("auto: upgraded to SFU (\(reason)); \(entries.count) peer\(entries.count == 1 ? "" : "s") migrated")
-        emitPeersChanged()
+        return entries.count
     }
 
     private static func localIsOfferer(localNodeID: UUID, peerNodeID: UUID) -> Bool {

@@ -640,10 +640,11 @@ extension KeepTalkingClient {
         await broadcastLocalNodeState(
             reason: "peer-connect node=\(nodeIDText)"
         )
-        if activeVoiceSession != nil {
+        if let activeVoiceSession {
             let voiceBroadcastPayload = KeepTalkingVoiceCallStartedPayload(
                 from: config.node,
-                contextID: config.contextID
+                contextID: config.contextID,
+                effectiveTransport: activeVoiceSession.effectiveTransport.rawValue
             )
             do {
                 try rtcClient.sendEnvelope(voiceBroadcastPayload)

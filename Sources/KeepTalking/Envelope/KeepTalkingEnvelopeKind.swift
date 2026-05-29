@@ -75,8 +75,9 @@ extension KeepTalkingEnvelopeKind {
         }
     }
 
-    public var preferredRoutes: [KeepTalkingTransportRoute] {
+    public var routingStrategy: KeepTalkingRoutingStrategy {
         switch self {
+            // Signaling, presence, trust, voice — must fan out via SFU.
             case .p2pSignal,
                 .p2pPresence,
                 .trustRequest,
@@ -86,7 +87,9 @@ extension KeepTalkingEnvelopeKind {
                 .voiceCallStarted,
                 .voiceCallEnded,
                 .voiceCallSignal:
-                return [.sfu]
+                return .sfuOnly
+            // Service envelopes — catalog, node state, agent continuations.
+            // Reliability matters more than latency; SFU is the safe path.
             case .node,
                 .nodeStatus,
                 .encryptedNodeStatus,
@@ -95,7 +98,8 @@ extension KeepTalkingEnvelopeKind {
                 .encryptedActionCatalogRequest,
                 .encryptedActionCatalogResult,
                 .encryptedAgentTurnContinuationResponse:
-                return [.sfu]
+                return .sfuOnly
+            // User-visible payload — chat, sync, action calls. Latency wins.
             case .contextSync,
                 .message,
                 .attachment,
@@ -106,8 +110,13 @@ extension KeepTalkingEnvelopeKind {
                 .encryptedActionCallRequest,
                 .encryptedRequestAck,
                 .encryptedActionCallResult:
-                return [.p2p, .sfu]
+                return .preferDirect
         }
+    }
+
+    /// Legacy shim — migrate callers to `routingStrategy` and remove.
+    public var preferredRoutes: [KeepTalkingTransportRoute] {
+        routingStrategy.orderedRoutes
     }
 
     public var envelopeType: KeepTalkingEnvelopeType {

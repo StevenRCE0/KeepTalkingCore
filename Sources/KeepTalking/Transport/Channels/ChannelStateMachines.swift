@@ -133,6 +133,14 @@ public struct DirectChannelStateMachine: Sendable {
                 state = .interrupted
                 return .none
 
+            // Connection-level failure while live (e.g. H2 keepalive
+            // timeout, abrupt TCP RST). The carrier is dead — go
+            // straight to the retry/abandon path rather than parking
+            // in .interrupted (which expects a reconnect attempt that
+            // will never come because the carrier already closed).
+            case (.ready, .iceFailed):
+                return applyFailure()
+
             case (.interrupted, .iceConnected):
                 state = .ready
                 return .none

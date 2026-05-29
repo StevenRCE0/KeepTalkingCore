@@ -135,7 +135,13 @@ public final class KeepTalkingJuiceP2PSession: @unchecked Sendable {
         emit("ice state=\(s)")
         switch s {
             case .disconnected:
-                break
+                // libjuice's DISCONNECTED fires when consent-freshness
+                // checks fail (RFC 7675) on a previously-connected path.
+                // Pre-connection it's the initial state and harmless —
+                // only treat it as a failure after we've been connected.
+                if case .connected = state {
+                    state = .failed("ice disconnected (consent expired)")
+                }
             case .gathering:
                 state = .gathering
             case .connecting:
