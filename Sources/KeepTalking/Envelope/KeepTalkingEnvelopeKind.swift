@@ -25,6 +25,18 @@ public enum KeepTalkingEnvelopeKind: String, Codable, Sendable {
     case trustAccept
     case trustComplete
     case trustReject
+    /// Broadcast: "I have started or joined the voice call in this
+    /// context." Peers use it to populate their participant set and,
+    /// when they're also in the call, to drive SDP handshake.
+    case voiceCallStarted
+    /// Broadcast: "I have left the voice call." Peers tear down ICE
+    /// to this node and drop it from the participant set.
+    case voiceCallEnded
+    /// Directed: SDP exchange between two participants. Carried as an
+    /// envelope so it rides the same encrypted, addressable path as
+    /// the call presence pings — replaces the SFU `.p2pSignal` raw
+    /// channel previously used for SDP.
+    case voiceCallSignal
 }
 
 extension KeepTalkingEnvelopeKind {
@@ -55,7 +67,10 @@ extension KeepTalkingEnvelopeKind {
                 .trustRequest,
                 .trustAccept,
                 .trustComplete,
-                .trustReject:
+                .trustReject,
+                .voiceCallStarted,
+                .voiceCallEnded,
+                .voiceCallSignal:
                 return .signaling
         }
     }
@@ -67,7 +82,10 @@ extension KeepTalkingEnvelopeKind {
                 .trustRequest,
                 .trustAccept,
                 .trustComplete,
-                .trustReject:
+                .trustReject,
+                .voiceCallStarted,
+                .voiceCallEnded,
+                .voiceCallSignal:
                 return [.sfu]
             case .node,
                 .nodeStatus,
@@ -117,7 +135,10 @@ extension KeepTalkingEnvelopeKind {
                 .trustRequest,
                 .trustAccept,
                 .trustComplete,
-                .trustReject:
+                .trustReject,
+                .voiceCallStarted,
+                .voiceCallEnded,
+                .voiceCallSignal:
                 return .p2pSignaling
         }
     }

@@ -640,6 +640,17 @@ extension KeepTalkingClient {
         await broadcastLocalNodeState(
             reason: "peer-connect node=\(nodeIDText)"
         )
+        if activeVoiceSession != nil {
+            let voiceBroadcastPayload = KeepTalkingVoiceCallStartedPayload(
+                from: config.node,
+                contextID: config.contextID
+            )
+            do {
+                try rtcClient.sendEnvelope(voiceBroadcastPayload)
+            } catch {
+                rtcClient.onLog?("failed to send voice call started: \(error)")
+            }
+        }
         await syncCurrentContext(with: nodeID)
         // A fresh channel is the headline trigger for draining the outbox:
         // any queued envelopes have a real path to a peer now.

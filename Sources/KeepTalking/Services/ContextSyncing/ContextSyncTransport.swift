@@ -443,6 +443,7 @@ extension KeepTalkingClient {
         )
         .filter(\.$context.$id, .equal, context)
         .all()
+
         return KeepTalkingContextSyncSnapshot(
             context: context,
             messages: messages,

@@ -44,6 +44,9 @@ public enum KeepTalkingClientError: LocalizedError {
     /// In-flight call/sync/request rejected because the client is being
     /// torn down (e.g. `disconnect()`).
     case clientDisconnected
+    /// `makeVoiceSession` was called but the client has no SFU endpoint
+    /// configured. Voice requires SFU presence + signaling.
+    case noSFUEndpointConfigured
 
     public var errorDescription: String? {
         switch self {
@@ -120,6 +123,8 @@ public enum KeepTalkingClientError: LocalizedError {
                     "Trust scope must include at least one context (or use \"all contexts\")."
             case .clientDisconnected:
                 return "Client is disconnecting; in-flight operation cancelled."
+            case .noSFUEndpointConfigured:
+                return "No SFU endpoint is configured for this client; voice requires SFU presence + signaling."
         }
     }
 }
@@ -182,6 +187,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
     }
 
     public let logon: UUID
+    /// Tracks which contexts have an ongoing joinable voice call, fed
+    /// by inbound `voiceCallStarted` / `voiceCallEnded` envelopes. The
+    /// app reads from this to glow the in-context Voice button when
+    /// another participant has started a call but local self hasn't
+    /// joined yet.
+    public let voiceCallPresence = KeepTalkingVoiceCallPresenceRegistry()
+    var activeVoiceSession: KeepTalkingVoiceSession?
     let config: KeepTalkingConfig
     let rtcClient: any KeepTalkingTransportClient
     let kvService: (any KeepTalkingKVService)?

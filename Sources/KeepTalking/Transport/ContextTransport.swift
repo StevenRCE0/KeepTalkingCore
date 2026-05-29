@@ -277,6 +277,9 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
             case .trustRequest, .trustAccept, .trustComplete, .trustReject:
                 onTrustEnvelope?(envelope)
                 return
+            case .voiceCallStarted, .voiceCallEnded, .voiceCallSignal:
+                onEnvelope?(envelope)
+                return
             default:
                 break
         }

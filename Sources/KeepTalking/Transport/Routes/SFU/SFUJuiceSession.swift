@@ -69,20 +69,29 @@ public final class KeepTalkingSFUJuiceSession: @unchecked Sendable {
 
     private let inner: KeepTalkingSFUJuiceClient
     private let config: KeepTalkingConfig
+    /// Closure used by both the outbound `send(envelope:)` path (inner
+    /// client's `sendEnvelope`) and the inbound dispatch path
+    /// (`dispatchInbound`) for context-secret AEAD. Set by callers that
+    /// own a context secret; left nil for opaque-bytes-only use cases
+    /// (e.g. blob lab's pre-envelope mode).
+    private var contextSecretProvider: (@Sendable (UUID) async throws -> Data?)?
 
     public init(
         config: KeepTalkingConfig,
         sfuHost: String,
         sfuPort: UInt16,
-        signingKey: Curve25519.Signing.PrivateKey
+        signingKey: Curve25519.Signing.PrivateKey,
+        contextSecretProvider: (@Sendable (UUID) async throws -> Data?)? = nil
     ) {
         self.config = config
+        self.contextSecretProvider = contextSecretProvider
         self.inner = KeepTalkingSFUJuiceClient(
             config: config,
             sfuHost: sfuHost,
             sfuPort: sfuPort,
             signingKey: signingKey
         )
+        inner.contextSecretProvider = contextSecretProvider
         inner.onLog = { [weak self] msg in self?.onLog?(msg) }
         // The legacy onEnvelope / onBlobData closures still exist on the
         // KeepTalkingTransportClient protocol but the session no longer
@@ -155,7 +164,7 @@ public final class KeepTalkingSFUJuiceSession: @unchecked Sendable {
             try? KeepTalkingPacketTransportCrypto
             .inboundEnvelope(
                 from: inbound.bytes,
-                contextSecretProvider: nil
+                contextSecretProvider: contextSecretProvider
             )
         {
             onInbound?(.envelope(envelope, channel: channel, sender: inbound.sender))

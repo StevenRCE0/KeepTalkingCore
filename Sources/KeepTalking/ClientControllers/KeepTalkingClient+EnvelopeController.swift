@@ -10,7 +10,9 @@ extension KeepTalkingClient {
         handlers.registerContextSyncHandlers(for: self)
         handlers.registerActionCallHandlers(for: self)
         handlers.registerActionCatalogHandlers(for: self)
+        handlers.registerVoiceCallHandlers(for: self)
         try await handlers.handle(envelope)
+        activeVoiceSession?.receiveVoiceEnvelope(envelope)
         onEnvelope?(envelope)
     }
 }
