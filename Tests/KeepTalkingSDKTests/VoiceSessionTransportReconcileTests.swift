@@ -13,15 +13,45 @@ struct VoiceSessionTransportReconcileTests {
     private final class SentBox: @unchecked Sendable {
         private let lock = NSLock()
         private var envelopes: [any KeepTalkingEnvelope] = []
+        private var blobs: [Data] = []
         func record(_ envelope: any KeepTalkingEnvelope) {
             lock.lock()
             defer { lock.unlock() }
             envelopes.append(envelope)
         }
+        func recordBlob(_ data: Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            blobs.append(data)
+        }
         var started: [KeepTalkingVoiceCallStartedPayload] {
             lock.lock()
             defer { lock.unlock() }
             return envelopes.compactMap { $0 as? KeepTalkingVoiceCallStartedPayload }
+        }
+        var sentBlobs: [Data] {
+            lock.lock()
+            defer { lock.unlock() }
+            return blobs
+        }
+    }
+
+    private final class InboundBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedSender: UUID?
+        private var storedPayload: Data?
+
+        func record(_ payload: Data, from sender: UUID) {
+            lock.lock()
+            defer { lock.unlock() }
+            storedSender = sender
+            storedPayload = payload
+        }
+
+        var snapshot: (sender: UUID?, payload: Data?) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (storedSender, storedPayload)
         }
     }
 
@@ -35,7 +65,7 @@ struct VoiceSessionTransportReconcileTests {
         let session = KeepTalkingVoiceSession(
             config: config,
             sendEnvelope: { envelope in sent.record(envelope) },
-            sendBlobData: { _, _ in },
+            sendBlobData: { data, _ in sent.recordBlob(data) },
             mode: mode
         )
         return (session, sent, contextID)
@@ -112,5 +142,128 @@ struct VoiceSessionTransportReconcileTests {
         let started = sent.started
         #expect(!started.isEmpty)
         #expect(started.allSatisfy { $0.effectiveTransport == "sfu" })
+    }
+
+    @Test("heartbeat evicts stale peer and allows rejoin")
+    func heartbeatEvictsAndRejoin() async throws {
+        let local = UUID(uuidString: "ff000000-0000-0000-0000-000000000000")!
+        let peer = UUID(uuidString: "11000000-0000-0000-0000-000000000000")!
+        let (session, sent, context) = makeSession(node: local, mode: .sfu)
+        try await session.start()
+
+        // Peer joins.
+        session.receiveVoiceEnvelope(
+            KeepTalkingVoiceCallStartedPayload(
+                from: peer, contextID: context, effectiveTransport: "sfu"
+            )
+        )
+        #expect(session.peers.count == 1)
+
+        // Peer disappears — voice.ended lost. Simulate heartbeat ticks
+        // with no inbound voice.started from the peer. Threshold is 3
+        // ticks (6 s at 2 s intervals).
+        session.heartbeatTick()  // tick 1
+        session.heartbeatTick()  // tick 2
+        #expect(session.peers.count == 1)
+        session.heartbeatTick()  // tick 3 — hits threshold, evicted
+        #expect(session.peers.isEmpty)
+
+        // Peer reconnects and sends a fresh voice.started.
+        let sentCountBefore = sent.started.count
+        session.receiveVoiceEnvelope(
+            KeepTalkingVoiceCallStartedPayload(
+                from: peer, contextID: context, effectiveTransport: "sfu"
+            )
+        )
+        #expect(session.peers.count == 1)
+        #expect(session.peers.first?.state == .sfuRelay)
+        #expect(sent.started.count > sentCountBefore)
+    }
+
+    @Test("heartbeat re-broadcast keeps peer alive")
+    func heartbeatEchoResetsFreshness() async throws {
+        let local = UUID(uuidString: "ff000000-0000-0000-0000-000000000000")!
+        let peer = UUID(uuidString: "11000000-0000-0000-0000-000000000000")!
+        let (session, _, context) = makeSession(node: local, mode: .sfu)
+        try await session.start()
+
+        session.receiveVoiceEnvelope(
+            KeepTalkingVoiceCallStartedPayload(
+                from: peer, contextID: context, effectiveTransport: "sfu"
+            )
+        )
+        // Tick once — peer ages to 1.
+        session.heartbeatTick()
+        #expect(session.peers.count == 1)
+
+        // Peer's heartbeat echo arrives — resets the counter.
+        session.receiveVoiceEnvelope(
+            KeepTalkingVoiceCallStartedPayload(
+                from: peer, contextID: context, effectiveTransport: "sfu"
+            )
+        )
+
+        // Another tick — peer is at 1 again, not 2. Still alive.
+        session.heartbeatTick()
+        #expect(session.peers.count == 1)
+    }
+
+    @Test("sfu audio broadcast emits one relayed voice frame")
+    func sfuBroadcastWrapsFrameOnce() async throws {
+        let local = UUID(uuidString: "22000000-0000-0000-0000-000000000000")!
+        let peerA = UUID(uuidString: "33000000-0000-0000-0000-000000000000")!
+        let peerB = UUID(uuidString: "44000000-0000-0000-0000-000000000000")!
+        let (session, sent, context) = makeSession(node: local, mode: .sfu)
+        try await session.start()
+
+        session.receiveVoiceEnvelope(
+            KeepTalkingVoiceCallStartedPayload(from: peerA, contextID: context, effectiveTransport: "sfu")
+        )
+        session.receiveVoiceEnvelope(
+            KeepTalkingVoiceCallStartedPayload(from: peerB, contextID: context, effectiveTransport: "sfu")
+        )
+
+        session.broadcast(Data("pcm".utf8))
+
+        #expect(sent.sentBlobs.count == 1)
+    }
+
+    @Test("sfu relayed voice frame restores sender and payload")
+    func sfuRelayedFrameRestoresSender() async throws {
+        let sender = UUID(uuidString: "55000000-0000-0000-0000-000000000000")!
+        let receiver = UUID(uuidString: "66000000-0000-0000-0000-000000000000")!
+        let contextID = UUID(uuidString: "01000000-0000-0000-0000-000000000000")!
+        let senderSent = SentBox()
+        let senderSession = KeepTalkingVoiceSession(
+            config: KeepTalkingConfig(contextID: contextID, node: sender),
+            sendEnvelope: { _ in },
+            sendBlobData: { data, _ in senderSent.recordBlob(data) },
+            mode: .sfu
+        )
+        let receiverSession = KeepTalkingVoiceSession(
+            config: KeepTalkingConfig(contextID: contextID, node: receiver),
+            sendEnvelope: { _ in },
+            sendBlobData: { _, _ in },
+            mode: .sfu
+        )
+
+        try await senderSession.start()
+        try await receiverSession.start()
+        senderSession.receiveVoiceEnvelope(
+            KeepTalkingVoiceCallStartedPayload(from: receiver, contextID: contextID, effectiveTransport: "sfu")
+        )
+
+        senderSession.broadcast(Data("voice-payload".utf8))
+        let relayed = try #require(senderSent.sentBlobs.first)
+
+        let inbound = InboundBox()
+        receiverSession.onInboundFrame = { payload, sender in
+            inbound.record(payload, from: sender)
+        }
+
+        #expect(receiverSession.receiveRelayedFrame(relayed))
+        let snapshot = inbound.snapshot
+        #expect(snapshot.sender == sender)
+        #expect(snapshot.payload == Data("voice-payload".utf8))
     }
 }

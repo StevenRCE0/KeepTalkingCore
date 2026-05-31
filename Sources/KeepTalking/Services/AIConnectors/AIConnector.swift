@@ -2,8 +2,24 @@ import Foundation
 
 // MARK: - AITurnResult
 
+/// Audio output from an AI turn — decoded PCM/WAV bytes, transcript, and
+/// an opaque ID for multi-turn audio references.
+public struct AIAudioOutput: Sendable {
+    public let id: String?
+    public let data: Data?
+    public let transcript: String?
+    public let expiresAt: Int?
+
+    public init(id: String? = nil, data: Data? = nil, transcript: String? = nil, expiresAt: Int? = nil) {
+        self.id = id
+        self.data = data
+        self.transcript = transcript
+        self.expiresAt = expiresAt
+    }
+}
+
 /// The result of a single AI turn: optional assistant text, optional reasoning
-/// content, and any tool-call requests.
+/// content, any tool-call requests, and optional audio output.
 public struct AITurnResult: Sendable {
     public let assistantText: String?
     /// The model's reasoning / chain-of-thought, when the provider returns it
@@ -12,15 +28,20 @@ public struct AITurnResult: Sendable {
     /// whether to publish it into the conversation context.
     public let thinking: String?
     public let toolCalls: [AIToolCall]
+    /// Audio output from audio-capable models. Present when the turn was
+    /// configured with `modalities: ["audio"]` and the model produced audio.
+    public let audioOutput: AIAudioOutput?
 
     public init(
         assistantText: String?,
         thinking: String? = nil,
-        toolCalls: [AIToolCall]
+        toolCalls: [AIToolCall],
+        audioOutput: AIAudioOutput? = nil
     ) {
         self.assistantText = assistantText
         self.thinking = thinking
         self.toolCalls = toolCalls
+        self.audioOutput = audioOutput
     }
 }
 

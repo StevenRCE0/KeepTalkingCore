@@ -21,6 +21,7 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
     var onEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)?
     var onTrustEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
+    var onRealtimeData: KeepTalkingTransportRealtimeDataHandler?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
     var onBroadcastReady: (@Sendable () -> Void)?
@@ -197,11 +198,15 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
     }
 
     func sendBlobData(_ data: Data, targetPeerNodeID: UUID?) throws {
-        // Blob data is opaque to the SFU. For phase-1 we just stuff it
-        // through the broadcast channel; the receiver routes via
-        // onBlobData based on the framing the application already uses
-        // on top.
-        client.broadcast(envelope: data, context: config.contextID)
+        // Blob data is opaque to the SFU, but it must stay on the blob
+        // channel so receivers dispatch it as media/blob bytes instead
+        // of chat envelope traffic.
+        client.broadcast(envelope: data, context: config.contextID, channel: .blob)
+        stateQueue.sync { sentCount += 1 }
+    }
+
+    func sendRealtimeDataViaBroadcast(_ data: Data) throws {
+        client.broadcast(envelope: data, context: config.contextID, channel: .realtime)
         stateQueue.sync { sentCount += 1 }
     }
 
@@ -271,6 +276,10 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
 
     private func handleInboundEnvelope(_ inbound: SFUClient.InboundEnvelope) {
         stateQueue.sync { recvCount += 1 }
+        if inbound.channel == .realtime {
+            onRealtimeData?(inbound.bytes)
+            return
+        }
         do {
             if let envelope =
                 try KeepTalkingPacketTransportCrypto

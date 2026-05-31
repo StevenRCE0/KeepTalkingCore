@@ -81,6 +81,17 @@ public enum AIResponseFormat: Sendable {
 /// does not expose a unified protocol across providers — each provider has its own
 /// request body shape. Sealing the config here keeps the protocol stable while the
 /// fork tracks upstream changes.
+/// Audio output configuration for turns targeting audio-capable models.
+public struct AIAudioOutputConfig: Sendable {
+    public var voice: String
+    public var format: String
+
+    public init(voice: String, format: String = "pcm16") {
+        self.voice = voice
+        self.format = format
+    }
+}
+
 public struct AITurnConfiguration: Sendable {
     public var reasoning: AIReasoning?
     public var temperature: Double?
@@ -92,6 +103,13 @@ public struct AITurnConfiguration: Sendable {
     public var promptCacheKey: String?
     public var endUserID: String?
 
+    /// Output modalities requested for this turn (e.g. `["text", "audio"]`).
+    /// When `nil`, the connector uses its default (text only).
+    public var modalities: [String]?
+
+    /// Audio output configuration. Requires `modalities` to include `"audio"`.
+    public var audioOutput: AIAudioOutputConfig?
+
     public init(
         reasoning: AIReasoning? = nil,
         temperature: Double? = nil,
@@ -101,7 +119,9 @@ public struct AITurnConfiguration: Sendable {
         seed: Int? = nil,
         responseFormat: AIResponseFormat? = nil,
         promptCacheKey: String? = nil,
-        endUserID: String? = nil
+        endUserID: String? = nil,
+        modalities: [String]? = nil,
+        audioOutput: AIAudioOutputConfig? = nil
     ) {
         self.reasoning = reasoning
         self.temperature = temperature
@@ -112,6 +132,8 @@ public struct AITurnConfiguration: Sendable {
         self.responseFormat = responseFormat
         self.promptCacheKey = promptCacheKey
         self.endUserID = endUserID
+        self.modalities = modalities
+        self.audioOutput = audioOutput
     }
 
     public static let `default` = AITurnConfiguration()

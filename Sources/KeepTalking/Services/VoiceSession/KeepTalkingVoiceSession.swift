@@ -26,7 +26,7 @@ import Foundation
 /// ### Audio
 ///
 /// Audio still rides as raw frames — `broadcast(_:)` on `.p2p` goes
-/// through libjuice datagrams, on `.sfu` through the SFU `.blob`
+/// through libjuice datagrams, on `.sfu` through the SFU `.realtime`
 /// channel. Frames are opaque `Data`; a future multimodal agent can
 /// hook `onInboundFrame` and `broadcast(_:)` to get the same seam.
 public final class KeepTalkingVoiceSession: @unchecked Sendable {
@@ -82,9 +82,18 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
     private let config: KeepTalkingConfig
     private let sendEnvelope: @Sendable (any KeepTalkingEnvelope) throws -> Void
     private let sendBlobData: @Sendable (Data, UUID?) throws -> Void
-
     private let lock = NSLock()
     private var peerEntries: [UUID: PeerEntry] = [:]
+
+    /// Heartbeat interval — re-broadcasts `voice.started` and checks
+    /// peer freshness. Voice is real-time, so we run much tighter than
+    /// the transport's 13 s chat presence wave.
+    private static let heartbeatIntervalSeconds: TimeInterval = 2
+    /// A peer that hasn't echoed `voice.started` within this many ticks
+    /// is evicted. 3 ticks × 2 s = 6 s of silence before cleanup.
+    private static let peerStaleTicksThreshold: Int = 3
+
+    private var heartbeatTask: Task<Void, Never>?
 
     private final class PeerEntry {
         let nodeID: UUID
@@ -92,6 +101,9 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         var ice: KeepTalkingJuiceP2PSession?
         var iceLocalSDPSent: Bool = false
         var iceDidConnect: Bool = false
+        /// Ticks since the last `voice.started` from this peer. Reset to
+        /// 0 on every inbound `started`; incremented each heartbeat tick.
+        var ticksSinceLastSeen: Int = 0
         init(nodeID: UUID, state: KeepTalkingVoiceSession.PeerState) {
             self.nodeID = nodeID
             self.state = state
@@ -121,9 +133,12 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         isRunning = true
         emitLog("starting context voice session context=\(config.contextID.uuidString.prefix(8))")
         broadcastStarted()
+        startHeartbeat()
     }
 
     public func stop() {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
         // Send the goodbye *before* we tear down the SFU socket —
         // otherwise the envelope never makes it out and peers will hold
         // a stale entry until their own timeouts/SFU-presence fire.
@@ -170,9 +185,8 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
                     do { try ice.send(payload) } catch {}
                 }
             case .sfu:
-                for entry in snapshot {
-                    try? sendBlobData(payload, entry.nodeID)
-                }
+                guard !snapshot.isEmpty else { return }
+                try? sendBlobData(Self.encodeSFUFrame(payload, from: localNodeID, to: nil), nil)
         }
     }
 
@@ -185,8 +199,23 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
             case .p2p:
                 try? entry.ice?.send(payload)
             case .sfu:
-                try? sendBlobData(payload, nodeID)
+                try? sendBlobData(Self.encodeSFUFrame(payload, from: localNodeID, to: nodeID), nodeID)
         }
+    }
+
+    /// Handles an inbound voice frame carried on the shared SFU
+    /// `.realtime` channel. Returns `false` for non-voice realtime data
+    /// so future realtime frame types can share the same transport.
+    @discardableResult
+    func receiveRelayedFrame(_ data: Data) -> Bool {
+        guard let frame = Self.decodeSFUFrame(data) else { return false }
+        guard frame.target == nil || frame.target == localNodeID else { return true }
+        guard frame.sender != localNodeID else { return true }
+        if lock.withLock({ peerEntries[frame.sender] == nil }) {
+            handlePeerStarted(nodeID: frame.sender, remoteTransport: .sfu)
+        }
+        onInboundFrame?(frame.payload, frame.sender)
+        return true
     }
 
     // MARK: - Envelope outbound
@@ -290,6 +319,10 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         var staleICE: KeepTalkingJuiceP2PSession?
         let disposition: StartedDisposition = lock.withLock {
             if let existing = peerEntries[nodeID] {
+                // Any voice.started — echo or not — proves the peer is
+                // alive. Reset its freshness counter so the heartbeat
+                // eviction clock restarts.
+                existing.ticksSinceLastSeen = 0
                 guard isReplaceable(existing) else { return .kept }
                 staleICE = existing.ice
                 existing.ice = nil
@@ -326,31 +359,32 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
     }
 
     /// Whether a `started` from an already-known peer should rebuild the
-    /// connection. Live and mid-handshake p2p entries are left alone (the
+    /// connection. Live and mid-handshake entries are left alone (the
     /// `started` is just the re-announce a peer fires when a third party
-    /// joins); only dead ones are replaced. Must be called under `lock`.
+    /// joins); only dead ones are replaced.
+    ///
+    /// Stale SFU peers (where `voice.ended` was lost) are cleaned up by
+    /// the transport's liveness system (`handlePeerOffline`), which
+    /// removes the entry entirely — so by the time a rejoining peer's
+    /// `voice.started` arrives, there's no entry to gate. This method
+    /// only handles the echo-vs-dead distinction for entries that still
+    /// exist.
+    ///
+    /// Must be called under `lock`.
     private func isReplaceable(_ entry: PeerEntry) -> Bool {
-        switch effectiveTransport {
-            case .sfu:
-                // No ICE to rebuild — the relay carries on regardless.
+        switch entry.state {
+            case .failed:
+                return true
+            case .sfuRelay:
+                // SFU relay is stateless — no ICE to rebuild. If the
+                // peer is here and not `.failed`, the relay works.
                 return false
-            case .p2p:
-                switch entry.state {
-                    case .failed:
-                        return true
-                    case .iceConnected:
-                        // `.closed` clears `iceDidConnect` without moving
-                        // the state — that's a dropped peer, replace it.
-                        return !entry.iceDidConnect
-                    case .discovering:
-                        // Answerer waiting with no agent yet — safe to
-                        // re-kick; an in-flight agent means leave it.
-                        return entry.ice == nil
-                    case .iceGathering:
-                        return false
-                    case .sfuRelay:
-                        return false
-                }
+            case .iceConnected:
+                return !entry.iceDidConnect
+            case .discovering:
+                return entry.ice == nil
+            case .iceGathering:
+                return false
         }
     }
 
@@ -557,6 +591,43 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         sendSignal(sdp: sdp, to: peerNodeID)
     }
 
+    // MARK: - Heartbeat
+
+    private func startHeartbeat() {
+        heartbeatTask?.cancel()
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.heartbeatIntervalSeconds))
+                guard let self, self.isRunning, !Task.isCancelled else { break }
+                self.heartbeatTick()
+            }
+        }
+    }
+
+    /// Exposed as internal for `@testable` — the real heartbeat loop
+    /// calls this on its timer. Tests can drive it synchronously.
+    func heartbeatTick() {
+        // 1. Re-broadcast voice.started — retries the initial announce
+        //    if it was lost, and keeps peers' freshness counters alive.
+        broadcastStarted()
+
+        // 2. Age every peer and evict stale ones.
+        var staleNodeIDs: [UUID] = []
+        lock.withLock {
+            for (nodeID, entry) in peerEntries {
+                entry.ticksSinceLastSeen += 1
+                if entry.ticksSinceLastSeen >= Self.peerStaleTicksThreshold {
+                    staleNodeIDs.append(nodeID)
+                }
+            }
+        }
+        for nodeID in staleNodeIDs {
+            emitLog(
+                "peer \(nodeID.uuidString.prefix(8)) stale (\(Self.peerStaleTicksThreshold) missed ticks) — evicting")
+            handlePeerEnded(nodeID: nodeID)
+        }
+    }
+
     // MARK: - Helpers
 
     private func emitLog(_ message: String) {
@@ -569,4 +640,60 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         handler(snapshot)
     }
 
+}
+
+extension KeepTalkingVoiceSession {
+    private struct SFUFrame {
+        let sender: UUID
+        let target: UUID?
+        let payload: Data
+    }
+
+    private static let sfuFrameMagic: [UInt8] = [0x4B, 0x54, 0x56, 0x01]
+    private static let nilTarget = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
+    private static let sfuFrameHeaderSize = 4 + 16 + 16
+
+    private static func encodeSFUFrame(_ payload: Data, from sender: UUID, to target: UUID?) -> Data {
+        var data = Data()
+        data.reserveCapacity(sfuFrameHeaderSize + payload.count)
+        data.append(contentsOf: sfuFrameMagic)
+        data.append(uuidBytes(sender))
+        data.append(uuidBytes(target ?? nilTarget))
+        data.append(payload)
+        return data
+    }
+
+    private static func decodeSFUFrame(_ data: Data) -> SFUFrame? {
+        guard data.count >= sfuFrameHeaderSize else { return nil }
+        guard Array(data.prefix(sfuFrameMagic.count)) == sfuFrameMagic else { return nil }
+        let sender = uuid(from: data, offset: 4)
+        let rawTarget = uuid(from: data, offset: 20)
+        let payload = data.subdata(in: data.startIndex + sfuFrameHeaderSize..<data.endIndex)
+        return SFUFrame(
+            sender: sender,
+            target: rawTarget == nilTarget ? nil : rawTarget,
+            payload: payload
+        )
+    }
+
+    private static func uuidBytes(_ id: UUID) -> Data {
+        var uuid = id.uuid
+        return withUnsafeBytes(of: &uuid) { Data($0) }
+    }
+
+    private static func uuid(from data: Data, offset: Int) -> UUID {
+        var uuid: uuid_t = (
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0
+        )
+        withUnsafeMutableBytes(of: &uuid) { buffer in
+            data.copyBytes(
+                to: buffer.bindMemory(to: UInt8.self),
+                from: data.startIndex + offset..<data.startIndex + offset + 16
+            )
+        }
+        return UUID(uuid: uuid)
+    }
 }

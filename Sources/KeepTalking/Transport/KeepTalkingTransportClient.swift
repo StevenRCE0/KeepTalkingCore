@@ -2,11 +2,13 @@ import Foundation
 
 typealias KeepTalkingTransportContextSecretProvider = @Sendable (UUID) async throws -> Data?
 typealias KeepTalkingTransportBlobDataHandler = @Sendable (Data) -> Void
+typealias KeepTalkingTransportRealtimeDataHandler = @Sendable (Data) -> Void
 
 protocol KeepTalkingTransportClient: AnyObject {
     var onEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)? { get set }
     var onTrustEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)? { get set }
     var onBlobData: KeepTalkingTransportBlobDataHandler? { get set }
+    var onRealtimeData: KeepTalkingTransportRealtimeDataHandler? { get set }
     var onRawMessage: (@Sendable (String) -> Void)? { get set }
     var onPeerConnect: (@Sendable (UUID) -> Void)? { get set }
     /// Fires when the broadcast (SFU) channel transitions to a state
@@ -23,6 +25,11 @@ protocol KeepTalkingTransportClient: AnyObject {
         _ data: Data,
         targetPeerNodeID: UUID?
     ) throws
+    /// Send blob data directly through the SFU broadcast channel,
+    /// bypassing the routing strategy.
+    func sendBlobDataViaBroadcast(_ data: Data) throws
+    /// Send realtime data directly through the SFU realtime channel.
+    func sendRealtimeDataViaBroadcast(_ data: Data) throws
     func currentRoute() -> KeepTalkingTransportRoute
     func runtimeStats() -> KeepTalkingRuntimeStats
     func requestP2PTrial()
@@ -31,6 +38,17 @@ protocol KeepTalkingTransportClient: AnyObject {
 }
 
 extension KeepTalkingTransportClient {
+    /// Default: falls back to `sendBlobData` with no target peer.
+    /// `ContextTransport` overrides to go straight to the SFU broadcast
+    /// channel, bypassing the routing strategy.
+    func sendBlobDataViaBroadcast(_ data: Data) throws {
+        try sendBlobData(data, targetPeerNodeID: nil)
+    }
+
+    func sendRealtimeDataViaBroadcast(_ data: Data) throws {
+        try sendBlobDataViaBroadcast(data)
+    }
+
     func sendTrustedEnvelope(
         _ envelope: any KeepTalkingEnvelope,
         cryptorSource: KeepTalkingTrustedEnvelopeCryptorSource

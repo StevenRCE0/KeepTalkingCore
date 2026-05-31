@@ -22,6 +22,7 @@ public final class KeepTalkingSFUJuiceSession: @unchecked Sendable {
         case actionCall
         case signaling
         case p2pSignal
+        case realtime
 
         var wireValue: SFUChannel {
             switch self {
@@ -30,6 +31,7 @@ public final class KeepTalkingSFUJuiceSession: @unchecked Sendable {
                 case .actionCall: return .actionCall
                 case .signaling: return .signaling
                 case .p2pSignal: return .p2pSignal
+                case .realtime: return .realtime
             }
         }
 
@@ -40,6 +42,7 @@ public final class KeepTalkingSFUJuiceSession: @unchecked Sendable {
                 case .actionCall: self = .actionCall
                 case .signaling: self = .signaling
                 case .p2pSignal: self = .p2pSignal
+                case .realtime: self = .realtime
             }
         }
     }

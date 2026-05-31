@@ -41,18 +41,25 @@ public struct AIMessage: Sendable, Equatable {
     /// transcripts; most ignore it. Connectors are free to drop it.
     public let name: String?
 
+    /// For assistant messages in multi-turn audio conversations: references a
+    /// previous audio output by ID so the model can continue the conversation
+    /// without re-sending the full audio bytes.
+    public let audioReference: String?
+
     public init(
         role: Role,
         content: Content?,
         toolCalls: [AIToolCall] = [],
         toolCallID: String? = nil,
-        name: String? = nil
+        name: String? = nil,
+        audioReference: String? = nil
     ) {
         self.role = role
         self.content = content
         self.toolCalls = toolCalls
         self.toolCallID = toolCallID
         self.name = name
+        self.audioReference = audioReference
     }
 }
 
@@ -87,6 +94,10 @@ extension AIMessage {
         /// bytes) are valid here — that's how attachments are typically
         /// inlined for vision models.
         case imageURL(URL)
+        /// Audio input — raw audio bytes sent to audio-capable models.
+        /// `format` is the wire format label (e.g. "wav", "pcm16").
+        /// Connectors encode `data` as base64 when building vendor payloads.
+        case inputAudio(data: Data, format: String)
     }
 }
 
@@ -106,12 +117,13 @@ extension AIMessage {
     }
 
     /// Assistant turn that produced text only (no tool calls).
-    public static func assistant(_ text: String?, name: String? = nil) -> AIMessage {
+    public static func assistant(_ text: String?, name: String? = nil, audioReference: String? = nil) -> AIMessage {
         .init(
             role: .assistant,
             content: text.map { .text($0) },
             toolCalls: [],
-            name: name
+            name: name,
+            audioReference: audioReference
         )
     }
 
@@ -119,13 +131,15 @@ extension AIMessage {
     public static func assistantToolCalls(
         _ toolCalls: [AIToolCall],
         text: String? = nil,
-        name: String? = nil
+        name: String? = nil,
+        audioReference: String? = nil
     ) -> AIMessage {
         .init(
             role: .assistant,
             content: text.map { .text($0) },
             toolCalls: toolCalls,
-            name: name
+            name: name,
+            audioReference: audioReference
         )
     }
 

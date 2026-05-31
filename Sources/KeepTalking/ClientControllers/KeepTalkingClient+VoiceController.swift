@@ -10,6 +10,14 @@ extension KeepTalkingClient {
     ///     keychain store)
     ///   - the same SFU endpoint (from `config.sfuEndpoint`)
     ///
+    /// **Transport split:**
+    ///   - *Signaling* (voice.started / .ended / .signal envelopes)
+    ///     routes through the shared `rtcClient` — needs to reach chat
+    ///     envelope handlers for bystander presence.
+    ///   - *Audio frames* (realtime data) go directly through the broadcast
+    ///     channel's `.realtime` channel, bypassing the routing strategy
+    ///     entirely. Same SFU connection, no P2P detour.
+    ///
     /// Callers own the session and are responsible for calling `stop()`
     /// (or letting it deinit) when voice is no longer wanted. The client
     /// does not retain it — voice is a separate lifecycle from chat sync.
@@ -26,9 +34,12 @@ extension KeepTalkingClient {
                 guard let self else { throw KeepTalkingClientError.clientDisconnected }
                 try self.rtcClient.sendEnvelope(envelope)
             },
-            sendBlobData: { [weak self] data, targetPeerNodeID in
+            sendBlobData: { [weak self] data, _ in
                 guard let self else { throw KeepTalkingClientError.clientDisconnected }
-                try self.rtcClient.sendBlobData(data, targetPeerNodeID: targetPeerNodeID)
+                // Voice audio goes straight to the SFU broadcast
+                // channel — same connection, `.realtime` channel tag,
+                // no routing-strategy detour through P2P.
+                try self.rtcClient.sendRealtimeDataViaBroadcast(data)
             },
             mode: mode,
             maxP2PMeshSize: maxP2PMeshSize

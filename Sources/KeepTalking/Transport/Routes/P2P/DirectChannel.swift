@@ -11,6 +11,7 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
 
     var onReceive: (@Sendable (KeepTalkingSequencedEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
+    var onRealtimeData: KeepTalkingTransportRealtimeDataHandler?
     var onStateChange: (@Sendable () -> Void)?
     var onPeerAlive: (@Sendable (UUID) -> Void)?
     var onSignalOutput: (@Sendable (KeepTalkingP2PSignalPayload) -> Void)?

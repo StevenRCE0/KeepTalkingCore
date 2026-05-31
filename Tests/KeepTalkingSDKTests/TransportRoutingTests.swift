@@ -29,7 +29,7 @@ struct TransportRoutingTests {
         #expect(harness.broadcast.sentSequenced.isEmpty)
     }
 
-    @Test("context sync envelopes use preferDirect strategy")
+    @Test("context sync envelopes use preferDirect policy")
     func contextSyncPrefersDirectBeforeBroadcast() {
         let envelope = makeContextSyncEnvelope(
             contextID: UUID(uuidString: "10000000-0000-0000-0000-000000000000")!,
@@ -37,7 +37,7 @@ struct TransportRoutingTests {
             recipient: UUID(uuidString: "30000000-0000-0000-0000-000000000000")!
         )
 
-        #expect(envelope.routingStrategy == .preferDirect)
+        #expect(envelope.routingPolicy == .preferDirect)
     }
 
     @Test("presence upgrades direct channel without trust gating")
@@ -233,6 +233,39 @@ struct TransportRoutingTests {
         #expect(harness.broadcast.sentBlob == [blob])
     }
 
+    @Test("broadcast blob send bypasses ready direct channels")
+    func broadcastBlobBypassesReadyDirect() async throws {
+        let harness = makeHarness()
+        try await harness.transport.start()
+        defer { harness.transport.stop() }
+
+        let remote = UUID(uuidString: "81200000-0000-0000-0000-000000000000")!
+        let direct = harness.registerPeer(remote, isReady: true)
+        let blob = Data("voice-sfu-frame".utf8)
+
+        try harness.transport.sendBlobDataViaBroadcast(blob)
+
+        #expect(direct.sentBlob.isEmpty)
+        #expect(harness.broadcast.sentBlob == [blob])
+    }
+
+    @Test("realtime bytes stay on the SFU realtime channel")
+    func realtimeBytesUseBroadcastOnly() async throws {
+        let harness = makeHarness()
+        try await harness.transport.start()
+        defer { harness.transport.stop() }
+
+        let remote = UUID(uuidString: "81300000-0000-0000-0000-000000000000")!
+        let direct = harness.registerPeer(remote, isReady: true)
+        let frame = Data("voice-realtime-frame".utf8)
+
+        try harness.transport.sendRealtimeDataViaBroadcast(frame)
+
+        #expect(direct.sentBlob.isEmpty)
+        #expect(harness.broadcast.sentBlob.isEmpty)
+        #expect(harness.broadcast.sentRealtime == [frame])
+    }
+
     @Test("broadcast send failures stay at the transport layer")
     func broadcastSendFailureDoesNotLeakDataChannelErrors() async throws {
         let harness = makeHarness()
@@ -392,6 +425,56 @@ struct ChannelStateMachineTests {
         }
     }
 
+    @Test("conservative strategy promotes after stable waves and locks on faults")
+    func conservativePromotionAndLockout() {
+        let strategy = KeepTalkingConservativeStrategy(promotionWaves: 3, maxFaults: 2)
+        let peer = UUID(uuidString: "aa000000-0000-0000-0000-000000000000")!
+        let p2pUp = KeepTalkingRouteAvailability(p2pReady: true, sfuReady: true, targetPeer: peer)
+        let sfuOnly = KeepTalkingRouteAvailability(p2pReady: false, sfuReady: true, targetPeer: peer)
+
+        // Before promotion — always SFU even with P2P ready.
+        #expect(strategy.resolve(p2pUp) == .sfu)
+
+        // Tick 3 stable waves — promotes to P2P.
+        strategy.tick(peer: peer, p2pReady: true)
+        strategy.tick(peer: peer, p2pReady: true)
+        #expect(strategy.resolve(p2pUp) == .sfu)
+        strategy.tick(peer: peer, p2pReady: true)
+        #expect(strategy.resolve(p2pUp) == .p2p)
+
+        // P2P goes away — demotes without faulting.
+        strategy.tick(peer: peer, p2pReady: false)
+        #expect(strategy.resolve(sfuOnly) == .sfu)
+        #expect(strategy.peerState(for: peer)?.faults == 0)
+
+        // Re-promote after 3 stable waves again.
+        strategy.tick(peer: peer, p2pReady: true)
+        strategy.tick(peer: peer, p2pReady: true)
+        strategy.tick(peer: peer, p2pReady: true)
+        #expect(strategy.resolve(p2pUp) == .p2p)
+
+        // Send fault — back to SFU, fault counted.
+        strategy.recordFault(for: peer)
+        #expect(strategy.resolve(p2pUp) == .sfu)
+        #expect(strategy.peerState(for: peer)?.faults == 1)
+        #expect(strategy.peerState(for: peer)?.locked == false)
+
+        // Re-promote then fault again — now locked.
+        strategy.tick(peer: peer, p2pReady: true)
+        strategy.tick(peer: peer, p2pReady: true)
+        strategy.tick(peer: peer, p2pReady: true)
+        #expect(strategy.resolve(p2pUp) == .p2p)
+        strategy.recordFault(for: peer)
+        #expect(strategy.resolve(p2pUp) == .sfu)
+        #expect(strategy.peerState(for: peer)?.locked == true)
+
+        // Locked: ticks can't promote anymore.
+        strategy.tick(peer: peer, p2pReady: true)
+        strategy.tick(peer: peer, p2pReady: true)
+        strategy.tick(peer: peer, p2pReady: true)
+        #expect(strategy.resolve(p2pUp) == .sfu)
+    }
+
     @Test("direct state machine allows forced retry during backoff")
     func directRetryBreaksOutOfBackoff() {
         var machine = DirectChannelStateMachine()
@@ -514,6 +597,7 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
     let route: KeepTalkingTransportRoute = .sfu
     var onReceive: (@Sendable (KeepTalkingSequencedEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
+    var onRealtimeData: KeepTalkingTransportRealtimeDataHandler?
     var onStateChange: (@Sendable () -> Void)?
     var onLog: (@Sendable (String) -> Void)?
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider?
@@ -522,9 +606,11 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
     var sentSequenced: [KeepTalkingSequencedEnvelope] = []
     var sentRaw: [any KeepTalkingEnvelope] = []
     var sentBlob: [Data] = []
+    var sentRealtime: [Data] = []
     var sendError: Error?
     var rawSendError: Error?
     var blobSendError: Error?
+    var realtimeSendError: Error?
 
     func start() async throws {
         state = .ready
@@ -550,6 +636,14 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
         }
     }
 
+    func sendRealtimeData(_ data: Data) throws {
+        sentRealtime.append(data)
+        if let realtimeSendError {
+            state = .reconnecting(attempt: 1)
+            throw realtimeSendError
+        }
+    }
+
     func sendRawEnvelope(_ envelope: any KeepTalkingEnvelope) throws {
         sentRaw.append(envelope)
         if let rawSendError {
@@ -560,7 +654,7 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
 
     func runtimeStats() -> KeepTalkingRuntimeStats {
         KeepTalkingRuntimeStats(
-            sent: sentSequenced.count + sentBlob.count,
+            sent: sentSequenced.count + sentBlob.count + sentRealtime.count,
             received: 0,
             outboundLabel: nil,
             outboundState: isReady ? 1 : 0,
@@ -583,6 +677,7 @@ private final class FakePeerChannel: KeepTalkingPeerTransportChannel, @unchecked
     var isReady = false
     var onReceive: (@Sendable (KeepTalkingSequencedEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
+    var onRealtimeData: KeepTalkingTransportRealtimeDataHandler?
     var onStateChange: (@Sendable () -> Void)?
     var onPeerAlive: (@Sendable (UUID) -> Void)?
     var onSignalOutput: (@Sendable (KeepTalkingP2PSignalPayload) -> Void)?

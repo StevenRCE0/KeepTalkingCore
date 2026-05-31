@@ -75,7 +75,7 @@ extension KeepTalkingEnvelopeKind {
         }
     }
 
-    public var routingStrategy: KeepTalkingRoutingStrategy {
+    public var routingPolicy: KeepTalkingRoutingPolicy {
         switch self {
             // Signaling, presence, trust, voice — must fan out via SFU.
             case .p2pSignal,
@@ -114,9 +114,9 @@ extension KeepTalkingEnvelopeKind {
         }
     }
 
-    /// Legacy shim — migrate callers to `routingStrategy` and remove.
+    /// Legacy shim.
     public var preferredRoutes: [KeepTalkingTransportRoute] {
-        routingStrategy.orderedRoutes
+        routingPolicy.orderedRoutes
     }
 
     public var envelopeType: KeepTalkingEnvelopeType {

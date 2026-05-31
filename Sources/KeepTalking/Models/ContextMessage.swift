@@ -148,11 +148,26 @@ extension KeepTalkingContextMessage {
             state: AgentTurnContinuationState = .pending
         )
 
+        /// Voice transcript produced by on-device speech recognition or a
+        /// realtime API.  Content is the transcribed text.  The source
+        /// distinguishes local ML (always-on passive transcription) from
+        /// realtime API (wake-word-activated, higher fidelity).
+        ///
+        /// - `source`: How the transcript was produced.
+        case transcript(source: TranscriptSource)
+
         /// User-visible status marker emitted when an agent run terminates
         /// abnormally — e.g. a connector error or a user-initiated cancel.
         /// Body text is a short generic string; the detailed error is shown
         /// on the failed queue entry in the composer, not in this message.
         case haywire(reason: HaywireReason)
+    }
+
+    public enum TranscriptSource: String, Codable, Sendable, Hashable {
+        /// On-device speech recognition (SFSpeechRecognizer).
+        case local
+        /// Server-side transcription from a realtime voice API.
+        case realtime
     }
 
     public enum HaywireReason: String, Codable, Sendable, Hashable {

@@ -11,13 +11,13 @@ public protocol KeepTalkingEnvelope: Codable, Sendable {
 extension KeepTalkingEnvelope {
     public var kind: KeepTalkingEnvelopeKind { Self.kind }
 
-    public var routingStrategy: KeepTalkingRoutingStrategy {
-        kind.routingStrategy
+    public var routingPolicy: KeepTalkingRoutingPolicy {
+        kind.routingPolicy
     }
 
-    /// Legacy shim — migrate callers to `routingStrategy` and remove.
+    /// Legacy shim.
     public var preferredRoutes: [KeepTalkingTransportRoute] {
-        routingStrategy.orderedRoutes
+        routingPolicy.orderedRoutes
     }
 
     public var envelopeType: KeepTalkingEnvelopeType {

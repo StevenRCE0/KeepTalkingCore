@@ -454,6 +454,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
                 }
             }
         }
+        rtcClient.onRealtimeData = { [weak self] data in
+            _ = self?.activeVoiceSession?.receiveRelayedFrame(data)
+        }
         rtcClient.onEnvelope = { [weak self] envelope in
             Task {
                 do {

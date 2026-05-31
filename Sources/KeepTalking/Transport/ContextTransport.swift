@@ -29,6 +29,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     var onEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)?
     var onTrustEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
+    var onRealtimeData: KeepTalkingTransportRealtimeDataHandler?
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
     var onBroadcastReady: (@Sendable () -> Void)?
@@ -66,6 +67,14 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     private var discoveredPeers = Set<UUID>()
     private var peerMissedWaves: [UUID: Int] = [:]
     private let stateQueue = DispatchQueue(label: "kt.context-transport.state")
+
+    /// Strategy instances keyed by policy. Each owns its own state
+    /// (e.g. conservative tracks per-peer promotion internally).
+    private let strategies: [KeepTalkingRoutingPolicy: any KeepTalkingRoutingStrategy] = [
+        .preferDirect: KeepTalkingPreferDirectStrategy(),
+        .sfuOnly: KeepTalkingSFUOnlyStrategy(),
+        .conservative: KeepTalkingConservativeStrategy(),
+    ]
 
     // MARK: - Init
 
@@ -134,6 +143,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
             directChannels.removeAll()
             peerMissedWaves = [:]
         }
+        for (_, strategy) in strategies { strategy.reset() }
 
         broadcast.stop()
     }
@@ -143,7 +153,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     func sendEnvelope(_ envelope: any KeepTalkingEnvelope) throws {
         let sequenced = makeSequenced(envelope)
         try send(
-            strategy: envelope.routingStrategy,
+            policy: envelope.routingPolicy,
             targetPeerNodeID: envelope.targetPeerNodeID,
             sendViaP2P: { direct in
                 try direct.send(sequenced)
@@ -159,7 +169,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         targetPeerNodeID: UUID?
     ) throws {
         try send(
-            strategy: .preferDirect,
+            policy: .preferDirect,
             targetPeerNodeID: targetPeerNodeID,
             sendViaP2P: { direct in
                 try direct.sendBlobData(data)
@@ -168,6 +178,20 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
                 try broadcast.sendBlobData(data)
             }
         )
+    }
+
+    func sendBlobDataViaBroadcast(_ data: Data) throws {
+        guard broadcast.isReady else {
+            throw KeepTalkingTransportError.allChannelsUnavailable
+        }
+        try broadcast.sendBlobData(data)
+    }
+
+    func sendRealtimeDataViaBroadcast(_ data: Data) throws {
+        guard broadcast.isReady else {
+            throw KeepTalkingTransportError.allChannelsUnavailable
+        }
+        try broadcast.sendRealtimeData(data)
     }
 
     func currentRoute() -> KeepTalkingTransportRoute {
@@ -247,6 +271,9 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     private func bindBroadcastBlobCallback() {
         broadcast.onBlobData = { [weak self] data in
             self?.onBlobData?(data)
+        }
+        broadcast.onRealtimeData = { [weak self] data in
+            self?.onRealtimeData?(data)
         }
     }
 
@@ -353,6 +380,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         direct.onBlobData = { [weak self] data in
             self?.onBlobData?(data)
         }
+        direct.onRealtimeData = nil
         direct.onSignalOutput = { [weak self] signal in
             guard let self else { return }
             do {
@@ -380,7 +408,9 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     }
 
     private func handleParticipantLeft(_ nodeID: UUID) {
-        let direct = stateQueue.sync { directChannels.removeValue(forKey: nodeID) }
+        let direct = stateQueue.sync {
+            directChannels.removeValue(forKey: nodeID)
+        }
         direct?.teardown()
         onParticipantChange?(.left(nodeID: nodeID))
         debug("participant left node=\(nodeID.uuidString.prefix(8))")
@@ -410,6 +440,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
                 if Task.isCancelled { break }
                 self.sendPresence(advancingHeartbeat: true)
                 self.checkPeerLiveness()
+                self.tickStrategies()
             }
         }
     }
@@ -459,6 +490,20 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         }
     }
 
+    // MARK: - Conservative promotion
+
+    /// Tick every strategy with each peer's current channel readiness.
+    /// Stateless strategies no-op; the conservative strategy uses this
+    /// to track promotion.
+    private func tickStrategies() {
+        let channels = stateQueue.sync { directChannels }
+        for (_, strategy) in strategies {
+            for (nodeID, direct) in channels {
+                strategy.tick(peer: nodeID, p2pReady: direct.isReady)
+            }
+        }
+    }
+
     // MARK: - Peer tracking
 
     private func rememberPeer(_ node: UUID) {
@@ -475,58 +520,42 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     }
 
     private func send(
-        strategy: KeepTalkingRoutingStrategy,
+        policy: KeepTalkingRoutingPolicy,
         targetPeerNodeID: UUID?,
         sendViaP2P: ((any KeepTalkingPeerTransportChannel) throws -> Void),
         sendViaSFU: () throws -> Void
     ) throws {
-        switch strategy {
-            case .sfuOnly:
-                guard broadcast.isReady else {
+        guard let strategy = strategies[policy] else {
+            throw KeepTalkingTransportError.allChannelsUnavailable
+        }
+        let direct = directChannel(for: targetPeerNodeID)
+        let availability = KeepTalkingRouteAvailability(
+            p2pReady: direct?.isReady ?? false,
+            sfuReady: broadcast.isReady,
+            targetPeer: targetPeerNodeID
+        )
+        guard let route = strategy.resolve(availability) else {
+            throw KeepTalkingTransportError.allChannelsUnavailable
+        }
+        switch route {
+            case .p2p:
+                guard let direct else {
                     throw KeepTalkingTransportError.allChannelsUnavailable
                 }
+                do {
+                    try sendViaP2P(direct)
+                } catch {
+                    if let peer = targetPeerNodeID {
+                        strategy.recordFault(for: peer)
+                    }
+                    debug(
+                        "p2p send failed peer=\(direct.peerNodeID.uuidString.prefix(8)) error=\(error.localizedDescription)"
+                    )
+                    guard broadcast.isReady else { throw error }
+                    try sendViaSFU()
+                }
+            case .sfu:
                 try sendViaSFU()
-
-            case .preferDirect:
-                // Try P2P first — lowest latency when the path exists.
-                if let direct = directChannel(for: targetPeerNodeID), direct.isReady {
-                    do {
-                        try sendViaP2P(direct)
-                        return
-                    } catch {
-                        debug(
-                            "p2p send failed peer=\(direct.peerNodeID.uuidString.prefix(8)) error=\(error.localizedDescription)"
-                        )
-                    }
-                }
-                // Fall through to SFU.
-                guard broadcast.isReady else {
-                    throw KeepTalkingTransportError.allChannelsUnavailable
-                }
-                try sendViaSFU()
-
-            case .conservative:
-                // Prefer SFU; only try P2P when SFU is degraded.
-                if broadcast.isReady {
-                    do {
-                        try sendViaSFU()
-                        return
-                    } catch {
-                        debug("sfu send failed (conservative) error=\(error.localizedDescription)")
-                    }
-                }
-                // SFU unavailable or failed — try P2P as last resort.
-                if let direct = directChannel(for: targetPeerNodeID), direct.isReady {
-                    do {
-                        try sendViaP2P(direct)
-                        return
-                    } catch {
-                        debug(
-                            "p2p fallback failed peer=\(direct.peerNodeID.uuidString.prefix(8)) error=\(error.localizedDescription)"
-                        )
-                    }
-                }
-                throw KeepTalkingTransportError.allChannelsUnavailable
         }
     }
 

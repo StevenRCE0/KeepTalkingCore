@@ -281,6 +281,10 @@ public actor AnthropicConnector: AIConnector {
                             return .textBlock(
                                 .init(text: "[unsupported image URL: \(url.absoluteString)]")
                             )
+                        case .inputAudio:
+                            return .textBlock(
+                                .init(text: "[audio input not supported by this provider]")
+                            )
                     }
                 }
                 return .blocks(blocks)

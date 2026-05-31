@@ -44,6 +44,9 @@ protocol KeepTalkingTransportChannelProtocol: AnyObject, Sendable {
     /// Called when the channel receives inbound blob bytes.
     var onBlobData: KeepTalkingTransportBlobDataHandler? { get set }
 
+    /// Called when the channel receives inbound realtime bytes.
+    var onRealtimeData: KeepTalkingTransportRealtimeDataHandler? { get set }
+
     /// Called when the channel's readiness state changes. This is the
     /// primary liveness signal — see the type-level "Liveness contract"
     /// note above.
@@ -63,6 +66,7 @@ protocol KeepTalkingBroadcastTransportChannel: KeepTalkingTransportChannelProtoc
     func start() async throws
     func stop()
     func sendRawEnvelope(_ envelope: any KeepTalkingEnvelope) throws
+    func sendRealtimeData(_ data: Data) throws
     func runtimeStats() -> KeepTalkingRuntimeStats
 }
 

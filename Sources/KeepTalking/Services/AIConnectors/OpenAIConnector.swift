@@ -169,6 +169,10 @@ public actor OpenAIConnector: AIConnector {
             return .auto
         }()
 
+        let audioConfig: OpenAIChatCompletionRequestBody.AudioOutputConfig? = configuration?.audioOutput.map {
+            .init(voice: $0.voice, format: $0.format)
+        }
+
         let body = OpenAIChatCompletionRequestBody(
             model: model,
             messages: openAIMessages,
@@ -178,12 +182,19 @@ public actor OpenAIConnector: AIConnector {
             responseFormat: configuration?.responseFormat?.openAIResponseFormat,
             seed: configuration?.seed,
             stop: configuration?.stop,
+            stream: audioConfig != nil ? true : nil,
             temperature: configuration?.temperature,
             tools: openAITools.isEmpty ? nil : openAITools,
             toolChoice: resolvedToolChoice,
             topP: configuration?.topP,
-            user: configuration?.endUserID
+            user: configuration?.endUserID,
+            modalities: configuration?.modalities,
+            audio: audioConfig
         )
+
+        if audioConfig != nil {
+            return try await streamCompleteTurn(body: body)
+        }
 
         // Run the HTTP call in a child task so cancellation can be propagated
         // to AIProxy's URLSession data task on parent cancel — without this,
@@ -210,6 +221,7 @@ public actor OpenAIConnector: AIConnector {
         var turnText: String? = nil
         var turnThinking: String? = nil
         var turnToolCalls: [AIToolCall] = []
+        var turnAudio: AIAudioOutput? = nil
 
         for choice in response.choices {
             let text = choice.message.content
@@ -229,13 +241,103 @@ public actor OpenAIConnector: AIConnector {
                         )
                     })
             }
+            if let audio = choice.message.audio {
+                turnAudio = AIAudioOutput(
+                    id: audio.id,
+                    data: audio.data.flatMap { Data(base64Encoded: $0) },
+                    transcript: audio.transcript,
+                    expiresAt: audio.expiresAt
+                )
+            }
         }
 
         return AITurnResult(
             assistantText: turnText,
             thinking: turnThinking,
-            toolCalls: turnToolCalls
+            toolCalls: turnToolCalls,
+            audioOutput: turnAudio
         )
+    }
+
+    // MARK: - Streaming path (required for audio output)
+
+    private func streamCompleteTurn(
+        body: OpenAIChatCompletionRequestBody
+    ) async throws -> AITurnResult {
+        let stream = try await service.streamingChatCompletionRequest(
+            body: body,
+            secondsToWait: Self.defaultTimeoutSeconds
+        )
+
+        var turnText = ""
+        var turnThinking: String? = nil
+        var turnToolCalls: [StreamToolCallAccumulator] = []
+        var audioID: String? = nil
+        var audioBase64 = ""
+        var audioTranscript = ""
+        var audioExpiresAt: Int? = nil
+        var finishReason: String? = nil
+
+        for try await chunk in stream {
+            try Task.checkCancellation()
+            for choice in chunk.choices {
+                if let content = choice.delta.content {
+                    turnText += content
+                }
+                if let tcs = choice.delta.toolCalls {
+                    for tc in tcs {
+                        let idx = tc.index ?? 0
+                        while turnToolCalls.count <= idx {
+                            turnToolCalls.append(.init())
+                        }
+                        if let id = tc.id { turnToolCalls[idx].id = id }
+                        if let fn = tc.function {
+                            if let n = fn.name { turnToolCalls[idx].name += n }
+                            if let a = fn.arguments { turnToolCalls[idx].arguments += a }
+                        }
+                    }
+                }
+                if let audio = choice.delta.audio {
+                    if let id = audio.id { audioID = id }
+                    if let d = audio.data { audioBase64 += d }
+                    if let t = audio.transcript { audioTranscript += t }
+                    if let e = audio.expiresAt { audioExpiresAt = e }
+                }
+                if let fr = choice.finishReason {
+                    finishReason = fr
+                }
+            }
+        }
+
+        let resolvedToolCalls: [AIToolCall] = turnToolCalls.compactMap { accum in
+            guard !accum.name.isEmpty else { return nil }
+            return AIToolCall(id: accum.id, name: accum.name, argumentsJSON: accum.arguments)
+        }
+
+        let audioOutput: AIAudioOutput?
+        if audioID != nil || !audioBase64.isEmpty {
+            audioOutput = AIAudioOutput(
+                id: audioID,
+                data: audioBase64.isEmpty ? nil : Data(base64Encoded: audioBase64),
+                transcript: audioTranscript.isEmpty ? nil : audioTranscript,
+                expiresAt: audioExpiresAt
+            )
+        } else {
+            audioOutput = nil
+        }
+
+        return AITurnResult(
+            assistantText: turnText.isEmpty ? nil : turnText,
+            thinking: turnThinking,
+            toolCalls: resolvedToolCalls,
+            audioOutput: audioOutput
+        )
+    }
+
+    private struct StreamToolCallAccumulator {
+        var id: String = ""
+        var name: String = ""
+        var arguments: String = ""
     }
 
     // MARK: - private translation
@@ -270,11 +372,14 @@ public actor OpenAIConnector: AIConnector {
                 // Assistant messages don't take multimodal content; collapse to text.
                 let content: OpenAIChatCompletionRequestBody.Message.MessageContent<String, [String]>? =
                     message.content.map { .text($0.text) }
+                let audioRef: OpenAIChatCompletionRequestBody.AudioReference? =
+                    message.audioReference.map { .init(id: $0) }
                 return .assistant(
                     content: content,
                     name: message.name,
                     refusal: nil,
-                    toolCalls: toolCalls
+                    toolCalls: toolCalls,
+                    audio: audioRef
                 )
             case .tool:
                 return .tool(
@@ -304,6 +409,8 @@ public actor OpenAIConnector: AIConnector {
                     switch part {
                         case .text(let s): return .text(s)
                         case .imageURL(let url): return .imageURL(url, detail: nil)
+                        case .inputAudio(let data, let format):
+                            return .inputAudio(data: data.base64EncodedString(), format: format)
                     }
                 }
                 return .parts(translated)

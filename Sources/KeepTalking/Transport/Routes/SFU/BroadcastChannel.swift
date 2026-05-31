@@ -32,6 +32,7 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
     private var reconnectTask: Task<Void, Never>?
     private var contextSecretProviderStorage: KeepTalkingTransportContextSecretProvider?
     private var blobDataHandlerStorage: KeepTalkingTransportBlobDataHandler?
+    private var realtimeDataHandlerStorage: KeepTalkingTransportRealtimeDataHandler?
     /// Active relay carriers keyed by `relayID`. Both opener- and
     /// responder-side carriers live here so inbound `RELAY_DATA` /
     /// `RELAY_CLOSE` frames can be routed back to the right carrier.
@@ -86,6 +87,16 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
             try sfuClient.sendBlobData(data, targetPeerNodeID: nil)
         } catch {
             handleSendFailure(error, operation: "blob send")
+            throw error
+        }
+    }
+
+    func sendRealtimeData(_ data: Data) throws {
+        do {
+            guard let sfuClient else { throw KeepTalkingTransportError.allChannelsUnavailable }
+            try sfuClient.sendRealtimeDataViaBroadcast(data)
+        } catch {
+            handleSendFailure(error, operation: "realtime send")
             throw error
         }
     }
@@ -165,6 +176,7 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
             self?.handleSFUEnvelope(envelope)
         }
         sfuClient.onBlobData = nil
+        sfuClient.onRealtimeData = nil
         sfuClient.onRawMessage = nil
         sfuClient.onPeerConnect = nil
         if let sfuJuice = sfuClient as? KeepTalkingSFUJuiceClient {
@@ -199,6 +211,7 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
         sfuClient.onLog = onLog
         sfuClient.contextSecretProvider = contextSecretProviderStorage
         sfuClient.onBlobData = blobDataHandlerStorage
+        sfuClient.onRealtimeData = realtimeDataHandlerStorage
     }
 
     private func handleSFUEnvelope(_ envelope: any KeepTalkingEnvelope) {
@@ -266,6 +279,14 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
         set {
             blobDataHandlerStorage = newValue
             sfuClient?.onBlobData = newValue
+        }
+    }
+
+    var onRealtimeData: KeepTalkingTransportRealtimeDataHandler? {
+        get { realtimeDataHandlerStorage }
+        set {
+            realtimeDataHandlerStorage = newValue
+            sfuClient?.onRealtimeData = newValue
         }
     }
 
