@@ -61,7 +61,14 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
 
     private var directChannels: [UUID: any KeepTalkingPeerTransportChannel] = [:]
     private let dedup = KeepTalkingEnvelopeDedup()
-    private var sendSequence: UInt64 = 0
+    /// Monotonic per-send counter, used ONLY for receiver-side dedup keyed on
+    /// `(senderNode, sequence)`. Seeded from a millisecond time base rather
+    /// than 0 so that a transport bounce (`reestablishTransport`) or process
+    /// restart resumes *above* any sequence a peer still remembers for this
+    /// node. Restarting at 0 caused re-announces (incl. `voice.started`) to be
+    /// silently deduped by peers that hadn't reset — manifesting as one-way
+    /// discovery ("A sees B, B never sees A"). Never reset on `start()`.
+    private var sendSequence: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000)
     private let sequenceLock = NSLock()
     private var heartbeatTask: Task<Void, Never>?
     private var discoveredPeers = Set<UUID>()
@@ -120,7 +127,10 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         }
         livenessState.reset()
         dedup.reset()
-        sendSequence = 0
+        // NB: do NOT reset `sendSequence` here. It must stay monotonic across
+        // restarts so peers don't dedup our re-announces against sequences
+        // they already saw (see the property's doc comment). Our *own* dedup
+        // is reset above so we re-accept peers' re-announces after a bounce.
 
         bindBroadcastCallbacks()
         try await broadcast.start()
