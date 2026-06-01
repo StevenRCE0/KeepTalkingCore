@@ -12,7 +12,7 @@ import Foundation
 // The audio model handles transcription, acknowledgement, and speech synthesis.
 // The main agent handles reasoning, tool use, and knowledge retrieval.
 
-public struct AudioInterfaceAgent {
+public struct AudioInterfaceAgent: Sendable {
 
     public struct Configuration: Sendable {
         public let audioModel: String
@@ -21,6 +21,7 @@ public struct AudioInterfaceAgent {
         public let maxBridgeTurns: Int
         public let bridgeSystemPrompt: String
         public let rephraseSystemPrompt: String
+        public let ackSystemPrompt: String
         public let responseLanguages: [String]
 
         public init(
@@ -30,7 +31,8 @@ public struct AudioInterfaceAgent {
             maxBridgeTurns: Int = 3,
             responseLanguages: [String] = [],
             bridgeSystemPrompt: String? = nil,
-            rephraseSystemPrompt: String? = nil
+            rephraseSystemPrompt: String? = nil,
+            ackSystemPrompt: String? = nil
         ) {
             self.audioModel = audioModel
             self.voice = voice
@@ -46,6 +48,9 @@ public struct AudioInterfaceAgent {
                 + Self.languageInstruction(for: self.responseLanguages)
             self.rephraseSystemPrompt =
                 (rephraseSystemPrompt ?? Self.defaultRephraseSystemPrompt)
+                + Self.languageInstruction(for: self.responseLanguages)
+            self.ackSystemPrompt =
+                (ackSystemPrompt ?? Self.defaultAckSystemPrompt)
                 + Self.languageInstruction(for: self.responseLanguages)
         }
 
@@ -63,6 +68,14 @@ public struct AudioInterfaceAgent {
             You are a voice interface. The user asked something and a backend \
             agent produced the answer below. Rephrase it naturally for spoken \
             delivery — concise and conversational. Respond with audio.
+            """
+
+        static let defaultAckSystemPrompt = """
+            You are a voice interface. The user just made a request that is being \
+            handed to a backend agent to fulfil. Acknowledge in ONE short, natural \
+            spoken sentence that you're on it (e.g. "Sure, let me look into that"). \
+            Do NOT attempt to answer the request yourself and do NOT invent \
+            details. Respond with audio.
             """
 
         static func languageInstruction(for languages: [String]) -> String {
@@ -251,13 +264,37 @@ public struct AudioInterfaceAgent {
         // Phase 2: Delegate to main agent
         log("phase 2: delegating to main agent…")
         await statusObserver?(.delegating)
+
+        // Speak a brief acknowledgement *concurrently* with the (often slow)
+        // delegate — but only if the extraction turn stayed silent, which is the
+        // usual case: audio models emit speech XOR a tool call, so a delegating
+        // turn produces no audio and the user would otherwise hear nothing until
+        // the rephrased answer lands. Awaited before phase 3 so the ack never
+        // overlaps the spoken answer in the player FIFO.
+        let ackTask: Task<Void, Never>?
+        if extraction.ackAudio == nil, let audioOutputHandler {
+            ackTask = Task { [self] in
+                await speakDelegationAck(
+                    intent: request.intent,
+                    connector: connector,
+                    audioOutputHandler: audioOutputHandler
+                )
+            }
+        } else {
+            ackTask = nil
+        }
+
         let delegateResponse: String
         do {
             delegateResponse = try await delegate(request)
         } catch {
+            ackTask?.cancel()
+            _ = await ackTask?.value
             log("phase 2 FAILED (delegate threw): \(error.localizedDescription)")
             throw error
         }
+        // Ensure the ack has finished streaming before the rephrase audio begins.
+        _ = await ackTask?.value
         log(
             "phase 2 done — delegate response (\(delegateResponse.count) chars): \(String(delegateResponse.prefix(300)))"
         )
@@ -497,6 +534,54 @@ public struct AudioInterfaceAgent {
             "rephrase result: text=\(result.assistantText?.count ?? 0) chars, audio=\(result.audioOutput?.data?.count ?? 0) bytes, audioID=\(result.audioOutput?.id ?? "nil")"
         )
         return result
+    }
+
+    // MARK: - Delegation acknowledgement (Phase 2, concurrent)
+
+    /// Speak a short, content-free acknowledgement while the delegate runs.
+    /// Streams audio chunk-by-chunk through the same handler the ack/rephrase
+    /// turns use. Failures are swallowed — a missing ack must never sink the
+    /// bridge flow, and cancellation (delegate threw) is expected.
+    private func speakDelegationAck(
+        intent: String,
+        connector: any AIConnector,
+        audioOutputHandler: @escaping AudioOutputHandler
+    ) async {
+        let streamHandler = AIStreamingAudioHandler { chunk in
+            await audioOutputHandler(AIAudioOutput(data: chunk))
+        }
+        // No maxOutputTokens cap: on an audio model that ceiling counts audio
+        // tokens too, so a small value truncates the spoken ack mid-word — the
+        // exact "only a few vowels" failure we're fixing. Brevity is steered by
+        // the prompt instead, matching `rephraseForSpeech`.
+        let turnConfig = AITurnConfiguration(
+            modalities: ["text", "audio"],
+            audioOutput: AIAudioOutputConfig(
+                voice: configuration.voice,
+                format: configuration.audioFormat
+            ),
+            streamingAudioHandler: streamHandler
+        )
+        log("phase 2: speaking delegation ack…")
+        do {
+            _ = try await connector.completeTurn(
+                messages: [
+                    .system(configuration.ackSystemPrompt),
+                    .user("The user's request: \(intent)"),
+                ],
+                tools: [],
+                model: configuration.audioModel,
+                toolChoice: nil,
+                stage: .execution,
+                configuration: turnConfig,
+                toolExecutor: nil
+            )
+            log("delegation ack spoken")
+        } catch is CancellationError {
+            log("delegation ack cancelled (delegate resolved/failed first)")
+        } catch {
+            log("delegation ack failed (non-fatal): \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Helpers
