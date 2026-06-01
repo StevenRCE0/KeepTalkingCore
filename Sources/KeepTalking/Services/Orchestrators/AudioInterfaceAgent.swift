@@ -21,12 +21,14 @@ public struct AudioInterfaceAgent {
         public let maxBridgeTurns: Int
         public let bridgeSystemPrompt: String
         public let rephraseSystemPrompt: String
+        public let responseLanguages: [String]
 
         public init(
             audioModel: String,
             voice: String = "alloy",
             audioFormat: String = "pcm16",
             maxBridgeTurns: Int = 3,
+            responseLanguages: [String] = [],
             bridgeSystemPrompt: String? = nil,
             rephraseSystemPrompt: String? = nil
         ) {
@@ -34,8 +36,17 @@ public struct AudioInterfaceAgent {
             self.voice = voice
             self.audioFormat = audioFormat
             self.maxBridgeTurns = maxBridgeTurns
-            self.bridgeSystemPrompt = bridgeSystemPrompt ?? Self.defaultBridgeSystemPrompt
-            self.rephraseSystemPrompt = rephraseSystemPrompt ?? Self.defaultRephraseSystemPrompt
+            self.responseLanguages = responseLanguages.reduce(into: []) { result, language in
+                let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, !result.contains(trimmed) else { return }
+                result.append(trimmed)
+            }
+            self.bridgeSystemPrompt =
+                (bridgeSystemPrompt ?? Self.defaultBridgeSystemPrompt)
+                + Self.languageInstruction(for: self.responseLanguages)
+            self.rephraseSystemPrompt =
+                (rephraseSystemPrompt ?? Self.defaultRephraseSystemPrompt)
+                + Self.languageInstruction(for: self.responseLanguages)
         }
 
         static let defaultBridgeSystemPrompt = """
@@ -52,6 +63,15 @@ public struct AudioInterfaceAgent {
             agent produced the answer below. Rephrase it naturally for spoken \
             delivery — concise and conversational. Respond with audio.
             """
+
+        static func languageInstruction(for languages: [String]) -> String {
+            guard !languages.isEmpty else { return "" }
+            if languages.count == 1 {
+                return "\nRespond in \(languages[0]) unless the user explicitly requests another language."
+            }
+            return
+                "\nRespond only in these languages unless the user explicitly requests another language: \(languages.joined(separator: ", "))."
+        }
     }
 
     /// The request forwarded to the main text agent for processing.
@@ -235,7 +255,8 @@ public struct AudioInterfaceAgent {
             rephraseResult = try await rephraseForSpeech(
                 intent: extraction.request.intent,
                 delegateResponse: delegateResponse,
-                connector: connector
+                connector: connector,
+                audioOutputHandler: audioOutputHandler
             )
         } catch {
             log("phase 3 FAILED: \(error.localizedDescription)")
@@ -245,12 +266,11 @@ public struct AudioInterfaceAgent {
             "phase 3 done — audioOutput: \(rephraseResult.audioOutput?.data?.count ?? 0) bytes, text: \(rephraseResult.assistantText?.prefix(100) ?? "nil")"
         )
 
-        if let audio = rephraseResult.audioOutput {
-            log("delivering rephrase audio to handler (\(audio.data?.count ?? 0) bytes)")
-            await audioOutputHandler?(audio)
-        } else {
+        if rephraseResult.audioOutput == nil {
             log("WARNING: no audio output from rephrase turn")
         }
+        // Audio was already streamed chunk-by-chunk via streamingAudioHandler.
+        // No need to deliver the full blob again.
 
         await statusObserver?(.done)
         log("bridge flow complete")
@@ -285,12 +305,19 @@ public struct AudioInterfaceAgent {
             .user(parts: [.inputAudio(data: audioData, format: inputFormat)]),
         ]
 
+        let streamHandler: AIStreamingAudioHandler? = audioOutputHandler.map { handler in
+            AIStreamingAudioHandler { chunk in
+                await handler(AIAudioOutput(data: chunk))
+            }
+        }
+
         let turnConfig = AITurnConfiguration(
             modalities: ["text", "audio"],
             audioOutput: AIAudioOutputConfig(
                 voice: configuration.voice,
                 format: configuration.audioFormat
-            )
+            ),
+            streamingAudioHandler: streamHandler
         )
 
         var ackAudio: AIAudioOutput?
@@ -328,13 +355,13 @@ public struct AudioInterfaceAgent {
                 log("  toolCall[\(i)]: \(tc.name)(id=\(tc.id), args=\(tc.argumentsJSON.prefix(200)))")
             }
 
-            // Surface ack audio to the user immediately
+            // Track ack audio metadata (the actual PCM was already streamed
+            // chunk-by-chunk via streamingAudioHandler).
             if let audio = result.audioOutput, audio.data != nil {
                 log(
                     "  ack audio ready: \(audio.data?.count ?? 0) bytes, transcript: \(audio.transcript?.prefix(80) ?? "nil")"
                 )
                 ackAudio = audio
-                await audioOutputHandler?(audio)
                 await statusObserver?(.ackAudioReady)
             }
 
@@ -408,7 +435,8 @@ public struct AudioInterfaceAgent {
     private func rephraseForSpeech(
         intent: String,
         delegateResponse: String,
-        connector: any AIConnector
+        connector: any AIConnector,
+        audioOutputHandler: AudioOutputHandler? = nil
     ) async throws -> AITurnResult {
         log(
             "rephrase: intent=\"\(intent)\", response=\(delegateResponse.count) chars, model=\(configuration.audioModel)"
@@ -418,12 +446,19 @@ public struct AudioInterfaceAgent {
             .user("The user asked: \(intent)\n\nAgent response:\n\(delegateResponse)"),
         ]
 
+        let streamHandler: AIStreamingAudioHandler? = audioOutputHandler.map { handler in
+            AIStreamingAudioHandler { chunk in
+                await handler(AIAudioOutput(data: chunk))
+            }
+        }
+
         let turnConfig = AITurnConfiguration(
             modalities: ["text", "audio"],
             audioOutput: AIAudioOutputConfig(
                 voice: configuration.voice,
                 format: configuration.audioFormat
-            )
+            ),
+            streamingAudioHandler: streamHandler
         )
 
         let result = try await connector.completeTurn(

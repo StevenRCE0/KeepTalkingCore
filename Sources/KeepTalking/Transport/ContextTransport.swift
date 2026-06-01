@@ -213,6 +213,17 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         )
     }
 
+    func broadcastState() -> BroadcastChannelState {
+        broadcast.state
+    }
+
+    func sendLivenessProbe() {
+        // Reuse the heartbeat presence wave. A reply (presence echo or SFU
+        // roster response) lands on the counted inbound path, which
+        // `probeTransport()` watches via `runtimeStats().received`.
+        sendPresence()
+    }
+
     func requestP2PTrial() {
         let peers = stateQueue.sync { Array(discoveredPeers.filter { $0 != config.node }) }
         for peer in peers {

@@ -92,6 +92,20 @@ public struct AIAudioOutputConfig: Sendable {
     }
 }
 
+/// Boxed callback for streaming audio deltas. Wraps a `@Sendable` closure
+/// in a reference type so `AITurnConfiguration` stays a value-type `Sendable`.
+/// Connectors that support streaming audio call `emit(_:)` with each decoded
+/// PCM chunk as it arrives from the SSE stream.
+public final class AIStreamingAudioHandler: Sendable {
+    private let handler: @Sendable (Data) async -> Void
+    public init(_ handler: @escaping @Sendable (Data) async -> Void) {
+        self.handler = handler
+    }
+    public func emit(_ chunk: Data) async {
+        await handler(chunk)
+    }
+}
+
 public struct AITurnConfiguration: Sendable {
     public var reasoning: AIReasoning?
     public var temperature: Double?
@@ -110,6 +124,11 @@ public struct AITurnConfiguration: Sendable {
     /// Audio output configuration. Requires `modalities` to include `"audio"`.
     public var audioOutput: AIAudioOutputConfig?
 
+    /// When set, the connector emits decoded audio chunks in real time as
+    /// they arrive from the SSE stream, rather than accumulating them.
+    /// The final `AITurnResult.audioOutput` still contains the full audio.
+    public var streamingAudioHandler: AIStreamingAudioHandler?
+
     public init(
         reasoning: AIReasoning? = nil,
         temperature: Double? = nil,
@@ -121,7 +140,8 @@ public struct AITurnConfiguration: Sendable {
         promptCacheKey: String? = nil,
         endUserID: String? = nil,
         modalities: [String]? = nil,
-        audioOutput: AIAudioOutputConfig? = nil
+        audioOutput: AIAudioOutputConfig? = nil,
+        streamingAudioHandler: AIStreamingAudioHandler? = nil
     ) {
         self.reasoning = reasoning
         self.temperature = temperature
@@ -134,6 +154,7 @@ public struct AITurnConfiguration: Sendable {
         self.endUserID = endUserID
         self.modalities = modalities
         self.audioOutput = audioOutput
+        self.streamingAudioHandler = streamingAudioHandler
     }
 
     public static let `default` = AITurnConfiguration()

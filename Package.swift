@@ -27,10 +27,7 @@ let package = Package(
             url: "https://github.com/modelcontextprotocol/swift-sdk.git",
             from: "0.12.0"
         ),
-        .package(
-            url: "https://github.com/StevenRCE0/AIProxySwift-MultiPlatform.git",
-            branch: "main"
-        ),
+        .package(path: "../AIProxySwift-MultiPlatform"),
         .package(path: "../KeepTalkingSFU"),
         .package(url: "https://github.com/StevenRCE0/swift-libjuice.git", from: "1.7.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),

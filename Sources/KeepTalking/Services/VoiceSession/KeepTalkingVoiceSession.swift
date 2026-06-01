@@ -550,10 +550,7 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
             case .connected:
                 handleICEConnected(for: peerNodeID)
             case .failed(let reason):
-                lock.withLock {
-                    peerEntries[peerNodeID]?.state = .failed(reason)
-                }
-                emitPeersChanged()
+                handleICEFailed(reason, for: peerNodeID)
             case .closed:
                 lock.withLock {
                     peerEntries[peerNodeID]?.iceDidConnect = false
@@ -561,6 +558,17 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
             default:
                 break
         }
+    }
+
+    private func handleICEFailed(_ reason: String, for peerNodeID: UUID) {
+        if mode == .auto, effectiveTransport == .p2p {
+            convergeToSFU(reason: "p2p failed for \(peerNodeID.uuidString.prefix(8)): \(reason)")
+            return
+        }
+        lock.withLock {
+            peerEntries[peerNodeID]?.state = .failed(reason)
+        }
+        emitPeersChanged()
     }
 
     private func handleICEConnected(for peerNodeID: UUID) {
@@ -611,7 +619,7 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         //    if it was lost, and keeps peers' freshness counters alive.
         broadcastStarted()
 
-        // 2. Age every peer and evict stale ones.
+        // 2. Age every peer and collect the stale ones.
         var staleNodeIDs: [UUID] = []
         lock.withLock {
             for (nodeID, entry) in peerEntries {
@@ -621,6 +629,33 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
                 }
             }
         }
+        guard !staleNodeIDs.isEmpty else { return }
+
+        // 3. A peer going silent on P2P usually means the *path* broke, not
+        //    that the peer left: its `voice.started` echoes ride the shared
+        //    context transport, which can starve them for several seconds
+        //    while it renegotiates (e.g. an SFU→P2P route flip — see the
+        //    flap in rtout.txt that evicted a perfectly live peer). Before
+        //    dropping a peer that may still be reachable, make the same
+        //    "SFU wins" move an ICE failure already makes (`handleICEFailed`):
+        //    converge to the relay and give every peer a fresh liveness
+        //    window to check in over SFU. `convergeToSFU` is session-wide and
+        //    sticky, so this fires at most once; a peer that's still silent
+        //    after the relay window is evicted by the `.sfu` branch below on
+        //    a later tick.
+        if mode == .auto, effectiveTransport == .p2p {
+            let names = staleNodeIDs.map { $0.uuidString.prefix(8) }.joined(separator: ",")
+            convergeToSFU(reason: "p2p peer(s) stale [\(names)] — relaying instead of dropping")
+            lock.withLock {
+                for entry in peerEntries.values {
+                    entry.ticksSinceLastSeen = 0
+                }
+            }
+            return
+        }
+
+        // 4. Already relaying, or the user pinned a transport: a stale peer
+        //    is genuinely gone. Evict.
         for nodeID in staleNodeIDs {
             emitLog(
                 "peer \(nodeID.uuidString.prefix(8)) stale (\(Self.peerStaleTicksThreshold) missed ticks) — evicting")

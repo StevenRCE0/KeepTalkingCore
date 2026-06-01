@@ -23,7 +23,8 @@ public enum AIPromptPresets {
         sideNotes: [KeepTalkingSideNoteDTO] = [],
         contextTranscript: String,
         currentDate: String,
-        platform: String
+        platform: String,
+        responseLanguages: [String] = []
     ) -> String {
         let currentPromptGuidance: String
         if currentPromptIncludesAttachments {
@@ -45,6 +46,7 @@ public enum AIPromptPresets {
         } else {
             currentPromptGuidance = ""
         }
+        let languageGuidance = responseLanguageGuidance(responseLanguages)
 
         return """
             You are a KeepTalking participant in a group chat.
@@ -54,6 +56,7 @@ public enum AIPromptPresets {
             Use tools only when they are relevant to the user's request.
             When a relevant tool can materially advance the request, call it instead of only describing what you might do next.
             Prefer taking the next concrete tool step now over deferring with a plan in prose.
+            \(languageGuidance)
             If no applicable tool/action exists for this context, and the user is not asking for tool execution, reply naturally in chat without calling tools.
             Do not fabricate tool outputs.
             Available actions are listed in the conversation context under "Available actions". Before calling \(ktRunActionToolFunctionName), scan that full list and choose the single action_id whose name, type, node, and description best match the user's intent. Do not delegate to the first plausible or current-node action when another listed action is more specific.
@@ -139,6 +142,20 @@ public enum AIPromptPresets {
                refinement of the exact task already underway — with no change of subject.
                Action: do nothing — call neither tool.
             """
+    }
+
+    static func responseLanguageGuidance(_ languages: [String]) -> String {
+        let cleaned = languages.reduce(into: [String]()) { result, language in
+            let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !result.contains(trimmed) else { return }
+            result.append(trimmed)
+        }
+        guard !cleaned.isEmpty else { return "" }
+        if cleaned.count == 1 {
+            return "Respond in \(cleaned[0]) unless the user explicitly requests another language."
+        }
+        return
+            "Respond only in these languages unless the user explicitly requests another language: \(cleaned.joined(separator: ", "))."
     }
 
     // MARK: - Side notes section

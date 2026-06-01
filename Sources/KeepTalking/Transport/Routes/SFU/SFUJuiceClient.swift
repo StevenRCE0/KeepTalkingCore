@@ -225,6 +225,21 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
         )
     }
 
+    func broadcastState() -> BroadcastChannelState {
+        switch client.state {
+            case .ready: return .ready
+            case .connecting, .authenticating, .idle: return .connecting
+            case .closed, .failed: return .failed
+        }
+    }
+
+    func sendLivenessProbe() {
+        // Roster request round-trips through the SFU server itself, so it
+        // works even with no other peers present. The reply lands on the
+        // counted inbound path observed by `probeTransport()`.
+        requestPeerRoster()
+    }
+
     func requestP2PTrial() {
         // No-op: this route never upgrades; if KT wants P2P, the SDK
         // should swap in the libjuice-based P2P client instead.

@@ -354,7 +354,8 @@ extension KeepTalkingClient {
             sideNotes: activeSideNotes,
             contextTranscript: contextTranscript,
             currentDate: currentDate,
-            platform: platform
+            platform: platform,
+            responseLanguages: responseLanguages
         )
         let messages: [AIMessage] =
             [AIMessage.system(systemPrompt)] + contextMessages + [userMessage]

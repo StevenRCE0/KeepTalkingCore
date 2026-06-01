@@ -180,6 +180,66 @@ struct VoiceSessionTransportReconcileTests {
         #expect(sent.started.count > sentCountBefore)
     }
 
+    @Test("auto p2p peer going stale converges to SFU instead of evicting")
+    func staleP2PPeerConvergesToSFU() async throws {
+        // Local is the *higher* node id so it's the answerer — it parks at
+        // .discovering without spinning up a real ICE agent.
+        let local = UUID(uuidString: "ff000000-0000-0000-0000-000000000000")!
+        let peer = UUID(uuidString: "11000000-0000-0000-0000-000000000000")!
+        let (session, _, context) = makeSession(node: local, mode: .auto)
+        try await session.start()
+        #expect(session.effectiveTransport == .p2p)
+
+        // Peer joins on P2P (matching transport — no immediate convergence).
+        session.receiveVoiceEnvelope(
+            KeepTalkingVoiceCallStartedPayload(
+                from: peer, contextID: context, effectiveTransport: "p2p"
+            )
+        )
+        #expect(session.peers.count == 1)
+        #expect(session.effectiveTransport == .p2p)
+
+        // Peer's echoes are starved — e.g. the shared context transport is
+        // mid SFU→P2P flip (rtout.txt). Drive past the stale threshold.
+        session.heartbeatTick()  // tick 1
+        session.heartbeatTick()  // tick 2
+        session.heartbeatTick()  // tick 3 — hits threshold
+
+        // The peer must NOT be evicted; the session relays instead.
+        #expect(session.peers.count == 1)
+        #expect(session.effectiveTransport == .sfu)
+        #expect(session.autoStickySFU)
+        #expect(session.peers.first?.state == .sfuRelay)
+    }
+
+    @Test("a peer still silent after SFU convergence is eventually evicted")
+    func stalePeerEvictedAfterConvergence() async throws {
+        let local = UUID(uuidString: "ff000000-0000-0000-0000-000000000000")!
+        let peer = UUID(uuidString: "11000000-0000-0000-0000-000000000000")!
+        let (session, _, context) = makeSession(node: local, mode: .auto)
+        try await session.start()
+
+        session.receiveVoiceEnvelope(
+            KeepTalkingVoiceCallStartedPayload(
+                from: peer, contextID: context, effectiveTransport: "p2p"
+            )
+        )
+
+        // First staleness converges to SFU and grants a fresh window.
+        session.heartbeatTick()
+        session.heartbeatTick()
+        session.heartbeatTick()
+        #expect(session.effectiveTransport == .sfu)
+        #expect(session.peers.count == 1)
+
+        // Peer stays silent through the relay window too — now it's really
+        // gone, and the .sfu path evicts it.
+        session.heartbeatTick()
+        session.heartbeatTick()
+        session.heartbeatTick()
+        #expect(session.peers.isEmpty)
+    }
+
     @Test("heartbeat re-broadcast keeps peer alive")
     func heartbeatEchoResetsFreshness() async throws {
         let local = UUID(uuidString: "ff000000-0000-0000-0000-000000000000")!

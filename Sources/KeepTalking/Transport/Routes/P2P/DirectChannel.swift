@@ -31,6 +31,10 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
     private var pendingRemoteDataHost: String?
     private var localDataHost: String?
     private var remoteDataHost: String?
+    private var activeLocalAttemptID: String?
+    private var activeRemoteAttemptID: String?
+    private var activeRemoteSDP: String?
+    private var lastRemoteSDPIssuedAtMs: Int64?
 
     var state: DirectChannelState {
         stateQueue.sync { stateMachine.state }
@@ -74,6 +78,13 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
     func receiveSignal(_ signal: KeepTalkingP2PSignalPayload) {
         guard signal.to == localNodeID, signal.from == peerNodeID else { return }
         if signal.data.kind == "h2-port", let raw = signal.data.candidate {
+            if let attemptID = signal.data.attemptID,
+                let activeRemoteAttemptID = stateQueue.sync(execute: { activeRemoteAttemptID }),
+                attemptID != activeRemoteAttemptID
+            {
+                debug("ignoring stale data port attempt=\(attemptID)")
+                return
+            }
             let parsed = Self.parseDataPortSignal(raw)
             if let port = parsed.port {
                 receiveRemoteDataPort(port, host: parsed.host)
@@ -81,15 +92,58 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
             return
         }
         guard signal.data.kind == "juice-sdp", let sdp = signal.data.sdp else { return }
+        receiveRemoteSDP(sdp, attemptID: signal.data.attemptID, issuedAtMs: signal.data.issuedAtMs)
+    }
 
-        let current = stateQueue.sync { stateMachine.state }
-        if current == .idle || current == .abandoned {
-            stateQueue.sync { pendingRemoteSDP = sdp }
-            attemptUpgrade()
-        } else if let session {
-            session.applyRemoteSDP(sdp)
-        } else {
-            stateQueue.sync { pendingRemoteSDP = sdp }
+    private func receiveRemoteSDP(_ sdp: String, attemptID: String?, issuedAtMs: Int64?) {
+        let remoteAttemptID = attemptID ?? Self.iceUfrag(in: sdp) ?? String(sdp.hashValue)
+        enum SDPAction {
+            case ignore(String)
+            case store
+            case apply(KeepTalkingJuiceP2PSession)
+            case restart
+        }
+
+        let action = stateQueue.sync { () -> SDPAction in
+            if let issuedAtMs, let lastRemoteSDPIssuedAtMs, issuedAtMs < lastRemoteSDPIssuedAtMs {
+                return .ignore("older remote sdp generation")
+            }
+            if activeRemoteSDP == sdp {
+                return .ignore("duplicate remote sdp")
+            }
+            let current = stateMachine.state
+            if current == .idle || current == .abandoned {
+                pendingRemoteSDP = sdp
+                activeRemoteAttemptID = remoteAttemptID
+                activeRemoteSDP = sdp
+                if let issuedAtMs { lastRemoteSDPIssuedAtMs = issuedAtMs }
+                return .store
+            }
+            if let activeRemoteAttemptID, activeRemoteAttemptID != remoteAttemptID {
+                pendingRemoteSDP = sdp
+                self.activeRemoteAttemptID = remoteAttemptID
+                activeRemoteSDP = sdp
+                if let issuedAtMs { lastRemoteSDPIssuedAtMs = issuedAtMs }
+                return .restart
+            }
+            self.activeRemoteAttemptID = remoteAttemptID
+            activeRemoteSDP = sdp
+            if let issuedAtMs { lastRemoteSDPIssuedAtMs = issuedAtMs }
+            if let session { return .apply(session) }
+            pendingRemoteSDP = sdp
+            return .store
+        }
+
+        switch action {
+            case .ignore(let reason):
+                debug("\(reason) attempt=\(remoteAttemptID)")
+            case .store:
+                attemptUpgrade()
+            case .apply(let session):
+                session.applyRemoteSDP(sdp)
+            case .restart:
+                debug("replacing p2p handshake remoteAttempt=\(remoteAttemptID)")
+                restartHandshake()
         }
     }
 
@@ -123,12 +177,16 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
 
     private func startHandshake() {
         let remoteSDP = stateQueue.sync { pendingRemoteSDP }
-        cleanup()
+        cleanup(keepingPendingRemote: true)
 
         do {
             let next = try KeepTalkingJuiceP2PSession()
+            let localAttemptID = UUID().uuidString.lowercased()
             bind(next)
-            stateQueue.sync { session = next }
+            stateQueue.sync {
+                session = next
+                activeLocalAttemptID = localAttemptID
+            }
             scheduleHandshakeTimeout()
             if let remoteSDP {
                 next.applyRemoteSDP(remoteSDP)
@@ -143,6 +201,7 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
     private func bind(_ next: KeepTalkingJuiceP2PSession) {
         next.onState = { [weak self] state in
             guard let self else { return }
+            guard self.isCurrentSession(next) else { return }
             switch state {
                 case .connected:
                     self.handleICEConnected(next)
@@ -156,6 +215,8 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
         }
         next.onLocalSDPReady = { [weak self] sdp in
             guard let self else { return }
+            guard self.isCurrentSession(next) else { return }
+            let attemptID = self.stateQueue.sync { self.activeLocalAttemptID }
             self.onSignalOutput?(
                 KeepTalkingP2PSignalPayload(
                     from: self.localNodeID,
@@ -166,7 +227,9 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
                         sdp: sdp,
                         candidate: nil,
                         sdpMid: nil,
-                        sdpMLineIndex: nil
+                        sdpMLineIndex: nil,
+                        attemptID: attemptID,
+                        issuedAtMs: Self.nowMs()
                     )
                 )
             )
@@ -178,6 +241,7 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
     }
 
     private func handleICEConnected(_ session: KeepTalkingJuiceP2PSession) {
+        guard isCurrentSession(session) else { return }
         guard let pair = session.selectedAddresses(),
             let (localHost, _) = Self.parseAddress(pair.local),
             let (remoteHost, _) = Self.parseAddress(pair.remote)
@@ -255,7 +319,7 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
     }
 
     private func sendDataPort(_ port: UInt16) {
-        let host = stateQueue.sync { localDataHost }
+        let (host, attemptID) = stateQueue.sync { (localDataHost, activeLocalAttemptID) }
         onSignalOutput?(
             KeepTalkingP2PSignalPayload(
                 from: localNodeID,
@@ -266,7 +330,9 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
                     sdp: nil,
                     candidate: host.map { "\(port)|\($0)" } ?? String(port),
                     sdpMid: nil,
-                    sdpMLineIndex: nil
+                    sdpMLineIndex: nil,
+                    attemptID: attemptID,
+                    issuedAtMs: Self.nowMs()
                 )
             )
         )
@@ -307,6 +373,7 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
 
     private func scheduleBackoff(seconds: TimeInterval) {
         backoffTask?.cancel()
+        cleanup(keepingPendingRemote: true)
         debug("backing off for \(seconds)s")
         backoffTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
@@ -315,7 +382,17 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
         }
     }
 
-    private func cleanup() {
+    private func restartHandshake() {
+        cleanup(keepingPendingRemote: true)
+        stateQueue.sync {
+            stateMachine = DirectChannelStateMachine()
+            _ = stateMachine.handle(.upgradeRequested)
+        }
+        onStateChange?()
+        startHandshake()
+    }
+
+    private func cleanup(keepingPendingRemote: Bool = false) {
         handshakeTimeoutTask?.cancel()
         handshakeTimeoutTask = nil
         backoffTask?.cancel()
@@ -334,11 +411,17 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
         let old = stateQueue.sync { () -> KeepTalkingJuiceP2PSession? in
             let value = session
             session = nil
-            pendingRemoteSDP = nil
+            if !keepingPendingRemote {
+                pendingRemoteSDP = nil
+                activeRemoteAttemptID = nil
+                activeRemoteSDP = nil
+                lastRemoteSDPIssuedAtMs = nil
+            }
             pendingRemoteDataPort = nil
             pendingRemoteDataHost = nil
             localDataHost = nil
             remoteDataHost = nil
+            activeLocalAttemptID = nil
             return value
         }
         old?.onState = nil
@@ -353,6 +436,7 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
             let value = session
             session = nil
             pendingRemoteSDP = nil
+            activeLocalAttemptID = nil
             return value
         }
         old?.onState = nil
@@ -364,6 +448,10 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
 
     private func debug(_ message: String) {
         onLog?("[direct-h2:\(peerNodeID.uuidString.prefix(8))] \(message)")
+    }
+
+    private func isCurrentSession(_ candidate: KeepTalkingJuiceP2PSession) -> Bool {
+        stateQueue.sync { session === candidate }
     }
 
     private static func parseAddress(_ value: String) -> (host: String, port: UInt16)? {
@@ -386,5 +474,19 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
         let port = UInt16(parts.first ?? "")
         let host = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
         return (port, host.isEmpty ? nil : host)
+    }
+
+    private static func iceUfrag(in sdp: String) -> String? {
+        for line in sdp.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("a=ice-ufrag:") {
+                return String(trimmed.dropFirst("a=ice-ufrag:".count))
+            }
+        }
+        return nil
+    }
+
+    private static func nowMs() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1000)
     }
 }

@@ -31,7 +31,8 @@ public actor OpenAIConnector: AIConnector {
         sideNotes: [KeepTalkingSideNoteDTO] = [],
         contextTranscript: String,
         currentDate: String,
-        platform: String
+        platform: String,
+        responseLanguages: [String] = []
     ) -> String {
         AIPromptPresets.systemPrompt(
             ktRunActionToolFunctionName: ktRunActionToolFunctionName,
@@ -46,7 +47,8 @@ public actor OpenAIConnector: AIConnector {
             sideNotes: sideNotes,
             contextTranscript: contextTranscript,
             currentDate: currentDate,
-            platform: platform
+            platform: platform,
+            responseLanguages: responseLanguages
         )
     }
 
@@ -193,7 +195,10 @@ public actor OpenAIConnector: AIConnector {
         )
 
         if audioConfig != nil {
-            return try await streamCompleteTurn(body: body)
+            return try await streamCompleteTurn(
+                body: body,
+                streamingAudioHandler: configuration?.streamingAudioHandler
+            )
         }
 
         // Run the HTTP call in a child task so cancellation can be propagated
@@ -262,7 +267,8 @@ public actor OpenAIConnector: AIConnector {
     // MARK: - Streaming path (required for audio output)
 
     private func streamCompleteTurn(
-        body: OpenAIChatCompletionRequestBody
+        body: OpenAIChatCompletionRequestBody,
+        streamingAudioHandler: AIStreamingAudioHandler? = nil
     ) async throws -> AITurnResult {
         let stream = try await service.streamingChatCompletionRequest(
             body: body,
@@ -276,7 +282,6 @@ public actor OpenAIConnector: AIConnector {
         var audioBase64 = ""
         var audioTranscript = ""
         var audioExpiresAt: Int? = nil
-        var finishReason: String? = nil
 
         for try await chunk in stream {
             try Task.checkCancellation()
@@ -299,12 +304,16 @@ public actor OpenAIConnector: AIConnector {
                 }
                 if let audio = choice.delta.audio {
                     if let id = audio.id { audioID = id }
-                    if let d = audio.data { audioBase64 += d }
+                    if let d = audio.data {
+                        audioBase64 += d
+                        if let handler = streamingAudioHandler,
+                            let decoded = Data(base64Encoded: d), !decoded.isEmpty
+                        {
+                            await handler.emit(decoded)
+                        }
+                    }
                     if let t = audio.transcript { audioTranscript += t }
                     if let e = audio.expiresAt { audioExpiresAt = e }
-                }
-                if let fr = choice.finishReason {
-                    finishReason = fr
                 }
             }
         }

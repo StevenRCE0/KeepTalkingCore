@@ -32,6 +32,13 @@ protocol KeepTalkingTransportClient: AnyObject {
     func sendRealtimeDataViaBroadcast(_ data: Data) throws
     func currentRoute() -> KeepTalkingTransportRoute
     func runtimeStats() -> KeepTalkingRuntimeStats
+    /// Current state of the always-on broadcast (SFU) backbone. Pure read of
+    /// the carrier's self-reported state machine — no probe.
+    func broadcastState() -> BroadcastChannelState
+    /// Emit a single liveness probe on the backbone (a presence wave). Used by
+    /// `KeepTalkingClient.probeTransport()` to confirm a stale-open channel is
+    /// really carrying bytes; inbound progress is observed via `runtimeStats`.
+    func sendLivenessProbe()
     func requestP2PTrial()
     func preferReliableRoute(reason: String)
     func debug(_ message: String)

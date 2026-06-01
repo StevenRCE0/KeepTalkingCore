@@ -154,6 +154,8 @@ struct InlinePromptAttachmentTests {
                             return value
                         case .imageURL:
                             return nil
+                        case .inputAudio:
+                            return nil
                     }
                 }
                 .joined(separator: "\n")

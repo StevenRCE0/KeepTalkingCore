@@ -205,6 +205,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// explicitly. Set this to the active provider's model so OpenRouter and
     /// other providers don't 404 on the OpenAI-style default.
     public let openAIModel: String?
+    public let responseLanguages: [String]
     let livenessState: KeepTalkingContextLivenessState
     let mcpManager: MCPManager
     let skillManager: SkillManager
@@ -306,6 +307,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
     ///                  on incoming action calls). Should match the active
     ///                  provider's model — for OpenRouter this is provider-prefixed
     ///                  (e.g. `openai/gpt-5-codex`).
+    ///   - responseLanguages: Preferred natural-language output languages for
+    ///                        agent prompts. Empty means infer from the user.
     ///   - stdioTransportLauncher: Optional stdio transport launcher used for
     ///     MCP stdio actions.
     ///   - skillScriptExecutor: Optional skill script executor used for skill
@@ -320,6 +323,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         openAIEndpoint: String? = nil,
         openAIBackend: OpenAIConnectorBackend = .openRouter,
         openAIModel: String? = nil,
+        responseLanguages: [String] = [],
         aiConnector: (any AIConnector)? = nil,
         stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
             DefaultMCPStdioTransportLauncher.current,
@@ -339,6 +343,11 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.openAIBackend = openAIBackend
         let trimmedModel = openAIModel?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.openAIModel = (trimmedModel?.isEmpty == false) ? trimmedModel : nil
+        self.responseLanguages = responseLanguages.reduce(into: []) { result, language in
+            let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !result.contains(trimmed) else { return }
+            result.append(trimmed)
+        }
         self.blobStore = KeepTalkingBlobStore.makeDefault(for: localStore)
         livenessState = KeepTalkingContextLivenessState(
             localNode: config.node
@@ -634,6 +643,85 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// Asks the transport to attempt a direct P2P connection.
     public func requestP2PTrial() {
         rtcClient.requestP2PTrial()
+    }
+
+    // MARK: - Transport health
+
+    /// Coarse health of the always-on broadcast (SFU) backbone, derived
+    /// purely from the transport's own pushed state — never a probe.
+    ///
+    /// The carriers already self-report liveness: libjuice consent-freshness
+    /// for ICE, and `HTTP2KeepAliveHandler` (PING / read-deadline) for both
+    /// the SFU and P2P HTTP/2 channels. Loss flips `BroadcastChannelState`
+    /// without any polling here. This enum is just a consumer-facing read of
+    /// that state so callers (e.g. the app's foreground-resume path) can
+    /// decide whether a re-establish is even warranted.
+    ///
+    /// P2P readiness is intentionally *not* reflected: a dead direct channel's
+    /// recovery is SFU fallback, handled inside the transport — it never
+    /// justifies tearing down the client.
+    public enum TransportHealth: Sendable, Equatable {
+        /// Broadcast backbone is ready. The path may still be stale-open
+        /// (rare); callers that care can confirm with `probeTransport()`.
+        case healthy
+        /// Backbone is mid-reconnect. The state machine retries with backoff
+        /// and never gives up — leave it alone; do not re-establish.
+        case recovering
+        /// Backbone is down (only reachable via an explicit stop). A
+        /// re-establish is warranted.
+        case down
+    }
+
+    /// Reads `TransportHealth` from the transport's current broadcast state.
+    /// Pure read, no I/O.
+    public func transportHealth() -> TransportHealth {
+        switch rtcClient.broadcastState() {
+            case .ready:
+                return .healthy
+            case .connecting, .reconnecting:
+                return .recovering
+            case .failed:
+                return .down
+        }
+    }
+
+    /// Actively confirms a `.healthy` backbone is really carrying bytes, not
+    /// wedged open (e.g. the keepalive task starved across a long suspend).
+    ///
+    /// Sends one presence wave and watches the transport's inbound counter
+    /// for progress within `timeout`. Any inbound byte — a presence echo, an
+    /// SFU roster reply, a peer's traffic — counts. Returns `true` if inbound
+    /// advanced (live), `false` on timeout (wedged → caller should
+    /// re-establish).
+    ///
+    /// Only worth calling when `transportHealth() == .healthy`: `.recovering`
+    /// already self-heals and `.down` is unambiguous.
+    public func probeTransport(timeout: Duration = .milliseconds(2500)) async -> Bool {
+        let before = rtcClient.runtimeStats().received
+        rtcClient.sendLivenessProbe()
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(100))
+            if rtcClient.runtimeStats().received > before {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Tears the transport down and brings it back up **on this same client
+    /// instance**. Unlike the app dropping and rebuilding a `KeepTalkingClient`,
+    /// this preserves every object that captured the client — most importantly
+    /// an `activeVoiceSession`, whose send closures route through
+    /// `self.rtcClient`. The voice session keeps running across the bounce; its
+    /// heartbeat re-announces over the freshly-started transport.
+    ///
+    /// `connect()` awaits the detached teardown `disconnect()` schedules, so
+    /// the stop fully completes before the restart.
+    public func reestablishTransport() async throws {
+        debug("reestablishTransport: bouncing transport in place")
+        disconnect()
+        try await connect()
     }
 
     func debug(_ message: String) {

@@ -76,4 +76,36 @@ struct OpenAIConnectorPromptTests {
             )
         )
     }
+
+    @Test("system prompt includes response language preference")
+    func responseLanguagePreferenceIsInjected() {
+        let prompt = OpenAIConnector.keepTalkingSystemPrompt(
+            ktRunActionToolFunctionName:
+                KeepTalkingClient.runActionToolFunctionName,
+            ktSkillMetainfoToolFunctionName:
+                KeepTalkingClient.ktSkillMetainfoToolFunctionName,
+            attachmentListingToolFunctionName:
+                KeepTalkingClient.contextAttachmentListingToolFunctionName,
+            attachmentReaderToolFunctionName:
+                KeepTalkingClient.contextAttachmentReadToolFunctionName,
+            searchThreadsToolFunctionName:
+                KeepTalkingClient.searchThreadsToolFunctionName,
+            markTurningPointToolFunctionName:
+                KeepTalkingClient.markTurningPointToolFunctionName,
+            markChitterChatterToolFunctionName:
+                KeepTalkingClient.markChitterChatterToolFunctionName,
+            currentPromptIncludesAttachments: false,
+            currentPromptShouldAvoidAutomaticToolUse: false,
+            contextTranscript: "",
+            currentDate: "2024-01-15T10:00:00Z",
+            platform: "macOS",
+            responseLanguages: ["Chinese (Simplified)", "Japanese"]
+        )
+
+        #expect(
+            prompt.contains(
+                "Respond only in these languages unless the user explicitly requests another language: Chinese (Simplified), Japanese."
+            )
+        )
+    }
 }

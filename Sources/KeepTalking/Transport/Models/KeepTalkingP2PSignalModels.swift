@@ -11,6 +11,8 @@ public struct KeepTalkingP2PSignalData: Codable, Sendable {
     public let candidate: String?
     public let sdpMid: String?
     public let sdpMLineIndex: Int32?
+    public let attemptID: String?
+    public let issuedAtMs: Int64?
 
     public init(
         kind: String,
@@ -18,7 +20,9 @@ public struct KeepTalkingP2PSignalData: Codable, Sendable {
         sdp: String?,
         candidate: String?,
         sdpMid: String?,
-        sdpMLineIndex: Int32?
+        sdpMLineIndex: Int32?,
+        attemptID: String? = nil,
+        issuedAtMs: Int64? = nil
     ) {
         self.kind = kind
         self.type = type
@@ -26,6 +30,8 @@ public struct KeepTalkingP2PSignalData: Codable, Sendable {
         self.candidate = candidate
         self.sdpMid = sdpMid
         self.sdpMLineIndex = sdpMLineIndex
+        self.attemptID = attemptID
+        self.issuedAtMs = issuedAtMs
     }
 }
 
