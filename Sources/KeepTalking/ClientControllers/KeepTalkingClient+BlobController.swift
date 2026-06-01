@@ -133,6 +133,62 @@ extension KeepTalkingClient {
         )
     }
 
+    /// Ask `recipient` for attachment *records* belonging to recent messages
+    /// that we have locally but hold no attachment rows for. Repairs orphaned
+    /// attachments that incremental message sync can't recover (the parent
+    /// message is already past our cursor, so its attachment never re-rides a
+    /// delta). Recency-bounded by the same lookback as blob recovery.
+    ///
+    /// "No local rows" is a heuristic — most messages legitimately have no
+    /// attachments — so the responder simply returns empty for those. Payload
+    /// is just message UUIDs; cheap relative to closing the data-loss hole.
+    func requestRecentMissingAttachmentRecords(
+        in contextID: UUID,
+        since: Date,
+        from recipient: UUID
+    ) async throws {
+        let messageIDs = try await recentMessageIDsLackingAttachments(
+            in: contextID,
+            since: since
+        )
+        guard !messageIDs.isEmpty else { return }
+
+        let request = KeepTalkingContextSyncAttachmentRecordsRequest(
+            context: contextID,
+            requester: config.node,
+            recipient: recipient,
+            messageIDs: messageIDs
+        )
+        try rtcClient.sendEnvelope(
+            KeepTalkingContextSyncEnvelope.attachmentRecordsRequest(request)
+        )
+    }
+
+    /// Message IDs (created since `since`) that have no local attachment rows.
+    /// Excludes our own messages — we authored those, so we already hold any
+    /// attachments they carry.
+    private func recentMessageIDsLackingAttachments(
+        in contextID: UUID,
+        since: Date
+    ) async throws -> [UUID] {
+        let messages = try await KeepTalkingContextMessage.query(
+            on: localStore.database
+        )
+        .filter(\.$context.$id, .equal, contextID)
+        .with(\.$attachments)
+        .all()
+
+        return messages.compactMap { message -> UUID? in
+            guard let id = message.id,
+                message.timestamp >= since,
+                message.attachments.isEmpty,
+                case .node(let senderID) = message.sender,
+                senderID != config.node
+            else { return nil }
+            return id
+        }
+    }
+
     func requestAttachmentBlobsIfNeeded(
         for attachments: [KeepTalkingContextAttachment],
         in contextID: UUID

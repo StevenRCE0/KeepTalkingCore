@@ -338,6 +338,61 @@ public struct KeepTalkingContextSyncAttachmentRequest: Codable, Sendable,
     }
 }
 
+/// Pull request for attachment *records* (not blob bytes) belonging to a set
+/// of message IDs the requester already has. Repairs the case where a message
+/// synced but its attachment record never landed (e.g. the live attachment
+/// envelope raced ahead of its message and was dropped) — incremental message
+/// sync can't recover this, because attachments only ride along with messages
+/// in the active delta, and the parent message is already behind the cursor.
+///
+/// Distinct from `KeepTalkingContextSyncAttachmentRequest`, which fetches blob
+/// *bytes* (by hash) for records the requester already holds.
+public struct KeepTalkingContextSyncAttachmentRecordsRequest: Codable, Sendable,
+    Equatable
+{
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let recipient: UUID
+    public let messageIDs: [UUID]
+
+    public init(
+        request: UUID = UUID(),
+        context: UUID,
+        requester: UUID,
+        recipient: UUID,
+        messageIDs: [UUID]
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.recipient = recipient
+        self.messageIDs = messageIDs
+    }
+}
+
+public struct KeepTalkingContextSyncAttachmentRecordsResult: Codable, Sendable {
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let responder: UUID
+    public let attachments: [KeepTalkingContextAttachmentDTO]
+
+    public init(
+        request: UUID,
+        context: UUID,
+        requester: UUID,
+        responder: UUID,
+        attachments: [KeepTalkingContextAttachmentDTO]
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.responder = responder
+        self.attachments = attachments
+    }
+}
+
 public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
     case summaryRequest(KeepTalkingContextSyncSummaryRequest)
     case summaryResult(KeepTalkingContextSyncSummaryResult)
@@ -345,6 +400,8 @@ public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
     case chunkRequest(KeepTalkingContextSyncChunkRequest)
     case messagesResult(KeepTalkingContextSyncMessagesResult)
     case attachmentRequest(KeepTalkingContextSyncAttachmentRequest)
+    case attachmentRecordsRequest(KeepTalkingContextSyncAttachmentRecordsRequest)
+    case attachmentRecordsResult(KeepTalkingContextSyncAttachmentRecordsResult)
     case sideNotesRequest(KeepTalkingContextSyncSideNotesRequest)
     case sideNotesResult(KeepTalkingContextSyncSideNotesResult)
 }

@@ -295,6 +295,12 @@ extension KeepTalkingClient {
         async throws
     {
         try await saveIncomingMessages([message], in: message.$context.id)
+        // A message may have arrived after attachment DTOs that referenced it
+        // (separate envelopes, separate Tasks). Re-drive any that were parked
+        // waiting for this parent.
+        if let messageID = message.id {
+            try await flushOrphanAttachments(forParentMessageID: messageID)
+        }
     }
 
     func handleIncomingAttachment(_ attachment: KeepTalkingContextAttachmentDTO)
@@ -417,8 +423,12 @@ extension KeepTalkingClient {
         for attachment in newAttachments {
             guard let parentMessage = parentMessagesByID[attachment.parentMessageID]
             else {
+                // Parent message hasn't been persisted yet — the attachment
+                // envelope beat the message envelope. Park it; it's re-driven
+                // by `flushOrphanAttachments` once the parent message saves.
+                bufferOrphanAttachment(attachment)
                 rtcClient.debug(
-                    "ignored attachment dto missing parent message attachment=\(attachment.id.uuidString.lowercased()) parent=\(attachment.parentMessageID.uuidString.lowercased())"
+                    "buffered orphan attachment dto pending parent message attachment=\(attachment.id.uuidString.lowercased()) parent=\(attachment.parentMessageID.uuidString.lowercased())"
                 )
                 continue
             }
@@ -454,6 +464,46 @@ extension KeepTalkingClient {
             savedAttachments.append(model)
         }
         return savedAttachments
+    }
+
+    // MARK: - Orphan attachment buffering
+
+    /// Park an attachment DTO whose parent message hasn't arrived yet, keyed by
+    /// `parentMessageID`. Deduplicates by attachment id so a redelivery doesn't
+    /// stack duplicates.
+    private func bufferOrphanAttachment(
+        _ attachment: KeepTalkingContextAttachmentDTO
+    ) {
+        orphanAttachmentLock.lock()
+        defer { orphanAttachmentLock.unlock() }
+        var parked = orphanAttachmentsByParentMessageID[attachment.parentMessageID] ?? []
+        guard !parked.contains(where: { $0.id == attachment.id }) else { return }
+        parked.append(attachment)
+        orphanAttachmentsByParentMessageID[attachment.parentMessageID] = parked
+    }
+
+    /// Re-drive any attachment DTOs parked for `parentMessageID` now that the
+    /// parent message exists. Called from `handleIncomingMessage` after the
+    /// message is persisted.
+    private func flushOrphanAttachments(
+        forParentMessageID parentMessageID: UUID
+    ) async throws {
+        let parked: [KeepTalkingContextAttachmentDTO] = {
+            orphanAttachmentLock.lock()
+            defer { orphanAttachmentLock.unlock() }
+            return
+                orphanAttachmentsByParentMessageID
+                .removeValue(forKey: parentMessageID) ?? []
+        }()
+        guard !parked.isEmpty else { return }
+
+        let savedAttachments = try await saveIncomingAttachments(parked)
+        guard !savedAttachments.isEmpty else { return }
+        // Match the live path: pull blobs for the now-linked attachments.
+        try await requestAttachmentBlobsIfNeeded(
+            for: savedAttachments,
+            in: parked[0].contextID
+        )
     }
 
     func upsertContext(_ context: KeepTalkingContext) async throws

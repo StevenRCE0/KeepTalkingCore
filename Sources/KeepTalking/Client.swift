@@ -280,6 +280,16 @@ public final class KeepTalkingClient: @unchecked Sendable {
     private let teardownLock = NSLock()
     private var pendingTeardown: Task<Void, Never>?
 
+    /// Inbound attachment DTOs whose parent message hasn't been persisted yet.
+    /// Message and attachment arrive as *separate* envelopes, each handled in
+    /// its own Task (see `rtcClient.onEnvelope`), so an attachment can land
+    /// before its message. Rather than drop it (which left live-received
+    /// attachments missing until a later full resync repopulated them via
+    /// `saveContext`), buffer it here keyed by `parentMessageID` and re-drive
+    /// when the parent message is saved. Guarded by `orphanAttachmentLock`.
+    let orphanAttachmentLock = NSLock()
+    var orphanAttachmentsByParentMessageID: [UUID: [KeepTalkingContextAttachmentDTO]] = [:]
+
     private func takePendingTeardown() -> Task<Void, Never>? {
         teardownLock.lock()
         defer { teardownLock.unlock() }

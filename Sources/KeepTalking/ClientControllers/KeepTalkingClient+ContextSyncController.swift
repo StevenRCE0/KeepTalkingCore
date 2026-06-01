@@ -68,12 +68,21 @@ extension KeepTalkingClient {
 
             Task.detached(priority: .background) { [self] in
                 if config.recentAttachmentSyncLookback > 0 {
+                    let since = Date(
+                        timeIntervalSinceNow: -config.recentAttachmentSyncLookback
+                    )
+                    // Recover missing attachment *records* first (creates rows
+                    // for orphans), then missing blob *bytes* for records we
+                    // hold. The records response itself kicks off blob fetches
+                    // for anything it newly creates, so the two are complementary.
+                    try await requestRecentMissingAttachmentRecords(
+                        in: contextID,
+                        since: since,
+                        from: node
+                    )
                     try await requestRecentMissingAttachmentBlobs(
                         in: contextID,
-                        since: Date(
-                            timeIntervalSinceNow: -config
-                                .recentAttachmentSyncLookback
-                        )
+                        since: since
                     )
                 }
             }
@@ -134,6 +143,19 @@ extension KeepTalkingClient {
                     return
                 }
                 try await respondToContextSyncAttachmentRequest(request)
+            case .attachmentRecordsRequest(let request):
+                guard request.recipient == config.node else {
+                    return
+                }
+                let result = try await executeContextSyncAttachmentRecordsRequest(request)
+                try rtcClient.sendEnvelope(
+                    KeepTalkingContextSyncEnvelope.attachmentRecordsResult(result)
+                )
+            case .attachmentRecordsResult(let result):
+                guard result.requester == config.node else {
+                    return
+                }
+                try await persistContextSyncAttachmentRecordsResult(result)
             case .sideNotesRequest(let request):
                 guard request.recipient == config.node else {
                     return
@@ -541,6 +563,49 @@ extension KeepTalkingClient {
             messages: messages,
             attachments: snapshot.attachments(for: messages)
         )
+    }
+
+    /// Responder side: return every attachment DTO we hold for the requested
+    /// message IDs. The requester filters out ones it already has, so it's
+    /// safe to return all of them.
+    private func executeContextSyncAttachmentRecordsRequest(
+        _ request: KeepTalkingContextSyncAttachmentRecordsRequest
+    ) async throws -> KeepTalkingContextSyncAttachmentRecordsResult {
+        let dtos: [KeepTalkingContextAttachmentDTO]
+        if request.messageIDs.isEmpty {
+            dtos = []
+        } else {
+            let rows = try await KeepTalkingContextAttachment.query(
+                on: localStore.database
+            )
+            .filter(\.$context.$id, .equal, request.context)
+            .filter(\.$parentMessage.$id ~~ request.messageIDs)
+            .all()
+            dtos = rows.compactMap(KeepTalkingContextAttachmentDTO.init)
+        }
+        return KeepTalkingContextSyncAttachmentRecordsResult(
+            request: request.request,
+            context: request.context,
+            requester: request.requester,
+            responder: config.node,
+            attachments: dtos
+        )
+    }
+
+    /// Requester side: persist recovered attachment records. `saveIncomingAttachments`
+    /// dedups against what we already have and pulls blobs for the newly-linked
+    /// ones, so this both creates missing records and kicks off their downloads.
+    private func persistContextSyncAttachmentRecordsResult(
+        _ result: KeepTalkingContextSyncAttachmentRecordsResult
+    ) async throws {
+        guard !result.attachments.isEmpty else { return }
+        let savedAttachments = try await saveIncomingAttachments(result.attachments)
+        if !savedAttachments.isEmpty {
+            try await requestAttachmentBlobsIfNeeded(
+                for: savedAttachments,
+                in: result.context
+            )
+        }
     }
 
     private func executeContextSyncSideNotesRequest(
