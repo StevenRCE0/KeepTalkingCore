@@ -168,6 +168,16 @@ extension KeepTalkingClient {
     /// SDK's in-memory `AgentRunQueue`; callers that need persistence across
     /// navigation, app switching, or process death should own the durable
     /// queue and call this only when the item reaches the head.
+    /// - Parameters:
+    ///   - promptType: Message type to stamp on the prompt row. Defaults to
+    ///     `.message` (a typed prompt); the voice→AI bridge passes
+    ///     `.transcript(source:)` so the prompt renders as a (fainter)
+    ///     transcript bubble and skips wake-notifications, while the AI still
+    ///     receives the same text.
+    /// - Returns: The agent run's final assistant text, so callers (e.g. the
+    ///   voice bridge) can speak the reply. Empty string if the run produced
+    ///   no text.
+    @discardableResult
     public func runDequeuedAIPrompt(
         _ prompt: String,
         attachments: [KeepTalkingLocalAttachmentInput] = [],
@@ -177,8 +187,9 @@ extension KeepTalkingClient {
         roleName: String = "ai",
         reasoningEffort: AIReasoning.Effort? = nil,
         sendPromptMessage: Bool = true,
+        promptType: KeepTalkingContextMessage.MessageType = .message,
         onPromptMessageSent: (() async -> Void)? = nil
-    ) async throws {
+    ) async throws -> String {
         let context = KeepTalkingContext(id: contextID)
         let agentTurnID = UUID()
         let preparedAttachments = try await prepareLocalAttachments(attachments)
@@ -188,12 +199,13 @@ extension KeepTalkingClient {
                 prompt,
                 preparedAttachments: preparedAttachments,
                 in: context,
+                type: promptType,
                 agentTurnID: agentTurnID
             )
             await onPromptMessageSent?()
         }
         try Task.checkCancellation()
-        _ = try await runAI(
+        let result = try await runAI(
             prompt: prompt,
             in: context,
             model: model,
@@ -204,6 +216,7 @@ extension KeepTalkingClient {
             reasoningEffort: reasoningEffort
         )
         await cancelStaleContinuations(agentTurnID: agentTurnID, in: contextID)
+        return result
     }
 
     // MARK: - Direct execution (CLI / internal)

@@ -51,11 +51,12 @@ public struct AudioInterfaceAgent {
 
         static let defaultBridgeSystemPrompt = """
             You are a voice interface bridge. You have two jobs:
-            1. Acknowledge the user's request with brief spoken audio.
-            2. Call the `delegate_to_agent` tool with the extracted intent.
-            You may do these in one turn or across two turns. \
-            The audio acknowledgment is for the user to hear. \
-            The tool call is for a backend agent to process.
+            1. Respond briefly with spoken audio.
+            2. Call the `delegate_to_agent` tool only when the user has a real \
+            backend intent: a fact/information question, a request that needs \
+            context lookup, or an action/execution request. Do not delegate \
+            greetings, thanks, acknowledgements, filler, small talk, unclear \
+            speech, or purely conversational replies.
             """
 
         static let defaultRephraseSystemPrompt = """
@@ -230,15 +231,29 @@ public struct AudioInterfaceAgent {
             throw AudioInterfaceAgentError.intentExtractionFailed
         }
 
-        log("phase 1 done — transcript: \"\(extraction.request.transcript)\", intent: \"\(extraction.request.intent)\"")
-        await statusObserver?(.intentExtracted(extraction.request))
+        log("phase 1 done — transcript: \"\(extraction.transcript)\", intent: \"\(extraction.intent)\"")
+
+        guard let request = extraction.request else {
+            await statusObserver?(.done)
+            log("bridge flow complete without delegation")
+            return BridgeResult(
+                contextID: contextID,
+                transcript: extraction.transcript,
+                intent: extraction.intent,
+                delegateResponse: "",
+                audioOutput: extraction.ackAudio,
+                ackAudioOutput: extraction.ackAudio
+            )
+        }
+
+        await statusObserver?(.intentExtracted(request))
 
         // Phase 2: Delegate to main agent
         log("phase 2: delegating to main agent…")
         await statusObserver?(.delegating)
         let delegateResponse: String
         do {
-            delegateResponse = try await delegate(extraction.request)
+            delegateResponse = try await delegate(request)
         } catch {
             log("phase 2 FAILED (delegate threw): \(error.localizedDescription)")
             throw error
@@ -253,7 +268,7 @@ public struct AudioInterfaceAgent {
         let rephraseResult: AITurnResult
         do {
             rephraseResult = try await rephraseForSpeech(
-                intent: extraction.request.intent,
+                intent: request.intent,
                 delegateResponse: delegateResponse,
                 connector: connector,
                 audioOutputHandler: audioOutputHandler
@@ -277,8 +292,8 @@ public struct AudioInterfaceAgent {
 
         return BridgeResult(
             contextID: contextID,
-            transcript: extraction.request.transcript,
-            intent: extraction.request.intent,
+            transcript: request.transcript,
+            intent: request.intent,
             delegateResponse: delegateResponse,
             audioOutput: rephraseResult.audioOutput,
             ackAudioOutput: extraction.ackAudio
@@ -288,7 +303,9 @@ public struct AudioInterfaceAgent {
     // MARK: - Intent extraction (Phase 1)
 
     private struct ExtractionResult {
-        let request: DelegationRequest
+        let request: DelegationRequest?
+        let transcript: String
+        let intent: String
         let ackAudio: AIAudioOutput?
     }
 
@@ -393,19 +410,25 @@ public struct AudioInterfaceAgent {
                             "Intent received. Delegating to backend agent.",
                             toolCallID: toolCall.id
                         ))
-                    return ExtractionResult(request: delegation, ackAudio: ackAudio)
+                    return ExtractionResult(
+                        request: delegation,
+                        transcript: delegation.transcript,
+                        intent: delegation.intent,
+                        ackAudio: ackAudio
+                    )
                 } else {
                     log("  WARNING: delegate_to_agent tool call found but failed to parse arguments")
                 }
             }
 
-            // Model didn't call the tool — nudge it
             if result.toolCalls.isEmpty && (result.assistantText != nil || result.audioOutput != nil) {
-                log("turn \(turn): model responded but didn't call delegate_to_agent — nudging")
-                transcript.append(
-                    .user(
-                        "Now please call the delegate_to_agent tool with the extracted intent from the audio."
-                    ))
+                log("turn \(turn): model handled utterance locally; no delegation")
+                return ExtractionResult(
+                    request: nil,
+                    transcript: result.audioOutput?.transcript ?? "",
+                    intent: result.assistantText ?? result.audioOutput?.transcript ?? "",
+                    ackAudio: ackAudio ?? result.audioOutput
+                )
             } else if result.toolCalls.isEmpty && result.assistantText == nil && result.audioOutput == nil {
                 log("turn \(turn): empty result — model returned nothing")
             }
