@@ -444,11 +444,11 @@ struct ContextSyncTransportTests {
             )
         )
 
-        let result = try await client.waitForContextSyncSummary(
-            request: request,
-            timeoutSeconds: 0.2,
+        let result = try await client.syncSummaries.response(
+            for: request,
+            timeout: 0.2,
             send: {
-                #expect(client.resolvePendingContextSyncSummary(expected))
+                #expect(client.syncSummaries.resolve(request, with: expected))
             }
         )
 

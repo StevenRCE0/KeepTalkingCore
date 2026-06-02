@@ -240,9 +240,6 @@ public final class KeepTalkingClient: @unchecked Sendable {
     // MARK: Agent Run Queue
     let agentRunQueue = AgentRunQueue()
 
-    // MARK: NodeState Broadcast properties
-    var nodeStateBroadcastDebounceTask: Task<Void, Never>?
-
     // MARK: Action Call properties
     let actionCallQueue = DispatchQueue(
         label: "KeepTalking.client.action-call"
@@ -615,7 +612,6 @@ public final class KeepTalkingClient: @unchecked Sendable {
         failAllPendingActionCalls(error: KeepTalkingClientError.clientDisconnected)
         failAllPendingActionCatalogRequests(error: KeepTalkingClientError.clientDisconnected)
         failAllPendingContextSync(error: KeepTalkingClientError.clientDisconnected)
-        cancelDebouncedNodeStateBroadcast()
 
         let rtc = rtcClient
         let previous = takePendingTeardown()

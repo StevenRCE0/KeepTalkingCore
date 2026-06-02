@@ -89,6 +89,9 @@ protocol KeepTalkingPeerTransportChannel: KeepTalkingTransportChannelProtocol {
     /// Forward an incoming P2P signal to this channel's underlying transport.
     func receiveSignal(_ signal: KeepTalkingP2PSignalPayload)
 
+    /// Current state of the direct channel handshake.
+    var state: DirectChannelState { get }
+
     /// Begin the P2P upgrade handshake.
     func attemptUpgrade()
 

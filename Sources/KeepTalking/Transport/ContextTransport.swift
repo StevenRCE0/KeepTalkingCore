@@ -136,7 +136,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         try await broadcast.start()
 
         rememberPeer(config.node)
-        sendPresence(advancingHeartbeat: true)
+        sendPresence()
         startHeartbeatLoop()
         debug("broadcast channel ready")
     }
@@ -369,7 +369,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
             sendPresence()
         }
 
-        if observation.confirmedCurrentWave {
+        if observation.isNewConnection {
             reportPeerConnected(node, source: "presence")
         }
 
@@ -387,7 +387,8 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     private func handleParticipantJoined(_ nodeID: UUID) {
         guard nodeID != config.node else { return }
         if let existing = stateQueue.sync(execute: { directChannels[nodeID] }) {
-            guard !existing.isReady else { return }
+            let s = existing.state
+            guard s != .ready, s != .negotiating else { return }
             existing.requestRetrial()
             existing.attemptUpgrade()
             debug("participant retrying direct node=\(nodeID.uuidString.prefix(8))")
@@ -445,7 +446,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
             from: nodeID,
             echoCooldown: Self.presenceEchoCooldownSeconds
         )
-        if observation.confirmedCurrentWave {
+        if observation.isNewConnection {
             reportPeerConnected(nodeID, source: "p2p")
         }
     }
@@ -459,19 +460,14 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.heartbeatIntervalSeconds))
                 if Task.isCancelled { break }
-                self.sendPresence(advancingHeartbeat: true)
+                self.sendPresence()
                 self.checkPeerLiveness()
                 self.tickStrategies()
             }
         }
     }
 
-    private func sendPresence(advancingHeartbeat: Bool = false) {
-        if advancingHeartbeat {
-            _ = livenessState.beginHeartbeatWave(
-                minimumInterval: Self.heartbeatIntervalSeconds
-            )
-        }
+    private func sendPresence() {
         do {
             try broadcast.sendRawEnvelope(
                 KeepTalkingP2PPresencePayload(node: config.node)
@@ -580,23 +576,12 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         }
     }
 
+    /// Called only on a connect edge (callers gate on `observation.isNewConnection`),
+    /// so this just notifies — the per-source/per-wave dedup the old liveness state
+    /// did is no longer needed (the edge itself, shared across sources, is the dedup).
     private func reportPeerConnected(_ nodeID: UUID, source: String) {
         guard nodeID != config.node else { return }
         rememberPeer(nodeID)
-
-        let livenessSource: KeepTalkingContextLivenessState.Source?
-        switch source {
-            case "presence": livenessSource = .presence
-            case "p2p": livenessSource = .p2p
-            default: livenessSource = nil
-        }
-
-        guard let livenessSource else { return }
-        let shouldNotify = livenessState.shouldNotifyPeerConnect(
-            nodeID,
-            source: livenessSource
-        )
-        guard shouldNotify else { return }
         debug("peer reachable source=\(source) node=\(nodeID.uuidString.prefix(8))")
         onPeerConnect?(nodeID)
     }

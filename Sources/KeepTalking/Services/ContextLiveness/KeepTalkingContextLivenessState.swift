@@ -1,135 +1,97 @@
 import Foundation
 
+/// Edge-triggered peer liveness.
+///
+/// A peer is **online** while we've seen its presence within `onlineTimeout`, and
+/// it transitions **offline→online** (a "connect edge") when presence resumes
+/// after a gap. Online-ness is purely time-based (last-seen), so a continuously
+/// present peer (presence every ~13s) stays online and produces the connect edge
+/// exactly once.
+///
+/// This replaces the old per-heartbeat "wave" model, which cleared the confirmed
+/// set every interval and so *re-discovered* every still-present peer each wave —
+/// re-firing connect-notify, presence echo, and (via the node controller) a full
+/// node-status rebroadcast on a stable peer every ~13s. Callers now key those
+/// reactions off `isNewConnection` instead.
 final class KeepTalkingContextLivenessState: @unchecked Sendable {
-    enum Source {
-        case presence
-        case p2p
-    }
-
     struct PresenceObservation {
-        let confirmedCurrentWave: Bool
+        /// True only on an offline→online transition — the real connect edge.
+        let isNewConnection: Bool
+        /// True when we should echo our presence back (once per edge, rate-limited
+        /// by `echoCooldown`).
         let shouldEcho: Bool
     }
 
     private let localNode: UUID
-    private let queue = DispatchQueue(
-        label: "KeepTalking.context-liveness"
-    )
+    /// A peer counts as online if seen within this window. Must comfortably exceed
+    /// the transport's presence heartbeat (~13s) so a single missed/late beat
+    /// doesn't flap the peer offline→online (which would resurrect the churn this
+    /// model exists to kill). ~3 heartbeats.
+    private let onlineTimeout: TimeInterval
+    private let queue = DispatchQueue(label: "KeepTalking.context-liveness")
 
-    private var currentWave = UUID()
-    private var lastWaveStartedAt: Date = .distantPast
-    private var confirmedPeers = Set<UUID>()
-    private var notifiedPresencePeers = Set<UUID>()
-    private var notifiedP2PPeers = Set<UUID>()
-    private var lastEchoAtByPeer: [UUID: Date] = [:]
     private var lastSeenAtByPeer: [UUID: Date] = [:]
+    private var lastEchoAtByPeer: [UUID: Date] = [:]
 
-    init(localNode: UUID) {
+    init(localNode: UUID, onlineTimeout: TimeInterval = 40) {
         self.localNode = localNode
+        self.onlineTimeout = onlineTimeout
     }
 
-    @discardableResult
-    func beginHeartbeatWave(
-        minimumInterval: TimeInterval,
-        now: Date = Date()
-    ) -> UUID {
-        queue.sync {
-            guard
-                now.timeIntervalSince(lastWaveStartedAt) >= minimumInterval
-            else {
-                return currentWave
-            }
-
-            currentWave = UUID()
-            lastWaveStartedAt = now
-            confirmedPeers.removeAll()
-            notifiedPresencePeers.removeAll()
-            notifiedP2PPeers.removeAll()
-            return currentWave
-        }
-    }
-
+    /// Record a presence from `node`. Returns whether this is a connect edge (was
+    /// offline, now online) and whether to echo our presence back. Both call sites
+    /// (SFU presence + p2p) feed this; whichever observes first while offline wins
+    /// the edge, so `onPeerConnect` fires once across sources.
     func observePresence(
         from node: UUID,
         echoCooldown: TimeInterval,
         now: Date = Date()
     ) -> PresenceObservation {
         queue.sync {
-            lastSeenAtByPeer[node] = max(
-                lastSeenAtByPeer[node] ?? .distantPast,
-                now
-            )
+            let wasOnline = isOnlineLocked(node, now: now)
+            lastSeenAtByPeer[node] = max(lastSeenAtByPeer[node] ?? .distantPast, now)
 
-            let confirmedCurrentWave = confirmedPeers.insert(node).inserted
+            let isNewConnection = !wasOnline
             let shouldEcho =
-                now.timeIntervalSince(
-                    lastEchoAtByPeer[node] ?? .distantPast
-                ) >= echoCooldown
-
+                isNewConnection
+                && now.timeIntervalSince(lastEchoAtByPeer[node] ?? .distantPast)
+                    >= echoCooldown
             if shouldEcho {
                 lastEchoAtByPeer[node] = now
             }
-
             return PresenceObservation(
-                confirmedCurrentWave: confirmedCurrentWave,
+                isNewConnection: isNewConnection,
                 shouldEcho: shouldEcho
             )
         }
     }
 
-    func shouldNotifyPeerConnect(_ node: UUID, source: Source) -> Bool {
-        guard node != localNode else {
-            return false
-        }
-
-        return queue.sync {
-            guard confirmedPeers.contains(node) else {
-                return false
-            }
-
-            switch source {
-                case .presence:
-                    return notifiedPresencePeers.insert(node).inserted
-                case .p2p:
-                    return notifiedP2PPeers.insert(node).inserted
-            }
-        }
+    func isNodeOnline(_ node: UUID, now: Date = Date()) -> Bool {
+        guard node != localNode else { return true }
+        return queue.sync { isOnlineLocked(node, now: now) }
     }
 
-    func isNodeOnline(_ node: UUID) -> Bool {
-        guard node != localNode else {
-            return true
-        }
-
-        return queue.sync {
-            confirmedPeers.contains(node)
-        }
-    }
-
-    func onlineNodeIDs() -> Set<UUID> {
+    func onlineNodeIDs(now: Date = Date()) -> Set<UUID> {
         queue.sync {
-            confirmedPeers.union([localNode])
-        }
-    }
-
-    func lastSeenAt(for node: UUID) -> Date? {
-        guard node != localNode else {
-            return Date()
-        }
-
-        return queue.sync {
-            lastSeenAtByPeer[node]
+            var online: Set<UUID> = [localNode]
+            for (node, seen) in lastSeenAtByPeer
+            where now.timeIntervalSince(seen) < onlineTimeout {
+                online.insert(node)
+            }
+            return online
         }
     }
 
     func reset() {
         queue.sync {
-            confirmedPeers.removeAll()
-            notifiedPresencePeers.removeAll()
-            notifiedP2PPeers.removeAll()
-            lastEchoAtByPeer.removeAll()
             lastSeenAtByPeer.removeAll()
-            lastWaveStartedAt = .distantPast
+            lastEchoAtByPeer.removeAll()
         }
+    }
+
+    /// Online == seen within `onlineTimeout`. Caller must hold `queue`.
+    private func isOnlineLocked(_ node: UUID, now: Date) -> Bool {
+        guard let seen = lastSeenAtByPeer[node] else { return false }
+        return now.timeIntervalSince(seen) < onlineTimeout
     }
 }

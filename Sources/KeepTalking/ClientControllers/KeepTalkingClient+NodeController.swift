@@ -34,9 +34,6 @@ public struct KeepTalkingActionSummary: Sendable {
 }
 
 extension KeepTalkingClient {
-    private static let nodeBroadcastDebounceNanoseconds: UInt64 =
-        1_000_000_000
-
     /// Publishes the current node identifier to the configured KV service.
     public func registerCurrentNodeID() async throws {
         guard let kvService else {
@@ -1152,26 +1149,6 @@ extension KeepTalkingClient {
         }
     }
 
-    func scheduleDebouncedNodeStateBroadcast(reason: String) {
-        cancelDebouncedNodeStateBroadcast()
-        nodeStateBroadcastDebounceTask = Task { [weak self] in
-            do {
-                try await Task.sleep(
-                    nanoseconds: Self.nodeBroadcastDebounceNanoseconds
-                )
-            } catch {
-                return
-            }
-            guard let self, !Task.isCancelled else { return }
-            await self.broadcastLocalNodeState(reason: "debounced \(reason)")
-        }
-    }
-
-    func cancelDebouncedNodeStateBroadcast() {
-        nodeStateBroadcastDebounceTask?.cancel()
-        nodeStateBroadcastDebounceTask = nil
-    }
-
     private static func mergedTrustRelationship(
         current: KeepTalkingRelationship,
         requestedScope: KeepTalkingNodeTrustScope
@@ -1270,8 +1247,10 @@ extension KeepTalkingClient {
                 "mark node discovered failed node=\(nodeIDText) error=\(error.localizedDescription)"
             )
         }
-        scheduleDebouncedNodeStateBroadcast(
-            reason: "p2pPresence node=\(nodeIDText)"
-        )
+        // NOTE: we deliberately do NOT rebroadcast our node-status here. Presence
+        // arrives every heartbeat (~13s); rebroadcasting the full ~5KB status on
+        // each one was the storm. Our status now goes out on the connect *edge*
+        // (onPeerConnect → ContextMaintenance .nodeOnline → broadcastLocalNodeState)
+        // and whenever our advertised state actually changes (NodeActionController).
     }
 }
