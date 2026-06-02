@@ -214,7 +214,8 @@ public struct AudioInterfaceAgent: Sendable {
         connector: any AIConnector,
         delegate: @escaping Delegate,
         audioOutputHandler: AudioOutputHandler? = nil,
-        statusObserver: StatusObserver? = nil
+        statusObserver: StatusObserver? = nil,
+        routingContext: String? = nil
     ) async throws -> BridgeResult {
         log(
             "run() started — audioData: \(audioData.count) bytes, format: \(inputFormat), model: \(configuration.audioModel), voice: \(configuration.voice)"
@@ -230,7 +231,8 @@ public struct AudioInterfaceAgent: Sendable {
                 contextID: contextID,
                 connector: connector,
                 audioOutputHandler: audioOutputHandler,
-                statusObserver: statusObserver
+                statusObserver: statusObserver,
+                routingContext: routingContext
             )
         } catch {
             log("phase 1 FAILED: \(error.localizedDescription)")
@@ -352,12 +354,15 @@ public struct AudioInterfaceAgent: Sendable {
         contextID: UUID,
         connector: any AIConnector,
         audioOutputHandler: AudioOutputHandler?,
-        statusObserver: StatusObserver?
+        statusObserver: StatusObserver?,
+        routingContext: String?
     ) async throws -> ExtractionResult? {
-        var transcript: [AIMessage] = [
-            .system(configuration.bridgeSystemPrompt),
-            .user(parts: [.inputAudio(data: audioData, format: inputFormat)]),
-        ]
+        var transcript: [AIMessage] = [.system(configuration.bridgeSystemPrompt)]
+        if let routingContext, !routingContext.isEmpty {
+            transcript.append(.system(routingContext))
+            log("routing context injected (\(routingContext.count) chars)")
+        }
+        transcript.append(.user(parts: [.inputAudio(data: audioData, format: inputFormat)]))
 
         let streamHandler: AIStreamingAudioHandler? = audioOutputHandler.map { handler in
             AIStreamingAudioHandler { chunk in

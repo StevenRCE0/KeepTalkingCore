@@ -37,6 +37,11 @@ public enum KeepTalkingEnvelopeKind: String, Codable, Sendable {
     /// the call presence pings — replaces the SFU `.p2pSignal` raw
     /// channel previously used for SDP.
     case voiceCallSignal
+    /// One line of a call's federated transcript, authored by the speaking
+    /// node. Rides the reliable context (chat) transport — NOT the lossy
+    /// voice-UDP frame path — and is reconciled/backfilled as a tuned resource
+    /// on `ContextSyncController`. Carries the session id so peers group it.
+    case voiceCallTranscriptLine
 }
 
 extension KeepTalkingEnvelopeKind {
@@ -48,7 +53,8 @@ extension KeepTalkingEnvelopeKind {
                 .node,
                 .nodeStatus,
                 .encryptedNodeStatus,
-                .contextSync:
+                .contextSync,
+                .voiceCallTranscriptLine:
                 return .chat
             case .actionCallRequest,
                 .requestAck,
@@ -104,6 +110,7 @@ extension KeepTalkingEnvelopeKind {
                 .message,
                 .attachment,
                 .context,
+                .voiceCallTranscriptLine,
                 .actionCallRequest,
                 .requestAck,
                 .actionCallResult,
@@ -121,7 +128,7 @@ extension KeepTalkingEnvelopeKind {
 
     public var envelopeType: KeepTalkingEnvelopeType {
         switch self {
-            case .message, .attachment, .context:
+            case .message, .attachment, .context, .voiceCallTranscriptLine:
                 return .chat
             case .node,
                 .nodeStatus,

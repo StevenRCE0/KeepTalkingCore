@@ -105,20 +105,7 @@ public struct KeepTalkingContextSyncTailRequest: Codable, Sendable,
         local: KeepTalkingContextSyncMetadata,
         remote: KeepTalkingContextSyncMetadata
     ) {
-        let localBySender = Dictionary(
-            uniqueKeysWithValues: local.senders.map { ($0.sender, $0) }
-        )
-        let senders: [KeepTalkingContextSyncTailCursor] = remote.senders.compactMap {
-            remoteSender in
-            let localCount = localBySender[remoteSender.sender]?.messageCount ?? 0
-            guard remoteSender.messageCount > localCount else {
-                return nil
-            }
-            return KeepTalkingContextSyncTailCursor(
-                sender: remoteSender.sender,
-                messageCount: localCount
-            )
-        }
+        let senders = contextSyncTailCursors(local: local, remote: remote)
         guard !senders.isEmpty else {
             return nil
         }
@@ -170,53 +157,7 @@ public struct KeepTalkingContextSyncChunkRequest: Codable, Sendable,
         local: KeepTalkingContextSyncMetadata,
         remote: KeepTalkingContextSyncMetadata
     ) {
-        let localSenders = Dictionary(
-            uniqueKeysWithValues: local.senders.map { ($0.sender, $0) }
-        )
-        let localChunks = Dictionary(
-            grouping: local.chunks,
-            by: \.sender
-        )
-        let remoteChunks = Dictionary(
-            grouping: remote.chunks,
-            by: \.sender
-        )
-
-        let chunks: [KeepTalkingContextSyncChunkCursor] = remote.senders.compactMap {
-            remoteSender in
-            let localCount = localSenders[remoteSender.sender]?.messageCount ?? 0
-            guard remoteSender.messageCount >= localCount else {
-                return nil
-            }
-            let localChunksForSender = Dictionary(
-                uniqueKeysWithValues: (localChunks[remoteSender.sender] ?? []).map {
-                    ($0.index, $0)
-                }
-            )
-            let remoteChunksForSender = (remoteChunks[remoteSender.sender] ?? [])
-                .sorted { $0.index < $1.index }
-
-            guard
-                let mismatch = remoteChunksForSender.first(where: { remoteChunk in
-                    guard let localChunk = localChunksForSender[remoteChunk.index] else {
-                        return true
-                    }
-                    return
-                        localChunk.firstMessage != remoteChunk.firstMessage
-                        || localChunk.lastMessage != remoteChunk.lastMessage
-                        || localChunk.messageCount != remoteChunk.messageCount
-                        || localChunk.digest != remoteChunk.digest
-                })
-            else {
-                return nil
-            }
-
-            return KeepTalkingContextSyncChunkCursor(
-                sender: remoteSender.sender,
-                index: mismatch.index
-            )
-        }
-
+        let chunks = contextSyncChunkCursors(local: local, remote: remote)
         guard !chunks.isEmpty else {
             return nil
         }
@@ -226,6 +167,75 @@ public struct KeepTalkingContextSyncChunkRequest: Codable, Sendable,
             requester: requester,
             recipient: recipient,
             chunks: chunks
+        )
+    }
+}
+
+// MARK: - Shared reconcile math (message sync + transcript sync)
+
+/// Tail cursors for an append-only pull: for each remote sender whose count
+/// exceeds ours, request starting from our current count. Shared by both the
+/// message sync and the transcript-line sync — same reconcile, different table.
+func contextSyncTailCursors(
+    local: KeepTalkingContextSyncMetadata,
+    remote: KeepTalkingContextSyncMetadata
+) -> [KeepTalkingContextSyncTailCursor] {
+    let localBySender = Dictionary(
+        uniqueKeysWithValues: local.senders.map { ($0.sender, $0) }
+    )
+    return remote.senders.compactMap { remoteSender in
+        let localCount = localBySender[remoteSender.sender]?.messageCount ?? 0
+        guard remoteSender.messageCount > localCount else { return nil }
+        return KeepTalkingContextSyncTailCursor(
+            sender: remoteSender.sender,
+            messageCount: localCount
+        )
+    }
+}
+
+/// Chunk cursors for mid-stream divergence repair: for each sender, find the
+/// first chunk whose digest/bounds disagree with ours and request it. Catches
+/// gaps that aren't at the tail — the reason sync can't assume linear arrival.
+/// Shared by message sync and transcript-line sync.
+func contextSyncChunkCursors(
+    local: KeepTalkingContextSyncMetadata,
+    remote: KeepTalkingContextSyncMetadata
+) -> [KeepTalkingContextSyncChunkCursor] {
+    let localSenders = Dictionary(
+        uniqueKeysWithValues: local.senders.map { ($0.sender, $0) }
+    )
+    let localChunks = Dictionary(grouping: local.chunks, by: \.sender)
+    let remoteChunks = Dictionary(grouping: remote.chunks, by: \.sender)
+
+    return remote.senders.compactMap { remoteSender in
+        let localCount = localSenders[remoteSender.sender]?.messageCount ?? 0
+        guard remoteSender.messageCount >= localCount else { return nil }
+        let localChunksForSender = Dictionary(
+            uniqueKeysWithValues: (localChunks[remoteSender.sender] ?? []).map {
+                ($0.index, $0)
+            }
+        )
+        let remoteChunksForSender = (remoteChunks[remoteSender.sender] ?? [])
+            .sorted { $0.index < $1.index }
+
+        guard
+            let mismatch = remoteChunksForSender.first(where: { remoteChunk in
+                guard let localChunk = localChunksForSender[remoteChunk.index] else {
+                    return true
+                }
+                return
+                    localChunk.firstMessage != remoteChunk.firstMessage
+                    || localChunk.lastMessage != remoteChunk.lastMessage
+                    || localChunk.messageCount != remoteChunk.messageCount
+                    || localChunk.digest != remoteChunk.digest
+            })
+        else {
+            return nil
+        }
+
+        return KeepTalkingContextSyncChunkCursor(
+            sender: remoteSender.sender,
+            index: mismatch.index
         )
     }
 }
@@ -393,119 +403,238 @@ public struct KeepTalkingContextSyncAttachmentRecordsResult: Codable, Sendable {
     }
 }
 
-public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
-    case summaryRequest(KeepTalkingContextSyncSummaryRequest)
-    case summaryResult(KeepTalkingContextSyncSummaryResult)
-    case tailRequest(KeepTalkingContextSyncTailRequest)
-    case chunkRequest(KeepTalkingContextSyncChunkRequest)
-    case messagesResult(KeepTalkingContextSyncMessagesResult)
-    case attachmentRequest(KeepTalkingContextSyncAttachmentRequest)
-    case attachmentRecordsRequest(KeepTalkingContextSyncAttachmentRecordsRequest)
-    case attachmentRecordsResult(KeepTalkingContextSyncAttachmentRecordsResult)
-    case sideNotesRequest(KeepTalkingContextSyncSideNotesRequest)
-    case sideNotesResult(KeepTalkingContextSyncSideNotesResult)
-}
+// MARK: - Transcript-line sync (the `transcriptSyncing` use)
+//
+// Mirrors the message sync's summary → tail → chunk reconcile, but over the flat
+// `kt_voice_transcript_lines` table and scoped to a single voice session. Reuses
+// `KeepTalkingContextSyncMetadata` + the tail/chunk cursors: a transcript line's
+// author maps to a `.node` sender, its `sequence`/id play the message role. The
+// three-phase reconcile (not a naive per-author cursor) is what makes it correct
+// when lines arrive out of order or with mid-stream gaps. Dispatched only while a
+// voice session is ongoing — no passive heartbeat.
 
-public struct KeepTalkingContextSyncSnapshot: Sendable {
+/// Phase 1 — ask a peer for its transcript metadata (per-author counts + chunk
+/// digests) for one session.
+public struct KeepTalkingContextSyncTranscriptSummaryRequest: Codable, Sendable, Equatable {
+    public let request: UUID
     public let context: UUID
-    public let summary: KeepTalkingContextSyncMetadata
-
-    private let messagesBySender: [KeepTalkingContextMessage.Sender: [KeepTalkingContextMessage]]
-    private let attachmentsByMessageID: [UUID: [KeepTalkingContextAttachmentDTO]]
+    public let requester: UUID
+    public let recipient: UUID
+    public let session: UUID
 
     public init(
+        request: UUID = UUID(),
         context: UUID,
-        messages: [KeepTalkingContextMessage],
-        attachments: [KeepTalkingContextAttachment],
-        chunkSize: Int = KeepTalkingContextSyncMetadata.defaultChunkSize
+        requester: UUID,
+        recipient: UUID,
+        session: UUID
     ) {
+        self.request = request
         self.context = context
-        self.summary = KeepTalkingContext.buildSyncMetadata(
-            from: messages,
-            chunkSize: chunkSize
-        )
-        self.messagesBySender = Dictionary(
-            grouping: messages,
-            by: \.sender
-        ).mapValues { $0.sortedForSync() }
-        self.attachmentsByMessageID = Dictionary(
-            grouping: attachments.compactMap(KeepTalkingContextAttachmentDTO.init),
-            by: \.parentMessageID
-        ).mapValues {
-            $0.sorted { lhs, rhs in
-                if lhs.sortIndex != rhs.sortIndex {
-                    return lhs.sortIndex < rhs.sortIndex
-                }
-                return lhs.id.uuidString < rhs.id.uuidString
-            }
-        }
-    }
-
-    public func messages(
-        after cursors: [KeepTalkingContextSyncTailCursor]
-    ) -> [KeepTalkingContextMessage] {
-        cursors.flatMap { cursor in
-            Array(
-                messagesBySender[cursor.sender, default: []]
-                    .dropFirst(max(0, cursor.messageCount))
-            )
-        }.sortedForSync()
-    }
-
-    public func messages(
-        in chunks: [KeepTalkingContextSyncChunkCursor]
-    ) -> [KeepTalkingContextMessage] {
-        let chunkSize = summary.chunkSize
-        return chunks.flatMap { cursor in
-            Array(
-                messagesBySender[cursor.sender, default: []]
-                    .dropFirst(cursor.index * chunkSize)
-            )
-        }.sortedForSync()
-    }
-
-    public func attachments(
-        for messages: [KeepTalkingContextMessage]
-    ) -> [KeepTalkingContextAttachmentDTO] {
-        var attachments: [KeepTalkingContextAttachmentDTO] = []
-        for message in messages {
-            guard let messageID = message.id else {
-                continue
-            }
-            attachments.append(
-                contentsOf: attachmentsByMessageID[messageID, default: []]
-            )
-        }
-        return attachments
+        self.requester = requester
+        self.recipient = recipient
+        self.session = session
     }
 }
 
-extension KeepTalkingClient {
-    func contextSyncSnapshot(
-        for context: UUID
-    ) async throws -> KeepTalkingContextSyncSnapshot {
-        let resolvedContext = try await ensure(context, for: KeepTalkingContext.self)
-        let chunkSize =
-            resolvedContext.syncMetadata?.chunkSize
-            ?? KeepTalkingContextSyncMetadata.defaultChunkSize
-        try await resolvedContext.refreshSyncMetadata(
-            on: localStore.database,
-            chunkSize: chunkSize
-        )
-        let messages = try await KeepTalkingContextMessage.query(on: localStore.database)
-            .filter(\.$context.$id, .equal, context)
-            .all()
-        let attachments = try await KeepTalkingContextAttachment.query(
-            on: localStore.database
-        )
-        .filter(\.$context.$id, .equal, context)
-        .all()
+public struct KeepTalkingContextSyncTranscriptSummaryResult: Codable, Sendable, Equatable {
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let responder: UUID
+    public let session: UUID
+    public let summary: KeepTalkingContextSyncMetadata
 
-        return KeepTalkingContextSyncSnapshot(
+    public init(
+        request: UUID,
+        context: UUID,
+        requester: UUID,
+        responder: UUID,
+        session: UUID,
+        summary: KeepTalkingContextSyncMetadata
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.responder = responder
+        self.session = session
+        self.summary = summary
+    }
+}
+
+/// Phase 2 — append-only pull: request each author's lines past the tail cursor.
+public struct KeepTalkingContextSyncTranscriptTailRequest: Codable, Sendable, Equatable {
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let recipient: UUID
+    public let session: UUID
+    public let senders: [KeepTalkingContextSyncTailCursor]
+
+    public init(
+        request: UUID = UUID(),
+        context: UUID,
+        requester: UUID,
+        recipient: UUID,
+        session: UUID,
+        senders: [KeepTalkingContextSyncTailCursor]
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.recipient = recipient
+        self.session = session
+        self.senders = senders.sorted {
+            senderSortKey($0.sender) < senderSortKey($1.sender)
+        }
+    }
+
+    /// Nil when local already covers every remote sender's tail (nothing to pull).
+    public init?(
+        request: UUID = UUID(),
+        context: UUID,
+        requester: UUID,
+        recipient: UUID,
+        session: UUID,
+        local: KeepTalkingContextSyncMetadata,
+        remote: KeepTalkingContextSyncMetadata
+    ) {
+        let senders = contextSyncTailCursors(local: local, remote: remote)
+        guard !senders.isEmpty else { return nil }
+        self.init(
+            request: request,
             context: context,
-            messages: messages,
-            attachments: attachments,
-            chunkSize: chunkSize
+            requester: requester,
+            recipient: recipient,
+            session: session,
+            senders: senders
         )
     }
 }
+
+/// Phase 3 — mid-stream repair: request the first chunk whose digest disagrees.
+public struct KeepTalkingContextSyncTranscriptChunkRequest: Codable, Sendable, Equatable {
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let recipient: UUID
+    public let session: UUID
+    public let chunks: [KeepTalkingContextSyncChunkCursor]
+
+    public init(
+        request: UUID = UUID(),
+        context: UUID,
+        requester: UUID,
+        recipient: UUID,
+        session: UUID,
+        chunks: [KeepTalkingContextSyncChunkCursor]
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.recipient = recipient
+        self.session = session
+        self.chunks = chunks.sorted {
+            let lhsKey = senderSortKey($0.sender)
+            let rhsKey = senderSortKey($1.sender)
+            if lhsKey != rhsKey { return lhsKey < rhsKey }
+            return $0.index < $1.index
+        }
+    }
+
+    /// Nil when no chunk diverges (the tail pull alone sufficed).
+    public init?(
+        request: UUID = UUID(),
+        context: UUID,
+        requester: UUID,
+        recipient: UUID,
+        session: UUID,
+        local: KeepTalkingContextSyncMetadata,
+        remote: KeepTalkingContextSyncMetadata
+    ) {
+        let chunks = contextSyncChunkCursors(local: local, remote: remote)
+        guard !chunks.isEmpty else { return nil }
+        self.init(
+            request: request,
+            context: context,
+            requester: requester,
+            recipient: recipient,
+            session: session,
+            chunks: chunks
+        )
+    }
+}
+
+/// Response to a transcript tail OR chunk request — the requested lines as DTOs
+/// (mirrors how `messagesResult` serves both message tail and chunk requests).
+public struct KeepTalkingContextSyncTranscriptLinesResult: Codable, Sendable {
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let responder: UUID
+    public let session: UUID
+    public let lines: [KeepTalkingVoiceTranscriptLineDTO]
+
+    public init(
+        request: UUID,
+        context: UUID,
+        requester: UUID,
+        responder: UUID,
+        session: UUID,
+        lines: [KeepTalkingVoiceTranscriptLineDTO]
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.responder = responder
+        self.session = session
+        self.lines = lines
+    }
+}
+
+public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
+    // Message sync (contextSyncing): summary → tail → chunk, both phases answered
+    // by `messagesResult`.
+    /// Ask a peer for its message metadata (per-sender counts + chunk digests).
+    case summaryRequest(KeepTalkingContextSyncSummaryRequest)
+    /// A peer's message metadata, answering `summaryRequest`.
+    case summaryResult(KeepTalkingContextSyncSummaryResult)
+    /// Pull each sender's messages past the tail cursor (append-only delta).
+    case tailRequest(KeepTalkingContextSyncTailRequest)
+    /// Pull a specific diverging message chunk (mid-stream gap repair).
+    case chunkRequest(KeepTalkingContextSyncChunkRequest)
+    /// Messages answering a `tailRequest` or `chunkRequest`.
+    case messagesResult(KeepTalkingContextSyncMessagesResult)
+
+    // Attachments: blob bytes by hash, plus record-repair by message id.
+    /// Pull attachment blob *bytes* (by content hash) for records we already hold.
+    case attachmentRequest(KeepTalkingContextSyncAttachmentRequest)
+    /// Pull attachment *records* for message ids whose attachment row never landed.
+    case attachmentRecordsRequest(KeepTalkingContextSyncAttachmentRecordsRequest)
+    /// Attachment records answering `attachmentRecordsRequest`.
+    case attachmentRecordsResult(KeepTalkingContextSyncAttachmentRecordsResult)
+
+    // Side notes: full-set pull, merged by `(key, updatedAt)`.
+    /// Pull the peer's entire side-note set for the context.
+    case sideNotesRequest(KeepTalkingContextSyncSideNotesRequest)
+    /// Side notes answering `sideNotesRequest`.
+    case sideNotesResult(KeepTalkingContextSyncSideNotesResult)
+
+    // Transcript-line sync (transcriptSyncing): per-session mirror of the message
+    // summary → tail → chunk reconcile, both phases answered by
+    // `transcriptLinesResult`. Only exchanged while a voice session is ongoing.
+    /// Ask a peer for its transcript metadata for one session.
+    case transcriptSummaryRequest(KeepTalkingContextSyncTranscriptSummaryRequest)
+    /// A peer's transcript metadata, answering `transcriptSummaryRequest`.
+    case transcriptSummaryResult(KeepTalkingContextSyncTranscriptSummaryResult)
+    /// Pull each author's transcript lines past the tail cursor.
+    case transcriptTailRequest(KeepTalkingContextSyncTranscriptTailRequest)
+    /// Pull a specific diverging transcript chunk (out-of-order / gap repair).
+    case transcriptChunkRequest(KeepTalkingContextSyncTranscriptChunkRequest)
+    /// Transcript lines answering a `transcriptTailRequest` or `transcriptChunkRequest`.
+    case transcriptLinesResult(KeepTalkingContextSyncTranscriptLinesResult)
+}
+
+// `KeepTalkingContextSyncSnapshot` + `contextSyncSnapshot(for:)` moved to
+// MessageSyncStream.swift (next to its stream, mirroring VoiceTranscriptSync.swift).
+// This file holds the on-the-wire request/result types + the shared cursor math.

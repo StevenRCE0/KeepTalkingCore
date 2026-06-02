@@ -329,6 +329,12 @@ extension KeepTalkingClient {
         if !overwrite && existingIdentityKey != nil {
             return
         }
+        if overwrite {
+            let existingKeys = try await relation.$identityKeys.get(on: database)
+            for key in existingKeys {
+                try await key.delete(on: database)
+            }
+        }
 
         let identityKey = try KeepTalkingNodeIdentityKey(
             relation: relation,
@@ -633,29 +639,10 @@ extension KeepTalkingClient {
     }
 
     func handlePeerConnect(nodeID: UUID) async {
-        guard nodeID != config.node else { return }
-        onPeerConnect?(nodeID)
-        let nodeIDText = nodeID.uuidString.lowercased()
-        rtcClient.debug("peer connected node=\(nodeIDText)")
-        await broadcastLocalNodeState(
-            reason: "peer-connect node=\(nodeIDText)"
-        )
-        if let activeVoiceSession {
-            let voiceBroadcastPayload = KeepTalkingVoiceCallStartedPayload(
-                from: config.node,
-                contextID: config.contextID,
-                effectiveTransport: activeVoiceSession.effectiveTransport.rawValue
-            )
-            do {
-                try rtcClient.sendEnvelope(voiceBroadcastPayload)
-            } catch {
-                rtcClient.onLog?("failed to send voice call started: \(error)")
-            }
-        }
-        await syncCurrentContext(with: nodeID)
-        // A fresh channel is the headline trigger for draining the outbox:
-        // any queued envelopes have a real path to a peer now.
-        await drainOutbox()
+        // Centralized: the node-online task set (presence re-broadcast, voice
+        // re-assert, contextSyncing, transcriptSyncing, attachment recovery,
+        // outbox drain) lives in ContextMaintenance.
+        await dispatchMaintenance(.nodeOnline(node: nodeID))
     }
 
     func mergeDiscoveredNodeStatus(_ status: KeepTalkingNodeStatus) async throws {

@@ -97,6 +97,7 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             CreateKeepTalkingBlobRecordsMigration(),
             CreateSideNotesMigration(),
             CreateKeepTalkingOutboxEntriesMigration(),
+            CreateKeepTalkingVoiceTranscriptLinesMigration(),
             to: databaseID
         )
         try blocking {

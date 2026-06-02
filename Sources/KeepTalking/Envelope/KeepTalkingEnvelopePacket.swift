@@ -161,6 +161,11 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
                     try cast(KeepTalkingVoiceCallSignalPayload.self),
                     forKey: .payload
                 )
+            case .voiceCallTranscriptLine:
+                try container.encode(
+                    try cast(KeepTalkingVoiceCallTranscriptLinePayload.self),
+                    forKey: .payload
+                )
         }
     }
 
@@ -317,6 +322,11 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
             case .voiceCallSignal:
                 return try container.decode(
                     KeepTalkingVoiceCallSignalPayload.self,
+                    forKey: .payload
+                )
+            case .voiceCallTranscriptLine:
+                return try container.decode(
+                    KeepTalkingVoiceCallTranscriptLinePayload.self,
                     forKey: .payload
                 )
         }

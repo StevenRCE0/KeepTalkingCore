@@ -13,11 +13,21 @@ public struct KeepTalkingVoiceCallStartedPayload: Codable, Sendable {
     /// call half-opens. Optional so a `started` from a peer that predates
     /// this field decodes cleanly; a `nil` value is treated as P2P-capable.
     public let effectiveTransport: String?
+    /// The shared voice-session id. All participants converge on this as the
+    /// key for the in-memory call record + the transcript lines. Optional so a
+    /// `started` from a peer that predates this field decodes cleanly.
+    public let sessionID: UUID?
 
-    public init(from: UUID, contextID: UUID, effectiveTransport: String? = nil) {
+    public init(
+        from: UUID,
+        contextID: UUID,
+        effectiveTransport: String? = nil,
+        sessionID: UUID? = nil
+    ) {
         self.from = from
         self.contextID = contextID
         self.effectiveTransport = effectiveTransport
+        self.sessionID = sessionID
     }
 }
 
@@ -33,10 +43,14 @@ extension KeepTalkingVoiceCallStartedPayload: KeepTalkingEnvelope {
 public struct KeepTalkingVoiceCallEndedPayload: Codable, Sendable {
     public let from: UUID
     public let contextID: UUID
+    /// The shared voice-session id this hangup pertains to. Optional for
+    /// back-compat decode.
+    public let sessionID: UUID?
 
-    public init(from: UUID, contextID: UUID) {
+    public init(from: UUID, contextID: UUID, sessionID: UUID? = nil) {
         self.from = from
         self.contextID = contextID
+        self.sessionID = sessionID
     }
 }
 
@@ -58,12 +72,16 @@ public struct KeepTalkingVoiceCallSignalPayload: Codable, Sendable {
     public let to: UUID
     public let contextID: UUID
     public let sdp: String
+    /// The shared voice-session id this handshake belongs to. Optional for
+    /// back-compat decode.
+    public let sessionID: UUID?
 
-    public init(from: UUID, to: UUID, contextID: UUID, sdp: String) {
+    public init(from: UUID, to: UUID, contextID: UUID, sdp: String, sessionID: UUID? = nil) {
         self.from = from
         self.to = to
         self.contextID = contextID
         self.sdp = sdp
+        self.sessionID = sessionID
     }
 }
 
@@ -71,6 +89,52 @@ extension KeepTalkingVoiceCallSignalPayload: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .voiceCallSignal }
     public var participantNodeIDs: [UUID] { [from] }
     public var targetPeerNodeID: UUID? { to }
+    public var transportContextID: UUID? { contextID }
+}
+
+/// Broadcast: one line of a call's federated transcript, authored by the
+/// speaking node (`from` is always the speaker — a node only ever publishes its
+/// own mic). Rides the reliable context transport, NOT the lossy voice-UDP path;
+/// reconciled/backfilled as a tuned resource on `ContextSyncController`.
+/// Receivers persist it into the flat `kt_voice_transcript_lines` table keyed by
+/// `sessionID`; the call itself is in-memory only.
+public struct KeepTalkingVoiceCallTranscriptLinePayload: Codable, Sendable {
+    public let from: UUID
+    public let contextID: UUID
+    /// The shared voice-session id == the transcript lines' `session` key.
+    public let sessionID: UUID
+    public let lineID: UUID
+    /// Per-(session, author) monotonic cursor for incremental sync + dedup.
+    public let sequence: Int
+    public let text: String
+    /// `KeepTalkingVoiceTranscriptSource` raw value ("local" | "realtime").
+    public let source: String
+    public let timestampMs: UInt64
+
+    public init(
+        from: UUID,
+        contextID: UUID,
+        sessionID: UUID,
+        lineID: UUID,
+        sequence: Int,
+        text: String,
+        source: String,
+        timestampMs: UInt64
+    ) {
+        self.from = from
+        self.contextID = contextID
+        self.sessionID = sessionID
+        self.lineID = lineID
+        self.sequence = sequence
+        self.text = text
+        self.source = source
+        self.timestampMs = timestampMs
+    }
+}
+
+extension KeepTalkingVoiceCallTranscriptLinePayload: KeepTalkingEnvelope {
+    public static var kind: KeepTalkingEnvelopeKind { .voiceCallTranscriptLine }
+    public var participantNodeIDs: [UUID] { [from] }
     public var transportContextID: UUID? { contextID }
 }
 
@@ -94,6 +158,12 @@ extension KeepTalkingEnvelopeHandlers {
     ) {
         register(KeepTalkingVoiceCallSignalPayload.self, handler)
     }
+
+    public mutating func onVoiceCallTranscriptLine(
+        _ handler: @escaping @Sendable (KeepTalkingVoiceCallTranscriptLinePayload) -> Void
+    ) {
+        register(KeepTalkingVoiceCallTranscriptLinePayload.self, handler)
+    }
 }
 
 extension KeepTalkingEnvelopeAsyncHandlers {
@@ -115,6 +185,12 @@ extension KeepTalkingEnvelopeAsyncHandlers {
         register(KeepTalkingVoiceCallSignalPayload.self, handler)
     }
 
+    public mutating func onVoiceCallTranscriptLine(
+        _ handler: @escaping @Sendable (KeepTalkingVoiceCallTranscriptLinePayload) async throws -> Void
+    ) {
+        register(KeepTalkingVoiceCallTranscriptLinePayload.self, handler)
+    }
+
     /// Wires the started/ended pair into the client's bystander presence
     /// registry. Signals are intentionally NOT routed here — those are
     /// addressed to the local voice session, not to chat-level
@@ -132,6 +208,12 @@ extension KeepTalkingEnvelopeAsyncHandlers {
                 contextID: ended.contextID,
                 nodeID: ended.from
             )
+            // Feedback for the leaver's active end-probe: if we're still in this
+            // call, re-assert our presence so they don't seal it out from under us.
+            client?.handleVoiceCallEndedProbe(ended)
+        }
+        onVoiceCallTranscriptLine { [weak client] line in
+            try await client?.handleIncomingVoiceTranscriptLine(line)
         }
     }
 }

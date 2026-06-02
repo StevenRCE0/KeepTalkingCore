@@ -171,6 +171,11 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// Called when an agent run finishes (normally, with error, or after cancellation).
     /// Receives the context ID and the error if the run failed, or nil on success/cancel.
     public var onAgentRunCompleted: (@Sendable (UUID, (any Error)?) -> Void)?
+    /// Fired whenever a voice-call transcript line is persisted — both locally
+    /// appended (own mic) and received from a peer. The app drives the live
+    /// quick-panel + viewer from this. Carries the Sendable envelope payload so
+    /// no Fluent model crosses the actor boundary.
+    public var onVoiceTranscriptLine: (@Sendable (KeepTalkingVoiceCallTranscriptLinePayload) -> Void)?
     public var onLog: LogHandler? {
         didSet {
             rtcClient.onLog = onLog
@@ -193,6 +198,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// another participant has started a call but local self hasn't
     /// joined yet.
     public let voiceCallPresence = KeepTalkingVoiceCallPresenceRegistry()
+    /// In-memory voice-call bookkeeping, keyed by session id. Replaces the former
+    /// `kt_voice_calls` table — voice calls are never persisted; only their
+    /// transcript lines and the sealed `.voiceCallSeal` entry are durable.
+    let voiceCalls = KeepTalkingVoiceCallRegistry()
+    /// The periodic maintenance heartbeat (ContextMaintenance `.heartbeat`
+    /// trigger). Started on `connect()`, cancelled on `disconnect()`.
+    var maintenanceTask: Task<Void, Never>?
     var activeVoiceSession: KeepTalkingVoiceSession?
     let config: KeepTalkingConfig
     let rtcClient: any KeepTalkingTransportClient
@@ -252,12 +264,14 @@ public final class KeepTalkingClient: @unchecked Sendable {
     var pendingActionCatalogResults: [UUID: CheckedContinuation<KeepTalkingActionCatalogResult, Error>] = [:]
 
     // MARK: Context Sync properties
-    let contextSyncQueue = DispatchQueue(
-        label: "KeepTalking.client.context-sync"
-    )
-    var pendingContextSyncSummaries: [UUID: CheckedContinuation<KeepTalkingContextSyncSummaryResult, Error>] = [:]
-    var pendingContextSyncMessages: [UUID: CheckedContinuation<KeepTalkingContextSyncMessagesResult, Error>] = [:]
-    var pendingContextSyncSideNotes: [UUID: CheckedContinuation<KeepTalkingContextSyncSideNotesResult, Error>] = [:]
+    // One request/response registry per result type — each owns its pending
+    // continuations + timeout (see KeepTalkingSyncResponseRegistry). Both
+    // contextSyncing and transcriptSyncing dispatch through these.
+    let syncSummaries = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncSummaryResult>()
+    let syncMessages = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncMessagesResult>()
+    let syncSideNotes = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncSideNotesResult>()
+    let syncTranscriptSummaries = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncTranscriptSummaryResult>()
+    let syncTranscriptLines = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncTranscriptLinesResult>()
 
     // MARK: Trust handshake properties
     let trustQueue = DispatchQueue(
@@ -584,8 +598,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
             }
         }
 
-        await broadcastLocalNodeState(reason: "connect")
-        await reconcileStaleContinuations()
+        await dispatchMaintenance(.connected)
+        startMaintenanceLoop()
     }
 
     /// Stops transports and fails any pending remote requests.
@@ -597,6 +611,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// hundreds of milliseconds. A subsequent `connect()` will await the
     /// in-flight teardown before restarting the transport.
     public func disconnect() {
+        stopMaintenanceLoop()
         failAllPendingActionCalls(error: KeepTalkingClientError.clientDisconnected)
         failAllPendingActionCatalogRequests(error: KeepTalkingClientError.clientDisconnected)
         failAllPendingContextSync(error: KeepTalkingClientError.clientDisconnected)

@@ -126,6 +126,29 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         self.localNodeID = config.node
     }
 
+    // MARK: - Shared session id
+
+    /// The shared voice-session id every participant converges on — the key for
+    /// the federated transcript (in-memory call record + lines). Each node mints a
+    /// candidate and converges to the global minimum by adopting any lower id it
+    /// sees on a peer's `started`. Settles within the opening `started` exchange,
+    /// well before the first (endpointed) transcript line.
+    private var _sessionID = UUID()
+    public var sessionID: UUID { lock.withLock { _sessionID } }
+
+    /// Adopt `candidate` if it's lower than ours, and re-announce so peers
+    /// converge. Lowering-only ⇒ terminates at the global minimum.
+    private func adoptSessionIDIfLower(_ candidate: UUID) {
+        let changed: Bool = lock.withLock {
+            guard candidate.uuidString < _sessionID.uuidString else { return false }
+            _sessionID = candidate
+            return true
+        }
+        guard changed else { return }
+        emitLog("adopted lower sessionID=\(candidate.uuidString.prefix(8))")
+        broadcastStarted()
+    }
+
     // MARK: - Lifecycle
 
     public func start() async throws {
@@ -224,7 +247,8 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         let payload = KeepTalkingVoiceCallStartedPayload(
             from: localNodeID,
             contextID: config.contextID,
-            effectiveTransport: effectiveTransport.rawValue
+            effectiveTransport: effectiveTransport.rawValue,
+            sessionID: sessionID
         )
         do {
             try sendEnvelope(payload)
@@ -237,10 +261,11 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
     private func broadcastEnded() {
         let payload = KeepTalkingVoiceCallEndedPayload(
             from: localNodeID,
-            contextID: config.contextID
+            contextID: config.contextID,
+            sessionID: sessionID
         )
         try? sendEnvelope(payload)
-        emitLog("→ voice.ended")
+        emitLog("→ voice.ended session=\(sessionID.uuidString.prefix(8))")
     }
 
     private func sendSignal(sdp: String, to nodeID: UUID) {
@@ -248,7 +273,8 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
             from: localNodeID,
             to: nodeID,
             contextID: config.contextID,
-            sdp: sdp
+            sdp: sdp,
+            sessionID: sessionID
         )
         do {
             try sendEnvelope(payload)
@@ -275,6 +301,9 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         }
         switch envelope {
             case let started as KeepTalkingVoiceCallStartedPayload:
+                if let peerSession = started.sessionID {
+                    adoptSessionIDIfLower(peerSession)
+                }
                 handlePeerStarted(
                     nodeID: started.from,
                     remoteTransport: EffectiveTransport(rawValue: started.effectiveTransport ?? "")

@@ -72,6 +72,44 @@ struct LureTests {
         #expect(keys.count == 1)
     }
 
+    @Test("static lure overwrite replaces stale identity key")
+    func staticLureOverwriteReplacesStaleKey() async throws {
+        let localStore = try await KeepTalkingInMemoryStore()
+        let localNodeID = UUID()
+        let remoteNodeID = UUID()
+
+        try await KeepTalkingNode(id: localNodeID).save(on: localStore.database)
+
+        let stalePublicKey = Curve25519.KeyAgreement.PrivateKey()
+            .publicKey.rawRepresentation.base64EncodedString()
+        let freshPublicKey = Curve25519.KeyAgreement.PrivateKey()
+            .publicKey.rawRepresentation.base64EncodedString()
+
+        try await KeepTalkingClient.lure(
+            node: remoteNodeID,
+            publicKey: stalePublicKey,
+            localNodeID: localNodeID,
+            on: localStore.database
+        )
+        try await KeepTalkingClient.lure(
+            node: remoteNodeID,
+            publicKey: freshPublicKey,
+            localNodeID: localNodeID,
+            overwrite: true,
+            on: localStore.database
+        )
+
+        let relation = try #require(
+            try await KeepTalkingNodeRelation.query(on: localStore.database)
+                .filter(\.$from.$id, .equal, remoteNodeID)
+                .filter(\.$to.$id, .equal, localNodeID)
+                .first()
+        )
+
+        let keys = try await relation.$identityKeys.get(on: localStore.database)
+        #expect(keys.map(\.publicKey) == [freshPublicKey])
+    }
+
     @Test("static lure rejects invalid public key")
     func staticLureRejectsInvalidKey() async throws {
         let localStore = try await KeepTalkingInMemoryStore()

@@ -107,6 +107,7 @@ extension KeepTalkingClient {
         sender: KeepTalkingContextMessage.Sender? = nil,
         type: KeepTalkingContextMessage.MessageType = .message,
         agentTurnID: UUID? = nil,
+        id: UUID? = nil,
         emitLocalEnvelope: Bool = false
     ) async throws {
         let node = try await getCurrentNodeInstance()
@@ -114,6 +115,7 @@ extension KeepTalkingClient {
         let sender = try sender ?? .node(node: node.requireID())
 
         let message = KeepTalkingContextMessage(
+            id: id ?? UUID(),
             context: persistedContext,
             sender: sender,
             content: text,

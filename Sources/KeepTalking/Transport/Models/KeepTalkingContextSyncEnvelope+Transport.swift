@@ -23,6 +23,16 @@ extension KeepTalkingContextSyncEnvelope {
                 return [request.requester, request.recipient]
             case .sideNotesResult(let result):
                 return [result.requester, result.responder]
+            case .transcriptSummaryRequest(let request):
+                return [request.requester, request.recipient]
+            case .transcriptSummaryResult(let result):
+                return [result.requester, result.responder]
+            case .transcriptTailRequest(let request):
+                return [request.requester, request.recipient]
+            case .transcriptChunkRequest(let request):
+                return [request.requester, request.recipient]
+            case .transcriptLinesResult(let result):
+                return [result.requester, result.responder]
         }
     }
 
@@ -47,6 +57,16 @@ extension KeepTalkingContextSyncEnvelope {
             case .sideNotesRequest(let request):
                 return request.context
             case .sideNotesResult(let result):
+                return result.context
+            case .transcriptSummaryRequest(let request):
+                return request.context
+            case .transcriptSummaryResult(let result):
+                return result.context
+            case .transcriptTailRequest(let request):
+                return request.context
+            case .transcriptChunkRequest(let request):
+                return request.context
+            case .transcriptLinesResult(let result):
                 return result.context
         }
     }

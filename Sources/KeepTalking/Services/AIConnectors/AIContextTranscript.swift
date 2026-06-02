@@ -386,6 +386,73 @@ extension KeepTalkingClient {
             """
     }
 
+    // MARK: - Voice routing context
+
+    /// Compact, text-only context block for the audio bridge's `extractIntent` turn.
+    /// Never throws — any fetch failure produces an empty string so the bridge
+    /// always has *something* to inject (even if it's blank).
+    ///
+    /// Two sections, both char-capped:
+    /// - Recent conversation tail (~8 turns, ≤800 chars)
+    /// - Ongoing voice transcript lines (~20 lines, ≤400 chars) — omitted when `sessionID` is nil
+    public func voiceRoutingContext(
+        contextID: UUID,
+        sessionID: UUID?
+    ) async -> String {
+        var sections: [String] = []
+
+        // --- Conversation tail ---
+        if let tail = try? await voiceRoutingContextTail(contextID: contextID), !tail.isEmpty {
+            sections.append(tail)
+        }
+
+        // --- Ongoing voice transcript ---
+        if let sessionID,
+            let lines = try? await voiceTranscriptLines(forSession: sessionID),
+            !lines.isEmpty
+        {
+            let recent = lines.suffix(20)
+            var block = "Ongoing voice call transcript (most recent lines):"
+            var remaining = 400
+            for line in recent {
+                let entry = "\n[\(line.author.uuidString.prefix(8))]: \(line.text)"
+                guard remaining > 0 else { break }
+                let clipped = String(entry.prefix(remaining))
+                block += clipped
+                remaining -= clipped.count
+            }
+            sections.append(block)
+        }
+
+        return sections.joined(separator: "\n\n")
+    }
+
+    private func voiceRoutingContextTail(contextID: UUID) async throws -> String {
+        let aliasLookup = try await aliasLookup()
+        let (_, _, selected) = try await loadContextSelection(contextID: contextID)
+
+        let turns = selected.flatMap(\.messages).filter { $0.type == .message }.suffix(8)
+        guard !turns.isEmpty else { return "" }
+
+        var block = "Recent conversation (routing reference only — do not answer from this):"
+        var remaining = 800
+        for message in turns {
+            let speaker: String
+            switch message.sender {
+                case .autonomous:
+                    speaker = "assistant"
+                case .node(let nodeID):
+                    speaker = aliasLookup.resolve(.node(nodeID)).primary(.uppercase)
+            }
+            let entry = "\n[\(speaker)]: \(message.content)"
+            guard remaining > 0 else { break }
+            let clipped = String(entry.prefix(remaining))
+            block += clipped
+            remaining -= clipped.count
+        }
+        return block
+    }
+
     // MARK: - Shared utilities
 
     func previewList(_ values: [String], maxItems: Int) -> String {

@@ -122,6 +122,22 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
         return document.ktOwnedNodes.compactMap { UUID(uuidString: $0) }
     }
 
+    public func deregisterNodeID(_ node: UUID) async throws {
+        let nodeID = normalizedNodeID(node.uuidString)
+        var document = try await fetchDocument()
+
+        document.ktOwnedNodes.removeAll { $0 == nodeID }
+        try await saveOwnedNodes(document.ktOwnedNodes)
+
+        try await deleteValue(forKey: nodeRecordKey(nodeID: nodeID))
+        for key in document.pairPublicKeys.keys.sorted() {
+            guard let pair = parsePairPublicKey(key) else { continue }
+            if pair.nodeID == nodeID || pair.trustedNodeID == nodeID {
+                try await deleteValue(forKey: key)
+            }
+        }
+    }
+
     public func loadPairPublicKeys(
         trustedNodeID: UUID? = nil
     ) async throws -> [KeepTalkingPairPublicKeyRecord] {
@@ -438,10 +454,7 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
     }
 
     private func saveDocument(_ document: KVDocument) async throws {
-        let ownedNodesJSON = try encodeJSONString(
-            normalizeOwnedNodes(document.ktOwnedNodes)
-        )
-        try await upsertValue(ownedNodesJSON, forKey: KVDocumentKey.ownedNodes)
+        try await saveOwnedNodes(document.ktOwnedNodes)
 
         let normalizedRecords = normalizeNodeRecords(document.nodeRecords)
         for (key, metadata) in normalizedRecords {
@@ -455,6 +468,11 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
         }
     }
 
+    private func saveOwnedNodes(_ nodeIDs: [String]) async throws {
+        let ownedNodesJSON = try encodeJSONString(normalizeOwnedNodes(nodeIDs))
+        try await upsertValue(ownedNodesJSON, forKey: KVDocumentKey.ownedNodes)
+    }
+
     private func upsertValue(_ value: String, forKey key: String) async throws {
         var request = URLRequest(url: try makeKVEntryURL(key: key))
         request.httpMethod = "POST"
@@ -466,6 +484,14 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
         if !data.isEmpty {
             _ = try decodeUpsertResponse(data)
         }
+    }
+
+    private func deleteValue(forKey key: String) async throws {
+        var request = URLRequest(url: try makeKVEntryURL(key: key))
+        request.httpMethod = "DELETE"
+
+        let (_, response) = try await session.data(for: request)
+        try validateHTTP(response, expected: [200, 404])
     }
 
     private func encodeJSONString<T: Encodable>(_ value: T) throws -> String {

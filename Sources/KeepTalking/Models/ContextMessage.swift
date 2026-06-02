@@ -161,6 +161,16 @@ extension KeepTalkingContextMessage {
         /// Body text is a short generic string; the detailed error is shown
         /// on the failed queue entry in the composer, not in this message.
         case haywire(reason: HaywireReason)
+
+        /// The sealed-call context entry — one low-volume chat entry per voice
+        /// call, carrying the call's `sessionID`. The full transcript lives in
+        /// `kt_voice_calls` / `kt_voice_transcript_lines` (read on demand); this
+        /// is just the durable, syncable pointer + a summary in `content`. Like
+        /// `.transcript` it's a deliberate chat surfacing: out of agent
+        /// working-context (the `.message`-only filter) and skips wake. The
+        /// message id is derived deterministically from the session id, so
+        /// concurrent sealers across nodes converge on one entry.
+        case voiceCallSeal(sessionID: UUID)
     }
 
     public enum TranscriptSource: String, Codable, Sendable, Hashable {
