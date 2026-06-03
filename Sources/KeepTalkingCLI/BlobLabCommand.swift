@@ -41,10 +41,7 @@ enum BlobLabCommand {
     }
 
     private static func run(_ args: Args) async throws {
-        let signingKey = try await KeepTalkingSFUSigningKey.loadOrCreate(
-            nodeID: args.node,
-            store: keychainStore()
-        )
+        let signingKey = KeepTalkingSFUSigningKey.ephemeral()
         let config = KeepTalkingConfig(
             contextID: args.context,
             node: args.node
@@ -288,14 +285,6 @@ enum BlobLabCommand {
             index += 1
         }
         return out
-    }
-
-    private static func keychainStore() -> any KeepTalkingKeychainStore {
-        #if canImport(Security)
-        KeepTalkingSecItemKeychainStore.shared
-        #else
-        KeepTalkingInMemoryKeychainStore()
-        #endif
     }
 
     private static func deterministic(_ count: Int) -> Data {

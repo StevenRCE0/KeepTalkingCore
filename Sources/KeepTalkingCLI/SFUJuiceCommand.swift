@@ -15,12 +15,8 @@ enum SFUJuiceCommand {
         cliConfig: CliConfig,
         endpoint: CliConfig.SFUJuiceEndpoint
     ) async {
-        let store = makeKeychainStore()
         do {
-            let signingKey = try await KeepTalkingSFUSigningKey.loadOrCreate(
-                nodeID: cliConfig.sdkConfig.node,
-                store: store
-            )
+            let signingKey = KeepTalkingSFUSigningKey.ephemeral()
             let pubHex = signingKey.publicKey.rawRepresentation
                 .map { String(format: "%02x", $0) }
                 .joined()
@@ -89,14 +85,6 @@ enum SFUJuiceCommand {
     }
 
     // MARK: - Helpers
-
-    private static func makeKeychainStore() -> any KeepTalkingKeychainStore {
-        #if canImport(Security)
-        return KeepTalkingSecItemKeychainStore.shared
-        #else
-        return KeepTalkingInMemoryKeychainStore()
-        #endif
-    }
 
     private static func readStdinLoop(_ handler: @escaping @Sendable (String) -> Void) async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in

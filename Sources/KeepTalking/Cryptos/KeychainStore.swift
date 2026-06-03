@@ -5,10 +5,6 @@ public struct KeepTalkingKeychainKey: Hashable, Sendable {
         case groupSecret = "group-secret"
         case nodeIdentityPriv = "node-identity-priv"
         case loginCredential = "login-credential"
-        /// Persistent Ed25519 signing key used to authenticate with a
-        /// KeepTalkingSFU server. One per local node UUID — losing it means
-        /// the SFU treats us as a brand-new peer.
-        case sfuSigningKey = "sfu-signing-key"
     }
 
     public let kind: Kind
@@ -31,9 +27,6 @@ public struct KeepTalkingKeychainKey: Hashable, Sendable {
         KeepTalkingKeychainKey(kind: .loginCredential, id: id)
     }
 
-    public static func sfuSigningKey(nodeID: UUID) -> KeepTalkingKeychainKey {
-        KeepTalkingKeychainKey(kind: .sfuSigningKey, id: nodeID.uuidString.lowercased())
-    }
 }
 
 public protocol KeepTalkingKeychainStore: Sendable {

@@ -150,24 +150,13 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
         guard let endpoint = config.sfuEndpoint else {
             throw KeepTalkingTransportError.sfuEndpointMissing
         }
-        let signingKey = try await KeepTalkingSFUSigningKey.loadOrCreate(
-            nodeID: config.node,
-            store: keychainStore()
-        )
+        let signingKey = KeepTalkingSFUSigningKey.ephemeral()
         return KeepTalkingSFUJuiceClient(
             config: config,
             sfuHost: endpoint.host,
             sfuPort: endpoint.port,
             signingKey: signingKey
         )
-    }
-
-    private func keychainStore() -> any KeepTalkingKeychainStore {
-        #if canImport(Security)
-        KeepTalkingSecItemKeychainStore.shared
-        #else
-        KeepTalkingInMemoryKeychainStore()
-        #endif
     }
 
     private func bindSFUCallbacks() {
