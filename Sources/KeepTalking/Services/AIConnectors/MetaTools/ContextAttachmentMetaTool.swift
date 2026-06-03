@@ -26,11 +26,17 @@ extension KeepTalkingClient {
             )
         }
 
+        // Voice-call transcripts are surfaced as virtual attachments resolved
+        // live from the transcript table (no rows, no blobs) — each one's
+        // attachment_id is the call's session id.
+        let transcriptRows = try await voiceTranscriptSessionSummaries(in: contextID)
+            .map { voiceTranscriptVirtualAttachmentJSON($0, aliasLookup: aliasLookup) }
+
         return jsonString([
             "ok": true,
             "context_id": contextID.uuidString.lowercased(),
-            "count": rows.count,
-            "attachments": rows,
+            "count": rows.count + transcriptRows.count,
+            "attachments": rows + transcriptRows,
         ])
     }
 
@@ -102,6 +108,18 @@ extension KeepTalkingClient {
 
         guard let attachment = try await contextAttachment(attachmentID, in: contextID)
         else {
+            // Not a stored attachment — it may be a virtual voice-call transcript
+            // whose attachment_id is the session id; resolve it from the database.
+            if let transcriptResult = try await voiceTranscriptReadResult(
+                sessionID: attachmentID,
+                contextID: contextID,
+                mode: mode,
+                maxCharacters: maxCharacters,
+                toolCallID: toolCallID,
+                functionName: functionName
+            ) {
+                return transcriptResult
+            }
             return [
                 toolMessage(
                     payload: jsonString([
@@ -462,5 +480,126 @@ extension KeepTalkingClient {
                 leadText: leadText
             )
         )
+    }
+
+    // MARK: - Voice transcript virtual attachments
+
+    /// JSON row describing a voice-call transcript as a virtual attachment — same
+    /// shape as `contextAttachmentJSONObject`, but synthesized from a session
+    /// summary (no `KeepTalkingContextAttachment` exists). `attachment_id` is the
+    /// session id, which the read tool resolves back to live transcript text.
+    func voiceTranscriptVirtualAttachmentJSON(
+        _ summary: KeepTalkingVoiceTranscriptSessionSummary,
+        aliasLookup: KeepTalkingAliasLookup
+    ) -> [String: Any] {
+        let names = summary.authors.map {
+            aliasLookup.resolve(.node($0)).primary(.uppercase)
+        }
+        let date = DateFormatter()
+        date.dateStyle = .medium
+        date.timeStyle = .short
+        return [
+            "attachment_id": summary.sessionID.uuidString.lowercased(),
+            "parent_message_id": NSNull(),
+            "sender": "voice_call",
+            "blob_id": NSNull(),
+            "filename":
+                "Voice call transcript — \(date.string(from: summary.firstAt)) (\(summary.lineCount) lines).txt",
+            "mime_type": "text/plain",
+            "byte_count": summary.textByteCount,
+            "created_at": summary.firstAt.ISO8601Format(),
+            "sort_index": 0,
+            "availability": "ready",
+            "kind": "voice_transcript",
+            "metadata": [
+                "line_count": summary.lineCount,
+                "participants": names,
+                "started_at": summary.firstAt.ISO8601Format(),
+                "ended_at": summary.lastAt.ISO8601Format(),
+            ],
+        ]
+    }
+
+    /// Resolve a `kt_get_context_attachment` read whose `attachment_id` is a voice
+    /// session id. Returns nil when no transcript exists for that session in the
+    /// context, so the caller falls through to `attachment_not_found`.
+    fileprivate func voiceTranscriptReadResult(
+        sessionID: UUID,
+        contextID: UUID,
+        mode: ContextAttachmentReadMode,
+        maxCharacters: Int,
+        toolCallID: String,
+        functionName: String
+    ) async throws -> [AIMessage]? {
+        let aliasLookup = try await aliasLookup()
+        guard
+            let summary = try await voiceTranscriptSessionSummaries(in: contextID)
+                .first(where: { $0.sessionID == sessionID })
+        else { return nil }
+
+        let attachmentJSON = voiceTranscriptVirtualAttachmentJSON(
+            summary, aliasLookup: aliasLookup)
+
+        switch mode {
+            case .metadata:
+                return [
+                    toolMessage(
+                        payload: jsonString([
+                            "ok": true,
+                            "function_name": functionName,
+                            "mode": mode.rawValue,
+                            "attachment": attachmentJSON,
+                        ]),
+                        toolCallID: toolCallID
+                    )
+                ]
+
+            case .previewText:
+                let text =
+                    (try await renderVoiceTranscript(
+                        forSession: sessionID,
+                        in: contextID,
+                        aliasLookup: aliasLookup,
+                        maxCharacters: maxCharacters
+                    )) ?? ""
+                return [
+                    toolMessage(
+                        payload: jsonString([
+                            "ok": true,
+                            "function_name": functionName,
+                            "mode": mode.rawValue,
+                            "attachment": attachmentJSON,
+                            "has_preview": !text.isEmpty,
+                            "max_characters": maxCharacters,
+                            "preview_text": text,
+                        ]),
+                        toolCallID: toolCallID
+                    )
+                ]
+
+            case .native:
+                let full =
+                    (try await renderVoiceTranscript(
+                        forSession: sessionID,
+                        in: contextID,
+                        aliasLookup: aliasLookup,
+                        maxCharacters: 24_000
+                    )) ?? ""
+                let lead =
+                    "Voice call transcript you requested (session \(sessionID.uuidString.prefix(8))) — included below. Use it directly."
+                return [
+                    toolMessage(
+                        payload: jsonString([
+                            "ok": true,
+                            "function_name": functionName,
+                            "mode": mode.rawValue,
+                            "attachment": attachmentJSON,
+                            "native_injected": true,
+                        ]),
+                        toolCallID: toolCallID
+                    ),
+                    .user("\(lead)\n\n\(full)"),
+                ]
+        }
     }
 }

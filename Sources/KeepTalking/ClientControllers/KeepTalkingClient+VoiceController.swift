@@ -19,8 +19,11 @@ extension KeepTalkingClient {
     ///     entirely. Same SFU connection, no P2P detour.
     ///
     /// Callers own the session and are responsible for calling `stop()`
-    /// (or letting it deinit) when voice is no longer wanted. The client
-    /// does not retain it — voice is a separate lifecycle from chat sync.
+    /// (or letting it deinit) when voice is no longer wanted. The client holds a
+    /// weak-purpose reference (`activeVoiceSession`) for envelope routing and
+    /// presence — it clears that reference automatically on the session's
+    /// `onStopped`, so "are we in a call?" stays accurate without the caller having
+    /// to remember to detach.
     public func makeVoiceSession(
         mode: KeepTalkingVoiceSession.TransportMode = .auto,
         maxP2PMeshSize: Int = 4
@@ -44,13 +47,24 @@ extension KeepTalkingClient {
             mode: mode,
             maxP2PMeshSize: maxP2PMeshSize
         )
+        // Self-detach on stop so a torn-down session never lingers as
+        // `activeVoiceSession` (which would make the client think it's still in the
+        // call — re-asserting presence on peer leaves, blocking every seal).
+        session.onStopped = { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.clearVoiceSession(session)
+        }
         activeVoiceSession = session
         return session
     }
 
+    /// Drop the client's reference to `session` if it's still the active one.
+    /// Identity-checked so a stale session's late `onStopped` can't clear a newer
+    /// session that has since taken its place. Invoked from `onStopped`.
     func clearVoiceSession(_ session: KeepTalkingVoiceSession) {
         if activeVoiceSession === session {
             activeVoiceSession = nil
+            onLog?("[voice] cleared active session reference")
         }
     }
 }

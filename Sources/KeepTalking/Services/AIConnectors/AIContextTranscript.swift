@@ -109,6 +109,29 @@ extension KeepTalkingClient {
             attachmentSummary = ""
         }
 
+        // --- Voice call transcript summary ---
+        // Transcripts stay in the database and are exposed to the agent as
+        // virtual attachments (attachment_id == the call's session id), read via
+        // the same context-attachment tools.
+        let transcriptSessions =
+            (try? await voiceTranscriptSessionSummaries(in: contextID)) ?? []
+        let voiceTranscriptSummary: String
+        if !transcriptSessions.isEmpty {
+            let transcriptDate = DateFormatter()
+            transcriptDate.dateStyle = .medium
+            transcriptDate.timeStyle = .short
+            let names = transcriptSessions.prefix(5).map {
+                "Voice call transcript — \(transcriptDate.string(from: $0.firstAt)) (\($0.lineCount) lines)"
+            }
+            voiceTranscriptSummary = """
+                Voice call transcripts: \(transcriptSessions.count)
+                Recent: \(previewList(Array(names), maxItems: 5))
+                Each is a virtual attachment whose attachment_id is the call's session id — list them with \(Self.contextAttachmentListingToolFunctionName) and read one with \(Self.contextAttachmentReadToolFunctionName) (it resolves the live transcript from the database).
+                """
+        } else {
+            voiceTranscriptSummary = ""
+        }
+
         // --- Node name summary (derived from selected messages) ---
         let nodeNameSummary = renderNodeNameSummary(
             recentMessages: allSelectedMessages,
@@ -116,9 +139,12 @@ extension KeepTalkingClient {
         )
         let actionNodeSummary = renderActionNodeSummary(actionStubs, aliasLookup: aliasLookup)
 
-        return [threadMapSummary, nodeNameSummary, attachmentSummary, actionNodeSummary]
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n\n")
+        return [
+            threadMapSummary, nodeNameSummary, attachmentSummary,
+            voiceTranscriptSummary, actionNodeSummary,
+        ]
+        .filter { !$0.isEmpty }
+        .joined(separator: "\n\n")
     }
 
     /// Returns the decay-weighted conversation history as proper API messages,

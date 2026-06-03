@@ -70,6 +70,38 @@ public final class KeepTalkingVoiceCallPresenceRegistry: @unchecked Sendable {
         return changed
     }
 
+    /// Reconcile best-effort presence against ground-truth liveness: drop every
+    /// participant whose node isn't in `online`, across all contexts. Returns the
+    /// contexts whose membership changed.
+    ///
+    /// Presence is fed solely by `voiceCallStarted`/`voiceCallEnded` envelopes, so
+    /// a peer that vanished (crash, network loss, app kill) WITHOUT a clean
+    /// `ended` leaves a **ghost** participant. A ghost otherwise sticks forever:
+    /// it keeps a call from ever sealing (it vetoes both the active leave-probe and
+    /// the passive stale sweep) and keeps the toolbar's joinable-call glow lit.
+    /// The maintenance heartbeat calls this with `onlineNodeIDs()`, so a ghost
+    /// clears once it ages out of liveness (last-seen older than the online
+    /// timeout). A peer that merely missed a beat stays online and is untouched.
+    @discardableResult
+    public func retainOnline(_ online: Set<UUID>) -> [UUID] {
+        let touched: [UUID] = lock.withLock {
+            var hits: [UUID] = []
+            for (contextID, entries) in byContext {
+                let live = entries.filter { online.contains($0.nodeID) }
+                guard live.count != entries.count else { continue }
+                if live.isEmpty {
+                    byContext.removeValue(forKey: contextID)
+                } else {
+                    byContext[contextID] = live
+                }
+                hits.append(contextID)
+            }
+            return hits
+        }
+        for contextID in touched { onChange?(contextID) }
+        return touched
+    }
+
     /// Drops every entry tied to `nodeID` across all contexts. Used when
     /// a peer disconnects from the chat transport — a call that survives
     /// a disconnect is fine, but a call we *only* know about because of

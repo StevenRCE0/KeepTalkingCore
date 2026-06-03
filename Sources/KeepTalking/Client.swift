@@ -176,6 +176,11 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// quick-panel + viewer from this. Carries the Sendable envelope payload so
     /// no Fluent model crosses the actor boundary.
     public var onVoiceTranscriptLine: (@Sendable (KeepTalkingVoiceCallTranscriptLinePayload) -> Void)?
+    /// Display name of *this* node's voice agent — the configured wake keyword,
+    /// shown beside the node name when rendering the agent's `.realtime`
+    /// transcript lines. The app sets it from its voice settings; nil (or a
+    /// peer-authored line, whose wake keyword we don't know) falls back to "ai".
+    public var localVoiceAgentName: String?
     public var onLog: LogHandler? {
         didSet {
             rtcClient.onLog = onLog

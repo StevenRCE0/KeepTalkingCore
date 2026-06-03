@@ -32,7 +32,7 @@ private struct KeepTalkingVoiceTranscriptDigestPayload: Codable {
     let author: UUID
     let text: String
     let timestamp: Int64
-    let source: KeepTalkingVoiceTranscriptSource
+    let sender: KeepTalkingContextMessage.Sender
     let sequence: Int
 }
 
@@ -42,7 +42,7 @@ private func transcriptLineDigest(for line: KeepTalkingVoiceTranscriptLine) -> D
         author: line.author,
         text: line.text,
         timestamp: Int64((line.timestamp.timeIntervalSince1970 * 1_000).rounded()),
-        source: line.source,
+        sender: line.sender,
         sequence: line.sequence
     )
     let encoder = JSONEncoder()

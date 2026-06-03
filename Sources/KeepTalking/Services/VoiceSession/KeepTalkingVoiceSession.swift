@@ -59,10 +59,15 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
     public typealias LogHandler = @Sendable (String) -> Void
     public typealias FrameHandler = @Sendable (Data, _ from: UUID) -> Void
     public typealias PeersChangedHandler = @Sendable ([Peer]) -> Void
+    public typealias StoppedHandler = @Sendable () -> Void
 
     public var onLog: LogHandler?
     public var onInboundFrame: FrameHandler?
     public var onPeersChanged: PeersChangedHandler?
+    /// Fires once when the session transitions running → stopped. The client wires
+    /// this to drop its `activeVoiceSession` reference so "are we in a call?" stays
+    /// accurate after teardown.
+    public var onStopped: StoppedHandler?
 
     public private(set) var mode: TransportMode
     public let maxP2PMeshSize: Int
@@ -160,6 +165,7 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
     }
 
     public func stop() {
+        let wasRunning = isRunning
         heartbeatTask?.cancel()
         heartbeatTask = nil
         // Send the goodbye *before* we tear down the SFU socket —
@@ -184,6 +190,10 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         effectiveTransport = (mode == .sfu) ? .sfu : .p2p
         emitPeersChanged()
         emitLog("stopped")
+        // Let the client drop its `activeVoiceSession` so it no longer believes
+        // it's in the call (otherwise it keeps re-asserting presence on peers'
+        // leaves and nothing ever seals). Only on a real running → stopped edge.
+        if wasRunning { onStopped?() }
     }
 
     public func setMode(_ newMode: TransportMode) {

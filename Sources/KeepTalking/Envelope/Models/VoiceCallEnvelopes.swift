@@ -107,8 +107,9 @@ public struct KeepTalkingVoiceCallTranscriptLinePayload: Codable, Sendable {
     /// Per-(session, author) monotonic cursor for incremental sync + dedup.
     public let sequence: Int
     public let text: String
-    /// `KeepTalkingVoiceTranscriptSource` raw value ("local" | "realtime").
-    public let source: String
+    /// Who spoke: `.node(id)` for a human's mic, `.autonomous(name:node:)` for the
+    /// agent — the `name` carries the wake keyword so peers can label it directly.
+    public let sender: KeepTalkingContextMessage.Sender
     public let timestampMs: UInt64
 
     public init(
@@ -118,7 +119,7 @@ public struct KeepTalkingVoiceCallTranscriptLinePayload: Codable, Sendable {
         lineID: UUID,
         sequence: Int,
         text: String,
-        source: String,
+        sender: KeepTalkingContextMessage.Sender,
         timestampMs: UInt64
     ) {
         self.from = from
@@ -127,7 +128,7 @@ public struct KeepTalkingVoiceCallTranscriptLinePayload: Codable, Sendable {
         self.lineID = lineID
         self.sequence = sequence
         self.text = text
-        self.source = source
+        self.sender = sender
         self.timestampMs = timestampMs
     }
 }
@@ -208,8 +209,9 @@ extension KeepTalkingEnvelopeAsyncHandlers {
                 contextID: ended.contextID,
                 nodeID: ended.from
             )
-            // Feedback for the leaver's active end-probe: if we're still in this
-            // call, re-assert our presence so they don't seal it out from under us.
+            // If we're still in this call, re-assert our presence so the leaver
+            // doesn't seal it out from under us. (Accurate only because the client
+            // clears `activeVoiceSession` on stop — a left node won't re-assert.)
             client?.handleVoiceCallEndedProbe(ended)
         }
         onVoiceCallTranscriptLine { [weak client] line in

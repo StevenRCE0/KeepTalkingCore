@@ -71,15 +71,23 @@ extension KeepTalkingClient {
         guard !result.lines.isEmpty else { return }
         var persisted = 0
         for dto in result.lines {
-            if try await KeepTalkingVoiceTranscriptLine.find(dto.id, on: localStore.database) != nil {
-                continue
-            }
             ensureVoiceCall(
                 sessionID: dto.sessionID,
                 contextID: dto.contextID,
                 participant: dto.author
             )
-            try await dto.makeModel().create(on: localStore.database)
+            // Upsert so a revised line backfills in place (mutating sync), instead
+            // of being skipped as a duplicate with stale text.
+            if let existing = try await KeepTalkingVoiceTranscriptLine.find(
+                dto.id, on: localStore.database)
+            {
+                guard existing.text != dto.text else { continue }
+                existing.text = dto.text
+                existing.sender = dto.sender
+                try await existing.update(on: localStore.database)
+            } else {
+                try await dto.makeModel().create(on: localStore.database)
+            }
             persisted += 1
             onVoiceTranscriptLine?(
                 KeepTalkingVoiceCallTranscriptLinePayload(
@@ -89,7 +97,7 @@ extension KeepTalkingClient {
                     lineID: dto.id,
                     sequence: dto.sequence,
                     text: dto.text,
-                    source: dto.source.rawValue,
+                    sender: dto.sender,
                     timestampMs: UInt64(dto.timestamp.timeIntervalSince1970 * 1000)
                 )
             )

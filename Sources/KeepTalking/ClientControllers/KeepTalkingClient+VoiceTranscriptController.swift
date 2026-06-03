@@ -55,32 +55,80 @@ extension KeepTalkingClient {
     /// per-author sequence, persist it, broadcast the envelope to peers, and
     /// fire `onVoiceTranscriptLine`. Opt-in is enforced by the caller (only
     /// publish when transcription is on).
+    /// Append or **upsert** a transcript line for this node's own speech. Pass an
+    /// existing `lineID` to revise that line in place (the live path upserts the
+    /// current window's line as the transcription evolves); omit it to create a
+    /// fresh line. Either way the line is persisted, broadcast, and surfaced via
+    /// `onVoiceTranscriptLine`. Opt-in is enforced by the caller.
     @discardableResult
     public func appendVoiceTranscriptLine(
         sessionID: UUID,
         contextID: UUID,
         text: String,
-        source: KeepTalkingVoiceTranscriptSource
+        source: KeepTalkingVoiceTranscriptSource,
+        lineID: UUID? = nil
     ) async throws -> UUID {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             onLog?("[voice-transcript] skip empty local line session=\(sessionID.uuidString.prefix(8))")
-            return UUID()
+            return lineID ?? UUID()
         }
         let author = config.node
+        // Map the high-level source to a message sender: a human's mic becomes
+        // `.node(author)`; the agent's reply becomes `.autonomous` carrying this
+        // node's wake keyword (or "ai") as its name, so peers can label it.
+        let sender: KeepTalkingContextMessage.Sender
+        switch source {
+            case .local:
+                sender = .node(node: author)
+            case .realtime:
+                let trimmedName = localVoiceAgentName?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let agentName = (trimmedName?.isEmpty == false ? trimmedName! : "ai")
+                sender = .autonomous(name: agentName, node: author, model: nil)
+        }
         ensureVoiceCall(sessionID: sessionID, contextID: contextID, participant: author)
+
+        // Upsert: when this id already exists, revise the line in place — keeping
+        // its sequence + timestamp so it holds its position — instead of appending
+        // a new one. The revision re-broadcasts and re-syncs (digest-based, exactly
+        // like a mutated context message). No-ops when the text is unchanged.
+        if let lineID,
+            let existing = try await KeepTalkingVoiceTranscriptLine.find(lineID, on: voiceDB)
+        {
+            guard existing.text != trimmed else { return lineID }
+            existing.text = trimmed
+            existing.sender = sender
+            try await existing.update(on: voiceDB)
+            let payload = KeepTalkingVoiceCallTranscriptLinePayload(
+                from: author,
+                contextID: contextID,
+                sessionID: sessionID,
+                lineID: lineID,
+                sequence: existing.sequence,
+                text: trimmed,
+                sender: sender,
+                timestampMs: UInt64(existing.timestamp.timeIntervalSince1970 * 1000)
+            )
+            try? rtcClient.sendEnvelope(payload)
+            onLog?(
+                "[voice-transcript] ~revise line=\(lineID.uuidString.prefix(8)) seq=\(existing.sequence) chars=\(trimmed.count)"
+            )
+            onVoiceTranscriptLine?(payload)
+            return lineID
+        }
 
         let sequence = try await nextSequence(sessionID: sessionID, author: author)
         let now = Date()
-        let lineID = UUID()
+        let newID = lineID ?? UUID()
 
         let line = KeepTalkingVoiceTranscriptLine(
-            id: lineID,
+            id: newID,
             sessionID: sessionID,
             contextID: contextID,
             author: author,
             text: trimmed,
-            source: source,
+            sender: sender,
             timestamp: now,
             sequence: sequence
         )
@@ -95,16 +143,16 @@ extension KeepTalkingClient {
             from: author,
             contextID: contextID,
             sessionID: sessionID,
-            lineID: lineID,
+            lineID: newID,
             sequence: sequence,
             text: trimmed,
-            source: source.rawValue,
+            sender: sender,
             timestampMs: UInt64(now.timeIntervalSince1970 * 1000)
         )
 
         do {
             try rtcClient.sendEnvelope(payload)
-            onLog?("[voice-transcript] → broadcast line=\(lineID.uuidString.prefix(8)) seq=\(sequence)")
+            onLog?("[voice-transcript] → broadcast line=\(newID.uuidString.prefix(8)) seq=\(sequence)")
         } catch {
             // Best-effort: the line is persisted locally; sync-backfill will
             // carry it to peers that missed the live broadcast.
@@ -112,7 +160,7 @@ extension KeepTalkingClient {
         }
 
         onVoiceTranscriptLine?(payload)
-        return lineID
+        return newID
     }
 
     // MARK: - Incoming (receive)
@@ -127,8 +175,22 @@ extension KeepTalkingClient {
         if payload.from == config.node {
             return
         }
-        if try await KeepTalkingVoiceTranscriptLine.find(payload.lineID, on: voiceDB) != nil {
-            onLog?("[voice-transcript] dup incoming line=\(payload.lineID.uuidString.prefix(8)) — skipped")
+        // Mutating sync (like continuation-bubble messages): if we already hold
+        // this line, revise it in place when the text changed — the author upserts
+        // the current line live as the transcription evolves — rather than
+        // dropping it as a duplicate.
+        if let existing = try await KeepTalkingVoiceTranscriptLine.find(payload.lineID, on: voiceDB) {
+            guard existing.text != payload.text else {
+                onLog?("[voice-transcript] dup incoming line=\(payload.lineID.uuidString.prefix(8)) — unchanged")
+                return
+            }
+            existing.text = payload.text
+            existing.sender = payload.sender
+            try await existing.update(on: voiceDB)
+            onLog?(
+                "[voice-transcript] ←~ revise line=\(payload.lineID.uuidString.prefix(8)) from=\(payload.from.uuidString.prefix(8)): \"\(payload.text.prefix(60))\""
+            )
+            onVoiceTranscriptLine?(payload)
             return
         }
         ensureVoiceCall(
@@ -136,14 +198,13 @@ extension KeepTalkingClient {
             contextID: payload.contextID,
             participant: payload.from
         )
-        let source = KeepTalkingVoiceTranscriptSource(rawValue: payload.source) ?? .local
         let line = KeepTalkingVoiceTranscriptLine(
             id: payload.lineID,
             sessionID: payload.sessionID,
             contextID: payload.contextID,
             author: payload.from,
             text: payload.text,
-            source: source,
+            sender: payload.sender,
             timestamp: Date(timeIntervalSince1970: Double(payload.timestampMs) / 1000),
             sequence: payload.sequence
         )
@@ -168,6 +229,100 @@ extension KeepTalkingClient {
             .all()
     }
 
+    /// Distinct voice-call sessions that have transcript lines in `contextID`,
+    /// most-recently-active first. Each is surfaced to the agent as a virtual
+    /// transcript "attachment" (its `attachment_id` is the session id) and read
+    /// back through the existing context-attachment tools — no attachment row or
+    /// blob is created; the lines stay in `kt_voice_transcript_lines`.
+    public func voiceTranscriptSessionSummaries(
+        in contextID: UUID
+    ) async throws -> [KeepTalkingVoiceTranscriptSessionSummary] {
+        let lines = try await KeepTalkingVoiceTranscriptLine.query(on: voiceDB)
+            .filter(\.$contextID == contextID)
+            .sort(\.$timestamp, .ascending)
+            .sort(\.$sequence, .ascending)
+            .all()
+        guard !lines.isEmpty else { return [] }
+
+        var order: [UUID] = []
+        var grouped: [UUID: [KeepTalkingVoiceTranscriptLine]] = [:]
+        for line in lines {
+            if grouped[line.sessionID] == nil { order.append(line.sessionID) }
+            grouped[line.sessionID, default: []].append(line)
+        }
+
+        return
+            order
+            .compactMap { sessionID -> KeepTalkingVoiceTranscriptSessionSummary? in
+                guard let group = grouped[sessionID], !group.isEmpty else { return nil }
+                var authorOrder: [UUID] = []
+                var seenAuthors = Set<UUID>()
+                var byteCount = 0
+                for line in group {
+                    if seenAuthors.insert(line.author).inserted {
+                        authorOrder.append(line.author)
+                    }
+                    byteCount += line.text.utf8.count
+                }
+                return KeepTalkingVoiceTranscriptSessionSummary(
+                    sessionID: sessionID,
+                    contextID: contextID,
+                    lineCount: group.count,
+                    firstAt: group.first!.timestamp,
+                    lastAt: group.last!.timestamp,
+                    authors: authorOrder,
+                    textByteCount: byteCount
+                )
+            }
+            .sorted { $0.lastAt > $1.lastAt }
+    }
+
+    /// Render a session's transcript as agent-facing text with resolved speaker
+    /// names and timestamps. Returns nil when the session has no lines in this
+    /// context. Optionally clipped to `maxCharacters` (head kept, with a marker).
+    /// DB-backed — reads `kt_voice_transcript_lines`, creates nothing.
+    func renderVoiceTranscript(
+        forSession sessionID: UUID,
+        in contextID: UUID,
+        aliasLookup: KeepTalkingAliasLookup,
+        maxCharacters: Int? = nil
+    ) async throws -> String? {
+        let lines = try await voiceTranscriptLines(forSession: sessionID)
+            .filter { $0.contextID == contextID }
+        guard !lines.isEmpty else { return nil }
+
+        let time = DateFormatter()
+        time.dateFormat = "HH:mm"
+        let participantCount = Set(lines.map(\.author)).count
+        var out =
+            "Voice call transcript · \(participantCount) participant(s) · \(lines.count) line(s)\n"
+        for line in lines {
+            // The sender both distinguishes the two sides and (for the agent)
+            // carries its name, so peers render it exactly as we do — no local
+            // wake-keyword lookup. `.autonomous` is the agent (named by its wake
+            // keyword, beside its node); `.node` is the human speaker.
+            let speaker: String
+            switch line.sender {
+                case .autonomous(let name, let node, _):
+                    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let agentName = (trimmed.isEmpty ? "ai" : trimmed).uppercased()
+                    if let node {
+                        let nodeName = aliasLookup.resolve(.node(node)).primary(.uppercase)
+                        speaker = "\(agentName) (\(nodeName))"
+                    } else {
+                        speaker = agentName
+                    }
+                case .node(let id):
+                    speaker = aliasLookup.resolve(.node(id)).primary(.uppercase)
+            }
+            out += "[\(time.string(from: line.timestamp))] \(speaker): \(line.text)\n"
+        }
+        if let maxCharacters, out.count > maxCharacters {
+            out = String(out.prefix(max(0, maxCharacters - 16))) + "\n… [truncated]"
+        }
+        return out
+    }
+
     /// Highest per-(session, author) sequence + 1. Authors number their own
     /// lines independently; (author, sequence) is the dedup/ordering key.
     private func nextSequence(sessionID: UUID, author: UUID) async throws -> Int {
@@ -181,14 +336,19 @@ extension KeepTalkingClient {
 
     // MARK: - Seal (P2P last-leaver + stale-sweep backstop)
 
-    /// The local node is leaving the call. Hybrid seal — the *active* path:
+    /// The local node is leaving the call. Active seal path:
     ///  • no transcript record (transcription was off) ⇒ nothing to seal, return;
-    ///  • no peers online ⇒ we're solo, seal immediately (no one to probe);
-    ///  • else broadcast the leave probe (a `voiceCallEnded`) and wait briefly —
-    ///    any node still in the call re-asserts `voiceCallStarted` via
-    ///    `handleVoiceCallEndedProbe`, repopulating presence. Silence ⇒ we were
-    ///    the last one out ⇒ seal.
-    /// The *passive* path is `sweepStaleVoiceCalls` on the maintenance heartbeat.
+    ///  • no peers online ⇒ we're solo, seal immediately;
+    ///  • else wait briefly, then seal only if no other participant remains.
+    ///
+    /// We do NOT send a separate "anyone here?" probe — the voice session already
+    /// broadcasts `voiceCallEnded` on `stop()` (which runs before this), and any
+    /// node still in the call re-asserts `voiceCallStarted` in response (see
+    /// `handleVoiceCallEndedProbe`), repopulating our presence within the wait.
+    /// `retainOnline` then drops any participant that has aged out of liveness (a
+    /// peer that vanished without an `ended`). What's left is the genuinely-present
+    /// set. The *passive* path is `sweepStaleVoiceCalls` on the maintenance
+    /// heartbeat.
     public func localLeaveVoiceCall(sessionID: UUID, contextID: UUID) async {
         let tag = sessionID.uuidString.prefix(8)
         guard voiceCalls.record(sessionID) != nil else {
@@ -201,18 +361,20 @@ extension KeepTalkingClient {
             await sealOnLeave(sessionID)
             return
         }
-        // Active end-probe: announce we're stopping, then give any node still in
-        // the call a moment to re-assert its presence.
-        broadcastVoiceLeaveProbe(sessionID: sessionID, contextID: contextID)
+        // Give peers still in the call a moment to re-assert in response to our
+        // session's `voiceCallEnded`, then reconcile presence against ground-truth
+        // liveness so a vanished peer can't veto the seal.
         try? await Task.sleep(for: .seconds(Self.sealProbeWaitSeconds))
+        voiceCallPresence.retainOnline(onlineNodeIDs())
         let others = voiceCallPresence.participants(in: contextID)
             .map(\.nodeID)
             .filter { $0 != config.node }
         guard others.isEmpty else {
-            onLog?("[voice-transcript] leave probe — \(others.count) peer(s) re-asserted; not sealing \(tag)")
+            onLog?("[voice-transcript] local leave — \(others.count) peer(s) still present; not sealing \(tag)")
             return
         }
-        onLog?("[voice-transcript] leave probe — silence after \(Int(Self.sealProbeWaitSeconds))s; sealing \(tag)")
+        onLog?(
+            "[voice-transcript] local leave — no peers remain after \(Int(Self.sealProbeWaitSeconds))s; sealing \(tag)")
         await sealOnLeave(sessionID)
     }
 
@@ -222,25 +384,15 @@ extension KeepTalkingClient {
         }
     }
 
-    /// Broadcast the leave probe — a `voiceCallEnded` that doubles as the "still
-    /// anyone here?" trigger. Idempotent with the voice session's own teardown
-    /// `ended` (both `recordEnded` and the re-assert are idempotent).
-    private func broadcastVoiceLeaveProbe(sessionID: UUID, contextID: UUID) {
-        let payload = KeepTalkingVoiceCallEndedPayload(
-            from: config.node,
-            contextID: contextID,
-            sessionID: sessionID
-        )
-        do {
-            try rtcClient.sendEnvelope(payload)
-            onLog?("[voice-transcript] → leave probe (ended) session=\(sessionID.uuidString.prefix(8))")
-        } catch {
-            onLog?("[voice-transcript] leave probe send failed: \(error.localizedDescription)")
-        }
-    }
-
-    /// Feedback to a peer's leave probe: if we're still in this call, re-assert
-    /// our presence so the leaver sees the call continues and doesn't seal.
+    /// A peer announced it's leaving (its voice session broadcast `voiceCallEnded`
+    /// on stop). If we're genuinely still in this call, re-assert our presence so a
+    /// leaver deciding whether to seal sees us and holds off. The
+    /// `activeVoiceSession != nil` guard is the load-bearing check: it's accurate
+    /// only because the session clears it on `stop()` — otherwise a node that has
+    /// itself already left would keep re-asserting "still in call" and no one could
+    /// ever seal. (`recordEnded` has already dropped the leaver from the registry
+    /// by the time this runs.) This is the explicit signal the seal relies on —
+    /// NOT the 2 s session heartbeat, which exists to retry a lost connection.
     func handleVoiceCallEndedProbe(_ ended: KeepTalkingVoiceCallEndedPayload) {
         guard ended.from != config.node else { return }
         guard activeVoiceSession != nil, ended.contextID == config.contextID else { return }
@@ -253,6 +405,12 @@ extension KeepTalkingClient {
     /// (sealed calls are skipped), and safe to call from any node — the
     /// deterministic sealed-entry id makes concurrent seals converge.
     public func sweepStaleVoiceCalls(staleness: TimeInterval = 120) async {
+        // Reconcile best-effort presence against ground-truth liveness first: a
+        // peer that vanished without a clean `voiceCallEnded` leaves a ghost
+        // participant that would otherwise veto every seal below (and keep the
+        // toolbar lit). Once it ages out of `onlineNodeIDs()` it's dropped here, so
+        // the `peerPresent` check sees the call for what it is — abandoned.
+        voiceCallPresence.retainOnline(onlineNodeIDs())
         let now = Date()
         for call in voiceCalls.activeCalls() {
             let sessionID = call.id

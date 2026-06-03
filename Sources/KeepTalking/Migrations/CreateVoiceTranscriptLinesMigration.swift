@@ -11,7 +11,7 @@ struct CreateKeepTalkingVoiceTranscriptLinesMigration: AsyncMigration {
             .field("context", .uuid, .required)
             .field("author", .uuid, .required)
             .field("text", .string, .required)
-            .field("source", .string, .required)
+            .field("sender", .json, .required)
             .field("timestamp", .datetime, .required)
             .field("sequence", .int64, .required)
             .create()

@@ -45,8 +45,12 @@ public final class KeepTalkingVoiceTranscriptLine: Model, @unchecked Sendable {
     @Field(key: "text")
     public var text: String
 
-    @Field(key: "source")
-    public var source: KeepTalkingVoiceTranscriptSource
+    /// Who produced this line, reusing `KeepTalkingContextMessage.Sender`:
+    /// `.node(id)` for a human's mic, `.autonomous(name:node:)` for the agent's
+    /// spoken reply — the `name` carries the agent's wake keyword so peers render
+    /// it without any extra lookup. Replaces the old `.local`/`.realtime` source.
+    @Field(key: "sender")
+    public var sender: KeepTalkingContextMessage.Sender
 
     @Field(key: "timestamp")
     public var timestamp: Date
@@ -64,7 +68,7 @@ public final class KeepTalkingVoiceTranscriptLine: Model, @unchecked Sendable {
         contextID: UUID,
         author: UUID,
         text: String,
-        source: KeepTalkingVoiceTranscriptSource,
+        sender: KeepTalkingContextMessage.Sender,
         timestamp: Date = Date(),
         sequence: Int
     ) {
@@ -73,7 +77,7 @@ public final class KeepTalkingVoiceTranscriptLine: Model, @unchecked Sendable {
         self.contextID = contextID
         self.author = author
         self.text = text
-        self.source = source
+        self.sender = sender
         self.timestamp = timestamp
         self.sequence = sequence
     }
@@ -89,7 +93,7 @@ public struct KeepTalkingVoiceTranscriptLineDTO: Codable, Sendable, Equatable {
     public let contextID: UUID
     public let author: UUID
     public let text: String
-    public let source: KeepTalkingVoiceTranscriptSource
+    public let sender: KeepTalkingContextMessage.Sender
     public let timestamp: Date
     public let sequence: Int
 
@@ -99,7 +103,7 @@ public struct KeepTalkingVoiceTranscriptLineDTO: Codable, Sendable, Equatable {
         contextID: UUID,
         author: UUID,
         text: String,
-        source: KeepTalkingVoiceTranscriptSource,
+        sender: KeepTalkingContextMessage.Sender,
         timestamp: Date,
         sequence: Int
     ) {
@@ -108,7 +112,7 @@ public struct KeepTalkingVoiceTranscriptLineDTO: Codable, Sendable, Equatable {
         self.contextID = contextID
         self.author = author
         self.text = text
-        self.source = source
+        self.sender = sender
         self.timestamp = timestamp
         self.sequence = sequence
     }
@@ -121,7 +125,7 @@ public struct KeepTalkingVoiceTranscriptLineDTO: Codable, Sendable, Equatable {
             contextID: model.contextID,
             author: model.author,
             text: model.text,
-            source: model.source,
+            sender: model.sender,
             timestamp: model.timestamp,
             sequence: model.sequence
         )
@@ -134,9 +138,44 @@ public struct KeepTalkingVoiceTranscriptLineDTO: Codable, Sendable, Equatable {
             contextID: contextID,
             author: author,
             text: text,
-            source: source,
+            sender: sender,
             timestamp: timestamp,
             sequence: sequence
         )
+    }
+}
+
+/// A distinct voice-call session that has transcript lines in a context, with
+/// enough metadata to surface it to the agent as a *virtual* attachment (its
+/// `attachment_id` is the session id) that the existing context-attachment tools
+/// list and read. Backed entirely by `kt_voice_transcript_lines` — surfacing one
+/// creates no attachment row and no blob; the transcript stays in the database.
+public struct KeepTalkingVoiceTranscriptSessionSummary: Sendable, Equatable {
+    public let sessionID: UUID
+    public let contextID: UUID
+    public let lineCount: Int
+    public let firstAt: Date
+    public let lastAt: Date
+    /// Distinct speakers in first-spoken order (node ids; map via alias lookup).
+    public let authors: [UUID]
+    /// Sum of the lines' text bytes — an approximate size for the listing.
+    public let textByteCount: Int
+
+    public init(
+        sessionID: UUID,
+        contextID: UUID,
+        lineCount: Int,
+        firstAt: Date,
+        lastAt: Date,
+        authors: [UUID],
+        textByteCount: Int
+    ) {
+        self.sessionID = sessionID
+        self.contextID = contextID
+        self.lineCount = lineCount
+        self.firstAt = firstAt
+        self.lastAt = lastAt
+        self.authors = authors
+        self.textByteCount = textByteCount
     }
 }
