@@ -4,7 +4,7 @@ import Foundation
 public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     Hashable, CaseIterable
 {
-    case openURLInBrowser = "open-url-in-browser"
+    case openWithURL = "open-url-in-browser"
     case addToReadingList = "add-to-reading-list"
     case askForFile = "ask-for-file"
     case getCurrentlyPlayingMusic = "get-currently-playing-music"
@@ -60,10 +60,10 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
 
     public static let availablePrimitiveActions: [KeepTalkingPrimitiveBundle] = [
         KeepTalkingPrimitiveBundle(
-            name: "open-url-in-browser",
+            name: "open-with-url",
             indexDescription:
-                "Open a URL with the system browser on the action host.",
-            action: .openURLInBrowser
+                "Open a URL via the system API — websites open in the browser, deep-links open native apps directly. Use for: navigate or search on Maps, get directions, call or FaceTime someone, compose a message or email, search Apple Music or open radio, search the App Store, open Weather, Calendar, Voice Memos, Books, Apple News, TV, or HomeKit.",
+            action: .openWithURL
         ),
         KeepTalkingPrimitiveBundle(
             name: "add-to-reading-list",
@@ -132,7 +132,7 @@ extension KeepTalkingPrimitiveActionKind {
                         ),
                     ]),
                 ]
-            case .openURLInBrowser, .addToReadingList, .askForFile,
+            case .openWithURL, .addToReadingList, .askForFile,
                 .getCurrentlyPlayingMusic, .runMacOSShortcut, .createAction:
                 return [:]
         }

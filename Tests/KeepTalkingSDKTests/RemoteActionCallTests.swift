@@ -64,9 +64,9 @@ struct RemoteActionCallTests {
                                 object: nil
                             ),
                             payloadSummary: .primitive(
-                                name: "open-url-in-browser",
+                                name: "open-with-url",
                                 indexDescription: "Open a URL",
-                                action: .openURLInBrowser
+                                action: .openWithURL
                             ),
                             remoteAuthorisable: false,
                             blockingAuthorisation: false,
@@ -151,9 +151,9 @@ struct RemoteActionCallTests {
                                 object: nil
                             ),
                             payloadSummary: .primitive(
-                                name: "open-url-in-browser",
+                                name: "open-with-url",
                                 indexDescription: "Open a URL",
-                                action: .openURLInBrowser
+                                action: .openWithURL
                             ),
                             remoteAuthorisable: false,
                             blockingAuthorisation: false,
@@ -228,9 +228,9 @@ struct RemoteActionCallTests {
         let action = try await KeepTalkingClient.registerAction(
             payload: .primitive(
                 KeepTalkingPrimitiveBundle(
-                    name: "open-url-in-browser",
+                    name: "open-with-url",
                     indexDescription: "Open a URL",
-                    action: .openURLInBrowser
+                    action: .openWithURL
                 )
             ),
             node: ownedHostNode,
@@ -314,9 +314,9 @@ struct RemoteActionCallTests {
                                 object: nil
                             ),
                             payloadSummary: .primitive(
-                                name: "open-url-in-browser",
+                                name: "open-with-url",
                                 indexDescription: "Open a URL",
-                                action: .openURLInBrowser
+                                action: .openWithURL
                             ),
                             remoteAuthorisable: false,
                             blockingAuthorisation: false,
@@ -386,9 +386,9 @@ struct RemoteActionCallTests {
         let action = try await KeepTalkingClient.registerAction(
             payload: .primitive(
                 KeepTalkingPrimitiveBundle(
-                    name: "open-url-in-browser",
+                    name: "open-with-url",
                     indexDescription: "Open a URL",
-                    action: .openURLInBrowser
+                    action: .openWithURL
                 )
             ),
             node: ownerNode,
@@ -459,9 +459,9 @@ struct RemoteActionCallTests {
         let action = try await KeepTalkingClient.registerAction(
             payload: .primitive(
                 KeepTalkingPrimitiveBundle(
-                    name: "open-url-in-browser",
+                    name: "open-with-url",
                     indexDescription: "Open a URL",
-                    action: .openURLInBrowser
+                    action: .openWithURL
                 )
             ),
             node: ownerNode,
@@ -528,9 +528,9 @@ struct RemoteActionCallTests {
         let action = try await KeepTalkingClient.registerAction(
             payload: .primitive(
                 KeepTalkingPrimitiveBundle(
-                    name: "open-url-in-browser",
+                    name: "open-with-url",
                     indexDescription: "Open a URL",
-                    action: .openURLInBrowser
+                    action: .openWithURL
                 )
             ),
             node: ownerNode,
@@ -595,9 +595,9 @@ struct RemoteActionCallTests {
         let action = try await KeepTalkingClient.registerAction(
             payload: .primitive(
                 KeepTalkingPrimitiveBundle(
-                    name: "open-url-in-browser",
+                    name: "open-with-url",
                     indexDescription: "Open a URL",
-                    action: .openURLInBrowser
+                    action: .openWithURL
                 )
             ),
             node: ownerNode,
@@ -726,9 +726,9 @@ struct RemoteActionCallTests {
         try await relation.save(on: localStore.database)
 
         let bundle = KeepTalkingPrimitiveBundle(
-            name: "open-url-in-browser",
+            name: "open-with-url",
             indexDescription: "Open a URL",
-            action: .openURLInBrowser
+            action: .openWithURL
         )
         let action = try await KeepTalkingClient.registerAction(
             payload: .primitive(bundle),

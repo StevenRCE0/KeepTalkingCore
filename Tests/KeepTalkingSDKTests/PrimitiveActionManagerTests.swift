@@ -9,9 +9,9 @@ struct PrimitiveActionManagerTests {
     @Test("primitive action registry is invoked and response is forwarded")
     func registryResponseForwarded() async throws {
         let bundle = KeepTalkingPrimitiveBundle(
-            name: "open-url-in-browser",
+            name: "open-with-url",
             indexDescription: "Open a URL",
-            action: .openURLInBrowser
+            action: .openWithURL
         )
         let action = KeepTalkingAction(
             payload: .primitive(bundle),
