@@ -1,7 +1,6 @@
-import CryptoKit
+import Crypto
 import FluentKit
 import Foundation
-import UniformTypeIdentifiers
 
 extension KeepTalkingClient {
     private static let maxPushWakePreviewCharacters = 160
@@ -822,12 +821,8 @@ extension KeepTalkingClient {
                 attachmentInput,
                 filename: filename
             ) ?? ""
-        if let type = UTType(filenameExtension: pathExtension),
-            let mimeType = type.preferredMIMEType
-        {
-            return mimeType
-        }
-        return "application/octet-stream"
+        return MIMEType.preferredMIMEType(forExtension: pathExtension)
+            ?? "application/octet-stream"
     }
 
     private func derivedAttachmentMetadata(

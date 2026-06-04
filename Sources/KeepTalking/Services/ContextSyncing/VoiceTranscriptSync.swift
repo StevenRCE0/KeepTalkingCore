@@ -1,4 +1,4 @@
-import CryptoKit
+import Crypto
 import Foundation
 
 // Transcript-line sync support: build `KeepTalkingContextSyncMetadata` over voice

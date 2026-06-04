@@ -2,7 +2,6 @@ import AIProxy
 import FluentKit
 import Foundation
 import MCP
-import UniformTypeIdentifiers
 
 private struct KeepTalkingQueuedPromptPreparationError: LocalizedError, Sendable {
     let message: String

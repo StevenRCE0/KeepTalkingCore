@@ -1,4 +1,4 @@
-import CryptoKit
+import Crypto
 import Foundation
 
 /// Pure cryptographic primitives for the bidirectional trust handshake.

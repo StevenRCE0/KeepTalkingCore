@@ -1,4 +1,4 @@
-import CryptoKit
+import Crypto
 import FluentKit
 import Foundation
 

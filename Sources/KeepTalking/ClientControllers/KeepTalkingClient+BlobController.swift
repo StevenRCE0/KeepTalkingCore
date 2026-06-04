@@ -5,7 +5,7 @@
 //  Created by 砚渤 on 24/03/2026.
 //
 
-import CryptoKit
+import Crypto
 import FluentKit
 import Foundation
 

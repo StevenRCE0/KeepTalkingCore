@@ -1,6 +1,5 @@
 import Foundation
 import MCP
-import UniformTypeIdentifiers
 
 /// Closure-based bridge that gives `FilesystemActionManager` access to context blob storage.
 ///
@@ -376,10 +375,7 @@ public actor FilesystemActionManager {
 
     private func mimeTypeForPath(_ path: String) -> String {
         let ext = URL(fileURLWithPath: path).pathExtension
-        if !ext.isEmpty,
-            let type = UTType(filenameExtension: ext),
-            let mime = type.preferredMIMEType
-        {
+        if !ext.isEmpty, let mime = MIMEType.preferredMIMEType(forExtension: ext) {
             return mime
         }
         return "application/octet-stream"
