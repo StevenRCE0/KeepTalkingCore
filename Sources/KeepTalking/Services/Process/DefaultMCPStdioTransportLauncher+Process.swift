@@ -78,10 +78,17 @@ private struct Launcher: MCPStdioTransportLaunching {
             exitState.set(status: process.terminationStatus)
         }
 
-        // Apply sandbox policy before launch
+        // Apply sandbox policy before launch.
         if let sandboxPolicy {
+            #if os(macOS)
             let sandbox = SeatbeltSandbox()
             try sandbox.apply(policy: sandboxPolicy, to: process)
+            #else
+            // No OS-level process sandbox backend off macOS (seatbelt is macOS-only),
+            // so the MCP subprocess launches UNSANDBOXED on Linux/Windows. A Linux
+            // backend (bubblewrap/landlock) can be added via ProcessSandboxing later.
+            _ = sandboxPolicy
+            #endif
         }
 
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in

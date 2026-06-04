@@ -1,5 +1,8 @@
 import AIProxy
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Backend selection for the Anthropic connector. Mirrors `OpenAIConnectorBackend`:
 /// each case is an Anthropic-shaped Messages endpoint, differing only in base URL.

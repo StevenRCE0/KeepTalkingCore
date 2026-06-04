@@ -1,5 +1,8 @@
 import AIProxy
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Backend selection for the connector. Each case is an OpenAI-compatible
 /// `/v1/chat/completions` endpoint — they differ only in the base URL and any
