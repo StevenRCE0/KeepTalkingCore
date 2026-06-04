@@ -39,7 +39,12 @@ public struct MCPStdioTransportHandle: Sendable {
     }
 }
 
-#if os(macOS)
+// The Process-based Launcher (which compiles on macOS/Linux/Windows) takes a
+// sandboxPolicy, so the sandboxPolicy: variant must cover all those platforms —
+// not just macOS — to match the conformer. KTSandboxPolicy is cross-platform; the
+// policy is simply not enforced where there's no backend. iOS family uses the
+// no-sandboxPolicy variant (it routes through the Unavailable stub).
+#if !os(iOS) && !os(tvOS) && !os(watchOS) && !os(visionOS)
 public protocol MCPStdioTransportLaunching: Sendable {
     func launchTransport(
         command: [String],

@@ -675,7 +675,7 @@ public actor MCPManager {
             throw MCPManagerError.stdioUnavailableOnThisPlatform
         }
 
-        #if os(macOS)
+        #if !os(iOS) && !os(tvOS) && !os(watchOS) && !os(visionOS)
         let launched = try await stdioTransportLauncher.launchTransport(
             command: command,
             environment: environment,
