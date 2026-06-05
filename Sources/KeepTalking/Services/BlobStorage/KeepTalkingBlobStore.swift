@@ -205,6 +205,20 @@ public struct KeepTalkingBlobStore: Sendable {
         try FileManager.default.removeItem(at: fileURL)
     }
 
+    /// Delete a blob's on-disk bytes — both the promoted (ready) file and any
+    /// leftover partial. `relativePath` comes from the blob record; pass it when
+    /// known so we don't have to reconstruct the extension. Missing files are a
+    /// no-op, so this is safe to call on records that never reached `.ready`.
+    public func remove(blobID: String, relativePath: String?) throws {
+        if let relativePath {
+            let fileURL = fileURL(forRelativePath: relativePath)
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try FileManager.default.removeItem(at: fileURL)
+            }
+        }
+        try? removePartial(blobID: blobID)
+    }
+
     private func normalizedBlobID(_ blobID: String) throws -> String {
         let normalizedBlobID = blobID.trimmingCharacters(
             in: .whitespacesAndNewlines

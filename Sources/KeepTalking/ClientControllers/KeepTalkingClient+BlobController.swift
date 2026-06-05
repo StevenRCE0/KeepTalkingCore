@@ -48,6 +48,73 @@ extension KeepTalkingClient {
         try await record.save(on: localStore.database)
     }
 
+    /// The distinct blob IDs referenced by every attachment belonging to
+    /// `contextID`. Capture this *before* deleting the context — the cascade on
+    /// `kt_context_attachments` wipes the rows, after which the link is gone.
+    public static func blobIDsReferenced(
+        byContextID contextID: UUID,
+        on database: any Database
+    ) async throws -> Set<String> {
+        let blobIDs = try await KeepTalkingContextAttachment.query(on: database)
+            .filter(\.$context.$id, .equal, contextID)
+            .all(\.$blobID)
+        return Set(blobIDs)
+    }
+
+    /// Given blob IDs that *were* referenced by a now-deleted context, delete the
+    /// record + on-disk bytes for any that no longer have a single referencing
+    /// attachment anywhere in the store. Blobs are shared across contexts by
+    /// `blob_id` string alone (no FK), so deleting one context can strand a blob
+    /// that another context still uses — hence the per-blob reference check.
+    /// Returns the blob IDs that were pruned.
+    @discardableResult
+    public static func pruneStrayBlobs(
+        among candidateBlobIDs: Set<String>,
+        on database: any Database,
+        blobStore: KeepTalkingBlobStore
+    ) async throws -> [String] {
+        var pruned: [String] = []
+        for blobID in candidateBlobIDs {
+            let remainingReferences =
+                try await KeepTalkingContextAttachment
+                .query(on: database)
+                .filter(\.$blobID, .equal, blobID)
+                .count()
+            guard remainingReferences == 0 else { continue }
+
+            let record = try await KeepTalkingBlobRecord.query(on: database)
+                .filter(\.$id, .equal, blobID)
+                .first()
+            try? blobStore.remove(
+                blobID: blobID,
+                relativePath: record?.relativePath
+            )
+            try await record?.delete(on: database)
+            pruned.append(blobID)
+        }
+        return pruned
+    }
+
+    /// Sweep the entire store for stray blobs — records with no referencing
+    /// attachment anywhere — and delete each one's record + on-disk bytes.
+    /// Unscoped counterpart to the per-context prune; use it for an explicit
+    /// "reclaim space" action or a periodic housekeeping pass. Returns the
+    /// pruned blob IDs.
+    @discardableResult
+    public static func pruneAllStrayBlobs(
+        on database: any Database,
+        blobStore: KeepTalkingBlobStore
+    ) async throws -> [String] {
+        let allBlobIDs = try await KeepTalkingBlobRecord.query(on: database)
+            .all(\.$id)
+            .compactMap { $0 }
+        return try await pruneStrayBlobs(
+            among: Set(allBlobIDs),
+            on: database,
+            blobStore: blobStore
+        )
+    }
+
     func ensureBlobRecordPlaceholder(
         for attachment: KeepTalkingContextAttachment
     ) async throws {

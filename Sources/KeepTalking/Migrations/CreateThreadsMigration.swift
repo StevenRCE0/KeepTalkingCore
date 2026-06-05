@@ -8,17 +8,29 @@ struct CreateKeepTalkingThreadsMigration: AsyncMigration {
                 "context",
                 .uuid,
                 .required,
-                .references(KeepTalkingContext.schema, "id", onDelete: .cascade)
+                .references(
+                    KeepTalkingContext.schema,
+                    "id",
+                    onDelete: .cascade
+                )
             )
             .field(
                 "start_message",
                 .uuid,
-                .references(KeepTalkingContextMessage.schema, "id", onDelete: .setNull)
+                .references(
+                    KeepTalkingContextMessage.schema,
+                    "id",
+                    onDelete: .setNull
+                )
             )
             .field(
                 "end_message",
                 .uuid,
-                .references(KeepTalkingContextMessage.schema, "id", onDelete: .setNull)
+                .references(
+                    KeepTalkingContextMessage.schema,
+                    "id",
+                    onDelete: .setNull
+                )
             )
             .field("state", .string, .required)
             .field("summary", .string)

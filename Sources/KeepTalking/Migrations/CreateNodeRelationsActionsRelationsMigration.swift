@@ -25,7 +25,11 @@ struct CreateNodeRelationsActionsRelationsMigration: AsyncMigration {
                 "action",
                 .uuid,
                 .required,
-                .references(KeepTalkingAction.schema, "id")
+                .references(
+                    KeepTalkingAction.schema,
+                    "id",
+                    onDelete: .cascade
+                )
             )
             .field(
                 "approving_context",
