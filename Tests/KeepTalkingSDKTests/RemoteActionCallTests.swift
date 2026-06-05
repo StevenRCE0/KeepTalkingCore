@@ -646,9 +646,12 @@ struct RemoteActionCallTests {
 
         #expect(!client.resolvePendingActionCall(result))
 
+        // The result was cached by resolvePendingActionCall above, so this
+        // returns immediately via the cache short-circuit — the patient wait /
+        // target liveness path is never entered.
         let received = try await client.waitForActionCallResult(
             requestID: requestID,
-            timeoutSeconds: 0.1
+            targetNodeID: targetNodeID
         )
 
         #expect(received.requestID == requestID)

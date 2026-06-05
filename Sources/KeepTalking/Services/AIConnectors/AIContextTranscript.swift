@@ -8,16 +8,16 @@ extension KeepTalkingClient {
 
     /// Exponential decay applied to messages inside the live (contextMain) thread.
     /// A smaller value means messages reach further back before falling off.
-    static let contextMainDecayLambda: Double = 0.05
+    static let contextMainDecayLambda: Double = 0.015
 
     /// Exponential decay applied to messages inside completed (stored/archived) threads.
-    static let storedThreadDecayLambda: Double = 0.1
+    static let storedThreadDecayLambda: Double = 0.03
 
     /// Maximum messages taken from the live thread  (= floor(1 / λ₀)).
-    static let contextMainMessageBudget: Int = 20  // floor(1/0.05)
+    static let contextMainMessageBudget: Int = 80  // floor(1/0.05)
 
     /// Shared message budget across all completed threads  (= floor(1 / λ₁) * 1.5, rounded).
-    static let storedTotalMessageBudget: Int = 20
+    static let storedTotalMessageBudget: Int = 100
 
     // MARK: - Context transcript
 

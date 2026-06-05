@@ -3,7 +3,12 @@ import Foundation
 import MCP
 
 extension KeepTalkingClient {
-    private static let actionCallResultTimeoutSeconds: TimeInterval = 45
+    /// How long a remote action-call result waits silently before it switches
+    /// to patient liveness-polling. After this it waits indefinitely while the
+    /// target node stays online (see `waitForActionCallResult`).
+    private static let actionCallResultGraceSeconds: TimeInterval = 10
+    /// Liveness poll cadence once a result wait exceeds its grace period.
+    private static let actionCallResultPollSeconds: TimeInterval = 5
     private static let actionCallAckTimeoutSeconds: TimeInterval = 4
     private static let actionCallAckRetryLimit = 2
     private static let actionCallDeliveryCacheLimit = 32
@@ -590,7 +595,7 @@ extension KeepTalkingClient {
 
         return try await waitForActionCallResult(
             requestID: request.id,
-            timeoutSeconds: Self.actionCallResultTimeoutSeconds
+            targetNodeID: deliveryNodeID
         )
     }
 
@@ -773,23 +778,46 @@ extension KeepTalkingClient {
         }
     }
 
+    /// Waits for a remote action-call result *patiently*. For the first
+    /// `actionCallResultGraceSeconds` it simply waits; after that it polls the
+    /// target node's liveness every `actionCallResultPollSeconds` and keeps
+    /// waiting indefinitely while the node stays online — only giving up with
+    /// `actionCallTargetOffline` once the node drops. The wait is
+    /// cancellation-aware: when the agent run is aborted, the parent task is
+    /// cancelled, the pending continuation is resolved immediately via
+    /// `failPendingActionCall`, and the wait unwinds rather than leaking.
     func waitForActionCallResult(
         requestID: UUID,
-        timeoutSeconds: TimeInterval
+        targetNodeID: UUID
     ) async throws -> KeepTalkingActionCallResult {
         if let cachedResult = consumeReceivedActionCallResult(for: requestID) {
             return cachedResult
         }
 
-        return try await withThrowingTaskGroup(
-            of: KeepTalkingActionCallResult.self
-        ) {
-            group in
-            group.addTask { [weak self] in
-                guard let self else {
-                    throw KeepTalkingClientError.actionCallTimeout(requestID)
-                }
-                return try await withCheckedThrowingContinuation {
+        return try await patientWait(
+            label: "action-call result request=\(requestID.uuidString.lowercased())",
+            graceSeconds: Self.actionCallResultGraceSeconds,
+            pollSeconds: Self.actionCallResultPollSeconds,
+            log: onLog,
+            isAlive: { [weak self] in
+                guard let self else { return false }
+                // Local executions never reach this path, but treat the self
+                // node as always-alive for safety.
+                if targetNodeID == self.config.node { return true }
+                return self.isNodeOnline(targetNodeID)
+            },
+            onDeath: {
+                KeepTalkingClientError.actionCallTargetOffline(
+                    requestID: requestID,
+                    targetNodeID: targetNodeID
+                )
+            }
+        ) { [weak self] in
+            guard let self else {
+                throw KeepTalkingClientError.clientDisconnected
+            }
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation {
                     (
                         continuation: CheckedContinuation<
                             KeepTalkingActionCallResult, Error
@@ -807,29 +835,15 @@ extension KeepTalkingClient {
                         self.pendingActionCallResults[requestID] = continuation
                     }
                 }
-            }
-
-            group.addTask { [weak self] in
-                try await Task.sleep(
-                    nanoseconds: UInt64(timeoutSeconds * 1_000_000_000)
-                )
-                self?.onLog?(
-                    "[action-call/request] timed out request=\(requestID.uuidString.lowercased()) after=\(Int(timeoutSeconds))s"
-                )
-                self?.failPendingActionCall(
+            } onCancel: {
+                // Parent task aborted (e.g. user cancelled the agent run) or the
+                // patient watchdog gave up: resolve the pending continuation now
+                // so the wait can't hang on a leaked entry.
+                self.failPendingActionCall(
                     requestID: requestID,
-                    error: KeepTalkingClientError.actionCallTimeout(requestID)
+                    error: CancellationError()
                 )
-                throw KeepTalkingClientError.actionCallTimeout(requestID)
             }
-
-            let first = try await group.next()
-            group.cancelAll()
-            guard let first else {
-                throw KeepTalkingClientError.actionCallTimeout(requestID)
-            }
-
-            return first
         }
     }
 

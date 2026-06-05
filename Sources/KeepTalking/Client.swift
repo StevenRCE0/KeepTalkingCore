@@ -12,6 +12,9 @@ public enum KeepTalkingClientError: LocalizedError {
     case relationNotTrustedOrOwned(UUID)
     case actionCallNotAuthorized(action: UUID, caller: UUID, context: UUID)
     case actionCallTimeout(UUID)
+    /// Gave up waiting for a remote action-call result because the target node
+    /// went offline while we were patiently waiting on it.
+    case actionCallTargetOffline(requestID: UUID, targetNodeID: UUID)
     case actionCatalogTimeout(UUID)
     case contextSyncTimeout(UUID)
     case localExecutorRegistrationTimedOut(
@@ -70,6 +73,9 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Action call is not authorized. action=\(actionID) caller=\(caller) context=\(context)"
             case .actionCallTimeout(let requestID):
                 return "Timed out waiting for remote action call result: \(requestID)"
+            case .actionCallTargetOffline(let requestID, let targetNodeID):
+                return
+                    "Target node \(targetNodeID.uuidString.lowercased()) went offline while waiting for action call result: \(requestID.uuidString.lowercased())"
             case .actionCatalogTimeout(let requestID):
                 return "Timed out waiting for remote action catalog result: \(requestID)"
             case .contextSyncTimeout(let requestID):
@@ -233,6 +239,11 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let scopeManager: ScopeManager
     #endif
     let aiConnector: (any AIConnector)?
+    /// Connector used by the ACT (action/tool-calling) sub-agent. `nil` means
+    /// the ACT agent shares the main `aiConnector`; set it only when the ACT
+    /// role is configured with a different provider/endpoint than the main
+    /// agent. Resolved via `resolveACTConnector()`.
+    let actConnector: (any AIConnector)?
     let blobStore: KeepTalkingBlobStore
     private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
     var actionApprovalHandler: ActionApprovalHandler?
@@ -333,6 +344,11 @@ public final class KeepTalkingClient: @unchecked Sendable {
     ///                  on incoming action calls). Should match the active
     ///                  provider's model — for OpenRouter this is provider-prefixed
     ///                  (e.g. `openai/gpt-5-codex`).
+    ///   - actConnector: Optional connector for the ACT (action/tool-calling)
+    ///                   sub-agent. When `nil`, the ACT agent reuses
+    ///                   `aiConnector`. Pass a distinct connector only when the
+    ///                   ACT role targets a different provider/endpoint than the
+    ///                   main agent.
     ///   - responseLanguages: Preferred natural-language output languages for
     ///                        agent prompts. Empty means infer from the user.
     ///   - stdioTransportLauncher: Optional stdio transport launcher used for
@@ -351,6 +367,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         openAIModel: String? = nil,
         responseLanguages: [String] = [],
         aiConnector: (any AIConnector)? = nil,
+        actConnector: (any AIConnector)? = nil,
         stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
             DefaultMCPStdioTransportLauncher.current,
         skillScriptExecutor: (any SkillScriptExecuting)? =
@@ -408,6 +425,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
                 self.aiConnector = nil
             }
         }
+        self.actConnector = actConnector
         self.skillManager = SkillManager(
             nodeConfig: config,
             aiConnector: self.aiConnector,

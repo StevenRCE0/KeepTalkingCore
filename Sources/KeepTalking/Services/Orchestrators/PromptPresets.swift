@@ -63,8 +63,7 @@ public enum AIPromptPresets {
             Call \(ktRunActionToolFunctionName)(action_id, task) to execute the selected action end-to-end. The ACT agent receives only that selected action; it will handle that action's tool discovery, argument construction, and execution, then return a concise result.
             Write the task argument as a precise instruction for the selected action, preserving any target node, action name, file, query, or constraints the user gave.
             Action types in the listing — mcp: external server tools; skill: a directory-based agent skill you can read and invoke; primitive: a direct built-in operation; filesystem: sandboxed file access on the owning node, including a blob bridge (file-to-blob uploads a local file as a shared context attachment visible to all participants, blob-to-file materialises a shared context attachment to disk); semanticretrieval: remote thread-memory search on another node.
-            For skill actions, call \(ktSkillMetainfoToolFunctionName) first to read the manifest and discover file/metadata tools.
-            After reading skill metadata, that skill's specific tool schemas will be injected into the next turn — call those injected tools directly.
+            For skill actions, you may call \(ktSkillMetainfoToolFunctionName) first to read the skill's manifest and instructions so you can frame a precise task. You never call a skill's own sub-tools — they run inside the ACT agent. Execute the skill by calling \(ktRunActionToolFunctionName)(action_id, task); the skill's tools never appear in your own tool list, so do not wait for them or ask the user to advance a turn.
             Notice that you also have built-in tools like web search and context attachment access.
             You do not have general filesystem access. Attachment tools expose only files that are already attached to the active context.
             If the user needs a different earlier attachment from the active context, call \(attachmentListingToolFunctionName) to inspect the available attachments.
@@ -87,13 +86,11 @@ public enum AIPromptPresets {
             4) Use the transcript, especially the "Known node names in this context" section, to match the user's wording to the correct node name before choosing an action.
             5) Do not reinterpret the tool argument as a node target. It selects the wrapped underlying MCP or skill sub-tool only.
 
-            Skill execution policy (mandatory):
-            1) Before using any skill action, first call \(ktSkillMetainfoToolFunctionName) with the same action_id to read the manifest.
-            2) Check the metadata response for "configured_directories" and "configured_parameters" — these are already set by the user and the execution runtime resolves them automatically.
-            3) When configured_directories are present, do NOT ask the user for directory paths — the skill already knows where its files are. Just pass the user's request (e.g. filename, task description) to the action proxy tool.
-            4) Use the injected skill_file tool to inspect manifest content at least once before calling the action proxy.
-            5) If skill_file fails, explain the failure and do not continue with that skill action call.
-            6) After the required skill metadata and skill file reads succeed, continue to the injected skill action call as soon as it is relevant. Do not stall by restating the plan.
+            Skill execution policy:
+            1) To understand a skill before running it, call \(ktSkillMetainfoToolFunctionName) with its action_id to read the manifest and instructions. This is optional context-gathering, not a required handshake.
+            2) The metadata response lists "configured_directories" and "configured_parameters" — these are already set by the user and resolved automatically at execution time. When configured_directories are present, do NOT ask the user for directory paths; the skill already knows where its files are.
+            3) Execute the skill by calling \(ktRunActionToolFunctionName)(action_id, task), folding the user's request (filename, query, task description) into the task argument. The ACT agent owns the skill's file, metadata, and execution sub-tools and runs them — they never appear in your own tool list, so never wait for them or ask the user to send another turn.
+            4) Do not stall by restating the plan: once you know the skill and the task, call \(ktRunActionToolFunctionName).
 
             Tool-result response policy:
             1) When tool output contains user-relevant findings, include a concise assistant text summary after processing the tool output.
@@ -190,7 +187,7 @@ public enum AIPromptPresets {
     public enum ToolDescriptions {
 
         public static let ktSkillMetainfo =
-            "Read the manifest and file index for a skill action. Returns the skill manifest metadata, references, scripts, assets, and configured parameter/directory names. Also injects the skill's file-reader, metadata, and execution proxy tools into the next turn."
+            "Read a skill action's manifest and instructions: returns its metadata, references, scripts, assets, and configured parameter/directory names so you can frame a precise task. This tool only returns information — the skill's own file/metadata/execution tools run inside the ACT agent, so to actually run the skill call kt_run_action(action_id, task)."
 
         public static let contextAttachmentListing =
             "List attachments already stored in the active KeepTalking context, including ids, filenames, mime types, availability, and derived metadata. Use this only when you need a different earlier attachment or need to confirm attachment identity or metadata that is not already present in the current turn. Do not call this just to verify a file or image that was already attached or injected into the same turn."

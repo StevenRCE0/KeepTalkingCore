@@ -804,40 +804,11 @@ extension KeepTalkingClient {
                 bundle: bundle
             )
 
-            // Register action proxy + file + metadata tools into lazy registry on first access
-            if await !runtimeCatalog.lazyRegistry.isInitialized(actionID) {
-                let actionToolDef = makeSkillActionProxyDefinition(
-                    actionID: actionID,
-                    ownerNodeID: stub.ownerNodeID,
-                    bundle: bundle,
-                    descriptor: action.descriptor,
-                    supportsWakeAssist: stub.supportsWakeAssist
-                )
-                let fileToolDef = makeSkillFileReaderDefinition(
-                    actionID: actionID,
-                    ownerNodeID: stub.ownerNodeID,
-                    bundle: bundle
-                )
-                let metaToolDef = makeSkillMetadataDefinition(
-                    actionID: actionID,
-                    ownerNodeID: stub.ownerNodeID,
-                    bundle: bundle
-                )
-                let skillRoutes: [String: KeepTalkingAgentToolRoute] = [
-                    actionToolDef.functionName: .actionProxy(actionToolDef),
-                    fileToolDef.functionName: .skillFileLocal(skillContext),
-                    metaToolDef.functionName: .skillMetadata(skillContext),
-                ]
-                await runtimeCatalog.lazyRegistry.register(
-                    routes: skillRoutes,
-                    for: actionID
-                )
-                runtimeCatalog.append(
-                    definitions: [actionToolDef, fileToolDef, metaToolDef],
-                    routes: skillRoutes
-                )
-            }
-
+            // Metadata only. kt_skill_metainfo exposes the skill's manifest and
+            // instructions to the main agent so it can frame a precise task; it
+            // does NOT register the skill's file/metadata/execution tools. Those
+            // belong to the ACT agent, which resolves them itself when the main
+            // agent delegates via kt_run_action.
             return [
                 toolMessage(
                     payload: renderSkillMetadataPayload(
@@ -894,50 +865,9 @@ extension KeepTalkingClient {
                 ]
             }
 
-            // Register remote skill file tool into lazy registry on first access
-            if await !runtimeCatalog.lazyRegistry.isInitialized(actionID) {
-                let fileToolDef = KeepTalkingActionToolDefinition(
-                    functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
-                        ownerNodeID: stub.ownerNodeID,
-                        actionID: actionID,
-                        targetName: "skill_file"
-                    ),
-                    actionID: actionID,
-                    ownerNodeID: stub.ownerNodeID,
-                    source: .skill,
-                    targetName: "skill_file",
-                    displayName: metadata.name,
-                    description:
-                        "Read a file from skill bundle \(metadata.name). Paths must stay within the skill directory.",
-                    parameters: [
-                        "type": .string("object"),
-                        "properties": .object([
-                            "path": .object([
-                                "type": .string("string"),
-                                "description": .string("Relative path inside the skill bundle."),
-                            ]),
-                            "max_characters": .object([
-                                "type": .string("integer"),
-                                "description": .string("Optional maximum characters to return."),
-                            ]),
-                        ]),
-                        "additionalProperties": .bool(true),
-                    ]
-                )
-                let remoteSkillRoutes: [String: KeepTalkingAgentToolRoute] = [
-                    fileToolDef.functionName: .skillFileRemote(
-                        actionID: actionID,
-                        ownerNodeID: stub.ownerNodeID,
-                        skillName: metadata.name
-                    )
-                ]
-                await runtimeCatalog.lazyRegistry.register(
-                    routes: remoteSkillRoutes,
-                    for: actionID
-                )
-                runtimeCatalog.append(definitions: [fileToolDef], routes: remoteSkillRoutes)
-            }
-
+            // Metadata only — the remote skill's file/metadata/execution tools
+            // are resolved by the ACT agent when the main agent delegates via
+            // kt_run_action, not surfaced to the main agent here.
             return [
                 toolMessage(
                     payload: jsonString([

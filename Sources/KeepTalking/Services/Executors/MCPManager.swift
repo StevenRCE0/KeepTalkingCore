@@ -1,9 +1,10 @@
 import Foundation
+import Logging
+import MCP
+
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import Logging
-import MCP
 
 #if canImport(System)
 import System
@@ -25,6 +26,9 @@ public enum MCPManagerError: LocalizedError {
     case unknownMCPTool(requested: String, available: [String])
     case toolNotPermitted(String)
     case unregisteredAction(UUID)
+    /// The action's executor went away (server torn down / health failed) while
+    /// we were patiently waiting on an in-flight tool call.
+    case executorUnavailable(UUID)
 
     public var errorDescription: String? {
         switch self {
@@ -56,6 +60,8 @@ public enum MCPManagerError: LocalizedError {
                 return "MCP tool '\(name)' is not permitted by the caller's grant."
             case .unregisteredAction(let actionID):
                 return "Action is not registered in MCPManager: \(actionID)"
+            case .executorUnavailable(let actionID):
+                return "MCP executor became unavailable while the tool call was running: \(actionID)"
         }
     }
 }
@@ -290,7 +296,12 @@ public actor MCPManager {
     private let nodeConfig: KeepTalkingConfig
     private let stdioTransportLauncher: (any MCPStdioTransportLaunching)?
     private let connectTimeoutSeconds: TimeInterval
-    private let toolCallTimeoutSeconds: TimeInterval
+    /// How long a tool call waits silently before it switches to patient
+    /// liveness-polling. After this it waits indefinitely while the executor
+    /// stays healthy (see `callToolPatiently`).
+    private let toolCallGraceSeconds: TimeInterval
+    /// Liveness poll cadence once a tool call exceeds its grace period.
+    private let toolCallPollSeconds: TimeInterval
     private var clientsByActionID: [UUID: Client] = [:]
     private var stdioProcessesByActionID: [UUID: StdioProcessHandle] = [:]
     private var virtualToolNamesByActionID: [UUID: [String]] = [:]
@@ -305,12 +316,14 @@ public actor MCPManager {
         stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
             DefaultMCPStdioTransportLauncher.current,
         connectTimeoutSeconds: TimeInterval = 10,
-        toolCallTimeoutSeconds: TimeInterval = 20
+        toolCallGraceSeconds: TimeInterval = 10,
+        toolCallPollSeconds: TimeInterval = 5
     ) {
         self.nodeConfig = nodeConfig
         self.stdioTransportLauncher = stdioTransportLauncher
         self.connectTimeoutSeconds = connectTimeoutSeconds
-        self.toolCallTimeoutSeconds = toolCallTimeoutSeconds
+        self.toolCallGraceSeconds = toolCallGraceSeconds
+        self.toolCallPollSeconds = toolCallPollSeconds
     }
 
     /// Sets a callback invoked when a registered action's tool list changes.
@@ -473,14 +486,28 @@ public actor MCPManager {
             throw MCPManagerError.toolNotPermitted(invocation.name)
         }
 
-        return try await Self.callToolWithTimeout(
+        let log = onLog
+        return try await Self.callToolPatiently(
             client: client,
             name: invocation.name,
             arguments: invocation.arguments as [String: Value]?,
             meta: call.metadata,
             actionID: actionID,
-            timeoutSeconds: toolCallTimeoutSeconds
+            graceSeconds: toolCallGraceSeconds,
+            pollSeconds: toolCallPollSeconds,
+            log: log,
+            isAlive: { [weak self] in await self?.isActionExecutorLive(actionID) ?? false }
         )
+    }
+
+    /// Whether the executor backing `actionID` is still alive enough to keep
+    /// waiting on. Used by `callToolPatiently` once a tool call exceeds its
+    /// grace period. A dead transport makes `callTool` throw on its own; this
+    /// is the secondary net that catches an explicit teardown / failed health.
+    func isActionExecutorLive(_ actionID: UUID) -> Bool {
+        guard clientsByActionID[actionID] != nil else { return false }
+        if case .failed = healthByActionID[actionID] { return false }
+        return true
     }
 
     /// Returns the sorted tool names currently exposed by an MCP action.
@@ -575,36 +602,53 @@ public actor MCPManager {
         )
     }
 
-    private nonisolated static func callToolWithTimeout(
+    /// Invokes an MCP tool *patiently*: it waits silently for `graceSeconds`,
+    /// then keeps waiting indefinitely as long as the executor stays alive,
+    /// polling liveness every `pollSeconds`. It gives up only if the executor
+    /// dies (`executorUnavailable`), `callTool` itself throws, or the
+    /// surrounding task is cancelled — in which case the in-flight request is
+    /// resumed locally with `CancellationError` and a `notifications/cancelled`
+    /// is sent to the server, so an aborted agent run stops the running tool.
+    private nonisolated static func callToolPatiently(
         client: Client,
         name: String,
         arguments: [String: Value]?,
         meta: Metadata,
         actionID: UUID,
-        timeoutSeconds: TimeInterval
+        graceSeconds: TimeInterval,
+        pollSeconds: TimeInterval,
+        log: (@Sendable (String) -> Void)?,
+        isAlive: @escaping @Sendable () async -> Bool
     ) async throws -> (content: [Tool.Content], isError: Bool?) {
-        let timeoutNanos = UInt64(max(timeoutSeconds, 1) * 1_000_000_000)
-
-        return try await withThrowingTaskGroup(
-            of: (content: [Tool.Content], isError: Bool?).self
-        ) { group in
-            group.addTask {
+        try await patientWait(
+            label: "mcp tool \(name) action=\(actionID.uuidString.lowercased())",
+            graceSeconds: graceSeconds,
+            pollSeconds: pollSeconds,
+            log: log,
+            isAlive: isAlive,
+            onDeath: { MCPManagerError.executorUnavailable(actionID) }
+        ) {
+            // Use the cancellation-tracking RequestContext variant so an aborted
+            // agent run actually stops the tool: on cancel we resume the local
+            // wait with CancellationError AND send the MCP notifications/cancelled
+            // so the server stops processing (advisory, per the MCP spec).
+            let requestContext: RequestContext<CallTool.Result> =
                 try await client.callTool(
                     name: name,
                     arguments: arguments,
                     meta: meta
                 )
+            let result = try await withTaskCancellationHandler {
+                try await requestContext.value
+            } onCancel: {
+                Task {
+                    try? await client.cancelRequest(
+                        requestContext.requestID,
+                        reason: "KeepTalking agent run cancelled"
+                    )
+                }
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: timeoutNanos)
-                throw MCPManagerError.toolCallTimedOut(actionID, timeoutSeconds)
-            }
-
-            guard let result = try await group.next() else {
-                throw MCPManagerError.toolCallTimedOut(actionID, timeoutSeconds)
-            }
-            group.cancelAll()
-            return result
+            return (content: result.content, isError: result.isError)
         }
     }
 

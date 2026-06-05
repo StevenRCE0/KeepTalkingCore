@@ -17,6 +17,8 @@ private struct Executor: SkillScriptExecuting {
         timeoutSeconds: TimeInterval,
         sandboxPolicy: KTSandboxPolicy?
     ) async throws -> SkillScriptExecutionResult {
+        // The configured timeout is now the *grace* period: after it elapses the
+        // run keeps waiting patiently (polling) instead of being killed.
         try await SkillScriptRunner.run(
             command: SkillScriptRunner.makeCommand(
                 scriptURL: scriptURL,
@@ -25,7 +27,7 @@ private struct Executor: SkillScriptExecuting {
             currentDirectory: currentDirectory,
             environment: environment,
             actionID: actionID,
-            timeoutSeconds: timeoutSeconds,
+            graceSeconds: timeoutSeconds,
             sandboxPolicy: sandboxPolicy
         )
     }

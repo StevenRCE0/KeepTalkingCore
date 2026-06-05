@@ -11,12 +11,12 @@ struct SkillScriptRunnerTests {
 
         let scriptURL = fixture.appendingPathComponent("large-output.sh")
         try """
-            #!/bin/zsh
-            for i in {1..20000}; do
-              print "line-$i"
-            done
-            """
-            .write(to: scriptURL, atomically: true, encoding: .utf8)
+        #!/bin/zsh
+        for i in {1..20000}; do
+          print "line-$i"
+        done
+        """
+        .write(to: scriptURL, atomically: true, encoding: .utf8)
 
         let result = try await SkillScriptRunner.run(
             command: SkillScriptRunner.makeCommand(
@@ -25,7 +25,7 @@ struct SkillScriptRunnerTests {
             ),
             currentDirectory: fixture,
             actionID: UUID(),
-            timeoutSeconds: 5
+            graceSeconds: 5
         )
 
         #expect(result.exitCode == 0)
@@ -33,32 +33,43 @@ struct SkillScriptRunnerTests {
         #expect(result.stdout.contains("line-20000"))
     }
 
-    @Test("script runner terminates timed out processes")
-    func terminatesTimedOutProcess() async throws {
+    @Test("script runner terminates a cancelled process")
+    func terminatesCancelledProcess() async throws {
         let fixture = try makeFixtureDirectory()
         defer { try? FileManager.default.removeItem(at: fixture) }
 
         let markerURL = fixture.appendingPathComponent("terminated.txt")
-        let scriptURL = fixture.appendingPathComponent("timeout.sh")
+        let scriptURL = fixture.appendingPathComponent("longrunning.sh")
         try """
-            #!/bin/zsh
-            trap 'print "terminated" > "$1"; exit 0' TERM
-            while true; do
-              sleep 1
-            done
-            """
-            .write(to: scriptURL, atomically: true, encoding: .utf8)
+        #!/bin/zsh
+        trap 'print "terminated" > "$1"; exit 0' TERM
+        while true; do
+          sleep 1
+        done
+        """
+        .write(to: scriptURL, atomically: true, encoding: .utf8)
 
-        await #expect(throws: SkillManagerError.self) {
-            _ = try await SkillScriptRunner.run(
+        // The run now waits patiently (no hard timeout) — only an explicit
+        // cancellation stops it. Cancelling the surrounding task must terminate
+        // the process and surface a CancellationError.
+        let task = Task {
+            try await SkillScriptRunner.run(
                 command: SkillScriptRunner.makeCommand(
                     scriptURL: scriptURL,
                     arguments: [markerURL.path]
                 ),
                 currentDirectory: fixture,
                 actionID: UUID(),
-                timeoutSeconds: 1
+                graceSeconds: 1
             )
+        }
+
+        // Give the script a moment to start, then abort it.
+        try await Task.sleep(nanoseconds: 500_000_000)
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
         }
 
         for _ in 0..<20 {

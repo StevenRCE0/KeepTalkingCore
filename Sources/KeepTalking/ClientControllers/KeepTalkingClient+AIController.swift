@@ -254,6 +254,10 @@ extension KeepTalkingClient {
         guard let aiConnector = try await resolveAIConnector() else {
             throw KeepTalkingClientError.aiNotConfigured
         }
+        // The ACT sub-agent may target a different provider/endpoint than the
+        // main agent; resolve its connector independently (falls back to the
+        // main connector when no ACT-specific provider is configured).
+        let actConnector = (try await resolveACTConnector()) ?? aiConnector
 
         await ensureMCPToolChangeObserverInstalled()
 
@@ -401,7 +405,7 @@ extension KeepTalkingClient {
                                 rawArguments: toolCall.argumentsJSON,
                                 runtimeCatalog: runtimeCatalog,
                                 context: persistedContext,
-                                actConnector: aiConnector,
+                                actConnector: actConnector,
                                 actModel: actModel ?? activeModel,
                                 publisher: assistantPublisher,
                                 agentTurnID: agentTurnID
@@ -864,82 +868,80 @@ extension KeepTalkingClient {
             }
         }()
 
-        let timeoutSeconds: TimeInterval = source == "mcp" ? 30 : 10
-        let timeoutNanos = UInt64(max(timeoutSeconds, 1) * 1_000_000_000)
-        let actionIDLabel = actionID.uuidString.lowercased()
-
         do {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { [self] in
-                    switch action.payload {
-                        case .mcpBundle:
-                            let actionID =
-                                action.id?.uuidString.lowercased()
-                                ?? "unknown"
-                            onLog?("[mcp] registering local action=\(actionID)")
-                            try await mcpManager.registerIfNeeded(action)
-                            onLog?("[mcp] registered local action=\(actionID)")
-                        case .skill:
-                            let actionID =
-                                action.id?.uuidString.lowercased()
-                                ?? "unknown"
-                            onLog?("[skill] registering local action=\(actionID)")
-                            try await skillManager.registerIfNeeded(action)
-                            onLog?("[skill] registered local action=\(actionID)")
-                        case .primitive:
-                            let actionID =
-                                action.id?.uuidString.lowercased()
-                                ?? "unknown"
-                            onLog?(
-                                "[primitive] registering local action=\(actionID)"
-                            )
-                            try await primitiveActionManager.registerIfNeeded(
-                                action
-                            )
-                            onLog?(
-                                "[primitive] registered local action=\(actionID)"
-                            )
-                        case .semanticRetrieval:
-                            // Handled app-side via semanticSearchCallback; no local executor.
-                            return
-                        case .filesystem:
-                            let actionID =
-                                action.id?.uuidString.lowercased()
-                                ?? "unknown"
-                            onLog?("[filesystem] registering local action=\(actionID)")
-                            try await filesystemActionManager.registerIfNeeded(action)
-                            onLog?("[filesystem] registered local action=\(actionID)")
+            // Patient registration: wait the grace period silently, then poll
+            // executor liveness indefinitely instead of hard-failing. A genuinely
+            // broken executor still surfaces — `registerIfNeeded` throws on real
+            // failure (and MCP connect has its own inner timeout), and the
+            // liveness probe bails if health flips to `.failed`.
+            try await patientWait(
+                label: "register \(source) executor action=\(actionID.uuidString.lowercased())",
+                graceSeconds: 10,
+                pollSeconds: 5,
+                log: onLog,
+                isAlive: { [weak self] in
+                    guard let self else { return false }
+                    guard source == "mcp" else { return true }
+                    if case .failed = await self.mcpManager.actionHealth(
+                        actionID: actionID
+                    ) {
+                        return false
                     }
-                }
-                group.addTask { [self] in
-                    try await Task.sleep(nanoseconds: timeoutNanos)
-                    self.onLog?(
-                        "[\(source)] registration timeout action=\(actionIDLabel) after=\(Int(timeoutSeconds))s"
+                    return true
+                },
+                onDeath: {
+                    KeepTalkingClientError.localExecutorRegistrationFailed(
+                        actionID: actionID,
+                        source: source,
+                        actionName: actionName,
+                        message: "executor became unavailable during registration"
                     )
-                    throw
-                        KeepTalkingClientError
-                        .localExecutorRegistrationTimedOut(
-                            actionID: actionID,
-                            source: source,
-                            actionName: actionName,
-                            timeoutSeconds: timeoutSeconds
-                        )
                 }
-
-                guard try await group.next() != nil else {
-                    throw
-                        KeepTalkingClientError
-                        .localExecutorRegistrationTimedOut(
-                            actionID: actionID,
-                            source: source,
-                            actionName: actionName,
-                            timeoutSeconds: timeoutSeconds
+            ) { [self] in
+                switch action.payload {
+                    case .mcpBundle:
+                        let actionID =
+                            action.id?.uuidString.lowercased()
+                            ?? "unknown"
+                        onLog?("[mcp] registering local action=\(actionID)")
+                        try await mcpManager.registerIfNeeded(action)
+                        onLog?("[mcp] registered local action=\(actionID)")
+                    case .skill:
+                        let actionID =
+                            action.id?.uuidString.lowercased()
+                            ?? "unknown"
+                        onLog?("[skill] registering local action=\(actionID)")
+                        try await skillManager.registerIfNeeded(action)
+                        onLog?("[skill] registered local action=\(actionID)")
+                    case .primitive:
+                        let actionID =
+                            action.id?.uuidString.lowercased()
+                            ?? "unknown"
+                        onLog?(
+                            "[primitive] registering local action=\(actionID)"
                         )
+                        try await primitiveActionManager.registerIfNeeded(
+                            action
+                        )
+                        onLog?(
+                            "[primitive] registered local action=\(actionID)"
+                        )
+                    case .semanticRetrieval:
+                        // Handled app-side via semanticSearchCallback; no local executor.
+                        return
+                    case .filesystem:
+                        let actionID =
+                            action.id?.uuidString.lowercased()
+                            ?? "unknown"
+                        onLog?("[filesystem] registering local action=\(actionID)")
+                        try await filesystemActionManager.registerIfNeeded(action)
+                        onLog?("[filesystem] registered local action=\(actionID)")
                 }
-                group.cancelAll()
             }
         } catch let error as KeepTalkingClientError {
             throw error
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw KeepTalkingClientError.localExecutorRegistrationFailed(
                 actionID: actionID,
@@ -972,6 +974,13 @@ extension KeepTalkingClient {
 
     func resolveAIConnector() async throws -> (any AIConnector)? {
         aiConnector
+    }
+
+    /// Connector the ACT (action/tool-calling) sub-agent should use. Falls back
+    /// to the main connector when no ACT-specific connector was injected, so the
+    /// ACT role only diverges when explicitly configured with its own provider.
+    func resolveACTConnector() async throws -> (any AIConnector)? {
+        actConnector ?? aiConnector
     }
 
     func publishAgentRunFailure(
