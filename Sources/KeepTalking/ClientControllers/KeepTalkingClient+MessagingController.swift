@@ -121,8 +121,8 @@ extension KeepTalkingClient {
             type: type,
             agentTurnID: agentTurnID
         )
-        persistedContext.updatedAt = message.timestamp
 
+        // updatedAt is advanced by the touch middleware when the message saves.
         try await message.save(on: localStore.database)
         let savedAttachments = try await persistOutgoingAttachments(
             preparedAttachments,
@@ -324,15 +324,11 @@ extension KeepTalkingClient {
         let newMessages = try await filterNewMessages(context.messages)
         let newAttachments = try await filterNewAttachments(context.attachments)
 
+        // updatedAt is advanced by the touch middleware on each child save below.
         for message in newMessages {
             message.$context.id = try persistedContext.requireID()
             message.$context.value = persistedContext
             try await message.save(on: localStore.database)
-            if let updatedAt = persistedContext.updatedAt {
-                persistedContext.updatedAt = max(updatedAt, message.timestamp)
-            } else {
-                persistedContext.updatedAt = message.timestamp
-            }
         }
 
         for attachment in newAttachments {
@@ -341,11 +337,6 @@ extension KeepTalkingClient {
             try await attachment.save(on: localStore.database)
             try await ensureSenderRelation(for: attachment.sender)
             try await ensureBlobRecordPlaceholder(for: attachment)
-            if let updatedAt = persistedContext.updatedAt {
-                persistedContext.updatedAt = max(updatedAt, attachment.createdAt)
-            } else {
-                persistedContext.updatedAt = attachment.createdAt
-            }
         }
         try await persistedContext.refreshSyncMetadata(on: localStore.database)
     }
@@ -369,24 +360,32 @@ extension KeepTalkingClient {
         }
 
         let latestTimestamp = newMessages.map(\.timestamp).max() ?? Date()
+        // upsertContext advances updatedAt to max(existing, latestTimestamp) — that
+        // IS the batch path's context touch (the bulk insert below bypasses the
+        // touch middleware, so nothing double-fires).
         let persistedContext = try await upsertContext(
             KeepTalkingContext(
                 id: contextID,
                 updatedAt: latestTimestamp
             )
         )
+        let resolvedContextID = try persistedContext.requireID()
 
-        for message in newMessages {
-            message.$context.id = try persistedContext.requireID()
-            message.$context.value = persistedContext
-            try await message.save(on: localStore.database)
-            try await ensureSenderRelation(for: message.sender)
+        // Ensure each DISTINCT non-self sender once (was a per-row query+save).
+        for sender in Set(newMessages.map(\.sender)) {
+            try await ensureSenderRelation(for: sender)
         }
 
-        persistedContext.updatedAt = max(
-            persistedContext.updatedAt ?? latestTimestamp,
-            latestTimestamp
-        )
+        // One transaction for the whole batch: `Collection.create(on:)` is a bulk
+        // insert (one round-trip, one commit) instead of N autocommitting saves.
+        try await localStore.database.transaction { db in
+            for message in newMessages {
+                message.$context.id = resolvedContextID
+                message.$context.value = persistedContext
+            }
+            try await newMessages.create(on: db)
+        }
+
         try await persistedContext.refreshSyncMetadata(on: localStore.database)
     }
 
@@ -520,12 +519,9 @@ extension KeepTalkingClient {
         )
         .filter(\.$id, .equal, contextID)
         .first() {
-            if let updatedAt = context.updatedAt {
-                if let existingUpdatedAt = existing.updatedAt {
-                    existing.updatedAt = max(existingUpdatedAt, updatedAt)
-                } else {
-                    existing.updatedAt = updatedAt
-                }
+            // Forward-only: only advance (and only write) when newer.
+            if context.updatedAt > existing.updatedAt {
+                existing.updatedAt = context.updatedAt
                 try await existing.save(on: localStore.database)
             }
             return existing

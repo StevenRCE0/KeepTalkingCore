@@ -50,8 +50,12 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     )
     public var operators: [KeepTalkingNode]
 
-    @Timestamp(key: "updated_at", on: .update)
-    public var updatedAt: Date?
+    /// Last-activity time. A plain (non-optional) field — NOT `@Timestamp(on:.update)`,
+    /// because that auto-overwrites to "now" on every save and would clobber the
+    /// value set by the message/attachment touch middleware (and the batch path).
+    /// Defaults to now on creation; advanced forward-only by writes to its children.
+    @Field(key: "updated_at")
+    public var updatedAt: Date
 
     @OptionalField(key: "sync_metadata")
     public var syncMetadata: KeepTalkingContextSyncMetadata?
@@ -132,7 +136,7 @@ extension KeepTalkingContext: Codable {
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(id, forKey: .id)
-        try container.encodeIfPresent(updatedAt, forKey: .updatedAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
         try container.encode($messages.value ?? [], forKey: .messages)
         try container.encode($attachments.value ?? [], forKey: .attachments)
     }

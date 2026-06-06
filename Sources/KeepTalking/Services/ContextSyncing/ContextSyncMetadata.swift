@@ -127,8 +127,14 @@ extension KeepTalkingContext {
         guard syncMetadata != metadata else {
             return
         }
+        // Targeted update of ONLY sync_metadata — a full `save()` would write back
+        // this instance's (possibly stale) `updatedAt` and clobber the value the
+        // touch middleware set via its own UPDATE. See ContextTouchMiddleware.
+        try await KeepTalkingContext.query(on: database)
+            .filter(\.$id == context)
+            .set(\.$syncMetadata, to: metadata)
+            .update()
         syncMetadata = metadata
-        try await save(on: database)
     }
 }
 
