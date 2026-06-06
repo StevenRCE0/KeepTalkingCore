@@ -427,6 +427,12 @@ extension KeepTalkingClient {
     ) async -> String {
         var sections: [String] = []
 
+        // --- Environment ---
+        // Ground the bridge in the same local time / timezone / platform the
+        // main agent sees, so spoken answers and routing decisions can reason
+        // about "now" correctly instead of being time-blind.
+        sections.append("Environment:\n\(KeepTalkingEnvironmentContext.summaryLine())")
+
         // --- Conversation tail ---
         if let tail = try? await voiceRoutingContextTail(contextID: contextID), !tail.isEmpty {
             sections.append(tail)

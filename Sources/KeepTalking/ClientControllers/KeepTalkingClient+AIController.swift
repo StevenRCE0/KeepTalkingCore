@@ -338,16 +338,11 @@ extension KeepTalkingClient {
             model: model
         )
 
-        let currentDate = ISO8601DateFormatter().string(from: Date())
-        #if os(iOS)
-        let platform = "iOS"
-        #elseif os(macOS)
-        let platform = "macOS"
-        #elseif os(visionOS)
-        let platform = "visionOS"
-        #else
-        let platform = "unknown"
-        #endif
+        // Local wall-clock + timezone (not bare UTC ISO-8601, which misreports
+        // "now" for the user's locale). Shared with the audio bridge so both
+        // agents agree on the current time.
+        let currentDate = KeepTalkingEnvironmentContext.localDateTimeDescription()
+        let platform = KeepTalkingEnvironmentContext.platform
 
         let activeSideNotes =
             (try? await persistedContext.$sideNotes

@@ -89,6 +89,11 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
     private let sendBlobData: @Sendable (Data, UUID?) throws -> Void
     private let lock = NSLock()
     private var peerEntries: [UUID: PeerEntry] = [:]
+    /// When non-nil, all outbound audio frames are AES-GCM sealed with this
+    /// secret and inbound frames are expected to be sealed likewise. Frames
+    /// that fail decryption are silently dropped.
+    private let frameSecret: Data?
+    private var outboundFrameCounter: UInt64 = 0
 
     /// Heartbeat interval — re-broadcasts `voice.started` and checks
     /// peer freshness. Voice is real-time, so we run much tighter than
@@ -120,7 +125,8 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         sendEnvelope: @escaping @Sendable (any KeepTalkingEnvelope) throws -> Void,
         sendBlobData: @escaping @Sendable (Data, UUID?) throws -> Void,
         mode: TransportMode = .auto,
-        maxP2PMeshSize: Int = 4
+        maxP2PMeshSize: Int = 4,
+        frameSecret: Data? = nil
     ) {
         self.config = config
         self.sendEnvelope = sendEnvelope
@@ -129,6 +135,7 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         self.maxP2PMeshSize = max(1, maxP2PMeshSize)
         self.effectiveTransport = (mode == .sfu) ? .sfu : .p2p
         self.localNodeID = config.node
+        self.frameSecret = frameSecret
     }
 
     // MARK: - Shared session id
@@ -211,15 +218,16 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
     public func broadcast(_ payload: Data) {
         let transport = effectiveTransport
         let snapshot = lock.withLock { Array(peerEntries.values) }
+        let wire = sealFrame(payload)
         switch transport {
             case .p2p:
                 for entry in snapshot {
                     guard entry.iceDidConnect, let ice = entry.ice else { continue }
-                    do { try ice.send(payload) } catch {}
+                    do { try ice.send(wire) } catch {}
                 }
             case .sfu:
                 guard !snapshot.isEmpty else { return }
-                try? sendBlobData(Self.encodeSFUFrame(payload, from: localNodeID, to: nil), nil)
+                try? sendBlobData(Self.encodeSFUFrame(wire, from: localNodeID, to: nil), nil)
         }
     }
 
@@ -228,11 +236,12 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
     public func send(_ payload: Data, to nodeID: UUID) {
         let entry = lock.withLock { peerEntries[nodeID] }
         guard let entry else { return }
+        let wire = sealFrame(payload)
         switch effectiveTransport {
             case .p2p:
-                try? entry.ice?.send(payload)
+                try? entry.ice?.send(wire)
             case .sfu:
-                try? sendBlobData(Self.encodeSFUFrame(payload, from: localNodeID, to: nodeID), nodeID)
+                try? sendBlobData(Self.encodeSFUFrame(wire, from: localNodeID, to: nodeID), nodeID)
         }
     }
 
@@ -247,7 +256,8 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         if lock.withLock({ peerEntries[frame.sender] == nil }) {
             handlePeerStarted(nodeID: frame.sender, remoteTransport: .sfu)
         }
-        onInboundFrame?(frame.payload, frame.sender)
+        guard let plaintext = openFrame(frame.payload) else { return true }
+        onInboundFrame?(plaintext, frame.sender)
         return true
     }
 
@@ -560,7 +570,8 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
                 self?.handleICEState(state, for: captured)
             }
             agent.onMessage = { [weak self] data in
-                self?.onInboundFrame?(data, captured)
+                guard let self, let plaintext = self.openFrame(data) else { return }
+                self.onInboundFrame?(plaintext, captured)
             }
             agent.onLocalSDPReady = { [weak self] _ in
                 self?.attemptSendLocalSDP(for: captured)
@@ -712,6 +723,55 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         guard let handler = onPeersChanged else { return }
         let snapshot = peers
         handler(snapshot)
+    }
+
+    // MARK: - Frame crypto
+
+    /// Builds a 12-byte nonce: first 4 bytes of our node UUID (per-sender
+    /// domain separation) + 8-byte big-endian monotonic counter.
+    private func nextFrameNonce() -> Data {
+        let counter: UInt64 = lock.withLock {
+            outboundFrameCounter &+= 1
+            return outboundFrameCounter
+        }
+        var nonce = Data(count: 12)
+        let u = localNodeID.uuid
+        nonce[0] = u.0
+        nonce[1] = u.1
+        nonce[2] = u.2
+        nonce[3] = u.3
+        var be = counter.bigEndian
+        withUnsafeBytes(of: &be) { nonce.replaceSubrange(4..<12, with: $0) }
+        return nonce
+    }
+
+    /// Encrypts `payload` if a `frameSecret` is configured, otherwise passes
+    /// it through. Drops the frame (returns nil-equivalent via logging) on
+    /// the extremely unlikely encryption failure path.
+    private func sealFrame(_ payload: Data) -> Data {
+        guard let secret = frameSecret else { return payload }
+        let nonce = nextFrameNonce()
+        let sid = sessionID
+        do {
+            return try KeepTalkingFrameTransportCrypto.sealVoiceFrame(
+                secret: secret, sessionID: sid, nonce12: nonce, plaintext: payload)
+        } catch {
+            emitLog("[voice/crypto] seal failed: \(error.localizedDescription)")
+            return payload
+        }
+    }
+
+    /// Decrypts an inbound frame. Returns `nil` to drop the frame on
+    /// authentication failure. If no secret is configured, passes through.
+    private func openFrame(_ data: Data) -> Data? {
+        guard let secret = frameSecret else { return data }
+        let sid = sessionID
+        do {
+            return try KeepTalkingFrameTransportCrypto.openVoiceFrame(secret: secret, sessionID: sid, data: data)
+        } catch {
+            emitLog("[voice/crypto] open failed — dropping frame")
+            return nil
+        }
     }
 
 }

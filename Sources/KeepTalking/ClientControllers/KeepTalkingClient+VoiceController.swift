@@ -31,6 +31,7 @@ extension KeepTalkingClient {
         guard config.sfuEndpoint != nil else {
             throw KeepTalkingClientError.noSFUEndpointConfigured
         }
+        let contextSecret = try await loadGroupChatSecret(for: config.contextID)
         let session = KeepTalkingVoiceSession(
             config: config,
             sendEnvelope: { [weak self] envelope in
@@ -45,7 +46,8 @@ extension KeepTalkingClient {
                 try self.rtcClient.sendRealtimeDataViaBroadcast(data)
             },
             mode: mode,
-            maxP2PMeshSize: maxP2PMeshSize
+            maxP2PMeshSize: maxP2PMeshSize,
+            frameSecret: contextSecret
         )
         // Self-detach on stop so a torn-down session never lingers as
         // `activeVoiceSession` (which would make the client think it's still in the
