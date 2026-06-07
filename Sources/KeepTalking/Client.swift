@@ -177,6 +177,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// Called when an agent run finishes (normally, with error, or after cancellation).
     /// Receives the context ID and the error if the run failed, or nil on success/cancel.
     public var onAgentRunCompleted: (@Sendable (UUID, (any Error)?) -> Void)?
+    /// Fired the moment an agent turn suspends to wait on an out-of-band
+    /// continuation. A non-blocking driver (e.g. the voice bridge) uses this to
+    /// acknowledge and detach — see `KeepTalkingAgentTurnSuspension`.
+    public var onAgentTurnSuspended: (@Sendable (KeepTalkingAgentTurnSuspension) -> Void)?
     /// Fired whenever a voice-call transcript line is persisted — both locally
     /// appended (own mic) and received from a peer. The app drives the live
     /// quick-panel + viewer from this. Carries the Sendable envelope payload so

@@ -1,6 +1,28 @@
 import Foundation
 import MCP
 
+/// Emitted the moment an agent turn suspends to wait on an out-of-band
+/// continuation (a remote node's response, a local authorization bubble, an
+/// ask-for-file pick). Lets a driver that can't block — e.g. the voice bridge —
+/// detach: acknowledge now and let the turn finish in the background, with its
+/// answer landing in the conversation as a normal message.
+public struct KeepTalkingAgentTurnSuspension: Sendable {
+    public let agentTurnID: UUID
+    public let contextID: UUID
+    /// The action kind that triggered the suspension (e.g. a primitive action
+    /// raw value, "mcp", "skill", or the raw action id).
+    public let kind: String
+    /// The node that must respond before the turn can resume.
+    public let targetNodeID: UUID
+
+    public init(agentTurnID: UUID, contextID: UUID, kind: String, targetNodeID: UUID) {
+        self.agentTurnID = agentTurnID
+        self.contextID = contextID
+        self.kind = kind
+        self.targetNodeID = targetNodeID
+    }
+}
+
 extension KeepTalkingClient {
 
     // MARK: - Incoming (A receives response from B)
@@ -296,7 +318,23 @@ extension KeepTalkingClient {
             "[continuation] suspended agentTurnID=\(agentTurnID.uuidString.lowercased()) action=\(actionID.uuidString.lowercased()) target=\(targetNodeID.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"
         )
 
-        let response = try await agentRunQueue.awaitContinuation(agentTurnID: agentTurnID)
+        // Tell any non-blocking driver (e.g. the voice bridge) that this turn is
+        // now parked on an external response, so it can acknowledge and detach
+        // instead of waiting out the whole continuation on a possibly-doomed
+        // voice session.
+        onAgentTurnSuspended?(
+            KeepTalkingAgentTurnSuspension(
+                agentTurnID: agentTurnID,
+                contextID: contextID,
+                kind: kind,
+                targetNodeID: targetNodeID
+            )
+        )
+
+        let response = try await agentRunQueue.awaitContinuation(
+            agentTurnID: agentTurnID,
+            contextID: contextID
+        )
 
         guard response.state == .fulfilled else {
             return []

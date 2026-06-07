@@ -11,6 +11,11 @@ public enum KeepTalkingSendQueueItemState: String, Codable, Sendable {
     case queued
     case running
     case suspended
+    /// The item's agent turn suspended on an out-of-band continuation and is now
+    /// running detached in the background. Excluded from the drain's runnable
+    /// set (its in-flight task finalizes it); a non-blocking driver was already
+    /// acknowledged. On relaunch a stranded `.detached` row is reset to retry.
+    case detached
     case failed
 }
 

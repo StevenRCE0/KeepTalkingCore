@@ -187,10 +187,10 @@ extension KeepTalkingClient {
         reasoningEffort: AIReasoning.Effort? = nil,
         sendPromptMessage: Bool = true,
         promptType: KeepTalkingContextMessage.MessageType = .message,
+        agentTurnID: UUID = UUID(),
         onPromptMessageSent: (() async -> Void)? = nil
     ) async throws -> String {
         let context = KeepTalkingContext(id: contextID)
-        let agentTurnID = UUID()
         let preparedAttachments = try await prepareLocalAttachments(attachments)
         try Task.checkCancellation()
         if sendPromptMessage {

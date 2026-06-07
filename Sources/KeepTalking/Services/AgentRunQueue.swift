@@ -136,6 +136,18 @@ actor AgentRunQueue {
             emit()
             return
         }
+        // Suspended run: it no longer holds an active slot. Resolve its
+        // continuation with cancellation so its parked task unwinds; the next
+        // queued run already started when it suspended.
+        if let turnEntry = suspended.first(where: { $0.value.id == runID }) {
+            let turnID = turnEntry.key
+            suspended.removeValue(forKey: turnID)
+            if let continuation = suspensionContinuations.removeValue(forKey: turnID) {
+                continuation.resume(throwing: CancellationError())
+            }
+            emit()
+            return
+        }
         // Queued run: drop silently.
         for contextID in queued.keys {
             guard
@@ -193,6 +205,7 @@ actor AgentRunQueue {
     /// Returns true if any active or suspended run is associated with the given agent turn ID.
     func hasActiveTurn(agentTurnID: UUID) -> Bool {
         active.values.contains { $0.item.agentTurnID == agentTurnID }
+            || suspended[agentTurnID] != nil
     }
 
     // MARK: - Suspension & Resumption
@@ -201,8 +214,16 @@ actor AgentRunQueue {
     /// continuation response from a remote node.  The run slot is freed so
     /// queued runs can proceed.  Returns when `deliverContinuationResponse`
     /// is called with a matching `agentTurnID`.
+    ///
+    /// Freeing the slot means a queued run for the same context may start while
+    /// this one is parked, and both may briefly overlap once this one resumes.
+    /// That is the intended trade-off — a turn waiting on a remote/human
+    /// response must not hold the context hostage. Runs that never entered the
+    /// queue (the durable dispatcher path) have no slot here, so this is a
+    /// no-op for them.
     func awaitContinuation(
-        agentTurnID: UUID
+        agentTurnID: UUID,
+        contextID: UUID
     ) async throws -> KeepTalkingAgentTurnContinuationResponse {
         // Check for early arrival
         if let early = earlyResponses.removeValue(forKey: agentTurnID) {
@@ -215,6 +236,9 @@ actor AgentRunQueue {
         // that hasn't been installed yet).
         try Task.checkCancellation()
 
+        // Vacate the per-context slot before parking, so a queued run can start.
+        freeSlotForSuspension(agentTurnID: agentTurnID, contextID: contextID)
+
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 suspensionContinuations[agentTurnID] = continuation
@@ -225,6 +249,21 @@ actor AgentRunQueue {
                 await cancelSuspended(agentTurnID: agentTurnID)
             }
         }
+    }
+
+    /// Moves the active run for `agentTurnID` out of its context's active slot
+    /// and into the suspended set, then starts the next queued run. The run's
+    /// own task keeps executing — it is merely parked at the continuation await.
+    /// No-op when the run has no active slot (the durable dispatcher path runs
+    /// `runAI` directly without enqueueing here).
+    private func freeSlotForSuspension(agentTurnID: UUID, contextID: UUID) {
+        guard let entry = active[contextID], entry.item.agentTurnID == agentTurnID else {
+            return
+        }
+        suspended[agentTurnID] = entry.item
+        active[contextID] = nil
+        startNextQueued(contextID: contextID)
+        emit()
     }
 
     /// Delivers a continuation response, resuming a suspended agent turn.
@@ -243,6 +282,7 @@ actor AgentRunQueue {
 
     /// Cancels a suspended run by failing its continuation.
     func cancelSuspended(agentTurnID: UUID) {
+        suspended.removeValue(forKey: agentTurnID)
         if let continuation = suspensionContinuations.removeValue(forKey: agentTurnID) {
             continuation.resume(throwing: CancellationError())
         }
@@ -275,14 +315,26 @@ actor AgentRunQueue {
             return
         }
 
-        active[item.contextID] = nil
+        // A run that suspended was moved out of `active`; drop its suspended
+        // record now that it has finished.
+        if let turnID = item.agentTurnID {
+            suspended.removeValue(forKey: turnID)
+        }
+
+        // Only clear/advance the slot if this run still owns it. A suspended run
+        // that resumes may have been displaced by a later run that took the
+        // freed slot — that later run owns the slot and will advance the queue
+        // when it finishes.
+        if active[item.contextID]?.item.id == item.id {
+            active[item.contextID] = nil
+            startNextQueued(contextID: item.contextID)
+        }
 
         // Park failures so the UI can offer Retry / Dismiss.
         if let error, !(error is CancellationError) {
             failed[item.id] = (item: item, message: error.localizedDescription)
         }
 
-        startNextQueued(contextID: item.contextID)
         emit()
     }
 

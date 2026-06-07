@@ -22,6 +22,7 @@ public struct AudioInterfaceAgent: Sendable {
         public let bridgeSystemPrompt: String
         public let rephraseSystemPrompt: String
         public let ackSystemPrompt: String
+        public let deferralSystemPrompt: String
         public let responseLanguages: [String]
 
         public init(
@@ -32,7 +33,8 @@ public struct AudioInterfaceAgent: Sendable {
             responseLanguages: [String] = [],
             bridgeSystemPrompt: String? = nil,
             rephraseSystemPrompt: String? = nil,
-            ackSystemPrompt: String? = nil
+            ackSystemPrompt: String? = nil,
+            deferralSystemPrompt: String? = nil
         ) {
             self.audioModel = audioModel
             self.voice = voice
@@ -51,6 +53,9 @@ public struct AudioInterfaceAgent: Sendable {
                 + Self.languageInstruction(for: self.responseLanguages)
             self.ackSystemPrompt =
                 (ackSystemPrompt ?? Self.defaultAckSystemPrompt)
+                + Self.languageInstruction(for: self.responseLanguages)
+            self.deferralSystemPrompt =
+                (deferralSystemPrompt ?? Self.defaultDeferralSystemPrompt)
                 + Self.languageInstruction(for: self.responseLanguages)
         }
 
@@ -76,6 +81,15 @@ public struct AudioInterfaceAgent: Sendable {
             spoken sentence that you're on it (e.g. "Sure, let me look into that"). \
             Do NOT attempt to answer the request yourself and do NOT invent \
             details. Respond with audio.
+            """
+
+        static let defaultDeferralSystemPrompt = """
+            You are a voice interface. The user's request was started but can't \
+            finish right now — it needs another step, such as a confirmation or \
+            another participant. In ONE short, natural spoken sentence, tell the \
+            user it's underway and that the result will appear in the \
+            conversation when it's ready. Do NOT attempt to answer the request \
+            and do NOT invent any result. Respond with audio.
             """
 
         static func languageInstruction(for languages: [String]) -> String {
@@ -138,9 +152,20 @@ public struct AudioInterfaceAgent: Sendable {
     /// The app layer uses this to stream audio to the speaker in real time.
     public typealias AudioOutputHandler = @Sendable (AIAudioOutput) async -> Void
 
+    /// The result of delegating an intent to the main text agent.
+    public enum DelegateOutcome: Sendable {
+        /// The agent produced a final answer to speak.
+        case answered(String)
+        /// The agent turn suspended waiting on something out of band (a
+        /// confirmation, another participant, a file). The associated text is a
+        /// short human reason to speak; the eventual answer arrives in the
+        /// conversation, not here, so the bridge acknowledges and ends the turn.
+        case deferred(reason: String)
+    }
+
     /// Called to delegate the extracted intent to the main text agent.
-    /// Returns the agent's text response.
-    public typealias Delegate = @Sendable (DelegationRequest) async throws -> String
+    /// Returns either the agent's answer or a deferral when the turn suspends.
+    public typealias Delegate = @Sendable (DelegationRequest) async throws -> DelegateOutcome
 
     /// Called for status updates during the bridge flow.
     public typealias StatusObserver = @Sendable (BridgeStatus) async -> Void
@@ -286,57 +311,90 @@ public struct AudioInterfaceAgent: Sendable {
             ackTask = nil
         }
 
-        let delegateResponse: String
+        let outcome: DelegateOutcome
         do {
-            delegateResponse = try await delegate(request)
+            outcome = try await delegate(request)
         } catch {
             ackTask?.cancel()
             _ = await ackTask?.value
             log("phase 2 FAILED (delegate threw): \(error.localizedDescription)")
             throw error
         }
-        // Ensure the ack has finished streaming before the rephrase audio begins.
+        // Ensure the ack has finished streaming before the next audio begins.
         _ = await ackTask?.value
-        log(
-            "phase 2 done — delegate response (\(delegateResponse.count) chars): \(String(delegateResponse.prefix(300)))"
-        )
 
-        // Phase 3: Rephrase for speech
-        log("phase 3: rephrasing for speech…")
-        await statusObserver?(.rephrasing)
-        let rephraseResult: AITurnResult
-        do {
-            rephraseResult = try await rephraseForSpeech(
-                intent: request.intent,
-                delegateResponse: delegateResponse,
-                connector: connector,
-                audioOutputHandler: audioOutputHandler
-            )
-        } catch {
-            log("phase 3 FAILED: \(error.localizedDescription)")
-            throw error
+        switch outcome {
+            case .deferred(let reason):
+                // The backend turn suspended on an out-of-band step. Speak a
+                // short status and end here; the answer will arrive in the
+                // conversation. We do NOT wait it out (the voice session may be
+                // gone by the time it resolves).
+                log("phase 2 deferred — \(reason)")
+                await statusObserver?(.rephrasing)
+                let deferResult: AITurnResult
+                do {
+                    deferResult = try await speakDeferral(
+                        reason: reason,
+                        connector: connector,
+                        audioOutputHandler: audioOutputHandler
+                    )
+                } catch {
+                    log("phase 3 (deferral) FAILED: \(error.localizedDescription)")
+                    throw error
+                }
+                await statusObserver?(.done)
+                log("bridge flow complete (deferred)")
+                return BridgeResult(
+                    contextID: contextID,
+                    transcript: request.transcript,
+                    intent: request.intent,
+                    delegateResponse: reason,
+                    audioOutput: deferResult.audioOutput,
+                    ackAudioOutput: extraction.ackAudio
+                )
+
+            case .answered(let delegateResponse):
+                log(
+                    "phase 2 done — delegate response (\(delegateResponse.count) chars): \(String(delegateResponse.prefix(300)))"
+                )
+
+                // Phase 3: Rephrase for speech
+                log("phase 3: rephrasing for speech…")
+                await statusObserver?(.rephrasing)
+                let rephraseResult: AITurnResult
+                do {
+                    rephraseResult = try await rephraseForSpeech(
+                        intent: request.intent,
+                        delegateResponse: delegateResponse,
+                        connector: connector,
+                        audioOutputHandler: audioOutputHandler
+                    )
+                } catch {
+                    log("phase 3 FAILED: \(error.localizedDescription)")
+                    throw error
+                }
+                log(
+                    "phase 3 done — audioOutput: \(rephraseResult.audioOutput?.data?.count ?? 0) bytes, text: \(rephraseResult.assistantText?.prefix(100) ?? "nil")"
+                )
+
+                if rephraseResult.audioOutput == nil {
+                    log("WARNING: no audio output from rephrase turn")
+                }
+                // Audio was already streamed chunk-by-chunk via streamingAudioHandler.
+                // No need to deliver the full blob again.
+
+                await statusObserver?(.done)
+                log("bridge flow complete")
+
+                return BridgeResult(
+                    contextID: contextID,
+                    transcript: request.transcript,
+                    intent: request.intent,
+                    delegateResponse: delegateResponse,
+                    audioOutput: rephraseResult.audioOutput,
+                    ackAudioOutput: extraction.ackAudio
+                )
         }
-        log(
-            "phase 3 done — audioOutput: \(rephraseResult.audioOutput?.data?.count ?? 0) bytes, text: \(rephraseResult.assistantText?.prefix(100) ?? "nil")"
-        )
-
-        if rephraseResult.audioOutput == nil {
-            log("WARNING: no audio output from rephrase turn")
-        }
-        // Audio was already streamed chunk-by-chunk via streamingAudioHandler.
-        // No need to deliver the full blob again.
-
-        await statusObserver?(.done)
-        log("bridge flow complete")
-
-        return BridgeResult(
-            contextID: contextID,
-            transcript: request.transcript,
-            intent: request.intent,
-            delegateResponse: delegateResponse,
-            audioOutput: rephraseResult.audioOutput,
-            ackAudioOutput: extraction.ackAudio
-        )
     }
 
     // MARK: - Intent extraction (Phase 1)
@@ -539,6 +597,77 @@ public struct AudioInterfaceAgent: Sendable {
             "rephrase result: text=\(result.assistantText?.count ?? 0) chars, audio=\(result.audioOutput?.data?.count ?? 0) bytes, audioID=\(result.audioOutput?.id ?? "nil")"
         )
         return result
+    }
+
+    // MARK: - Deferral notice (Phase 3, when the turn suspended)
+
+    /// Speak a short "it's underway, the result will appear in the conversation"
+    /// notice when the backend turn suspended on an out-of-band step.
+    private func speakDeferral(
+        reason: String,
+        connector: any AIConnector,
+        audioOutputHandler: AudioOutputHandler? = nil
+    ) async throws -> AITurnResult {
+        let streamHandler: AIStreamingAudioHandler? = audioOutputHandler.map { handler in
+            AIStreamingAudioHandler { chunk in
+                await handler(AIAudioOutput(data: chunk))
+            }
+        }
+        let turnConfig = AITurnConfiguration(
+            modalities: ["text", "audio"],
+            audioOutput: AIAudioOutputConfig(
+                voice: configuration.voice,
+                format: configuration.audioFormat
+            ),
+            streamingAudioHandler: streamHandler
+        )
+        return try await connector.completeTurn(
+            messages: [
+                .system(configuration.deferralSystemPrompt),
+                .user("Context for the user: \(reason)"),
+            ],
+            tools: [],
+            model: configuration.audioModel,
+            toolChoice: nil,
+            stage: .execution,
+            configuration: turnConfig,
+            toolExecutor: nil
+        )
+    }
+
+    // MARK: - Standalone readout
+
+    /// Speak an already-finished answer aloud, naturally. Used to read out the
+    /// result of a previously-deferred turn if the user is still on the call
+    /// when it resolves. Streams audio chunk-by-chunk via `audioOutputHandler`.
+    public func speak(
+        text: String,
+        connector: any AIConnector,
+        audioOutputHandler: @escaping AudioOutputHandler
+    ) async throws {
+        let streamHandler = AIStreamingAudioHandler { chunk in
+            await audioOutputHandler(AIAudioOutput(data: chunk))
+        }
+        let turnConfig = AITurnConfiguration(
+            modalities: ["text", "audio"],
+            audioOutput: AIAudioOutputConfig(
+                voice: configuration.voice,
+                format: configuration.audioFormat
+            ),
+            streamingAudioHandler: streamHandler
+        )
+        _ = try await connector.completeTurn(
+            messages: [
+                .system(configuration.rephraseSystemPrompt),
+                .user(text),
+            ],
+            tools: [],
+            model: configuration.audioModel,
+            toolChoice: nil,
+            stage: .execution,
+            configuration: turnConfig,
+            toolExecutor: nil
+        )
     }
 
     // MARK: - Delegation acknowledgement (Phase 2, concurrent)
