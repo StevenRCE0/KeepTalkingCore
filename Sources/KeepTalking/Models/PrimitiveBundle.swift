@@ -121,14 +121,14 @@ extension KeepTalkingPrimitiveActionKind {
                         "type": .string("array"),
                         "items": .object(["type": .string("string")]),
                         "description": .string(
-                            "Calendar titles this action may list events from. Empty/omitted means no read scoping."
+                            "Calendar titles this action may list events from. Empty/omitted disables reading entirely — listing events becomes unavailable (it does not mean \"all calendars\")."
                         ),
                     ]),
                     "write": .object([
                         "type": .string("array"),
                         "items": .object(["type": .string("string")]),
                         "description": .string(
-                            "Calendar titles this action may add events to. Empty/omitted means no write scoping."
+                            "Calendar titles this action may add events to. Empty/omitted disables writing entirely — creating events becomes unavailable. When non-empty, the first listed is the default write target; there is no system-default fallback."
                         ),
                     ]),
                 ]
