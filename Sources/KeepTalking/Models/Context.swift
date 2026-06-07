@@ -80,11 +80,13 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     @Children(for: \.$context)
     public var outboxEntries: [KeepTalkingOutboxEntry]
 
-    public init() {}
+    public init() {
+        updatedAt = .now
+    }
 
     public init(
         id: UUID = UUID(),
-        updatedAt: Date = Date(),
+        updatedAt: Date = .now,
         messages: [KeepTalkingContextMessage] = [],
         attachments: [KeepTalkingContextAttachment] = []
     ) {
@@ -116,7 +118,7 @@ extension KeepTalkingContext: Codable {
             try container.decodeIfPresent(
                 Date.self,
                 forKey: .updatedAt
-            ) ?? Date()
+            ) ?? .now
         self.init(
             id: id,
             updatedAt: updatedAt

@@ -219,6 +219,76 @@ public struct KeepTalkingBlobStore: Sendable {
         try? removePartial(blobID: blobID)
     }
 
+    /// Delete on-disk blob files that no record claims. A *ready* file (under
+    /// `prefix/hash.ext`) is kept iff its path is in `keepRelativePaths`; a
+    /// *partial* file (under `partial/prefix/hash.part`) is kept iff the blob ID
+    /// in its name is in `keepBlobIDs`. Everything else is orphaned bytes — a
+    /// record was deleted without its file, a write landed without being
+    /// recorded, or a transfer left a partial behind that no record ever indexed
+    /// — and gets removed. Partial files we can't parse a valid blob ID from are
+    /// left alone (we only delete what we can positively identify as unindexed).
+    /// Returns how many files were removed and how many bytes that reclaimed.
+    @discardableResult
+    public func pruneOrphanFiles(
+        keepRelativePaths: Set<String>,
+        keepBlobIDs: Set<String>
+    ) throws -> (removedCount: Int, freedBytes: Int) {
+        let fileManager = FileManager.default
+        guard
+            let enumerator = fileManager.enumerator(
+                at: baseURL,
+                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            )
+        else {
+            return (0, 0)
+        }
+
+        var removedCount = 0
+        var freedBytes = 0
+        for case let fileURL as URL in enumerator {
+            let resourceValues = try? fileURL.resourceValues(
+                forKeys: [.isRegularFileKey, .fileSizeKey]
+            )
+            guard resourceValues?.isRegularFile == true,
+                let relativePath = relativePath(of: fileURL)
+            else { continue }
+
+            if relativePath.hasPrefix("partial/") {
+                // Indexed iff a record tracks the blob ID encoded in the filename.
+                guard let blobID = partialBlobID(fromRelativePath: relativePath),
+                    !keepBlobIDs.contains(blobID)
+                else { continue }
+            } else if keepRelativePaths.contains(relativePath) {
+                continue
+            }
+
+            try fileManager.removeItem(at: fileURL)
+            removedCount += 1
+            freedBytes += resourceValues?.fileSize ?? 0
+        }
+        return (removedCount, freedBytes)
+    }
+
+    /// Path of `fileURL` relative to `baseURL`, in the same `prefix/hash.ext`
+    /// shape stored on blob records. `nil` if the URL isn't under `baseURL`.
+    private func relativePath(of fileURL: URL) -> String? {
+        let basePath = baseURL.standardizedFileURL.path
+        let filePath = fileURL.standardizedFileURL.path
+        guard filePath.hasPrefix(basePath) else { return nil }
+        var relative = String(filePath.dropFirst(basePath.count))
+        if relative.hasPrefix("/") { relative.removeFirst() }
+        return relative.isEmpty ? nil : relative
+    }
+
+    /// The blob ID encoded in a partial file's name (`partial/prefix/hash.part`),
+    /// or `nil` if it isn't a well-formed blob hash. Mirrors `partialRelativePath`.
+    private func partialBlobID(fromRelativePath relativePath: String) -> String? {
+        let fileName = (relativePath as NSString).lastPathComponent
+        let candidate = (fileName as NSString).deletingPathExtension
+        return try? normalizedBlobID(candidate)
+    }
+
     private func normalizedBlobID(_ blobID: String) throws -> String {
         let normalizedBlobID = blobID.trimmingCharacters(
             in: .whitespacesAndNewlines

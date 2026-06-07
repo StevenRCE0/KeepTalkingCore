@@ -115,6 +115,24 @@ extension KeepTalkingClient {
         )
     }
 
+    /// Delete on-disk blob files that no blob record claims — ready bytes orphaned
+    /// when a record was removed without its file (or a write landed without being
+    /// recorded), plus partial bytes from transfers that no record ever indexed.
+    /// Counterpart to `pruneAllStrayBlobs`, which prunes the *records* (and files)
+    /// no attachment references; this catches *files* with no backing record at
+    /// all. Returns the count removed and bytes freed.
+    @discardableResult
+    public static func pruneOrphanBlobFiles(
+        on database: any Database,
+        blobStore: KeepTalkingBlobStore
+    ) async throws -> (removedCount: Int, freedBytes: Int) {
+        let records = try await KeepTalkingBlobRecord.query(on: database).all()
+        return try blobStore.pruneOrphanFiles(
+            keepRelativePaths: Set(records.compactMap { $0.relativePath }),
+            keepBlobIDs: Set(records.compactMap { $0.id })
+        )
+    }
+
     func ensureBlobRecordPlaceholder(
         for attachment: KeepTalkingContextAttachment
     ) async throws {
