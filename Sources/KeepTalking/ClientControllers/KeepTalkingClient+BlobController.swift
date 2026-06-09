@@ -194,6 +194,15 @@ extension KeepTalkingClient {
 
     func handleIncomingBlobFrameData(_ data: Data) async throws {
         let frame = try KeepTalkingBlobTransferCodec.decode(data)
+        // One-time blobs route to the ephemeral assembler — never the blob
+        // store, records, or context attachments. OTB is strictly
+        // point-to-point: require the frame be addressed to THIS node (a nil
+        // recipient is the broadcast-attachment case and is never a valid OTB).
+        if frame.header.isEphemeral == true {
+            guard frame.header.recipientNodeID == config.node else { return }
+            await handleIncomingOneTimeBlobFrame(frame)
+            return
+        }
         switch frame.header.kind {
             case .chunk:
                 try await handleIncomingBlobChunk(frame)

@@ -111,6 +111,17 @@ extension KeepTalkingClient {
             (@Sendable (KeepTalkingRequestAckState, String?) async -> Void)? =
             nil
     ) async -> KeepTalkingActionCallResult {
+        #if os(macOS)
+        // Built-in file-staging preflight: handled before normal action
+        // resolution (it has no action record). Stages the streamed file and
+        // returns its handle for a subsequent real tool call to reference.
+        if request.call.action == Self.stageFileActionID {
+            if let onAcknowledgement {
+                await onAcknowledgement(.accepted, "Staging file.")
+            }
+            return await handleStageFilePreflight(request)
+        }
+        #endif
         let action: KeepTalkingAction
         let grant: KeepTalkingGrantPermission
         do {
@@ -139,10 +150,10 @@ extension KeepTalkingClient {
         }
 
         do {
-            #if os(macOS)
-            let sandboxPolicy = try? await scopeManager.resolvedPolicy(for: action)
-            #endif
             let callResult: (content: [Tool.Content], isError: Bool?)
+            // One-time blobs the executor streams back to the caller (filesystem
+            // get-file); surfaced on the result for the caller to materialize.
+            var outputTransfers: [KeepTalkingOneTimeBlobRef]? = nil
             switch action.payload {
                 case .mcpBundle:
                     let allowedTools: Set<String>?
@@ -158,11 +169,76 @@ extension KeepTalkingClient {
                     )
                 case .skill:
                     #if os(macOS)
+                    // Build the skill's $KT_ATTACHMENTS staging dir from two
+                    // sources: the context's ready attachments, and any OTB file
+                    // inputs the caller relayed to us — gated on the action
+                    // accepting file input (skills only, today). One dir, two
+                    // sources; the skill script sees them all.
+                    let staged = await stageContextAttachments(in: request.contextID)
+                    var attachmentsDir: URL? = staged?.directory
+                    var ownedInputDir: URL? = nil
+                    // Arm cleanup BEFORE materializing — a throw mid-loop must not
+                    // leave decrypted plaintext at rest in the staging dir.
+                    defer {
+                        staged.map { cleanupStagedAttachments($0) }
+                        ownedInputDir.map { try? FileManager.default.removeItem(at: $0) }
+                        // Turn-scoped: drop the staged plaintext we consumed this
+                        // call rather than letting it linger to the store TTL. The
+                        // handle survives concurrent references within the turn
+                        // (each resolve copies its own file under isolation); its
+                        // backing plaintext is removed once this call finishes.
+                        if let consumed = request.call.inputHandles, !consumed.isEmpty {
+                            Task { [stagedFileStore] in
+                                for handle in consumed {
+                                    await stagedFileStore.discard(handle: handle)
+                                }
+                            }
+                        }
+                    }
+                    // Resolve any preflighted (staged) file inputs the caller
+                    // referenced by handle into the skill's $KT_ATTACHMENTS dir.
+                    if action.acceptsFileInput,
+                        request.call.inputHandles?.isEmpty == false
+                    {
+                        let dir: URL
+                        if let existing = attachmentsDir {
+                            dir = existing
+                        } else {
+                            dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+                                .appendingPathComponent(
+                                    "kt-otb-skillin-\(request.id.uuidString.lowercased())",
+                                    isDirectory: true)
+                            ownedInputDir = dir
+                        }
+                        _ = try await resolveStagedInputs(
+                            request.call, callerNodeID: request.callerNodeID, into: dir)
+                        attachmentsDir = dir
+                    }
+                    let sandboxPolicy: KTSandboxPolicy?
+                    if let attachmentsDir {
+                        // Best-effort grant of the staging dir. Injecting a
+                        // directory only ADDS constraints, so the policy can only
+                        // fail to compile in cases where the plain policy ALSO
+                        // fails (an inherently-unsandboxed skill whose staged file
+                        // is readable anyway) — so fall back rather than
+                        // hard-failing; never downgrades a would-be-sandboxed skill.
+                        if let granted = try? await scopeManager.resolvedPolicy(
+                            for: action,
+                            extraReadDirectories: ["KT_ATTACHMENTS": attachmentsDir]
+                        ) {
+                            sandboxPolicy = granted
+                        } else {
+                            sandboxPolicy = try? await scopeManager.resolvedPolicy(for: action)
+                        }
+                    } else {
+                        sandboxPolicy = try? await scopeManager.resolvedPolicy(for: action)
+                    }
                     callResult = try await skillManager.callAction(
                         action: action,
                         call: request.call,
                         sandboxPolicy: sandboxPolicy,
-                        model: openAIModel ?? "gpt-5-codex"
+                        model: openAIModel ?? "gpt-5-codex",
+                        attachmentsDir: attachmentsDir
                     )
                     #else
                     callResult = (content: [], isError: true)
@@ -188,12 +264,36 @@ extension KeepTalkingClient {
                     } else {
                         callerMask = .all
                     }
-                    callResult = try await filesystemActionManager.callAction(
+                    let isLocalExecution = request.callerNodeID == config.node
+                    // Materialize streamed one-time blobs ONLY for put-file — the
+                    // only op that consumes them. Read ops (ls/read/grep/stat) that
+                    // carry spurious inputTransfers must not trigger an
+                    // unseal+decrypt+write. Cleanup armed before any materialize.
+                    let inputStagingDir = URL(
+                        fileURLWithPath: NSTemporaryDirectory(), isDirectory: true
+                    ).appendingPathComponent(
+                        "kt-otb-fsin-\(request.id.uuidString.lowercased())", isDirectory: true)
+                    defer { try? FileManager.default.removeItem(at: inputStagingDir) }
+                    var inputFiles: [URL] = []
+                    let fsOp = filesystemOpAndArguments(request.call).op
+                    if fsOp == KeepTalkingFilesystemOperation.putFile.rawValue {
+                        for ref in request.call.inputTransfers ?? [] {
+                            inputFiles.append(
+                                try await materializeOneTimeBlob(
+                                    ref, from: request.callerNodeID, into: inputStagingDir))
+                        }
+                    }
+                    let fsResult = try await filesystemActionManager.callAction(
                         action: action,
                         call: request.call,
                         callerMask: callerMask,
-                        contextID: request.contextID
+                        contextID: request.contextID,
+                        callerNodeID: request.callerNodeID,
+                        isLocalExecution: isLocalExecution,
+                        inputFiles: inputFiles
                     )
+                    callResult = (content: fsResult.content, isError: fsResult.isError)
+                    outputTransfers = fsResult.outputTransfers.isEmpty ? nil : fsResult.outputTransfers
                 case .semanticRetrieval:
                     callResult = try await semanticRetrievalActionManager.callAction(
                         action: action,
@@ -236,7 +336,8 @@ extension KeepTalkingClient {
                 actionID: request.call.action,
                 content: callResult.content,
                 isError: callResult.isError ?? false,
-                errorMessage: nil
+                errorMessage: nil,
+                outputTransfers: outputTransfers
             )
         } catch {
             return KeepTalkingActionCallResult(
@@ -591,12 +692,31 @@ extension KeepTalkingClient {
             "[action-call/request] dispatching remote request=\(requestID) action=\(actionID) owner=\(actionOwner.uuidString.lowercased()) target=\(deliveryNodeID.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased())"
         )
 
-        try await sendRemoteActionCallRequest(request, deliveryDescription: "rtc")
+        // Filesystem put-file: privately stream the caller's local source to the
+        // host as a one-time encrypted blob before dispatch (no-op for any other
+        // call). Result get-files are materialized locally afterward.
+        let effectiveCall = try await preparingOutgoingFilesystemTransfers(
+            call, recipient: deliveryNodeID)
+        let effectiveRequest = KeepTalkingActionCallRequest(
+            id: request.id,
+            contextID: request.contextID,
+            callerNodeID: config.node,
+            targetNodeID: deliveryNodeID,
+            call: effectiveCall
+        )
 
-        return try await waitForActionCallResult(
-            requestID: request.id,
+        try await sendRemoteActionCallRequest(effectiveRequest, deliveryDescription: "rtc")
+
+        let result = try await waitForActionCallResult(
+            requestID: effectiveRequest.id,
             targetNodeID: deliveryNodeID
         )
+        guard result.outputTransfers?.isEmpty == false else { return result }
+        let receiveDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(
+                "kt-otb-recv-\(request.id.uuidString.lowercased())", isDirectory: true)
+        return try await materializingIncomingFilesystemTransfers(
+            result, from: deliveryNodeID, into: receiveDir)
     }
 
     private func dispatchBlockingActionCallViaContinuation(
@@ -669,7 +789,7 @@ extension KeepTalkingClient {
         )
     }
 
-    private func sendRemoteActionCallRequest(
+    func sendRemoteActionCallRequest(
         _ request: KeepTalkingActionCallRequest,
         deliveryDescription: String
     ) async throws {
@@ -888,6 +1008,11 @@ extension KeepTalkingClient {
         else {
             return false
         }
+        // Filesystem actions must take the direct remote branch so OTB transfers
+        // are streamed/materialized — the continuation path doesn't carry them.
+        // (iOS forces blockingAuthorisation=true for ALL actions, so without
+        // this a remote get/put-file would silently no-op there.)
+        if case .filesystem = action.payload { return false }
         return action.blockingAuthorisation == true
     }
 

@@ -61,9 +61,10 @@ public struct KTActionCreationResult: Codable, Sendable {
 public actor ScopeManager {
 
     /// Callback surfaced to the app layer for user approval of action creation requests.
-    public typealias ActionCreationApprovalHandler = @Sendable (
-        KTActionCreationRequest
-    ) async -> (approved: Bool, duration: KeepTalkingActionGrantDuration)
+    public typealias ActionCreationApprovalHandler =
+        @Sendable (
+            KTActionCreationRequest
+        ) async -> (approved: Bool, duration: KeepTalkingActionGrantDuration)
 
     private let sandbox: any ProcessSandboxing
     private var activeGrants: [UUID: KeepTalkingActionGrant] = [:]
@@ -140,6 +141,30 @@ public actor ScopeManager {
             additionalGrants: grants,
             sandbox: sandbox
         )
+    }
+
+    /// Resolves a policy that additionally grants read access to one or more
+    /// extra directories (e.g. a per-call attachment staging dir). The extra
+    /// dirs are injected into the *merged* descriptor's `directories` — so they
+    /// compile to `(allow file-read* (subpath …))` rules — and symlink-resolved
+    /// so the granted path matches what the kernel canonicalizes at access time.
+    public func resolvedPolicy(
+        for action: KeepTalkingAction,
+        extraReadDirectories: [String: URL]
+    ) throws -> KTSandboxPolicy {
+        let grants = Array(activeGrants.values)
+        var descriptor = ScopeResolver.resolvedDescriptor(
+            for: action,
+            additionalGrants: grants
+        )
+        if !extraReadDirectories.isEmpty {
+            var dirs = descriptor.directories ?? [:]
+            for (label, url) in extraReadDirectories {
+                dirs[label] = url.resolvingSymlinksInPath()
+            }
+            descriptor.directories = dirs
+        }
+        return try sandbox.compilePolicy(descriptor: descriptor)
     }
 }
 #endif

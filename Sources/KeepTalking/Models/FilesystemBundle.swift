@@ -10,22 +10,26 @@ public enum KeepTalkingFilesystemOperation: String, Codable, Sendable, Hashable,
     case readFile = "read-file"
     /// Search file trees with a regex pattern (like grep -r).
     case grep
+    /// Apply a `s/pattern/replacement/flags` substitution to a file in place.
+    case sed
     /// Write or overwrite a file.
     case writeFile = "write-file"
     /// Return metadata (size, modification date, type) for a path.
     case stat
-    /// Read a local file and register it as a context blob attachment.
-    case fileToBlob = "file-to-blob"
-    /// Copy a context blob attachment to a local filesystem path.
-    case blobToFile = "blob-to-file"
+    /// Read a file on the host and stream it back to the caller as a one-time
+    /// encrypted blob (point-to-point, ephemeral — no context attachment).
+    case getFile = "get-file"
+    /// Receive a one-time encrypted blob the caller streamed and write it to a
+    /// path on the host.
+    case putFile = "put-file"
 
     /// Minimum mask bit required to invoke this operation.
     public var requiredMask: KeepTalkingActionPermissionMask {
         switch self {
-        case .ls, .readFile, .grep, .stat, .fileToBlob:
-            return .read
-        case .writeFile, .blobToFile:
-            return .write
+            case .ls, .readFile, .grep, .stat, .getFile:
+                return .read
+            case .writeFile, .sed, .putFile:
+                return .write
         }
     }
 }
@@ -39,17 +43,18 @@ public struct KeepTalkingFilesystemBundle: KeepTalkingActionBundle {
     public var name: String
     public var indexDescription: String
 
-    /// Optional path prefix used to sandbox every operation.
-    /// Paths outside this root are rejected at execution time.
-    /// `nil` means no sandboxing (owner's full filesystem is accessible).
-    public var rootPath: String?
+    /// Required path prefix that sandboxes every operation. ALL caller paths are
+    /// resolved strictly relative to this root, and anything resolving outside
+    /// it is rejected. There is no unsandboxed mode; an empty root fails closed
+    /// at execution.
+    public var rootPath: String
 
     public init(
         id: UUID = UUID(),
         name: String = "filesystem",
         indexDescription: String =
             "Access local files and directories on the action host.",
-        rootPath: String? = nil
+        rootPath: String
     ) {
         self.id = id
         self.name = name
@@ -76,76 +81,115 @@ extension KeepTalkingFilesystemOperation {
     /// Human-readable description of this operation for catalog displays.
     public var toolDescription: String {
         switch self {
-        case .ls:
-            return "List the contents of a directory."
-        case .readFile:
-            return "Read the text content of a file."
-        case .grep:
-            return "Search file trees recursively with a regex pattern."
-        case .writeFile:
-            return "Write or overwrite the content of a file."
-        case .stat:
-            return "Return metadata (size, type, modification date) for a path."
-        case .fileToBlob:
-            return "Read a local file and publish it as a context attachment (blob) shared with all participants in this context. Returns a blob_id that can be referenced in blob-to-file or discovered via kt_list_context_attachments. Use this to make a local file visible in the conversation."
-        case .blobToFile:
-            return "Materialise a context attachment (blob) to a local file path on this node. Supply a blob_id from a prior file-to-blob call or from kt_list_context_attachments. Use this to bring a shared context file onto disk for further processing by other filesystem tools."
+            case .ls:
+                return "List the contents of a directory."
+            case .readFile:
+                return "Read the text content of a file."
+            case .grep:
+                return "Search file trees recursively with a regex pattern."
+            case .sed:
+                return
+                    "Apply a sed-style s/pattern/replacement/flags substitution to a file in place. Returns a summary of what changed."
+            case .writeFile:
+                return "Write or overwrite the content of a file."
+            case .stat:
+                return "Return metadata (size, type, modification date) for a path."
+            case .getFile:
+                return
+                    "Read a file on the host and return its bytes to you via a one-time encrypted transfer — point-to-point and ephemeral, NOT shared with the conversation. Use for binary or large files you need to pull from this host."
+            case .putFile:
+                return
+                    "Write a file you provide onto the host's filesystem. Supply the destination `path`; the bytes are streamed privately as a one-time encrypted transfer, not published as a context attachment."
         }
     }
 
     /// OpenAI-compatible JSON-schema for this operation's arguments.
     public var inputSchemaProperties: [String: [String: String]] {
         switch self {
-        case .ls:
-            return ["path": ["type": "string", "description": "Directory path to list."]]
-        case .readFile:
-            return ["path": ["type": "string", "description": "File path to read."]]
-        case .grep:
-            return [
-                "pattern": ["type": "string", "description": "Regex pattern to search for."],
-                "path": ["type": "string", "description": "Root path to search under."],
-            ]
-        case .writeFile:
-            return [
-                "path": ["type": "string", "description": "File path to write."],
-                "content": ["type": "string", "description": "Content to write."],
-            ]
-        case .stat:
-            return ["path": ["type": "string", "description": "Path to stat."]]
-        case .fileToBlob:
-            return [
-                "path": [
-                    "type": "string",
-                    "description": "Absolute path of the local file to read and upload. Must be within a permitted directory.",
-                ],
-                "filename": [
-                    "type": "string",
-                    "description": "Display name for the attachment in the conversation. Defaults to the last path component of path.",
-                ],
-            ]
-        case .blobToFile:
-            return [
-                "blob_id": [
-                    "type": "string",
-                    "description": "ID of the context attachment to write to disk. Obtain from a prior file-to-blob call or from kt_list_context_attachments.",
-                ],
-                "path": [
-                    "type": "string",
-                    "description": "Absolute destination path on this node's filesystem. Intermediate directories are created automatically.",
-                ],
-            ]
+            case .ls:
+                return [
+                    "path": [
+                        "type": "string",
+                        "description":
+                            "Directory to list, RELATIVE to the action's root. Use \".\" (or \"\") for the root itself; never an absolute path.",
+                    ]
+                ]
+            case .readFile:
+                return [
+                    "path": [
+                        "type": "string",
+                        "description": "File to read, relative to the action's root.",
+                    ]
+                ]
+            case .grep:
+                return [
+                    "pattern": ["type": "string", "description": "Regex pattern to search for."],
+                    "path": [
+                        "type": "string",
+                        "description":
+                            "Directory to search under, relative to the action's root (\".\" = root).",
+                    ],
+                ]
+            case .sed:
+                return [
+                    "path": [
+                        "type": "string",
+                        "description": "File to edit in place, relative to the action's root.",
+                    ],
+                    "expression": [
+                        "type": "string",
+                        "description":
+                            "A sed substitution, e.g. s/foo/bar/g (s/pattern/replacement/flags; flag 'g' = global).",
+                    ],
+                ]
+            case .writeFile:
+                return [
+                    "path": [
+                        "type": "string",
+                        "description": "File to write, relative to the action's root.",
+                    ],
+                    "content": ["type": "string", "description": "Content to write."],
+                ]
+            case .stat:
+                return [
+                    "path": [
+                        "type": "string",
+                        "description": "Path to stat, relative to the action's root.",
+                    ]
+                ]
+            case .getFile:
+                return [
+                    "path": [
+                        "type": "string",
+                        "description": "File on the host to read and return, RELATIVE to the action's root.",
+                    ]
+                ]
+            case .putFile:
+                return [
+                    "source": [
+                        "type": "string",
+                        "description":
+                            "Absolute path of YOUR local file to send (this is on the CALLER, so it is a real local path). Streamed to the host as a one-time encrypted transfer, not published to the conversation.",
+                    ],
+                    "path": [
+                        "type": "string",
+                        "description":
+                            "Destination on the host, RELATIVE to the action's root. Intermediate directories are created automatically.",
+                    ],
+                ]
         }
     }
 
     public var requiredInputProperties: [String] {
         switch self {
-        case .ls: return ["path"]
-        case .readFile: return ["path"]
-        case .grep: return ["pattern", "path"]
-        case .writeFile: return ["path", "content"]
-        case .stat: return ["path"]
-        case .fileToBlob: return ["path"]
-        case .blobToFile: return ["blob_id", "path"]
+            case .ls: return ["path"]
+            case .readFile: return ["path"]
+            case .grep: return ["pattern", "path"]
+            case .sed: return ["path", "expression"]
+            case .writeFile: return ["path", "content"]
+            case .stat: return ["path"]
+            case .getFile: return ["path"]
+            case .putFile: return ["source", "path"]
         }
     }
 }

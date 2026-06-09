@@ -57,7 +57,26 @@ extension KeepTalkingActionPermissionMask: Codable {
     public static let write = Self(rawValue: 1 << 1)
     /// Grants access to execute operations (shell commands, scripts).
     public static let execute = Self(rawValue: 1 << 2)
+    /// Data-flow axis (orthogonal to read/write/execute): caller may PROVIDE
+    /// `.input` file objects (push a file in).
+    public static let input = Self(rawValue: 1 << 3)
+    /// Data-flow axis: caller may RECEIVE `.output` file objects (pull a file out).
+    public static let output = Self(rawValue: 1 << 4)
 
-    /// Convenience: all three capabilities enabled.
+    /// Convenience: all three VERB capabilities. This is the "unrestricted"
+    /// sentinel `isUnrestricted` compares against — deliberately NOT including
+    /// the orthogonal `.input`/`.output` data-flow axis, so existing filesystem
+    /// grants and the verb-only mask editor still collapse to the nil sentinel.
     public static let all: Self = [.read, .write, .execute]
+
+    /// The data-flow capability a directioned object requires of the caller.
+    public static func required(
+        for direction: KeepTalkingResourceDirection
+    ) -> Self {
+        switch direction {
+            case .input: return .input
+            case .output: return .output
+            case .inputOutput: return [.input, .output]
+        }
+    }
 }

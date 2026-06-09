@@ -419,7 +419,7 @@ extension KeepTalkingClient {
         }
 
         rtcClient.debug(
-            "[asym.encrypt] purpose=\(purpose) sender=\(config.node.uuidString.lowercased()) recipient=\(recipientNodeID.uuidString.lowercased()) localPublicKey=\(localKeyMaterial.publicKeyBase64) localPrivateKey=\(localKeyMaterial.privateKeyBase64) remotePublicKey=\(recipientCandidate.publicKeyBase64) relation=\(recipientCandidate.relationID.uuidString.lowercased()) payloadBytes=\(payload.count)"
+            "[asym.encrypt] purpose=\(purpose) sender=\(config.node.uuidString.lowercased()) recipient=\(recipientNodeID.uuidString.lowercased()) localPublicKey=\(localKeyMaterial.publicKeyBase64) remotePublicKey=\(recipientCandidate.publicKeyBase64) relation=\(recipientCandidate.relationID.uuidString.lowercased()) payloadBytes=\(payload.count)"
         )
 
         let sharedSecret = try localKeyMaterial.privateKey.sharedSecretFromKeyAgreement(
@@ -493,7 +493,7 @@ extension KeepTalkingClient {
 
         for (index, senderCandidate) in senderPublicKeys.enumerated() {
             debug?(
-                "[asym.decrypt] purpose=\(purpose) sender=\(envelope.senderNodeID.uuidString.lowercased()) recipient=\(envelope.recipientNodeID.uuidString.lowercased()) localPublicKey=\(localKeyMaterial.publicKeyBase64) localPrivateKey=\(localKeyMaterial.privateKeyBase64) remotePublicKey=\(senderCandidate.publicKeyBase64) relation=\(senderCandidate.relationID.uuidString.lowercased()) candidate=\(index + 1)/\(senderPublicKeys.count) cipherBytes=\(envelope.ciphertext.count)"
+                "[asym.decrypt] purpose=\(purpose) sender=\(envelope.senderNodeID.uuidString.lowercased()) recipient=\(envelope.recipientNodeID.uuidString.lowercased()) localPublicKey=\(localKeyMaterial.publicKeyBase64) remotePublicKey=\(senderCandidate.publicKeyBase64) relation=\(senderCandidate.relationID.uuidString.lowercased()) candidate=\(index + 1)/\(senderPublicKeys.count) cipherBytes=\(envelope.ciphertext.count)"
             )
 
             let sharedSecret = try localKeyMaterial.privateKey

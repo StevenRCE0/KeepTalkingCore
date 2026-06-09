@@ -12,15 +12,27 @@ public struct KeepTalkingActionCall: Codable, Sendable {
     public var action: UUID
     public var arguments: [String: Value]
     public var metadata: Metadata
+    /// One-time blobs the caller is streaming to the executor alongside this
+    /// call. Used ONLY by the `stage-file` preflight to deliver the bytes being
+    /// staged; real tool calls reference staged files by `inputHandles` instead.
+    public var inputTransfers: [KeepTalkingOneTimeBlobRef]?
+    /// Handles to files the caller previously *preflighted* (staged) onto the
+    /// executor via `sendFile`. The executor resolves each to its staged path
+    /// and feeds it to the action's input file object. Optional.
+    public var inputHandles: [UUID]?
 
     public init(
         action: UUID,
         arguments: [String: Value] = [:],
-        metadata: Metadata = .init()
+        metadata: Metadata = .init(),
+        inputTransfers: [KeepTalkingOneTimeBlobRef]? = nil,
+        inputHandles: [UUID]? = nil
     ) {
         self.action = action
         self.arguments = arguments
         self.metadata = metadata
+        self.inputTransfers = inputTransfers
+        self.inputHandles = inputHandles
     }
 }
 
@@ -55,6 +67,9 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
     public var content: [Tool.Content]
     public var isError: Bool
     public var errorMessage: String?
+    /// One-time blobs the executor is streaming back to the caller (e.g. a file
+    /// read from the remote host). Each carries the sealed per-transfer key.
+    public var outputTransfers: [KeepTalkingOneTimeBlobRef]?
 
     public init(
         requestID: UUID,
@@ -64,7 +79,8 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
         actionID: UUID,
         content: [Tool.Content] = [],
         isError: Bool = false,
-        errorMessage: String? = nil
+        errorMessage: String? = nil,
+        outputTransfers: [KeepTalkingOneTimeBlobRef]? = nil
     ) {
         self.requestID = requestID
         self.contextID = contextID
@@ -74,6 +90,7 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
         self.content = content
         self.isError = isError
         self.errorMessage = errorMessage
+        self.outputTransfers = outputTransfers
     }
 }
 

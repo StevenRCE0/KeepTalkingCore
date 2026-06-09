@@ -522,6 +522,51 @@ extension KeepTalkingClient {
         )
     }
 
+    func makeSendFileTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.sendFileToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: """
+                Stage a local file onto another node ahead of running a \
+                file-accepting action there (e.g. a skill). Returns an opaque \
+                handle; pass it in the `input_handles` array of a later \
+                kt_run_action whose action is hosted on that SAME node, and the \
+                file is delivered as the action's input. Use this to relay a \
+                file you hold locally — for example one you just pulled from \
+                another node — to the node that will process it. The staged file \
+                is private to you, quota-bounded, and expires; stage it shortly \
+                before the kt_run_action that consumes it.
+                """,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "path": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "Absolute local path of the file to stage on the target node."
+                        ),
+                    ]),
+                    "target_node_id": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "UUID of the node that hosts the action which will consume this file (the action's owner node)."
+                        ),
+                    ]),
+                    "filename": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "Optional name to present the file as on the target. Defaults to the path's last component."
+                        ),
+                    ]),
+                ]),
+                "required": .array([.string("path"), .string("target_node_id")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
     func makeWebSearchTool() -> KeepTalkingActionToolDefinition {
         // Chat Completions only — Responses-API-style web_search_preview was dropped
         // when the protocol moved off the Responses API.

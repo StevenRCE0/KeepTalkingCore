@@ -302,6 +302,15 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     let blobFrameProcessor = KeepTalkingBlobFrameProcessor()
 
+    /// Reassembles inbound one-time-blob (OTB) transfers — ephemeral, encrypted,
+    /// point-to-point file payloads carried alongside action calls.
+    let oneTimeBlobAssembler = KeepTalkingOneTimeBlobAssembler()
+
+    /// Holds files peers have preflighted (staged) onto this node ahead of a
+    /// tool call, keyed by handle. A real call references the handle for its
+    /// input file object.
+    let stagedFileStore = KeepTalkingStagedFileStore()
+
     // MARK: Teardown serialization
     // `rtcClient.stop()` synchronously closes WebRTC peer connections, which
     // joins worker threads and can block for hundreds of milliseconds. We run
@@ -448,43 +457,25 @@ public final class KeepTalkingClient: @unchecked Sendable {
         #endif
 
         // All stored properties are initialized above; [weak self] is safe from here on.
-        // Inject the blob bridge synchronously so blob transfer operations are available
-        // immediately, using the same send(attachments:) path as ask-for-file.
-        filesystemActionManager.bridgeBox.bridge = FilesystemBlobBridge(
-            readBlob: { [weak self] blobID in
+        // Inject the one-time-blob transfer bridge: filesystem get-file streams a
+        // host file straight to the caller, encrypted and point-to-point — no
+        // context attachment, no broadcast, no record.
+        filesystemActionManager.bridgeBox.bridge = FilesystemTransferBridge(
+            sendOneTimeBlob: { [weak self] fileURL, filename, mimeType, recipient in
                 guard let self else {
                     throw FilesystemActionManagerError.blobBridgeNotConfigured
                 }
-                let records = try await self.blobRecordsByBlobID([blobID])
-                guard let record = records[blobID], record.availability == .ready else {
-                    throw FilesystemActionManagerError.blobNotAvailable(blobID)
-                }
-                return try self.blobStore.read(
-                    relativePath: record.relativePath,
-                    blobID: blobID
+                return try await self.sendOneTimeBlob(
+                    fileURL: fileURL,
+                    filename: filename,
+                    mimeType: mimeType,
+                    to: recipient
                 )
-            },
-            uploadFileAsContextAttachment: { [weak self] fileURL, filename, mimeType, contextID in
-                guard let self else {
-                    throw FilesystemActionManagerError.blobBridgeNotConfigured
-                }
-                let data = try Data(contentsOf: fileURL)
-                let blobID = self.hexDigest(for: data)
-                try await self.send(
-                    "",
-                    attachments: [
-                        KeepTalkingLocalAttachmentInput(
-                            sourceURL: fileURL,
-                            filename: filename,
-                            mimeType: mimeType
-                        )
-                    ],
-                    in: contextID,
-                    type: .intermediate(hint: "file-to-blob")
-                )
-                return blobID
             }
         )
+
+        // Clear any decrypted/ciphertext OTB temp dirs orphaned by a prior run.
+        KeepTalkingClient.pruneStaleOneTimeBlobTempDirs()
 
         rtcClient.onLog = { [weak self] line in
             self?.onLog?(line)

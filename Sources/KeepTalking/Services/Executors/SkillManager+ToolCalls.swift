@@ -61,7 +61,8 @@ extension SkillManager {
         skillDirectory: URL?,
         manifestContext: SkillManifestContext,
         sandboxPolicy: KTSandboxPolicy? = nil,
-        scriptTrace: SkillScriptTraceCollector? = nil
+        scriptTrace: SkillScriptTraceCollector? = nil,
+        attachmentsDir: URL? = nil
     ) async throws -> [AIMessage] {
         var messages: [AIMessage] = []
         for toolCall in toolCalls {
@@ -76,7 +77,9 @@ extension SkillManager {
 
             let parameters = skillBundlesByActionID[actionID]?.parameters ?? [:]
             let payload: String
-            let paramDirRoots = parameters.values.filter { $0.hasPrefix("/") }
+            var paramDirRoots = parameters.values.filter { $0.hasPrefix("/") }
+            // Staged context attachments are a readable root for the file tools too.
+            if let attachmentsDir { paramDirRoots.append(attachmentsDir.path) }
             if functionName == Self.getFileToolName {
                 var resolvedArgs = arguments
                 // Resolve directory labels in the path (e.g. "input_dir/file.txt" → "/real/path/file.txt")
@@ -89,7 +92,9 @@ extension SkillManager {
                 }
             } else if functionName == Self.listFilesToolName {
                 let dirLabel = arguments["directory"]?.stringValue ?? ""
-                payload = executeListFiles(directory: dirLabel, parameters: parameters, skillDirectory: skillDirectory)
+                payload = executeListFiles(
+                    directory: dirLabel, parameters: parameters,
+                    skillDirectory: skillDirectory, attachmentsDir: attachmentsDir)
             } else if let scriptPath = manifestContext.declaredTools[functionName] {
                 // Route declared tool call to its script — ACT provides raw CLI args string
                 let rawArgs = arguments["args"]?.stringValue ?? ""
@@ -103,7 +108,8 @@ extension SkillManager {
                     actionID: actionID,
                     skillDirectory: skillDirectory,
                     parameters: parameters,
-                    sandboxPolicy: sandboxPolicy
+                    sandboxPolicy: sandboxPolicy,
+                    attachmentsDir: attachmentsDir
                 )
                 // The skill loop reports its final answer back to the outer
                 // chat as one tool result; without this, the structured
@@ -169,7 +175,8 @@ extension SkillManager {
         actionID: UUID,
         skillDirectory: URL?,
         parameters: [String: String] = [:],
-        sandboxPolicy: KTSandboxPolicy? = nil
+        sandboxPolicy: KTSandboxPolicy? = nil,
+        attachmentsDir: URL? = nil
     ) async throws -> String {
         guard let scriptExecutor else {
             throw SkillManagerError.scriptExecutionUnavailableOnThisPlatform
@@ -188,6 +195,10 @@ extension SkillManager {
         var environment = parameters
         if let skillDir = skillDirectory {
             environment["SKILL_DIR"] = skillDir.path
+        }
+        // Expose staged context attachments to the script.
+        if let attachmentsDir {
+            environment["KT_ATTACHMENTS"] = attachmentsDir.path
         }
 
         #if os(macOS)
@@ -345,7 +356,8 @@ extension SkillManager {
     func executeListFiles(
         directory: String,
         parameters: [String: String],
-        skillDirectory: URL?
+        skillDirectory: URL?,
+        attachmentsDir: URL? = nil
     ) -> String {
         let resolved = resolveDirectoryLabel(directory, parameters: parameters)
         let dirURL: URL
@@ -357,11 +369,13 @@ extension SkillManager {
             return "Error: no directory found for '\(directory)'."
         }
 
-        // Verify the directory is within an allowed path (skill dir or a parameter dir)
+        // Verify the directory is within an allowed path (skill dir, a parameter
+        // dir, or the staged-attachments dir).
         let resolvedPath = dirURL.resolvingSymlinksInPath().path
         let allowedRoots =
             [skillDirectory?.resolvingSymlinksInPath().path].compactMap { $0 }
             + parameters.values.filter { $0.hasPrefix("/") }
+            + [attachmentsDir?.resolvingSymlinksInPath().path].compactMap { $0 }
         let isAllowed = allowedRoots.contains { root in
             resolvedPath == root || resolvedPath.hasPrefix(root + "/")
         }

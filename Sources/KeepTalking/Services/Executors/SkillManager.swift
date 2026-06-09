@@ -150,7 +150,8 @@ public actor SkillManager {
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
         sandboxPolicy: KTSandboxPolicy? = nil,
-        model: String = "gpt-5-codex"
+        model: String = "gpt-5-codex",
+        attachmentsDir: URL? = nil
     ) async throws -> (content: [MCP.Tool.Content], isError: Bool?) {
         guard let actionID = action.id else {
             throw SkillManagerError.missingActionID
@@ -197,6 +198,9 @@ public actor SkillManager {
             ),
             .user(makeSkillUserPrompt(call: call)),
         ]
+        if let note = attachmentsPromptNote(attachmentsDir) {
+            messages.append(.user(note))
+        }
 
         var latestAssistantText: String?
         let scriptTrace = SkillScriptTraceCollector()
@@ -215,7 +219,8 @@ public actor SkillManager {
                         skillDirectory: skillBundle.directory,
                         manifestContext: resolvedContext,
                         sandboxPolicy: sandboxPolicy,
-                        scriptTrace: scriptTrace
+                        scriptTrace: scriptTrace,
+                        attachmentsDir: attachmentsDir
                     )
                 }
             )
@@ -238,7 +243,8 @@ public actor SkillManager {
                     skillDirectory: skillBundle.directory,
                     manifestContext: resolvedContext,
                     sandboxPolicy: sandboxPolicy,
-                    scriptTrace: scriptTrace
+                    scriptTrace: scriptTrace,
+                    attachmentsDir: attachmentsDir
                 )
             )
         }
@@ -259,6 +265,32 @@ public actor SkillManager {
             content: [.text(text: finalText, annotations: nil, _meta: nil)],
             isError: false
         )
+    }
+
+    /// Tells the inner skill agent that context attachments are staged and how
+    /// to reach them — an env var (`KT_ATTACHMENTS`) for scripts, absolute paths
+    /// for the file tools. Returns nil when nothing is staged.
+    private func attachmentsPromptNote(_ attachmentsDir: URL?) -> String? {
+        guard let attachmentsDir else { return nil }
+        let names =
+            (try? FileManager.default.contentsOfDirectory(atPath: attachmentsDir.path))?
+            .filter { !$0.hasPrefix(".") }
+            .sorted() ?? []
+        guard !names.isEmpty else { return nil }
+        let list = names.map { "- \($0)" }.joined(separator: "\n")
+        return """
+            Context attachments for this conversation are staged on disk for this run:
+            \(list)
+
+            They live in \(attachmentsDir.path), also exposed to scripts as the \
+            environment variable KT_ATTACHMENTS. To use one:
+            - Pass its absolute path as a script argument, e.g. \
+            "\(attachmentsDir.path)/<filename>".
+            - Or inside a script read $KT_ATTACHMENTS and join the filename.
+            - To read it yourself, call \(Self.getFileToolName) with the absolute \
+            path under \(attachmentsDir.path).
+            Only use these when the request actually needs the attached file(s).
+            """
     }
     #endif
 

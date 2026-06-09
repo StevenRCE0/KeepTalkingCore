@@ -62,7 +62,7 @@ public enum AIPromptPresets {
             Available actions are listed in the conversation context under "Available actions". Before calling \(ktRunActionToolFunctionName), scan that full list and choose the single action_id whose name, type, node, and description best match the user's intent. Do not delegate to the first plausible or current-node action when another listed action is more specific.
             Call \(ktRunActionToolFunctionName)(action_id, task) to execute the selected action end-to-end. The ACT agent receives only that selected action; it will handle that action's tool discovery, argument construction, and execution, then return a concise result.
             Write the task argument as a precise instruction for the selected action, preserving any target node, action name, file, query, or constraints the user gave.
-            Action types in the listing — mcp: external server tools; skill: a directory-based agent skill you can read and invoke; primitive: a direct built-in operation; filesystem: sandboxed file access on the owning node, including a blob bridge (file-to-blob uploads a local file as a shared context attachment visible to all participants, blob-to-file materialises a shared context attachment to disk); semanticretrieval: remote thread-memory search on another node.
+            Action types in the listing — mcp: external server tools; skill: a directory-based agent skill you can read and invoke; primitive: a direct built-in operation; filesystem: sandboxed file access on the owning node (text ops ls/read-file/grep/sed/write-file/stat, plus get-file/put-file which transfer file bytes point-to-point and encrypted between you and the owning node — private, not shared with the conversation); semanticretrieval: remote thread-memory search on another node.
             For skill actions, you may call \(ktSkillMetainfoToolFunctionName) first to read the skill's manifest and instructions so you can frame a precise task. You never call a skill's own sub-tools — they run inside the ACT agent. Execute the skill by calling \(ktRunActionToolFunctionName)(action_id, task); the skill's tools never appear in your own tool list, so do not wait for them or ask the user to advance a turn.
             Notice that you also have built-in tools like web search and context attachment access.
             You do not have general filesystem access. Attachment tools expose only files that are already attached to the active context.
@@ -247,9 +247,10 @@ public enum AIPromptPresets {
             case .filesystem:
                 return """
                     Filesystem action — tools operate on the owning node's sandboxed directories.
-                    file-to-blob: reads a local file and publishes it as a context attachment shared with all participants in this context; returns a blob_id. Use this when the task asks to share, send, or attach a file to the conversation.
-                    blob-to-file: writes a context attachment identified by blob_id to a local file path; creates intermediate directories automatically. Use this when the task asks to save, materialise, or process a shared attachment on disk.
-                    A blob_id from file-to-blob is the same ID that appears in kt_list_context_attachments — it is immediately visible to all other nodes in this context.
+                    Text ops (ls, read-file, grep, sed, write-file, stat) take/return strings inline.
+                    get-file: reads a file on the owning node and returns its bytes to you via a one-time ENCRYPTED, point-to-point transfer — private, NOT published to the conversation and NOT visible to other participants. Use when the task asks to fetch/pull a file from that node.
+                    put-file: streams YOUR local file (the `source` path) to a destination `path` on the owning node, also as a one-time encrypted transfer — private, not a shared attachment. Use when the task asks to send/upload a file to that node.
+                    These transfers are ephemeral: they are not recorded as context attachments and are discarded after use.
                     """
             case .mcp:
                 return

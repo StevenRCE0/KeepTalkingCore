@@ -16,13 +16,25 @@ public enum ScopeResolver {
         switch action.payload {
             case .skill(let bundle):
                 let dirPath = bundle.directory?.path ?? ""
-                let fileResources: [URL] = bundle.directory.map { [$0] } ?? []
 
-                // Split parameters: path values → sandbox directories, others → env vars
+                // Split parameters: path values → sandbox scopes, others → env vars
                 let envParams = bundle.parameters.filter { !$0.value.hasPrefix("/") && !$0.value.isEmpty }
-                let dirParams = bundle.parameters
-                    .filter { $0.value.hasPrefix("/") }
+                let pathParams = bundle.parameters.filter { $0.value.hasPrefix("/") }
+
+                // A path the user supplied for a kt_require_file label becomes an
+                // executable file resource, so the skill can actually run a tool the
+                // user pointed at (e.g. a `uv` binary outside the default exec
+                // allowlist). Directory-granted paths stay read-only scopes.
+                let fileGranted =
+                    pathParams
+                    .filter { bundle.requiredFiles.contains($0.key) }
+                    .map { URL(fileURLWithPath: $0.value) }
+                let dirParams =
+                    pathParams
+                    .filter { !bundle.requiredFiles.contains($0.key) }
                     .reduce(into: [String: URL]()) { $0[$1.key] = URL(fileURLWithPath: $1.value) }
+
+                let fileResources: [URL] = (bundle.directory.map { [$0] } ?? []) + fileGranted
 
                 return KeepTalkingActionDescriptor(
                     subject: KeepTalkingActionResourceWithDescription(
@@ -92,7 +104,8 @@ public enum ScopeResolver {
         for bundle: KeepTalkingFilesystemBundle,
         mask: KeepTalkingActionPermissionMask
     ) -> KeepTalkingActionDescriptor? {
-        guard let rootPath = bundle.rootPath else { return nil }
+        let rootPath = bundle.rootPath
+        guard !rootPath.isEmpty else { return nil }
         let rootURL = URL(fileURLWithPath: rootPath)
 
         var verbs: Set<KeepTalkingActionVerb> = []

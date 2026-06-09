@@ -25,6 +25,7 @@ extension KeepTalkingClient {
     /// In Responses API mode the built-in webSearchPreview tool is used instead.
     static let updateSideNoteToolFunctionName = "kt_update_side_note"
     static let archiveSideNoteToolFunctionName = "kt_archive_side_note"
+    static let sendFileToolFunctionName = "kt_send_file"
     static let webSearchFunctionName = "web_search"
     static let maxAgentTurns = 32
     static let maxAINativeAttachmentBytes = 8 * 1024 * 1024
@@ -308,6 +309,7 @@ extension KeepTalkingClient {
             markChitterChatterTool,
             makeUpdateSideNoteTool(),
             makeArchiveSideNoteTool(),
+            makeSendFileTool(),
         ]
         let skillNameByActionID = skillNamesByActionID(
             routesByFunctionName: runtimeCatalog.routesByFunctionName

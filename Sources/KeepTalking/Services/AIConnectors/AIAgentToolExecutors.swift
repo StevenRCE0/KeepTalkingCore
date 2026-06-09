@@ -27,7 +27,8 @@ extension KeepTalkingClient {
         promptMessageID: UUID?,
         context: KeepTalkingContext,
         agentTurnID: UUID? = nil,
-        agentIntention: String? = nil
+        agentIntention: String? = nil,
+        inputHandles: [UUID]? = nil
     ) async throws -> [AIOrchestrator.ToolExecution] {
         var executions: [AIOrchestrator.ToolExecution] = []
 
@@ -216,6 +217,22 @@ extension KeepTalkingClient {
                         )
                     )
                     continue
+                } else if functionName == Self.sendFileToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: try await executeSendFileToolCall(
+                                        rawArguments: toolCall.argumentsJSON,
+                                        context: context
+                                    ),
+                                    toolCallID: toolCallID
+                                )
+                            ]
+                        )
+                    )
+                    continue
                 }
 
                 let payload: String
@@ -234,7 +251,8 @@ extension KeepTalkingClient {
                             rawArguments: toolCall.argumentsJSON,
                             context: context,
                             agentTurnID: agentTurnID,
-                            agentIntention: agentIntention
+                            agentIntention: agentIntention,
+                            inputHandles: inputHandles
                         )
                         payload = proxyResult.payload
                         extraInlineMessages = proxyResult.inlineMessages
@@ -323,7 +341,8 @@ extension KeepTalkingClient {
         rawArguments: String,
         context: KeepTalkingContext,
         agentTurnID: UUID? = nil,
-        agentIntention: String? = nil
+        agentIntention: String? = nil,
+        inputHandles: [UUID]? = nil
     ) async throws -> AgentToolProxyResult {
         let arguments = try parsedActionCallArguments(
             definition: definition,
@@ -351,11 +370,18 @@ extension KeepTalkingClient {
             metadata.fields["display_name"] = .string(displayName)
         }
 
-        let actionCall = KeepTalkingActionCall(
+        var actionCall = KeepTalkingActionCall(
             action: definition.actionID,
             arguments: arguments,
             metadata: metadata
         )
+        // Staged file inputs the orchestrator relayed for this delegation. They
+        // ride on every proxy call the ACT loop makes for the action, so the
+        // executor on the owner node resolves them caller-scoped into the
+        // action's input staging area.
+        if let inputHandles, !inputHandles.isEmpty {
+            actionCall.inputHandles = inputHandles
+        }
 
         let result = try await dispatchActionCall(
             actionOwner: definition.ownerNodeID,
@@ -367,6 +393,60 @@ extension KeepTalkingClient {
             functionName: functionName,
             result: result
         )
+    }
+
+    /// Stages a local file onto another node via the OTB preflight and returns
+    /// its caller-scoped handle, for the agent to reference in a later
+    /// kt_run_action's `input_handles`. Errors are reported as a tool payload
+    /// rather than thrown so the agent can react.
+    func executeSendFileToolCall(
+        rawArguments: String,
+        context: KeepTalkingContext
+    ) async throws -> String {
+        let args = try decodeToolArguments(rawArguments)
+        guard
+            let path = args["path"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !path.isEmpty
+        else {
+            return jsonString(["ok": false, "error": "missing_path"])
+        }
+        guard
+            let targetString = args["target_node_id"]?.stringValue,
+            let target = UUID(uuidString: targetString)
+        else {
+            return jsonString([
+                "ok": false, "error": "missing_or_invalid_target_node_id",
+            ])
+        }
+        let fileURL = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        let trimmedName = args["filename"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let filename =
+            (trimmedName?.isEmpty == false)
+            ? trimmedName! : fileURL.lastPathComponent
+        let mimeType =
+            MIMEType.preferredMIMEType(forExtension: fileURL.pathExtension)
+            ?? "application/octet-stream"
+        do {
+            let handle = try await sendFile(
+                fileURL: fileURL, filename: filename, mimeType: mimeType,
+                to: target, contextID: try context.requireID())
+            return jsonString([
+                "ok": true,
+                "handle": handle.uuidString.lowercased(),
+                "filename": filename,
+                "target_node_id": target.uuidString.lowercased(),
+                "note":
+                    "Pass this handle in `input_handles` of a kt_run_action targeting an action on this node.",
+            ])
+        } catch {
+            return jsonString([
+                "ok": false,
+                "error": "stage_failed",
+                "error_message": error.localizedDescription,
+            ])
+        }
     }
 
     func parsedActionCallArguments(

@@ -19,6 +19,49 @@ public struct KeepTalkingActionResourceWithDescription: Codable, Sendable {
     }
 }
 
+/// Which way data flows for an action object — the distinction the bare verb
+/// can't express (a skill can take a file AND produce one).
+public enum KeepTalkingResourceDirection: String, Codable, Sendable, Hashable {
+    /// Consumed by the action — flows IN (caller → executor).
+    case input
+    /// Produced by the action — flows OUT (executor → caller).
+    case output
+    /// Read-modify-write — both.
+    case inputOutput = "inout"
+}
+
+/// The "O" in subject·verb·object, upgraded: a typed resource plus the direction
+/// it flows and the call argument it binds to. A descriptor carries a *set* of
+/// these so an action can declare, e.g., one `.input` file and one `.output`
+/// file. For `.filePaths` objects this single declaration drives one-time-blob
+/// routing (direction → which way bytes stream), sandbox grants (input → read,
+/// output → write), and the acceptance gate (only declared objects are spooled).
+public struct KeepTalkingActionObject: Codable, Sendable {
+    /// Binds to a call argument, e.g. "input" / "source" / "path".
+    public var name: String?
+    public var description: String
+    public var resource: KeepTalkingActionResource
+    public var direction: KeepTalkingResourceDirection
+
+    public init(
+        name: String? = nil,
+        description: String = "",
+        resource: KeepTalkingActionResource,
+        direction: KeepTalkingResourceDirection
+    ) {
+        self.name = name
+        self.description = description
+        self.resource = resource
+        self.direction = direction
+    }
+
+    /// Whether this object is a file (the only resource OTB transfers today).
+    public var isFile: Bool {
+        if case .filePaths = resource { return true }
+        return false
+    }
+}
+
 /// An atomic operation that can be performed within an action's scope.
 public enum KeepTalkingActionVerb: String, Codable, Sendable, Hashable, CaseIterable {
     case read
@@ -53,6 +96,11 @@ public struct KeepTalkingActionDescriptor: Codable, Sendable {
     public var subject: KeepTalkingActionResourceWithDescription?
     public var action: KeepTalkingActionWithDescription?
     public var object: KeepTalkingActionResourceWithDescription?
+    /// Directioned object set — the upgraded "O" in SVO. Additive alongside the
+    /// legacy singular `object` (which remains for non-file actions and the
+    /// existing sandbox path); file routing/grants/gating key off this. `nil`
+    /// for actions that declare no directioned objects.
+    public var objects: [KeepTalkingActionObject]?
     /// Environment variables required by this action at execution time.
     public var environment: [String: String]?
     /// Named base directories the action needs access to (e.g. "project_root").
@@ -63,19 +111,41 @@ public struct KeepTalkingActionDescriptor: Codable, Sendable {
         subject: KeepTalkingActionResourceWithDescription? = nil,
         action: KeepTalkingActionWithDescription? = nil,
         object: KeepTalkingActionResourceWithDescription? = nil,
+        objects: [KeepTalkingActionObject]? = nil,
         environment: [String: String]? = nil,
         directories: [String: URL]? = nil
     ) {
         self.subject = subject
         self.action = action
         self.object = object
+        self.objects = objects
         self.environment = environment
         self.directories = directories
     }
 
     /// Whether this descriptor carries enough information to compile a sandbox policy.
     public var hasSandboxConstraints: Bool {
-        action?.verbs != nil && (object?.resource != nil || directories?.isEmpty == false)
+        action?.verbs != nil
+            && (object?.resource != nil || directories?.isEmpty == false
+                || objects?.isEmpty == false)
+    }
+
+    /// File objects flowing a given direction (the unit OTB transfers + grants
+    /// key off). `.inputOutput` objects appear in both input and output queries.
+    public func fileObjects(
+        direction: KeepTalkingResourceDirection
+    ) -> [KeepTalkingActionObject] {
+        (objects ?? []).filter { object in
+            guard object.isFile else { return false }
+            switch direction {
+                case .input:
+                    return object.direction == .input || object.direction == .inputOutput
+                case .output:
+                    return object.direction == .output || object.direction == .inputOutput
+                case .inputOutput:
+                    return object.direction == .inputOutput
+            }
+        }
     }
 }
 
@@ -196,6 +266,21 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
 
     public var beautifulLabel: String {
         actionLabel.beautifulName
+    }
+
+    /// Whether this action consumes a file as input — i.e. a caller may attach
+    /// one-time blob (OTB) `inputTransfers` that the executor stages for it.
+    /// This is the single gate for accepting pushed file bytes: a node never
+    /// spools a transfer for an action that doesn't accept one. Today only
+    /// skills consume files (their scripts read `$KT_ATTACHMENTS`); the property
+    /// is intentionally general so other payload types can opt in later.
+    public var acceptsFileInput: Bool {
+        switch payload {
+            case .skill:
+                return true
+            case .mcpBundle, .primitive, .filesystem, .semanticRetrieval:
+                return false
+        }
     }
 
     public var wakeDescription: String {

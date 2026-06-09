@@ -1,40 +1,32 @@
 import Foundation
 import MCP
 
-/// Closure-based bridge that gives `FilesystemActionManager` access to context blob storage.
-///
-/// Both closures follow the same conventions as the `ask-for-file` primitive: uploads go through
-/// `KeepTalkingClient.send(attachments:)` so the attachment gets message linkage, RTC broadcast,
-/// and scheduled blob transfers identical to a user-initiated file share.
-public struct FilesystemBlobBridge: Sendable {
-    /// Reads the data for a blob that is already marked `.ready` in the context store.
-    /// Throws `FilesystemActionManagerError.blobNotAvailable` if absent or still transferring.
-    public let readBlob: @Sendable (_ blobID: String) async throws -> Data
-    /// Uploads the file at `fileURL` as a context attachment scoped to `contextID`,
-    /// using the same `send(attachments:)` path as the `ask-for-file` primitive.
-    /// Returns the blob ID assigned during upload.
-    public let uploadFileAsContextAttachment: @Sendable (
-        _ fileURL: URL,
-        _ filename: String,
-        _ mimeType: String,
-        _ contextID: UUID
-    ) async throws -> String
+/// Bridge that lets `FilesystemActionManager` stream a host file back to the
+/// caller as a one-time encrypted blob (OTB). Replaces the old context-attachment
+/// bridge: transfers are point-to-point and ephemeral, never published to the
+/// conversation, never recorded.
+public struct FilesystemTransferBridge: Sendable {
+    /// Streams `fileURL` to `recipient` as a one-time encrypted blob and returns
+    /// the ref (with the sealed key) to embed in the action result.
+    public let sendOneTimeBlob:
+        @Sendable (
+            _ fileURL: URL, _ filename: String, _ mimeType: String, _ recipient: UUID
+        ) async throws -> KeepTalkingOneTimeBlobRef
 
     public init(
-        readBlob: @escaping @Sendable (_ blobID: String) async throws -> Data,
-        uploadFileAsContextAttachment: @escaping @Sendable (
-            _ fileURL: URL, _ filename: String, _ mimeType: String, _ contextID: UUID
-        ) async throws -> String
+        sendOneTimeBlob:
+            @escaping @Sendable (
+                _ fileURL: URL, _ filename: String, _ mimeType: String, _ recipient: UUID
+            ) async throws -> KeepTalkingOneTimeBlobRef
     ) {
-        self.readBlob = readBlob
-        self.uploadFileAsContextAttachment = uploadFileAsContextAttachment
+        self.sendOneTimeBlob = sendOneTimeBlob
     }
 }
 
 /// Reference-type holder that lets `KeepTalkingClient` inject the bridge after its own init
 /// completes (avoiding a use-before-initialized error on `self`).
-final class FilesystemBlobBridgeBox: @unchecked Sendable {
-    var bridge: FilesystemBlobBridge?
+final class FilesystemTransferBridgeBox: @unchecked Sendable {
+    var bridge: FilesystemTransferBridge?
     init() {}
 }
 
@@ -51,24 +43,24 @@ public enum FilesystemActionManagerError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .invalidAction:
-            return "Action payload is not a filesystem bundle."
-        case .missingActionID:
-            return "Action must have an ID before registration."
-        case .operationDeniedByMask(let op):
-            return "Operation '\(op.rawValue)' is not permitted by the grant mask."
-        case .pathOutsideRoot(let path):
-            return "Path '\(path)' is outside the permitted root."
-        case .invalidArguments(let detail):
-            return "Invalid filesystem arguments: \(detail)"
-        case .sandboxNotConfigured:
-            return "Filesystem root path is not configured."
-        case .blobBridgeNotConfigured:
-            return "Blob bridge is not configured; blob transfer operations are unavailable."
-        case .contextRequired:
-            return "Context not found for the given context ID."
-        case .blobNotAvailable(let blobID):
-            return "Blob '\(blobID)' is not available locally (missing or still transferring)."
+            case .invalidAction:
+                return "Action payload is not a filesystem bundle."
+            case .missingActionID:
+                return "Action must have an ID before registration."
+            case .operationDeniedByMask(let op):
+                return "Operation '\(op.rawValue)' is not permitted by the grant mask."
+            case .pathOutsideRoot(let path):
+                return "Path '\(path)' is outside the permitted root."
+            case .invalidArguments(let detail):
+                return "Invalid filesystem arguments: \(detail)"
+            case .sandboxNotConfigured:
+                return "Filesystem root path is not configured."
+            case .blobBridgeNotConfigured:
+                return "Blob bridge is not configured; blob transfer operations are unavailable."
+            case .contextRequired:
+                return "Context not found for the given context ID."
+            case .blobNotAvailable(let blobID):
+                return "Blob '\(blobID)' is not available locally (missing or still transferring)."
         }
     }
 }
@@ -81,14 +73,15 @@ public enum FilesystemActionManagerError: LocalizedError {
 /// 2. Resolves and validates the target path against the bundle's `rootPath` sandbox.
 /// 3. Executes the operation and returns tool content.
 ///
-/// Blob transfer operations (`file-to-blob`, `blob-to-file`) additionally require a
-/// `FilesystemBlobBridge` populated on `bridgeBox` before the first call.
+/// The binary transfer op `get-file` (streaming a host file to a remote caller)
+/// requires a `FilesystemTransferBridge` populated on `bridgeBox`; all other ops
+/// (including local-execution get/put-file) work without it.
 public actor FilesystemActionManager {
     private var bundlesByActionID: [UUID: KeepTalkingFilesystemBundle] = [:]
     /// Populated by `KeepTalkingClient` synchronously after its own init completes.
-    let bridgeBox = FilesystemBlobBridgeBox()
+    let bridgeBox = FilesystemTransferBridgeBox()
 
-    private var blobBridge: FilesystemBlobBridge? { bridgeBox.bridge }
+    private var transferBridge: FilesystemTransferBridge? { bridgeBox.bridge }
 
     public init() {}
 
@@ -144,8 +137,14 @@ public actor FilesystemActionManager {
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
         callerMask: KeepTalkingActionPermissionMask,
-        contextID: UUID
-    ) async throws -> (content: [Tool.Content], isError: Bool?) {
+        contextID: UUID,
+        callerNodeID: UUID,
+        isLocalExecution: Bool,
+        inputFiles: [URL] = []
+    ) async throws -> (
+        content: [Tool.Content], isError: Bool?,
+        outputTransfers: [KeepTalkingOneTimeBlobRef]
+    ) {
         guard case .filesystem(let bundle) = action.payload else {
             throw FilesystemActionManagerError.invalidAction
         }
@@ -182,15 +181,19 @@ public actor FilesystemActionManager {
             throw FilesystemActionManagerError.operationDeniedByMask(operation)
         }
 
-        let output = try await execute(
+        let result = try await execute(
             operation: operation,
             arguments: callArguments,
             rootPath: bundle.rootPath,
-            contextID: contextID
+            contextID: contextID,
+            callerNodeID: callerNodeID,
+            isLocalExecution: isLocalExecution,
+            inputFiles: inputFiles
         )
         return (
-            content: [.text(text: output, annotations: nil, _meta: nil)],
-            isError: false
+            content: [.text(text: result.text, annotations: nil, _meta: nil)],
+            isError: false,
+            outputTransfers: result.outputTransfers
         )
     }
 
@@ -199,75 +202,159 @@ public actor FilesystemActionManager {
     private func execute(
         operation: KeepTalkingFilesystemOperation,
         arguments: [String: Value],
-        rootPath: String?,
-        contextID: UUID
-    ) async throws -> String {
+        rootPath: String,
+        contextID: UUID,
+        callerNodeID: UUID,
+        isLocalExecution: Bool,
+        inputFiles: [URL]
+    ) async throws -> (text: String, outputTransfers: [KeepTalkingOneTimeBlobRef]) {
         switch operation {
-        case .ls:
-            let path = try requiredStringArg("path", from: arguments)
-            let resolved = try resolvedPath(path, root: rootPath)
-            return try listDirectory(at: resolved)
+            case .ls:
+                let resolved = try resolvedPath(
+                    try requiredStringArg("path", from: arguments), root: rootPath)
+                return (try listDirectory(at: resolved), [])
 
-        case .readFile:
-            let path = try requiredStringArg("path", from: arguments)
-            let resolved = try resolvedPath(path, root: rootPath)
-            return try readFile(at: resolved)
+            case .readFile:
+                let resolved = try resolvedPath(
+                    try requiredStringArg("path", from: arguments), root: rootPath)
+                return (try readFile(at: resolved), [])
 
-        case .grep:
-            let pattern = try requiredStringArg("pattern", from: arguments)
-            let path = try requiredStringArg("path", from: arguments)
-            let resolved = try resolvedPath(path, root: rootPath)
-            return try grepFiles(pattern: pattern, at: resolved)
+            case .grep:
+                let pattern = try requiredStringArg("pattern", from: arguments)
+                let resolved = try resolvedPath(
+                    try requiredStringArg("path", from: arguments), root: rootPath)
+                return (try grepFiles(pattern: pattern, at: resolved), [])
 
-        case .writeFile:
-            let path = try requiredStringArg("path", from: arguments)
-            let content = try requiredStringArg("content", from: arguments)
-            let resolved = try resolvedPath(path, root: rootPath)
-            try writeFile(content: content, at: resolved)
-            return "Written \(content.utf8.count) bytes to \(resolved)."
+            case .sed:
+                let resolved = try resolvedPath(
+                    try requiredStringArg("path", from: arguments), root: rootPath)
+                let expression = try requiredStringArg("expression", from: arguments)
+                return (try applySed(expression: expression, at: resolved), [])
 
-        case .stat:
-            let path = try requiredStringArg("path", from: arguments)
-            let resolved = try resolvedPath(path, root: rootPath)
-            return try statPath(at: resolved)
+            case .writeFile:
+                let content = try requiredStringArg("content", from: arguments)
+                let resolved = try resolvedPath(
+                    try requiredStringArg("path", from: arguments), root: rootPath)
+                try writeFile(content: content, at: resolved)
+                return ("Written \(content.utf8.count) bytes to \(resolved).", [])
 
-        case .fileToBlob:
-            guard let bridge = blobBridge else {
-                throw FilesystemActionManagerError.blobBridgeNotConfigured
-            }
-            let path = try requiredStringArg("path", from: arguments)
-            let resolved = try resolvedPath(path, root: rootPath)
-            let fileURL = URL(fileURLWithPath: resolved)
-            let filename: String
-            if case .string(let override) = arguments["filename"],
-                !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            {
-                filename = override
-            } else {
-                filename = fileURL.lastPathComponent
-            }
-            let mimeType = mimeTypeForPath(resolved)
-            let blobID = try await bridge.uploadFileAsContextAttachment(
-                fileURL, filename, mimeType, contextID
-            )
-            return "Uploaded file as context attachment. blob_id=\(blobID) filename=\(filename) mime_type=\(mimeType)"
+            case .stat:
+                let resolved = try resolvedPath(
+                    try requiredStringArg("path", from: arguments), root: rootPath)
+                return (try statPath(at: resolved), [])
 
-        case .blobToFile:
-            guard let bridge = blobBridge else {
-                throw FilesystemActionManagerError.blobBridgeNotConfigured
-            }
-            let blobID = try requiredStringArg("blob_id", from: arguments)
-            let path = try requiredStringArg("path", from: arguments)
-            let resolved = try resolvedPath(path, root: rootPath)
-            let data = try await bridge.readBlob(blobID)
-            let url = URL(fileURLWithPath: resolved)
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try data.write(to: url)
-            return "Copied \(data.count) bytes from blob \(blobID) to \(resolved)."
+            case .getFile:
+                let resolved = try resolvedPath(
+                    try requiredStringArg("path", from: arguments), root: rootPath)
+                let fileURL = URL(fileURLWithPath: resolved)
+                guard FileManager.default.fileExists(atPath: resolved) else {
+                    throw FilesystemActionManagerError.invalidArguments(
+                        "No file at '\(resolved)'.")
+                }
+                let filename = fileURL.lastPathComponent
+                let mimeType = mimeTypeForPath(resolved)
+                // Local caller already has filesystem access — no transfer needed.
+                if isLocalExecution {
+                    return ("File available locally at \(resolved) (mime_type=\(mimeType)).", [])
+                }
+                guard let bridge = transferBridge else {
+                    throw FilesystemActionManagerError.blobBridgeNotConfigured
+                }
+                let ref = try await bridge.sendOneTimeBlob(
+                    fileURL, filename, mimeType, callerNodeID)
+                return (
+                    "Streaming \(filename) (\(ref.byteCount) bytes) back as a one-time encrypted transfer.",
+                    [ref]
+                )
+
+            case .putFile:
+                let resolved = try resolvedPath(
+                    try requiredStringArg("path", from: arguments), root: rootPath)
+                let source: URL
+                if isLocalExecution {
+                    // Local caller supplies a source path it can already read.
+                    let src = try requiredStringArg("source", from: arguments)
+                    source = URL(fileURLWithPath: (src as NSString).expandingTildeInPath)
+                } else {
+                    // Remote caller streamed the bytes; controller materialized them.
+                    guard let input = inputFiles.first else {
+                        throw FilesystemActionManagerError.invalidArguments(
+                            "put-file requires a streamed input file.")
+                    }
+                    source = input
+                }
+                let data = try Data(contentsOf: source)
+                let destination = URL(fileURLWithPath: resolved)
+                try FileManager.default.createDirectory(
+                    at: destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true)
+                try data.write(to: destination)
+                return ("Wrote \(data.count) bytes to \(resolved).", [])
         }
+    }
+
+    /// Applies a single `s/pattern/replacement/flags` substitution to a file in
+    /// place. Supports flags `g` (global) and `i` (case-insensitive), and sed
+    /// backreferences (`\1` → regex template `$1`).
+    private func applySed(expression: String, at path: String) throws -> String {
+        let expr = expression.trimmingCharacters(in: .whitespaces)
+        guard expr.count > 3, expr.hasPrefix("s") else {
+            throw FilesystemActionManagerError.invalidArguments(
+                "Only s/pattern/replacement/flags substitutions are supported.")
+        }
+        let delimiter = expr[expr.index(expr.startIndex, offsetBy: 1)]
+        let parts = String(expr.dropFirst(2)).split(
+            separator: delimiter, omittingEmptySubsequences: false
+        ).map(String.init)
+        guard parts.count >= 2 else {
+            throw FilesystemActionManagerError.invalidArguments(
+                "Malformed sed expression '\(expression)'.")
+        }
+        let pattern = parts[0]
+        let replacement = parts[1]
+        let flags = parts.count >= 3 ? parts[2] : ""
+
+        var options: NSRegularExpression.Options = []
+        if flags.contains("i") { options.insert(.caseInsensitive) }
+        let regex = try NSRegularExpression(pattern: pattern, options: options)
+
+        guard let data = FileManager.default.contents(atPath: path),
+            let text = String(data: data, encoding: .utf8)
+        else {
+            throw FilesystemActionManagerError.invalidArguments(
+                "Cannot read '\(path)' as UTF-8 text.")
+        }
+        // sed uses \1 for capture groups; NSRegularExpression templates use $1.
+        // sed backref `\1` → NSRegularExpression template `$1`. The replacement
+        // string is itself a template under .regularExpression, so `$$`→`$` and
+        // `$1`→search-group-1 (the digit); we want a literal backslash-escaped
+        // `$` followed by the digit, i.e. `\$$1` → emits `$1`.
+        let template = replacement.replacingOccurrences(
+            of: #"\\(\d)"#, with: #"\$$1"#, options: .regularExpression)
+
+        let fullRange = NSRange(text.startIndex..., in: text)
+        let result: String
+        let count: Int
+        if flags.contains("g") {
+            count = regex.numberOfMatches(in: text, range: fullRange)
+            result = regex.stringByReplacingMatches(
+                in: text, range: fullRange, withTemplate: template)
+        } else if let first = regex.firstMatch(in: text, range: fullRange) {
+            let mutable = NSMutableString(string: text)
+            regex.replaceMatches(in: mutable, range: first.range, withTemplate: template)
+            result = mutable as String
+            count = 1
+        } else {
+            result = text
+            count = 0
+        }
+
+        guard let outData = result.data(using: .utf8) else {
+            throw FilesystemActionManagerError.invalidArguments(
+                "Result is not encodable as UTF-8.")
+        }
+        try outData.write(to: URL(fileURLWithPath: path))
+        return "sed applied to \(path): \(count) replacement(s)."
     }
 
     private func requiredStringArg(
@@ -282,21 +369,42 @@ public actor FilesystemActionManager {
         return s
     }
 
-    private func resolvedPath(
-        _ path: String,
-        root: String?
-    ) throws -> String {
-        let expanded = (path as NSString).expandingTildeInPath
-        let resolved = URL(fileURLWithPath: expanded).standardized.path
+    /// Resolves a caller-supplied path STRICTLY RELATIVE to the action's
+    /// `rootPath`. Leading slashes are stripped so "", "/", and "." all mean the
+    /// root itself, and an absolute-looking argument is interpreted relative to
+    /// the root — never the host filesystem. `..` (or any escape) is rejected by
+    /// the containment check after standardization. An empty root fails closed.
+    private func resolvedPath(_ path: String, root: String) throws -> String {
+        let rootExpanded = (root as NSString).expandingTildeInPath
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rootExpanded.isEmpty else {
+            throw FilesystemActionManagerError.sandboxNotConfigured
+        }
+        let rootURL = URL(fileURLWithPath: rootExpanded).standardizedFileURL
+        let rootResolved = rootURL.path
 
-        if let root {
-            let rootExpanded = (root as NSString).expandingTildeInPath
-            let rootResolved = URL(fileURLWithPath: rootExpanded).standardized.path
-            guard resolved.hasPrefix(rootResolved) else {
-                throw FilesystemActionManagerError.pathOutsideRoot(path)
-            }
+        var relative = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        while relative.hasPrefix("/") { relative.removeFirst() }
+        let candidate = relative.isEmpty ? rootURL : rootURL.appendingPathComponent(relative)
+        let resolved = candidate.standardizedFileURL.path
+
+        // Boundary on a path separator so a sibling like `<root>-secrets` can't
+        // satisfy a bare prefix check and escape the sandbox.
+        let rootWithSep = rootResolved.hasSuffix("/") ? rootResolved : rootResolved + "/"
+        guard resolved == rootResolved || resolved.hasPrefix(rootWithSep) else {
+            throw FilesystemActionManagerError.pathOutsideRoot(path)
         }
 
+        // The lexical check above can't see a symlink that lives INSIDE the root
+        // but points outside it. Resolve symlinks on both sides and re-verify, so
+        // an in-root symlink can't be used to read/write outside the sandbox.
+        // (Matches SkillManager+ToolCalls' containment.)
+        let realRoot = rootURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let realResolved = candidate.resolvingSymlinksInPath().standardizedFileURL.path
+        let realRootWithSep = realRoot.hasSuffix("/") ? realRoot : realRoot + "/"
+        guard realResolved == realRoot || realResolved.hasPrefix(realRootWithSep) else {
+            throw FilesystemActionManagerError.pathOutsideRoot(path)
+        }
         return resolved
     }
 
@@ -367,9 +475,10 @@ public actor FilesystemActionManager {
         let type = attrs[.type] as? String ?? "unknown"
         let size = attrs[.size] as? Int ?? 0
         let modified = attrs[.modificationDate] as? Date
-        let modString = modified.map {
-            ISO8601DateFormatter().string(from: $0)
-        } ?? "unknown"
+        let modString =
+            modified.map {
+                ISO8601DateFormatter().string(from: $0)
+            } ?? "unknown"
         return "type=\(type) size=\(size) modified=\(modString)"
     }
 

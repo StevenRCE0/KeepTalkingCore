@@ -1247,7 +1247,9 @@ extension KeepTalkingClient {
                         id: action.actionID,
                         name: name,
                         indexDescription: indexDescription,
-                        rootPath: nil
+                        // Remote stubs carry no root; an empty root fails closed
+                        // at execution (no unsandboxed filesystem action).
+                        rootPath: ""
                     )
                 )
         }

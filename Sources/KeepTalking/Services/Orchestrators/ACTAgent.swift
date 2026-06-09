@@ -35,7 +35,9 @@ extension KeepTalkingClient {
                 calling this. The ACT agent only receives that selected action,
                 then autonomously discovers its tools, calls the appropriate one
                 with arguments derived from the conversation, and returns a
-                concise summary of the result.
+                concise summary of the result. To feed a file into the action,
+                first stage it on the action's owner node with kt_send_file, then
+                pass the returned handle(s) in `input_handles` here.
                 """,
             parameters: [
                 "type": .string("object"),
@@ -50,6 +52,13 @@ extension KeepTalkingClient {
                         "type": .string("string"),
                         "description": .string(
                             "Natural-language description of what the selected action should accomplish, including any target node/action context the user implied."
+                        ),
+                    ]),
+                    "input_handles": .object([
+                        "type": .string("array"),
+                        "items": .object(["type": .string("string")]),
+                        "description": .string(
+                            "Optional staged-file handles (from kt_send_file) to deliver as the action's file input. Only use handles staged on this action's owner node."
                         ),
                     ]),
                 ]),
@@ -102,8 +111,11 @@ extension KeepTalkingClient {
         }
 
         let task = args["task"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let inputHandles = args["input_handles"]?.arrayValue?.compactMap {
+            $0.stringValue.flatMap { UUID(uuidString: $0) }
+        }
         actLog(
-            "start action=\(actionID.uuidString.lowercased()) kind=\(stub.kind.rawValue) node=\(stub.ownerNodeID.uuidString.lowercased()) task=\(clipped(task.isEmpty ? "(empty)" : task, maxCharacters: 160))"
+            "start action=\(actionID.uuidString.lowercased()) kind=\(stub.kind.rawValue) node=\(stub.ownerNodeID.uuidString.lowercased()) handles=\(inputHandles?.count ?? 0) task=\(clipped(task.isEmpty ? "(empty)" : task, maxCharacters: 160))"
         )
 
         return try await runACTMiniLoop(
@@ -116,7 +128,8 @@ extension KeepTalkingClient {
             actConnector: actConnector,
             actModel: actModel,
             publisher: publisher,
-            agentTurnID: agentTurnID
+            agentTurnID: agentTurnID,
+            inputHandles: (inputHandles?.isEmpty == false) ? inputHandles : nil
         )
     }
 
@@ -132,7 +145,8 @@ extension KeepTalkingClient {
         actConnector: any AIConnector,
         actModel: String,
         publisher: AIOrchestrator.AssistantPublisher,
-        agentTurnID: UUID? = nil
+        agentTurnID: UUID? = nil,
+        inputHandles: [UUID]? = nil
     ) async throws -> [AIMessage] {
         let resolvedAction = try await resolvedACTAction(
             actionID: actionID,
@@ -232,13 +246,16 @@ extension KeepTalkingClient {
             }
 
             // Execute the action tool calls directly (no recursive ACT invocation).
+            // Any staged-file handles the orchestrator relayed for this
+            // delegation ride along on every proxy call this loop makes.
             let executions = try await executeAgentToolCalls(
                 turn.toolCalls,
                 runtimeCatalog: runtimeCatalog,
                 promptMessageID: nil,
                 context: context,
                 agentTurnID: agentTurnID,
-                agentIntention: task
+                agentIntention: task,
+                inputHandles: inputHandles
             )
             actLog(
                 "action-result action=\(actionID.uuidString.lowercased()) calls=\(turn.toolCalls.map(\.name).joined(separator: ",")) payload=\(actExecutionPreview(executions, source: stub.kind))"
