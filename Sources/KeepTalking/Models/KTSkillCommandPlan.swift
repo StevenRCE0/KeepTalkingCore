@@ -160,7 +160,11 @@ extension KTSkillCommandPlan {
                         "description": .string("The content to write."),
                     ])
                     required.append(.string("content"))
-                case .execute, .callTool:
+                case .execute, .callTool, .named:
+                    // `.named` is a grant-scoping token, not a planner command verb
+                    // (the planner only emits structural verbs), so it shouldn't
+                    // reach here — but treat it like a tool call (generic arguments)
+                    // for exhaustiveness rather than dropping inputs.
                     properties["arguments"] = .object([
                         "type": .string("object"),
                         "description": .string("Optional arguments for the execution."),

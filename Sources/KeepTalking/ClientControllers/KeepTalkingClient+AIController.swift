@@ -862,6 +862,8 @@ extension KeepTalkingClient {
                     return ("semantic_retrieval", bundle.name)
                 case .filesystem(let bundle):
                     return ("filesystem", bundle.name)
+                case .acp(let bundle):
+                    return ("acp", bundle.name)
             }
         }()
 
@@ -933,6 +935,15 @@ extension KeepTalkingClient {
                         onLog?("[filesystem] registering local action=\(actionID)")
                         try await filesystemActionManager.registerIfNeeded(action)
                         onLog?("[filesystem] registered local action=\(actionID)")
+                    case .acp:
+                        #if os(macOS)
+                        let actionID =
+                            action.id?.uuidString.lowercased()
+                            ?? "unknown"
+                        onLog?("[acp] registering local action=\(actionID)")
+                        try await acpManager.registerIfNeeded(action)
+                        onLog?("[acp] registered local action=\(actionID)")
+                        #endif
                 }
             }
         } catch let error as KeepTalkingClientError {

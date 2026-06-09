@@ -37,6 +37,9 @@ struct CreateNodeRelationsActionsRelationsMigration: AsyncMigration {
             )
             .field("wake_handles", .json)
             .field("permission", .json)
+            // Reserved for WS3 cross-device authorization (B→C opt-in). Added now
+            // so the feature lands without another DB recreation; nullable.
+            .field("allow_remote_confirmation", .bool)
             .create()
     }
 

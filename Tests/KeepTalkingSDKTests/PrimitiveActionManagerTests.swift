@@ -38,7 +38,7 @@ struct PrimitiveActionManagerTests {
         let response = try await manager.callAction(
             action: action,
             call: call,
-            allowedScopeKeys: ["browser"]
+            scope: .verbs([.named("browser")])
         )
 
         #expect(response.isError == true)
@@ -65,7 +65,7 @@ struct PrimitiveActionManagerTests {
             _ = try await manager.callAction(
                 action: action,
                 call: call,
-                allowedScopeKeys: nil
+                scope: .all
             )
         }
     }

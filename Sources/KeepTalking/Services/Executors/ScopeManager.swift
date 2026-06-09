@@ -133,12 +133,14 @@ public actor ScopeManager {
     // MARK: - Policy resolution
 
     public func resolvedPolicy(
-        for action: KeepTalkingAction
+        for action: KeepTalkingAction,
+        callerScope: KeepTalkingActionScope = .all
     ) throws -> KTSandboxPolicy {
         let grants = Array(activeGrants.values)
         return try ScopeResolver.resolvedPolicy(
             for: action,
             additionalGrants: grants,
+            callerScope: callerScope,
             sandbox: sandbox
         )
     }
@@ -150,12 +152,14 @@ public actor ScopeManager {
     /// so the granted path matches what the kernel canonicalizes at access time.
     public func resolvedPolicy(
         for action: KeepTalkingAction,
-        extraReadDirectories: [String: URL]
+        extraReadDirectories: [String: URL],
+        callerScope: KeepTalkingActionScope = .all
     ) throws -> KTSandboxPolicy {
         let grants = Array(activeGrants.values)
         var descriptor = ScopeResolver.resolvedDescriptor(
             for: action,
-            additionalGrants: grants
+            additionalGrants: grants,
+            callerScope: callerScope
         )
         if !extraReadDirectories.isEmpty {
             var dirs = descriptor.directories ?? [:]

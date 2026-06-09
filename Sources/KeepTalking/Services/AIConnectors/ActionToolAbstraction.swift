@@ -10,6 +10,7 @@ public struct KeepTalkingActionStub: Sendable {
         case primitive
         case semanticRetrieval
         case filesystem
+        case acp
     }
 
     public let actionID: UUID
@@ -55,6 +56,7 @@ public struct KeepTalkingActionToolDefinition: Sendable {
         case skill
         case primitive
         case filesystem
+        case acp
     }
 
     public let functionName: String

@@ -241,6 +241,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let filesystemActionManager: FilesystemActionManager
     #if os(macOS)
     let scopeManager: ScopeManager
+    let acpManager: ACPManager
     #endif
     let aiConnector: (any AIConnector)?
     /// Connector used by the ACT (action/tool-calling) sub-agent. `nil` means
@@ -454,6 +455,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.filesystemActionManager = FilesystemActionManager()
         #if os(macOS)
         self.scopeManager = ScopeManager(sandbox: SeatbeltSandbox())
+        self.acpManager = ACPManager(
+            nodeConfig: config,
+            stdioTransportLauncher: stdioTransportLauncher
+        )
         #endif
 
         // All stored properties are initialized above; [weak self] is safe from here on.

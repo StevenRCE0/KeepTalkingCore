@@ -247,6 +247,47 @@ extension KeepTalkingClient {
         )
     }
 
+    func makeACPActionProxyDefinition(
+        actionID: UUID,
+        ownerNodeID: UUID,
+        bundle: KeepTalkingACPBundle,
+        descriptor: KeepTalkingActionDescriptor?,
+        supportsWakeAssist: Bool = false
+    ) -> KeepTalkingActionToolDefinition {
+        let description =
+            descriptor?.action?.description
+            ?? (bundle.indexDescription.isEmpty
+                ? "Delegate a task to the \(bundle.name) coding agent (ACP). It works autonomously and returns its final result."
+                : bundle.indexDescription)
+        return KeepTalkingActionToolDefinition(
+            functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
+                ownerNodeID: ownerNodeID,
+                actionID: actionID,
+                targetName: "acp"
+            ),
+            actionID: actionID,
+            ownerNodeID: ownerNodeID,
+            source: .acp,
+            targetName: nil,
+            displayName: bundle.name,
+            supportsWakeAssist: supportsWakeAssist,
+            description: description,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "prompt": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "The task or prompt to send to the agent."
+                        ),
+                    ])
+                ]),
+                "required": .array([.string("prompt")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
     func makeSkillMetadataDefinition(
         actionID: UUID,
         ownerNodeID: UUID,

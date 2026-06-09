@@ -264,6 +264,9 @@ public enum AIPromptPresets {
             case .semanticRetrieval:
                 return
                     "Semantic retrieval action — performs thread-memory search on a remote node. Use the retrieval tool to find relevant earlier threads from that node."
+            case .acp:
+                return
+                    "ACP action — delegates to an external coding agent (Agent Client Protocol). Pass a single clear `prompt` describing the whole task; the agent works autonomously (reading/writing files, running tools) and returns its final result. Call it once with a complete brief rather than many small prompts."
         }
     }
 

@@ -395,26 +395,44 @@ public actor MCPManager {
 
     /// Removes an MCP action and tears down any live client state.
     public func unregisterAction(actionID: UUID) async {
-        if let client = clientsByActionID[actionID] {
-            await client.disconnect()
-        }
-        terminateStdioProcess(for: actionID)
-        clientsByActionID.removeValue(forKey: actionID)
+        let client = clientsByActionID.removeValue(forKey: actionID)
+        let process = stdioProcessesByActionID.removeValue(forKey: actionID)
         virtualToolNamesByActionID.removeValue(forKey: actionID)
         healthByActionID.removeValue(forKey: actionID)
+        Self.teardownClientDetached(client: client, process: process)
     }
 
     /// Tears down any live client/process for a user-disabled action while
     /// keeping the manager aware that the action exists. Used by the action
     /// controller when the persisted `disabled` flag flips to true.
     public func disableAction(actionID: UUID) async {
-        if let client = clientsByActionID[actionID] {
-            await client.disconnect()
-        }
-        terminateStdioProcess(for: actionID)
-        clientsByActionID.removeValue(forKey: actionID)
+        let client = clientsByActionID.removeValue(forKey: actionID)
+        let process = stdioProcessesByActionID.removeValue(forKey: actionID)
         virtualToolNamesByActionID.removeValue(forKey: actionID)
         healthByActionID[actionID] = .disabled
+        Self.teardownClientDetached(client: client, process: process)
+    }
+
+    /// Tears a live MCP client/process down best-effort, detached from the
+    /// caller's task. `Client.disconnect()` ends by awaiting the message-loop
+    /// task, which a wedged STDIO process or stuck HTTP stream can stall
+    /// indefinitely — so disabling/removing must never wait on it: a failed
+    /// action has to stay disableable and removable. The manager's in-memory
+    /// state is already updated by the caller before this runs, so the action
+    /// is effectively off the moment it returns. We terminate the process
+    /// first (unblocking the read loop so the disconnect can actually drain),
+    /// then disconnect.
+    private static func teardownClientDetached(
+        client: Client?,
+        process: StdioProcessHandle?
+    ) {
+        guard client != nil || process != nil else {
+            return
+        }
+        Task.detached {
+            process?.processHandler.terminate()
+            await client?.disconnect()
+        }
     }
 
     /// Live runtime health for an MCP action. Returns `.notRegistered` when
@@ -458,13 +476,14 @@ public actor MCPManager {
 
     /// Invokes an MCP tool for the supplied action call.
     ///
-    /// - Parameter allowedTools: The set of tool names the caller's grant permits.
-    ///   `nil` means all tools are allowed (owner access). An empty set means no tools
-    ///   are allowed and every call will be rejected.
+    /// - Parameter scope: The caller's grant scope. `.all` or a `.verbs` set
+    ///   containing the `.callTool` class wildcard permits all tools; otherwise
+    ///   only tools named by `.named(...)` tokens are permitted (an empty set
+    ///   rejects every call).
     public func callAction(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
-        allowedTools: Set<String>?
+        scope: KeepTalkingActionScope
     ) async throws -> (content: [Tool.Content], isError: Bool?) {
         guard let actionID = action.id else {
             throw MCPManagerError.missingActionID
@@ -482,6 +501,9 @@ public actor MCPManager {
             rawArguments: call.arguments
         )
 
+        // `.callTool` (or `.all`) = all tools allowed → `nil`; otherwise the
+        // explicit `.named(...)` tool allowlist (possibly empty = none).
+        let allowedTools = scope.allowedNames(classWildcard: .callTool).map { Set($0) }
         if let allowedTools, !allowedTools.contains(invocation.name) {
             throw MCPManagerError.toolNotPermitted(invocation.name)
         }

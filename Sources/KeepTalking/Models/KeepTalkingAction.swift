@@ -62,15 +62,96 @@ public struct KeepTalkingActionObject: Codable, Sendable {
     }
 }
 
-/// An atomic operation that can be performed within an action's scope.
-public enum KeepTalkingActionVerb: String, Codable, Sendable, Hashable, CaseIterable {
+/// An atomic operation that can be performed within an action's scope — the
+/// single capability vocabulary. Structural cases name an operation class;
+/// `.named` names a specific resource (an MCP tool, a primitive scope key) that
+/// a grant can allowlist. "All"/unrestricted is deliberately NOT a verb — it
+/// lives on the grant (`KeepTalkingActionScope`), so an action's capability can
+/// never be confused with the breadth of a grant.
+public enum KeepTalkingActionVerb: Sendable, Hashable {
     case read
     case write
     case execute
     case network
     case grep
     case ls
-    case callTool = "call-tool"
+    case callTool
+    /// A specific named resource (MCP tool name, primitive scope key). Invisible
+    /// to the sandbox compiler — it narrows runtime call-gating only.
+    case named(String)
+
+    /// The structural (non-`named`) cases. Replaces synthesized `CaseIterable`,
+    /// which an associated-value enum cannot provide.
+    public static let structuralCases: [KeepTalkingActionVerb] =
+        [.read, .write, .execute, .network, .grep, .ls, .callTool]
+}
+
+/// Plain `rawValue`/`init?(rawValue:)` members (NOT a `RawRepresentable`
+/// conformance) so existing string consumers (skill command names, planner verb
+/// parsing, tool-entry labels) keep working unchanged. Crucially this is NOT a
+/// `RawRepresentable` conformance: that would make synthesized `Equatable`/
+/// `Hashable` key off `rawValue`, so `.named("read")` would compare EQUAL to the
+/// structural `.read` (and a primitive scope key named "read" would collide).
+/// As plain members, synthesized equality stays per-case.
+/// `init?(rawValue:)` recognizes ONLY structural tokens (returns `nil`
+/// otherwise — `.named` is never produced from a raw string); `rawValue`
+/// returns the bare name for `.named`.
+extension KeepTalkingActionVerb {
+    public init?(rawValue: String) {
+        switch rawValue {
+            case "read": self = .read
+            case "write": self = .write
+            case "execute": self = .execute
+            case "network": self = .network
+            case "grep": self = .grep
+            case "ls": self = .ls
+            case "call-tool": self = .callTool
+            default: return nil
+        }
+    }
+
+    public var rawValue: String {
+        switch self {
+            case .read: return "read"
+            case .write: return "write"
+            case .execute: return "execute"
+            case .network: return "network"
+            case .grep: return "grep"
+            case .ls: return "ls"
+            case .callTool: return "call-tool"
+            case .named(let name): return name
+        }
+    }
+}
+
+/// Custom `Codable`, kept separate from `rawValue` so `.named("read")` cannot
+/// collide with the structural `read` token: structural verbs encode as their
+/// bare string; `.named(x)` encodes as `{"named": x}`.
+extension KeepTalkingActionVerb: Codable {
+    private enum NamedCodingKey: String, CodingKey { case named }
+
+    public init(from decoder: Decoder) throws {
+        if let single = try? decoder.singleValueContainer(),
+            let raw = try? single.decode(String.self),
+            let verb = KeepTalkingActionVerb(rawValue: raw)
+        {
+            self = verb
+            return
+        }
+        let keyed = try decoder.container(keyedBy: NamedCodingKey.self)
+        self = .named(try keyed.decode(String.self, forKey: .named))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        switch self {
+            case .named(let name):
+                var keyed = encoder.container(keyedBy: NamedCodingKey.self)
+                try keyed.encode(name, forKey: .named)
+            default:
+                var single = encoder.singleValueContainer()
+                try single.encode(rawValue)
+        }
+    }
 }
 
 /// Describes the verb portion of an action descriptor.
@@ -199,6 +280,7 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
         case primitive(KeepTalkingPrimitiveBundle)
         case semanticRetrieval(KeepTalkingSemanticRetrievalBundle)
         case filesystem(KeepTalkingFilesystemBundle)
+        case acp(KeepTalkingACPBundle)
 
         public var isSemanticRetrieval: Bool {
             if case .semanticRetrieval = self { return true }
@@ -223,7 +305,9 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
             switch self {
                 case .filesystem, .mcpBundle: return true
                 case .primitive(let bundle): return !bundle.action.scopeSchema.isEmpty
-                case .skill, .semanticRetrieval: return false
+                // ACP has no per-grant narrowing UI in v1 (owner grants are
+                // unrestricted; the action's compiled sandbox is the ceiling).
+                case .skill, .semanticRetrieval, .acp: return false
             }
         }
 
@@ -239,6 +323,8 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
                     "Memory"
                 case .filesystem:
                     "File"
+                case .acp:
+                    "ACP"
             }
         }
     }
@@ -260,6 +346,9 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
         if case .filesystem(let bundle) = payload {
             return bundle.name
         }
+        if case .acp(let bundle) = payload {
+            return bundle.name
+        }
 
         return id?.uuidString.uppercased() ?? "Unknown Action"
     }
@@ -278,7 +367,7 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
         switch payload {
             case .skill:
                 return true
-            case .mcpBundle, .primitive, .filesystem, .semanticRetrieval:
+            case .mcpBundle, .primitive, .filesystem, .semanticRetrieval, .acp:
                 return false
         }
     }
@@ -343,20 +432,6 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
         self.payload = payload
         self.remoteAuthorisable = remoteAuthorisable
         self.blockingAuthorisation = blockingAuthorisation
-    }
-}
-
-extension KeepTalkingGrantPermission {
-    /// Default unrestricted permission for an action payload — used for action
-    /// owners, for the fallback when a grant row carries no `permission`, and
-    /// as the seed value when an editor binding starts from "no narrowing".
-    public static func unrestricted(for payload: KeepTalkingAction.Payload) -> KeepTalkingGrantPermission {
-        switch payload {
-            case .filesystem: return .filesystem(.all)
-            case .mcpBundle: return .mcp(allowedTools: nil)
-            case .primitive: return .primitive(allowedScopeKeys: nil)
-            case .skill, .semanticRetrieval: return .filesystem(.all)
-        }
     }
 }
 

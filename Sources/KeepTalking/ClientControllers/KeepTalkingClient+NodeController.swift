@@ -15,8 +15,8 @@ public enum KeepTalkingNodeTrustScope: Sendable {
 public struct KeepTalkingActionGrantSummary: Sendable {
     public let toNodeID: UUID
     public let approvingContext: KeepTalkingNodeRelationActionRelation.ApprovingContext?
-    /// Permission constraint for this grant. `nil` means full access.
-    public let permission: KeepTalkingGrantPermission?
+    /// Grant scope for this row. `nil` means full access (no recorded narrowing).
+    public let permission: KeepTalkingActionScope?
 }
 
 public struct KeepTalkingActionSummary: Sendable {
@@ -1062,6 +1062,11 @@ extension KeepTalkingClient {
                     name: bundle.name,
                     indexDescription: bundle.indexDescription
                 )
+            case .acp(let bundle):
+                payloadSummary = .acp(
+                    name: bundle.name,
+                    indexDescription: bundle.indexDescription
+                )
         }
 
         let isDisabled = action.disabled ?? false
@@ -1086,7 +1091,9 @@ extension KeepTalkingClient {
                                     action: action,
                                     context: context
                                 )
-                                if case .mcp(let allowed) = grant, let allowed {
+                                // `.callTool`/`.all`/no-grant → nil allowlist (all
+                                // tools); an explicit `.named` set → filter to it.
+                                if let allowed = grant?.allowedNames(classWildcard: .callTool) {
                                     let allowedSet = Set(allowed)
                                     advertisedTools = tools.filter {
                                         allowedSet.contains($0)
@@ -1110,7 +1117,7 @@ extension KeepTalkingClient {
                             availability = .connecting
                     }
                 }
-            case .skill, .primitive, .filesystem, .semanticRetrieval:
+            case .skill, .primitive, .filesystem, .semanticRetrieval, .acp:
                 // Non-MCP payloads have no per-server runtime health: the
                 // action is live whenever this node is reachable. The
                 // user-disabled flag still gates them.

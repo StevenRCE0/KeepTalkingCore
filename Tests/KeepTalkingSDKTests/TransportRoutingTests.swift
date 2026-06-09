@@ -683,6 +683,7 @@ private final class FakePeerChannel: KeepTalkingPeerTransportChannel, @unchecked
     var onSignalOutput: (@Sendable (KeepTalkingP2PSignalPayload) -> Void)?
     var onLog: (@Sendable (String) -> Void)?
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider?
+    var state: DirectChannelState = .idle
 
     var attemptUpgradeCount = 0
     var teardownCount = 0

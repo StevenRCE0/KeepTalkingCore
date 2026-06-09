@@ -33,10 +33,18 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
     @OptionalField(key: "wake_handles")
     public var wakeHandles: [KeepTalkingPushWakeHandle]?
 
-    /// Per-grant permission constraint — filesystem R/W/X mask or MCP tool allowlist.
-    /// `nil` means no restriction (full access for the applicable action type).
+    /// Per-grant scope — the unified `.all | .verbs(Set<KeepTalkingActionVerb>)`
+    /// grant. `nil` means no restriction (full access). Stored in the `permission`
+    /// JSON column (name retained; the DB is recreated fresh on cutover).
     @OptionalField(key: "permission")
-    public var permission: KeepTalkingGrantPermission?
+    public var permission: KeepTalkingActionScope?
+
+    /// WS3 (cross-device authorization): B's per-peer opt-in that this grantee's
+    /// blocking calls may be confirmed off-device by the owner (macOS broadcast to
+    /// co-owned devices). `nil`/`false` = not opted in. Column added ahead of WS3
+    /// so the behavior can land without another DB recreation; no logic uses it yet.
+    @OptionalField(key: "allow_remote_confirmation")
+    public var allowRemoteConfirmation: Bool?
 
     public init() {}
 
@@ -45,7 +53,8 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
         relation: KeepTalkingNodeRelation,
         action: KeepTalkingAction,
         approvingContext: ApprovingContext,
-        permission: KeepTalkingGrantPermission? = nil
+        permission: KeepTalkingActionScope? = nil,
+        allowRemoteConfirmation: Bool? = nil
     ) throws {
         self.id = id
         self.$relation.id = try relation.requireID()
@@ -53,6 +62,7 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
         self.approvingContext = approvingContext
         self.wakeHandles = nil
         self.permission = permission
+        self.allowRemoteConfirmation = allowRemoteConfirmation
     }
 
     public func applicable(in context: KeepTalkingContext?) -> Bool {

@@ -198,6 +198,7 @@ extension KeepTalkingClient {
                 case .primitive(let b): action.descriptor = Self.defaultDescriptor(for: b)
                 case .semanticRetrieval(let b): action.descriptor = Self.defaultDescriptor(for: b)
                 case .filesystem(let b): action.descriptor = Self.defaultDescriptor(for: b)
+                case .acp(let b): action.descriptor = Self.defaultDescriptor(for: b)
             }
         }
         try await action.save(on: database)
@@ -266,6 +267,8 @@ extension KeepTalkingClient {
                     action.descriptor = Self.defaultDescriptor(for: bundle)
                 case .filesystem(let bundle):
                     action.descriptor = Self.defaultDescriptor(for: bundle)
+                case .acp(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
             }
         }
 
@@ -288,6 +291,13 @@ extension KeepTalkingClient {
                 try await semanticRetrievalActionManager.registerIfNeeded(action)
             case .filesystem:
                 try await filesystemActionManager.registerFilesystemAction(action)
+            case .acp:
+                #if os(macOS)
+                try await acpManager.registerACPAction(action)
+                if isDisabledAtSave, let actionID = action.id {
+                    await acpManager.disableAction(actionID: actionID)
+                }
+                #endif
         }
         await invalidateActionToolCatalog(
             reason: "register_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
@@ -329,6 +339,8 @@ extension KeepTalkingClient {
                     action.descriptor = Self.defaultDescriptor(for: bundle)
                 case .filesystem(let bundle):
                     action.descriptor = Self.defaultDescriptor(for: bundle)
+                case .acp(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
                 case .semanticRetrieval:
                     break
             }
@@ -367,6 +379,14 @@ extension KeepTalkingClient {
                 try await primitiveActionManager.refreshPrimitiveAction(action)
             case .filesystem:
                 try await filesystemActionManager.refreshFilesystemAction(action)
+            case .acp:
+                #if os(macOS)
+                if isDisabledNow {
+                    await acpManager.disableAction(actionID: actionID)
+                } else {
+                    try await acpManager.refreshACPAction(action)
+                }
+                #endif
             case .semanticRetrieval:
                 break
         }
@@ -459,6 +479,23 @@ extension KeepTalkingClient {
         )
         await invalidateActionToolCatalog(
             reason: "remove_filesystem_action action=\(actionID.uuidString.lowercased())"
+        )
+    }
+
+    public func removeACPAction(actionID: UUID) async throws {
+        let node = try await getCurrentNodeInstance()
+        try await Self.removeMCPAction(
+            actionID: actionID,
+            node: node,
+            on: localStore.database,
+            callbackForUnregisteringAction: { id in
+                #if os(macOS)
+                await self.acpManager.unregisterAction(actionID: id)
+                #endif
+            }
+        )
+        await invalidateActionToolCatalog(
+            reason: "remove_acp_action action=\(actionID.uuidString.lowercased())"
         )
     }
 
@@ -606,7 +643,7 @@ extension KeepTalkingClient {
         actionID: UUID,
         toNodeID: UUID,
         scope: KeepTalkingActionPermissionScope,
-        permission: KeepTalkingGrantPermission? = nil,
+        grantScope: KeepTalkingActionScope? = nil,
         node: KeepTalkingNode,
         on database: any Database,
         callbackForBroadcasting: ((String) async -> Void)? = nil
@@ -653,14 +690,14 @@ extension KeepTalkingClient {
                         relation: relation,
                         action: action,
                         approvingContext: .all,
-                        permission: permission
+                        permission: grantScope
                     )
                 case .context(let approvingContext):
                     targetActionRelation = try .init(
                         relation: relation,
                         action: action,
                         approvingContext: .contexts([approvingContext]),
-                        permission: permission
+                        permission: grantScope
                     )
             }
 
@@ -670,8 +707,8 @@ extension KeepTalkingClient {
                 current: targetActionRelation!.approvingContext,
                 requestedScope: scope
             )
-            if let permission {
-                targetActionRelation!.permission = permission
+            if let grantScope {
+                targetActionRelation!.permission = grantScope
             }
 
             try await targetActionRelation!.update(on: database)
@@ -686,7 +723,7 @@ extension KeepTalkingClient {
         actionID: UUID,
         toNodeID: UUID,
         scope: KeepTalkingActionPermissionScope,
-        permission: KeepTalkingGrantPermission? = nil
+        grantScope: KeepTalkingActionScope? = nil
     ) async throws {
         let selfNode = try await ensure(
             config.node,
@@ -698,7 +735,7 @@ extension KeepTalkingClient {
             actionID: actionID,
             toNodeID: toNodeID,
             scope: scope,
-            permission: permission,
+            grantScope: grantScope,
             node: selfNode,
             on: localStore.database,
             callbackForBroadcasting: {
@@ -721,7 +758,7 @@ extension KeepTalkingClient {
     /// Updates the permission on a specific grant row (identified by its primary key).
     public func updateGrantPermission(
         grantID: UUID,
-        permission: KeepTalkingGrantPermission?
+        grantScope: KeepTalkingActionScope?
     ) async throws {
         guard
             let grant = try await KeepTalkingNodeRelationActionRelation.find(
@@ -730,7 +767,7 @@ extension KeepTalkingClient {
         else {
             throw KeepTalkingClientError.missingAction
         }
-        grant.permission = permission
+        grant.permission = grantScope
         try await grant.update(on: localStore.database)
         await broadcastLocalNodeState(
             reason: "update_grant_permission grant=\(grantID.uuidString.lowercased())"
@@ -748,27 +785,24 @@ extension KeepTalkingClient {
         }
     }
 
-    /// Resolves the effective grant permission a node has for `action` in `context`.
+    /// Resolves the effective grant scope a node has for `action` in `context`.
     ///
-    /// The returned case is selected by the action's payload kind:
-    ///  - filesystem → `.filesystem(mask)` with mask = union of applicable grant masks
-    ///  - mcp        → `.mcp(allowedTools:)` with allowlist = union (`nil` if any grant is unrestricted)
-    ///  - primitive  → `.primitive(allowedScopeKeys:)` with keys = union (`nil` if any grant is unrestricted)
-    ///  - skill / semanticRetrieval → `.filesystem(.all)` sentinel "granted, no narrowing"
-    ///
-    /// Returns `nil` when the caller has no applicable grant (i.e. denied).
-    /// The owner of the action always receives an unrestricted permission of the right case.
+    /// Returns `KeepTalkingActionScope` — `.all` (unrestricted) or `.verbs(set)`
+    /// (the union of applicable grant scopes, where a grant row with no recorded
+    /// scope is treated as `.all`). Returns `nil` when the caller has no
+    /// applicable grant (i.e. denied). The owner of the action always receives
+    /// `.unrestricted`.
     func resolveGrantPermission(
         node: KeepTalkingNode,
         action: KeepTalkingAction,
         context: KeepTalkingContext?
-    ) async throws -> KeepTalkingGrantPermission? {
+    ) async throws -> KeepTalkingActionScope? {
         let nodeID = try node.requireID()
         guard let ownerNodeID = action.$node.id else { return nil }
 
         // Owner always has unrestricted access to their own actions.
         if nodeID == ownerNodeID {
-            return Self.unrestrictedPermission(for: action.payload)
+            return .unrestricted
         }
 
         let selfNode = try await getCurrentNodeInstance()
@@ -795,74 +829,8 @@ extension KeepTalkingClient {
         let applicable = approvals.filter { $0.applicable(in: context) }
         guard !applicable.isEmpty else { return nil }
 
-        return Self.foldGrantPermissions(
-            applicable.map(\.permission),
-            for: action.payload
-        )
-    }
-
-    private static func unrestrictedPermission(
-        for payload: KeepTalkingAction.Payload
-    ) -> KeepTalkingGrantPermission {
-        KeepTalkingGrantPermission.unrestricted(for: payload)
-    }
-
-    /// Folds a list of applicable `permission` values into one resolved permission.
-    /// Union semantics per case; a missing or off-case permission row is treated as
-    /// "no narrowing" (unrestricted) on the relevant axis.
-    private static func foldGrantPermissions(
-        _ permissions: [KeepTalkingGrantPermission?],
-        for payload: KeepTalkingAction.Payload
-    ) -> KeepTalkingGrantPermission {
-        switch payload {
-            case .filesystem:
-                var merged: KeepTalkingActionPermissionMask = []
-                for permission in permissions {
-                    if case .filesystem(let mask) = permission {
-                        merged.formUnion(mask)
-                    } else {
-                        // No filesystem narrowing recorded → grant is unrestricted on this axis.
-                        merged = .all
-                        break
-                    }
-                }
-                return .filesystem(merged)
-
-            case .mcpBundle:
-                var merged: Set<String> = []
-                var anyUnrestricted = false
-                for permission in permissions {
-                    if case .mcp(let tools) = permission {
-                        if let tools {
-                            merged.formUnion(tools)
-                        } else {
-                            anyUnrestricted = true
-                        }
-                    } else {
-                        anyUnrestricted = true
-                    }
-                }
-                return .mcp(allowedTools: anyUnrestricted ? nil : Array(merged))
-
-            case .primitive:
-                var merged: Set<String> = []
-                var anyUnrestricted = false
-                for permission in permissions {
-                    if case .primitive(let keys) = permission {
-                        if let keys {
-                            merged.formUnion(keys)
-                        } else {
-                            anyUnrestricted = true
-                        }
-                    } else {
-                        anyUnrestricted = true
-                    }
-                }
-                return .primitive(allowedScopeKeys: anyUnrestricted ? nil : Array(merged))
-
-            case .skill, .semanticRetrieval:
-                return unrestrictedPermission(for: payload)
-        }
+        // A grant row with no recorded scope means "no narrowing" → `.all`.
+        return KeepTalkingActionScope.union(applicable.map { $0.permission ?? .all })
     }
 
     /// Lists the tool names currently exposed by a locally-hosted MCP action.
@@ -1054,6 +1022,10 @@ extension KeepTalkingClient {
                         await semanticRetrievalActionManager.unregisterAction(
                             actionID: staleID
                         )
+                    case .acp:
+                        #if os(macOS)
+                        await acpManager.unregisterAction(actionID: staleID)
+                        #endif
                 }
                 try await KeepTalkingNodeRelationActionRelation
                     .query(on: localStore.database)
@@ -1252,6 +1224,17 @@ extension KeepTalkingClient {
                         rootPath: ""
                     )
                 )
+            case .acp(let name, let indexDescription):
+                return .acp(
+                    KeepTalkingACPBundle(
+                        id: action.actionID,
+                        name: name,
+                        indexDescription: indexDescription,
+                        // Remote stub: the agent runs on the owner node, so the
+                        // local copy carries no command/cwd of its own.
+                        cwd: URL(fileURLWithPath: "/")
+                    )
+                )
         }
     }
 
@@ -1305,6 +1288,18 @@ extension KeepTalkingClient {
 
     private static func defaultDescriptor(
         for bundle: KeepTalkingFilesystemBundle
+    ) -> KeepTalkingActionDescriptor {
+        KeepTalkingActionDescriptor(
+            subject: nil,
+            action: KeepTalkingActionWithDescription(
+                description: bundle.indexDescription
+            ),
+            object: nil
+        )
+    }
+
+    private static func defaultDescriptor(
+        for bundle: KeepTalkingACPBundle
     ) -> KeepTalkingActionDescriptor {
         KeepTalkingActionDescriptor(
             subject: nil,

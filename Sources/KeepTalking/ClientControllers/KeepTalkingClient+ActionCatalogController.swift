@@ -205,7 +205,7 @@ extension KeepTalkingClient {
         guard request.targetNodeID == config.node else {
             return
         }
-        Task { [weak self] in
+        _ = Task { [weak self] in
             try await self?.handleIncomingActionCatalogRequest(request)
         }
     }
@@ -283,9 +283,11 @@ extension KeepTalkingClient {
                         action: action,
                         context: context
                     )
+                    // `.callTool`/`.all` → all tools (nil); a `.verbs` set → its
+                    // `.named` tools; no recorded grant → unfiltered (prior behavior).
                     let allowedTools: Set<String>?
-                    if case .mcp(let tools) = grant {
-                        allowedTools = tools.map { Set($0) }
+                    if let grant {
+                        allowedTools = grant.allowedNames(classWildcard: .callTool).map { Set($0) }
                     } else {
                         allowedTools = nil
                     }
@@ -340,15 +342,11 @@ extension KeepTalkingClient {
                         action: action,
                         context: context
                     )
-                    let callerMask: KeepTalkingActionPermissionMask
-                    if case .filesystem(let mask) = grant {
-                        callerMask = mask
-                    } else {
-                        callerMask = []
-                    }
+                    // No recorded grant → deny (no tools), matching prior behavior
+                    // where an absent/off-axis grant produced an empty mask.
                     let tools = await filesystemActionManager.availableTools(
                         bundle: bundle,
-                        mask: callerMask
+                        scope: grant ?? .verbs([])
                     )
                     return KeepTalkingActionCatalogItemResult(
                         actionID: query.actionID,

@@ -23,10 +23,16 @@ public enum KeepTalkingFilesystemOperation: String, Codable, Sendable, Hashable,
     /// path on the host.
     case putFile = "put-file"
 
-    /// Minimum mask bit required to invoke this operation.
-    public var requiredMask: KeepTalkingActionPermissionMask {
+    /// Minimum structural verb required to invoke this operation. A "read" grant
+    /// scope expands to `{.read, .ls, .grep}` (see `ScopeResolver`), so `ls`/`grep`
+    /// gate on their own verbs while `read-file`/`stat`/`get-file` gate on `.read`.
+    public var requiredVerb: KeepTalkingActionVerb {
         switch self {
-            case .ls, .readFile, .grep, .stat, .getFile:
+            case .ls:
+                return .ls
+            case .grep:
+                return .grep
+            case .readFile, .stat, .getFile:
                 return .read
             case .writeFile, .sed, .putFile:
                 return .write
@@ -36,7 +42,7 @@ public enum KeepTalkingFilesystemOperation: String, Codable, Sendable, Hashable,
 
 /// An action bundle that exposes structured filesystem access to the AI agent.
 ///
-/// A single bundle covers all five operations; the grant mask on the relation
+/// A single bundle covers all operations; the grant scope on the relation
 /// controls which subset a remote caller may actually invoke.
 public struct KeepTalkingFilesystemBundle: KeepTalkingActionBundle {
     public var id: UUID

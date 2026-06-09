@@ -363,6 +363,13 @@ extension KeepTalkingClient {
                     runtimeCatalog: runtimeCatalog,
                     context: context
                 )
+
+            case .acp:
+                // The callable ACP tool def (single `prompt` arg) is already in
+                // the runtime catalog; expose it like a primitive.
+                let definitions = runtimeCatalog.catalog.definitions
+                    .filter { $0.actionID == actionID }
+                return .init(tools: definitions, promptContext: "")
         }
     }
 
@@ -723,7 +730,7 @@ extension KeepTalkingClient {
 
         let tools: [KeepTalkingFilesystemTool]
         if stub.isCurrentNode {
-            tools = await filesystemActionManager.availableTools(bundle: bundle, mask: .all)
+            tools = await filesystemActionManager.availableTools(bundle: bundle, scope: .all)
             actLog(
                 "incoming-schema action=\(actionID.uuidString.lowercased()) source=local_filesystem tools=\(tools.count)"
             )

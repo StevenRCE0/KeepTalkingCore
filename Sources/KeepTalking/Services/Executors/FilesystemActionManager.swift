@@ -33,7 +33,7 @@ final class FilesystemTransferBridgeBox: @unchecked Sendable {
 public enum FilesystemActionManagerError: LocalizedError {
     case invalidAction
     case missingActionID
-    case operationDeniedByMask(KeepTalkingFilesystemOperation)
+    case operationDenied(KeepTalkingFilesystemOperation)
     case pathOutsideRoot(String)
     case invalidArguments(String)
     case sandboxNotConfigured
@@ -47,8 +47,8 @@ public enum FilesystemActionManagerError: LocalizedError {
                 return "Action payload is not a filesystem bundle."
             case .missingActionID:
                 return "Action must have an ID before registration."
-            case .operationDeniedByMask(let op):
-                return "Operation '\(op.rawValue)' is not permitted by the grant mask."
+            case .operationDenied(let op):
+                return "Operation '\(op.rawValue)' is not permitted by the grant scope."
             case .pathOutsideRoot(let path):
                 return "Path '\(path)' is outside the permitted root."
             case .invalidArguments(let detail):
@@ -116,13 +116,13 @@ public actor FilesystemActionManager {
         }
     }
 
-    /// Returns the filesystem tools visible to a caller given their grant mask.
+    /// Returns the filesystem tools visible to a caller given their grant scope.
     public func availableTools(
         bundle: KeepTalkingFilesystemBundle,
-        mask: KeepTalkingActionPermissionMask
+        scope: KeepTalkingActionScope
     ) -> [KeepTalkingFilesystemTool] {
         KeepTalkingFilesystemOperation.allCases
-            .filter { mask.contains($0.requiredMask) }
+            .filter { scope.allows($0.requiredVerb) }
             .map { KeepTalkingFilesystemTool(operation: $0, description: $0.toolDescription) }
     }
 
@@ -131,12 +131,12 @@ public actor FilesystemActionManager {
     /// - Parameters:
     ///   - action: The action being called.
     ///   - call: The call payload containing `operation` and arguments.
-    ///   - callerMask: Effective permission mask from the caller's grant.
+    ///   - scope: Effective grant scope from the caller's grant.
     ///   - contextID: The active context's UUID.
     public func callAction(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
-        callerMask: KeepTalkingActionPermissionMask,
+        scope: KeepTalkingActionScope,
         contextID: UUID,
         callerNodeID: UUID,
         isLocalExecution: Bool,
@@ -177,8 +177,8 @@ public actor FilesystemActionManager {
             )
         }
 
-        guard callerMask.contains(operation.requiredMask) else {
-            throw FilesystemActionManagerError.operationDeniedByMask(operation)
+        guard scope.allows(operation.requiredVerb) else {
+            throw FilesystemActionManagerError.operationDenied(operation)
         }
 
         let result = try await execute(

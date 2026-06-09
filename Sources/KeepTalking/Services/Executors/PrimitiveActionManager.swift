@@ -64,7 +64,7 @@ public actor PrimitiveActionManager {
     public func callAction(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
-        allowedScopeKeys: [String]?
+        scope: KeepTalkingActionScope
     ) async throws -> (content: [Tool.Content], isError: Bool?) {
         guard case .primitive(let primitiveBundle) = action.payload else {
             throw PrimitiveActionManagerError.invalidAction
@@ -74,6 +74,9 @@ public actor PrimitiveActionManager {
         }
         try await registerIfNeeded(action)
 
+        // Primitives narrow by scope key (`.named` tokens); there is no class
+        // wildcard, so only `.all` means "all keys". `nil` = all permitted.
+        let allowedScopeKeys = scope.allowedNames(classWildcard: nil)
         let response = try await registry.callAction(primitiveBundle, call, allowedScopeKeys)
         return (
             content: [.text(text: response.text, annotations: nil, _meta: nil)],

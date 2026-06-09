@@ -123,7 +123,7 @@ extension KeepTalkingClient {
         }
         #endif
         let action: KeepTalkingAction
-        let grant: KeepTalkingGrantPermission
+        let grant: KeepTalkingActionScope
         do {
             (action, grant) = try await prepareActionCallExecution(
                 request,
@@ -156,16 +156,10 @@ extension KeepTalkingClient {
             var outputTransfers: [KeepTalkingOneTimeBlobRef]? = nil
             switch action.payload {
                 case .mcpBundle:
-                    let allowedTools: Set<String>?
-                    if case .mcp(let tools) = grant {
-                        allowedTools = tools.map { Set($0) }
-                    } else {
-                        allowedTools = nil
-                    }
                     callResult = try await mcpManager.callAction(
                         action: action,
                         call: request.call,
-                        allowedTools: allowedTools
+                        scope: grant
                     )
                 case .skill:
                     #if os(macOS)
@@ -224,14 +218,17 @@ extension KeepTalkingClient {
                         // hard-failing; never downgrades a would-be-sandboxed skill.
                         if let granted = try? await scopeManager.resolvedPolicy(
                             for: action,
-                            extraReadDirectories: ["KT_ATTACHMENTS": attachmentsDir]
+                            extraReadDirectories: ["KT_ATTACHMENTS": attachmentsDir],
+                            callerScope: grant
                         ) {
                             sandboxPolicy = granted
                         } else {
-                            sandboxPolicy = try? await scopeManager.resolvedPolicy(for: action)
+                            sandboxPolicy = try? await scopeManager.resolvedPolicy(
+                                for: action, callerScope: grant)
                         }
                     } else {
-                        sandboxPolicy = try? await scopeManager.resolvedPolicy(for: action)
+                        sandboxPolicy = try? await scopeManager.resolvedPolicy(
+                            for: action, callerScope: grant)
                     }
                     callResult = try await skillManager.callAction(
                         action: action,
@@ -246,24 +243,12 @@ extension KeepTalkingClient {
                 case .primitive:
                     var call = request.call
                     call.metadata.fields["caller_id"] = .string(request.callerNodeID.uuidString.lowercased())
-                    let allowedScopeKeys: [String]?
-                    if case .primitive(let keys) = grant {
-                        allowedScopeKeys = keys
-                    } else {
-                        allowedScopeKeys = nil
-                    }
                     callResult = try await primitiveActionManager.callAction(
                         action: action,
                         call: call,
-                        allowedScopeKeys: allowedScopeKeys
+                        scope: grant
                     )
                 case .filesystem:
-                    let callerMask: KeepTalkingActionPermissionMask
-                    if case .filesystem(let mask) = grant {
-                        callerMask = mask
-                    } else {
-                        callerMask = .all
-                    }
                     let isLocalExecution = request.callerNodeID == config.node
                     // Materialize streamed one-time blobs ONLY for put-file — the
                     // only op that consumes them. Read ops (ls/read/grep/stat) that
@@ -286,7 +271,7 @@ extension KeepTalkingClient {
                     let fsResult = try await filesystemActionManager.callAction(
                         action: action,
                         call: request.call,
-                        callerMask: callerMask,
+                        scope: grant,
                         contextID: request.contextID,
                         callerNodeID: request.callerNodeID,
                         isLocalExecution: isLocalExecution,
@@ -300,6 +285,20 @@ extension KeepTalkingClient {
                         call: request.call,
                         contextID: request.contextID
                     )
+                case .acp:
+                    #if os(macOS)
+                    // The agent runs unsandboxed by design; the scope drives only
+                    // advisory containment (advertised fs caps, KT-served fs path
+                    // containment, permission auto-policy) inside ACPManager.
+                    callResult = try await acpManager.callAction(
+                        action: action,
+                        call: request.call,
+                        scope: grant,
+                        callerIsRemote: request.callerNodeID != config.node
+                    )
+                    #else
+                    callResult = (content: [], isError: true)
+                    #endif
             }
 
             let actionID = request.call.action.uuidString.lowercased()
@@ -315,6 +314,8 @@ extension KeepTalkingClient {
                         return "filesystem"
                     case .semanticRetrieval:
                         return "semantic_retrieval"
+                    case .acp:
+                        return "acp"
                 }
             }()
             let rendered = callResult.content.map {
@@ -356,7 +357,7 @@ extension KeepTalkingClient {
     private func prepareActionCallExecution(
         _ request: KeepTalkingActionCallRequest,
         context: KeepTalkingContext?
-    ) async throws -> (KeepTalkingAction, KeepTalkingGrantPermission) {
+    ) async throws -> (KeepTalkingAction, KeepTalkingActionScope) {
         let action = try await resolveLocalActionForExecution(
             actionID: request.call.action
         )
@@ -387,9 +388,9 @@ extension KeepTalkingClient {
             )
         }
 
-        // For filesystem grants an empty mask means "no operations allowed" —
-        // treat as denied so we don't dispatch to the executor with a zero mask.
-        if case .filesystem(let mask) = grant, mask == [] {
+        // A `.verbs([])` scope grants nothing — treat as denied uniformly across
+        // all payloads rather than dispatching to an executor with an empty scope.
+        if grant.isDenied {
             throw KeepTalkingClientError.actionCallNotAuthorized(
                 action: request.call.action,
                 caller: request.callerNodeID,
@@ -744,6 +745,7 @@ extension KeepTalkingClient {
                     case .skill: "skill"
                     case .filesystem: "filesystem"
                     case .semanticRetrieval: "semantic_retrieval"
+                    case .acp: "acp"
                 }
         } else {
             kind = actionID

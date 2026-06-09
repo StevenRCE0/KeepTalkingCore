@@ -98,8 +98,8 @@ struct RemoteActionCallTests {
         #expect(isGranted)
     }
 
-    @Test("incoming node status ignores grants outside the local trust scope")
-    func incomingNodeStatusIgnoresGrantOutsideLocalTrustScope() async throws {
+    @Test("incoming owner grant is recorded in its advertised context, scoped to it")
+    func incomingNodeStatusRecordsOwnerGrantInAdvertisedContext() async throws {
         let localStore = KeepTalkingInMemoryStore()
         let localNodeID = UUID(uuidString: "AAAAAAA1-9999-9999-9999-999999999999")!
         let remoteNodeID = UUID(uuidString: "BBBBBBB2-8888-8888-8888-888888888888")!
@@ -173,16 +173,33 @@ struct RemoteActionCallTests {
         .filter(\.$relation.$id, .equal, try #require(trustedRelation.id))
         .filter(\.$action.$id, .equal, actionID)
         .first()
-        let isGranted = try await KeepTalkingClient.isActionGrantedToNode(
+        let requiredAction = try #require(action)
+        // The owner (remote) advertised the grant in `grantedContext`, so the
+        // receiver records it there and honours it...
+        let grantedInAdvertisedContext = try await KeepTalkingClient.isActionGrantedToNode(
             node: localNode,
-            action: try #require(action),
+            action: requiredAction,
             context: grantedContext,
             selfNode: localNode,
             on: localStore.database
         )
+        // ...but it's SCOPED to that context: an unrelated context the local node
+        // happens to trust the remote in does not inherit the grant. The receiver
+        // materializes the incoming (remote→local) trust in the grant's own
+        // context and deliberately does not re-gate on the local node's outgoing
+        // trust scope (see mergeIncomingActionAuthorisations).
+        let grantedInUnrelatedContext = try await KeepTalkingClient.isActionGrantedToNode(
+            node: localNode,
+            action: requiredAction,
+            context: trustedContext,
+            selfNode: localNode,
+            on: localStore.database
+        )
 
+        // The grant lands on the incoming relation, never on the local→remote outgoing one.
         #expect(actionLink == nil)
-        #expect(!isGranted)
+        #expect(grantedInAdvertisedContext)
+        #expect(!grantedInUnrelatedContext)
     }
 
     @Test("grant action permission supports actions hosted on owned nodes")

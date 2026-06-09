@@ -89,33 +89,45 @@ public enum ScopeResolver {
                 }
 
             case .filesystem(let bundle):
-                return filesystemDescriptor(for: bundle, mask: .all)
+                return filesystemDescriptor(for: bundle, scope: .all)
 
-            case .primitive, .semanticRetrieval:
+            case .acp, .primitive, .semanticRetrieval:
+                // ACP agents run UNsandboxed by design — containment is advisory
+                // (the session cwd + advertised fs caps), not enforced — so there
+                // is no implicit sandbox descriptor, just like primitives, which
+                // spawn no confined subprocess.
                 return nil
         }
     }
 
-    /// Derives a descriptor for a filesystem bundle, filtered by a permission mask.
+    /// Derives a descriptor for a filesystem bundle, filtered by a grant scope.
     ///
-    /// The mask determines which verbs are included — e.g. a read-only mask
-    /// produces only `[.read, .ls, .grep]` verbs.
+    /// The scope determines which verbs are included — e.g. a read-only scope
+    /// produces only `[.read, .ls, .grep]` verbs. `.all` yields the bundle's full
+    /// filesystem capability; per-grant narrowing also happens later in
+    /// `resolvedDescriptor(callerScope:)`, so this is normally called with `.all`.
     public static func filesystemDescriptor(
         for bundle: KeepTalkingFilesystemBundle,
-        mask: KeepTalkingActionPermissionMask
+        scope: KeepTalkingActionScope
     ) -> KeepTalkingActionDescriptor? {
         let rootPath = bundle.rootPath
         guard !rootPath.isEmpty else { return nil }
         let rootURL = URL(fileURLWithPath: rootPath)
 
         var verbs: Set<KeepTalkingActionVerb> = []
-        if mask.contains(.read) {
+        if scope.allows(.read) {
             verbs.formUnion([.read, .ls, .grep])
         }
-        if mask.contains(.write) {
+        if scope.allows(.ls) {
+            verbs.insert(.ls)
+        }
+        if scope.allows(.grep) {
+            verbs.insert(.grep)
+        }
+        if scope.allows(.write) {
             verbs.insert(.write)
         }
-        if mask.contains(.execute) {
+        if scope.allows(.execute) {
             verbs.insert(.execute)
         }
 
@@ -139,7 +151,8 @@ public enum ScopeResolver {
     /// from all descriptors. The subject from the action's own descriptor is preserved.
     public static func resolvedDescriptor(
         for action: KeepTalkingAction,
-        additionalGrants: [KeepTalkingActionGrant] = []
+        additionalGrants: [KeepTalkingActionGrant] = [],
+        callerScope: KeepTalkingActionScope = .all
     ) -> KeepTalkingActionDescriptor {
         // Start with the action's explicit descriptor, fall back to implicit
         let base =
@@ -147,7 +160,8 @@ public enum ScopeResolver {
             ?? implicitDescriptor(for: action)
             ?? KeepTalkingActionDescriptor()
 
-        guard !additionalGrants.isEmpty else { return base }
+        // No grants and an unrestricted caller → nothing to merge or narrow.
+        if additionalGrants.isEmpty, case .all = callerScope { return base }
 
         var mergedVerbs = base.action?.verbs ?? []
         var mergedFilePaths: [URL] = []
@@ -173,6 +187,14 @@ public enum ScopeResolver {
                 urls: &mergedURLs,
                 commands: &mergedCommands
             )
+        }
+
+        // A `.verbs` grant scope NARROWS the action's capability (never widens):
+        // intersect the merged structural verbs with what the caller was granted.
+        // Descriptors never carry `.named` tokens, so the intersection cleanly
+        // drops any op class the caller wasn't granted. `.all` leaves verbs as-is.
+        if case .verbs(let granted) = callerScope {
+            mergedVerbs.formIntersection(granted)
         }
 
         // Build the merged object resource — prefer the most common type
@@ -209,11 +231,13 @@ public enum ScopeResolver {
     public static func resolvedPolicy(
         for action: KeepTalkingAction,
         additionalGrants: [KeepTalkingActionGrant] = [],
+        callerScope: KeepTalkingActionScope = .all,
         sandbox: any ProcessSandboxing
     ) throws -> KTSandboxPolicy {
         let descriptor = resolvedDescriptor(
             for: action,
-            additionalGrants: additionalGrants
+            additionalGrants: additionalGrants,
+            callerScope: callerScope
         )
         return try sandbox.compilePolicy(descriptor: descriptor)
     }

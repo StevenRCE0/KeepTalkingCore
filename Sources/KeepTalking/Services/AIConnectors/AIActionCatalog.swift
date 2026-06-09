@@ -335,6 +335,35 @@ extension KeepTalkingClient {
                             supportsWakeAssist: supportsWakeAssist,
                             isCurrentNode: isCurrentNode
                         ))
+
+                case .acp(let bundle):
+                    let description =
+                        action.descriptor?.action?.description
+                        ?? bundle.indexDescription
+                    actionStubs.append(
+                        KeepTalkingActionStub(
+                            actionID: actionID,
+                            ownerNodeID: ownerNodeID,
+                            name: bundle.name,
+                            kind: .acp,
+                            description: description,
+                            supportsWakeAssist: supportsWakeAssist,
+                            isCurrentNode: isCurrentNode
+                        ))
+                    // Expose ACP as a callable tool (single `prompt` arg), like
+                    // skills/primitives — without this the agent can't dispatch it.
+                    let acpActionDefinition =
+                        makeACPActionProxyDefinition(
+                            actionID: actionID,
+                            ownerNodeID: ownerNodeID,
+                            bundle: bundle,
+                            descriptor: action.descriptor,
+                            supportsWakeAssist: supportsWakeAssist
+                        )
+                    definitionsByName[acpActionDefinition.functionName] =
+                        acpActionDefinition
+                    routesByFunctionName[acpActionDefinition.functionName] =
+                        .actionProxy(acpActionDefinition)
             }
         }
 

@@ -15,8 +15,8 @@ public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     /// Operations are selected by the tool's `operation` argument; per-operation
     /// calendar scope lives on `KeepTalkingPrimitiveBundle.scope` keyed by
     /// `"read"` / `"write"` (each value is a list of calendar titles). The grant
-    /// further narrows which keys the caller may invoke via
-    /// `KeepTalkingGrantPermission.primitive(allowedScopeKeys:)`.
+    /// further narrows which keys the caller may invoke via the grant scope's
+    /// `.named(<key>)` tokens (`KeepTalkingActionScope`).
     case accessCalendar = "access-calendar"
 }
 
