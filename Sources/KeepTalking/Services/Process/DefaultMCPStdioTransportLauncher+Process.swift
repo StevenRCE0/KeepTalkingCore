@@ -38,14 +38,29 @@ private final class DefaultMCPStdioProcessHandler:
     }
 
     func terminate() {
+        // Non-blocking: send SIGTERM and escalate to SIGKILL out-of-band if the
+        // child ignores it. We deliberately do NOT `waitUntilExit()` — terminate
+        // runs on the actor / timeout-cleanup path (ACP) and a SIGTERM-ignoring
+        // agent would otherwise block it forever, defeating the timeout. Reaping
+        // happens via the process's terminationHandler set at launch.
         if process.isRunning {
             process.terminate()
-            process.waitUntilExit()
+            scheduleForceKill()
         }
         stdinPipe.fileHandleForWriting.closeFile()
         stdoutPipe.fileHandleForReading.closeFile()
         stderrPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.closeFile()
+    }
+
+    /// Escalates to SIGKILL if the process hasn't exited shortly after SIGTERM.
+    /// Re-checks `isRunning` before killing so a reaped/reused PID is never hit.
+    private func scheduleForceKill() {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [self] in
+            guard process.isRunning else { return }
+            let pid = process.processIdentifier
+            if pid > 0 { kill(pid, SIGKILL) }
+        }
     }
 }
 

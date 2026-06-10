@@ -249,7 +249,7 @@ public struct KeepTalkingActionGrant: Codable, Sendable, Identifiable {
     public var grantedByNodeID: UUID
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         descriptor: KeepTalkingActionDescriptor,
         duration: KeepTalkingActionGrantDuration,
         grantedAt: Date = .now,
@@ -423,7 +423,7 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
     ///   - remoteAuthorisable: Whether a remote node may authorize this action.
     ///   - blockingAuthorisation: Whether execution waits for authorization to complete.
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         payload: Payload,
         remoteAuthorisable: Bool,
         blockingAuthorisation: Bool

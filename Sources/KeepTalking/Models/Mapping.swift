@@ -76,7 +76,7 @@ public final class KeepTalkingMapping: Model, @unchecked Sendable {
     public init() {}
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         target: KeepTalkingMappingTarget,
         kind: KeepTalkingMappingKind,
         namespace: String? = nil,

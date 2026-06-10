@@ -63,7 +63,7 @@ public final class KeepTalkingVoiceTranscriptLine: Model, @unchecked Sendable {
     public init() {}
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         sessionID: UUID,
         contextID: UUID,
         author: UUID,

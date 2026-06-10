@@ -1,5 +1,5 @@
 {
-  "originHash" : "8ba6ab33e00f50fe68b2f76b621f4d5ab651ead7b28502c7c6b74f52d6e3c70d",
+  "originHash" : "5ba5e85541eeb6ca61716e369783a95571872ebb8da1b60e76c6a7a54a3e278d",
   "pins" : [
     {
       "identity" : "async-kit",
@@ -233,6 +233,15 @@
       "state" : {
         "revision" : "7c6ad0fc39d0763e0b699210e4124afd5041c5df",
         "version" : "1.6.4"
+      }
+    },
+    {
+      "identity" : "swift-uuidv7",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mhayes853/swift-uuidv7.git",
+      "state" : {
+        "revision" : "c7a578f20ca5e6e018ef4ba8bf8517550047864f",
+        "version" : "0.6.1"
       }
     }
   ],

@@ -49,7 +49,7 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
     public init() {}
 
     init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         relation: KeepTalkingNodeRelation,
         action: KeepTalkingAction,
         approvingContext: ApprovingContext,

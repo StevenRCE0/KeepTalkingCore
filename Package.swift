@@ -38,6 +38,9 @@ let package = Package(
         // swift-crypto: the cross-platform, API-compatible implementation of
         // CryptoKit. Used as the canonical crypto so the SDK is Apple-free.
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        // swift-uuidv7: time-ordered (RFC 9562 v7) UUID generation used for
+        // default primary keys on newly created entities. See Helpers/UUIDv7.swift.
+        .package(url: "https://github.com/mhayes853/swift-uuidv7.git", from: "0.6.1"),
     ],
     targets: [
         .target(
@@ -62,6 +65,7 @@ let package = Package(
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
                 .product(name: "X509", package: "swift-certificates"),
                 .product(name: "SwiftASN1", package: "swift-asn1"),
+                .product(name: "UUIDV7", package: "swift-uuidv7"),
             ],
             path: "Sources/KeepTalking"
         ),

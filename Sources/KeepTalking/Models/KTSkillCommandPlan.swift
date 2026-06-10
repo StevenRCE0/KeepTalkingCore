@@ -18,7 +18,7 @@ public struct KTSkillAtomicCommand: Codable, Sendable, Identifiable {
     public var argumentsSchema: String?
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         index: Int,
         descriptor: KeepTalkingActionDescriptor,
         intent: String,
@@ -41,7 +41,7 @@ public struct KTSkillAtomicCommand: Codable, Sendable, Identifiable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        self.id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID.v7()
         self.index = try c.decode(Int.self, forKey: .index)
         self.descriptor = try c.decode(KeepTalkingActionDescriptor.self, forKey: .descriptor)
         self.intent = try c.decode(String.self, forKey: .intent)

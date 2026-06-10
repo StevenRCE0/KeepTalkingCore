@@ -16,7 +16,7 @@ public final class KeepTalkingOperatorContext: Model, @unchecked Sendable {
     public init() {}
 
     public init(
-        id: UUID? = UUID(),
+        id: UUID? = UUID.v7(),
         `operator`: KeepTalkingNode,
         context: KeepTalkingContext
     ) {
@@ -85,7 +85,7 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     }
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         updatedAt: Date = .now,
         messages: [KeepTalkingContextMessage] = [],
         attachments: [KeepTalkingContextAttachment] = []
@@ -113,7 +113,7 @@ extension KeepTalkingContext: Codable {
 
     public convenience init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID.v7()
         let updatedAt =
             try container.decodeIfPresent(
                 Date.self,

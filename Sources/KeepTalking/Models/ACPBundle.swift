@@ -5,11 +5,13 @@ import Foundation
 /// JSON-RPC subprocess and drives as the *client*. The inverse of MCP: the
 /// external program is a full autonomous agent, and KT supervises it.
 ///
-/// ACP enforces no sandboxing itself, so containment is entirely KT's job: the
-/// granted scope (`KeepTalkingActionScope`) is compiled into a `KTSandboxPolicy`
-/// that confines the subprocess, and the advertised `fs.*` / `terminal`
-/// capabilities + the `cwd` root set are derived from that same scope at session
-/// time. macOS-only (like stdio MCP and skills).
+/// ACP enforces no sandboxing itself, and — by design — neither does KT: the
+/// agent runs UNsandboxed (like stdio MCP). Containment is ADVISORY, not
+/// enforced; for hard isolation run the agent in a container/VM. The granted
+/// scope (`KeepTalkingActionScope`) only shapes the advice — the advertised
+/// `fs.*` capabilities, the KT-served fs path-containment, and the
+/// `session/request_permission` auto-policy at session time. macOS-only (like
+/// stdio MCP and skills). See `ACPManager` for the full containment contract.
 public struct KeepTalkingACPBundle: KeepTalkingActionBundle, Equatable {
     public var id: UUID
     public var name: String
@@ -22,8 +24,9 @@ public struct KeepTalkingACPBundle: KeepTalkingActionBundle, Equatable {
     /// Environment variables for the agent subprocess.
     public var environment: [String: String]
 
-    /// Absolute working directory. Drives BOTH the `session/new` `cwd` (the
-    /// agent's advisory root) AND the compiled sandbox root (the enforced one).
+    /// Absolute working directory. Passed to the agent via `session/new` as its
+    /// recommended working root, and used as the root for KT-served `fs/*`
+    /// path-containment. Advisory — it does not confine the (unsandboxed) process.
     public var cwd: URL
 
     /// Extra absolute directories the agent may touch, beyond `cwd`. Surfaced to
@@ -38,7 +41,7 @@ public struct KeepTalkingACPBundle: KeepTalkingActionBundle, Equatable {
     public var remoteSystemPrompt: String?
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         name: String,
         indexDescription: String = "",
         command: [String] = [],

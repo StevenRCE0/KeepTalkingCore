@@ -41,7 +41,7 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
     public var blockingAuthorisation: Bool
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         name: String,
         indexDescription: String,
         action: KeepTalkingPrimitiveActionKind,
@@ -100,7 +100,7 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
 
     public func assigningNewID() -> KeepTalkingPrimitiveBundle {
         var copy = self
-        copy.id = UUID()
+        copy.id = UUID.v7()
         return copy
     }
 }

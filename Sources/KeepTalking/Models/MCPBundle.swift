@@ -63,7 +63,7 @@ public struct KeepTalkingMCPBundle: KeepTalkingActionBundle, Equatable {
     public var cachedTools: [String]?
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         name: String,
         indexDescription: String,
         service: KeepTalkingMCPService,

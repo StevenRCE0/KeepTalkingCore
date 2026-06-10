@@ -12,6 +12,11 @@ public enum ACPManagerError: LocalizedError {
     case sessionFailed(String)
     case agentError(code: Int, message: String)
     case timedOut(String)
+    /// The agent closed its stdout (EOF) — connection ended mid-session.
+    case transportClosed
+    /// The agent subprocess exited before completing the turn. `status` is the
+    /// exit code if known; `detail` carries the tail of the agent's stderr.
+    case agentExited(status: Int32?, detail: String?)
 
     public var errorDescription: String? {
         switch self {
@@ -31,7 +36,38 @@ public enum ACPManagerError: LocalizedError {
                 return "ACP agent error (\(code)): \(message)"
             case .timedOut(let what):
                 return "ACP timed out: \(what)"
+            case .transportClosed:
+                return "The ACP agent closed the connection."
+            case .agentExited(let status, let detail):
+                let statusText = status.map { "exit status \($0)" } ?? "unexpectedly"
+                let tail = (detail?.isEmpty == false) ? "\n--- agent stderr ---\n\(detail!)" : ""
+                return
+                    "The ACP agent exited \(statusText) before completing the turn (check the command and its stderr).\(tail)"
         }
+    }
+}
+
+/// Thread-safe ring of the agent's most recent stderr lines, surfaced in
+/// `agentExited` diagnostics so a "transport closed" failure (wrong command,
+/// crash, immediate exit) is actionable rather than opaque.
+final class ACPStderrBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    private let maxLines = 20
+
+    func append(_ text: String) {
+        let new = text.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
+        guard !new.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        lines.append(contentsOf: new)
+        if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
+    }
+
+    func tail() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -58,10 +94,19 @@ public enum ACPManagerError: LocalizedError {
 public actor ACPManager {
     /// ACP protocol version this client implements.
     static let protocolVersion = 1
-    /// How long to wait for any single JSON-RPC request (initialize/session.*).
-    private let requestTimeoutSeconds: TimeInterval
-    /// How long to wait for the whole prompt turn before giving up.
-    private let promptTimeoutSeconds: TimeInterval
+    /// Hard cap for the startup handshake (`initialize` + `session/new`). These
+    /// must complete promptly; a hang here means a wrong/garbled agent command,
+    /// so we fail fast rather than wait forever. The prompt turn itself is NOT
+    /// capped — see `promptGraceSeconds`.
+    private let handshakeTimeoutSeconds: TimeInterval
+    /// The prompt turn runs with no deadline: a coding agent legitimately works
+    /// for many minutes. `patientWait` waits silently for `promptGraceSeconds`,
+    /// then polls the agent's liveness every `promptPollSeconds` and keeps waiting
+    /// as long as the subprocess is alive — mirroring how MCP tool calls use
+    /// `callToolPatiently`. It ends only when the agent answers, the agent process
+    /// dies, or the run is cancelled.
+    private let promptGraceSeconds: TimeInterval
+    private let promptPollSeconds: TimeInterval
 
     private let nodeConfig: KeepTalkingConfig
     private let stdioTransportLauncher: (any MCPStdioTransportLaunching)?
@@ -72,13 +117,15 @@ public actor ACPManager {
         nodeConfig: KeepTalkingConfig,
         stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
             DefaultMCPStdioTransportLauncher.current,
-        requestTimeoutSeconds: TimeInterval = 30,
-        promptTimeoutSeconds: TimeInterval = 600
+        handshakeTimeoutSeconds: TimeInterval = 30,
+        promptGraceSeconds: TimeInterval = 10,
+        promptPollSeconds: TimeInterval = 5
     ) {
         self.nodeConfig = nodeConfig
         self.stdioTransportLauncher = stdioTransportLauncher
-        self.requestTimeoutSeconds = requestTimeoutSeconds
-        self.promptTimeoutSeconds = promptTimeoutSeconds
+        self.handshakeTimeoutSeconds = handshakeTimeoutSeconds
+        self.promptGraceSeconds = promptGraceSeconds
+        self.promptPollSeconds = promptPollSeconds
     }
 
     public func setLogHandler(_ handler: (@Sendable (String) -> Void)?) {
@@ -156,6 +203,7 @@ public actor ACPManager {
 
         let actionLabel = action.id?.uuidString.lowercased() ?? "unknown"
         let log = onLog
+        let stderr = ACPStderrBuffer()
         log?("[acp] launching agent action=\(actionLabel) cmd=\(bundle.command.first ?? "?")")
 
         let launched = try await launcher.launchTransport(
@@ -164,6 +212,7 @@ public actor ACPManager {
             stderrHandler: { data in
                 guard !data.isEmpty else { return }
                 let text = String(decoding: data, as: UTF8.self)
+                stderr.append(text)
                 for line in text.split(whereSeparator: \.isNewline) where !line.isEmpty {
                     log?("[acp/stderr] action=\(actionLabel) \(line)")
                 }
@@ -188,9 +237,15 @@ public actor ACPManager {
             launched.processHandler.terminate()
         }
 
+        // Liveness signal for the patient prompt wait: the agent subprocess is
+        // still running (no recorded exit status). Sendable handle captured by value.
+        let processHandler = launched.processHandler
+
         do {
             try await session.start()
-            try await withTimeout(requestTimeoutSeconds, label: "initialize") {
+            // Handshake: fail fast — these must answer promptly, and a hang here
+            // means the launched command isn't a conformant ACP agent.
+            try await withTimeout(handshakeTimeoutSeconds, label: "initialize") {
                 try await session.initialize(
                     clientName: "KeepTalking:\(self.nodeConfig.node.uuidString)",
                     protocolVersion: Self.protocolVersion,
@@ -198,7 +253,7 @@ public actor ACPManager {
                     fsWrite: scope.allows(.write)
                 )
             }
-            let sessionID = try await withTimeout(requestTimeoutSeconds, label: "session/new") {
+            let sessionID = try await withTimeout(handshakeTimeoutSeconds, label: "session/new") {
                 try await session.newSession(cwd: bundle.cwd.path)
             }
             // Owner's manual limitation for remote callers — injected ahead of the
@@ -211,7 +266,19 @@ public actor ACPManager {
                 else { return nil }
                 return "The following constraints are set by the host operator and MUST be respected:\n\(extra)"
             }()
-            try await withTimeout(promptTimeoutSeconds, label: "session/prompt") {
+            // The prompt turn has NO deadline: the agent may legitimately work for
+            // many minutes. patientWait polls the subprocess's liveness instead of
+            // counting down — if the agent dies it throws transportClosed (enriched
+            // below with the exit status + stderr tail); a cancelled run unwinds the
+            // cancellation-aware request(). Mirrors MCP's callToolPatiently.
+            try await patientWait(
+                label: "acp prompt action=\(actionLabel)",
+                graceSeconds: promptGraceSeconds,
+                pollSeconds: promptPollSeconds,
+                log: log,
+                isAlive: { processHandler.terminationStatus() == nil },
+                onDeath: { ACPManagerError.transportClosed }
+            ) {
                 try await session.prompt(
                     sessionID: sessionID, text: prompt, systemPreamble: systemPreamble)
             }
@@ -222,6 +289,21 @@ public actor ACPManager {
             return (content: [.text(text: body, annotations: nil, _meta: nil)], isError: false)
         } catch {
             await teardown()
+            // If the agent process died (wrong command, crash, immediate exit,
+            // EOF), surface its exit status + stderr tail instead of the raw
+            // "transport closed"/cancellation error, so the failure is actionable.
+            let exitStatus = processHandler.terminationStatus()
+            let isClosed: Bool = {
+                if case ACPManagerError.transportClosed = error { return true }
+                return false
+            }()
+            if exitStatus != nil || isClosed {
+                let tail = stderr.tail()
+                let enriched = ACPManagerError.agentExited(
+                    status: exitStatus, detail: tail.isEmpty ? nil : tail)
+                log?("[acp] action=\(actionLabel) failed: \(enriched.localizedDescription)")
+                throw enriched
+            }
             log?("[acp] action=\(actionLabel) failed: \(error.localizedDescription)")
             throw error
         }
@@ -290,10 +372,13 @@ private actor ACPSession {
                 for try await data in stream {
                     await self?.handleIncoming(data)
                 }
+                // Clean EOF: the agent closed its stdout. Fail any in-flight
+                // request with transportClosed; callAction enriches it with the
+                // process exit status + stderr tail. No-op once the turn is done.
+                await self?.failAll(ACPManagerError.transportClosed)
             } catch {
                 await self?.failAll(error)
             }
-            await self?.failAll(ACPManagerError.sessionFailed("transport closed"))
         }
     }
 
@@ -320,8 +405,9 @@ private actor ACPSession {
                 "protocolVersion": protocolVersion,
                 "clientCapabilities": [
                     "fs": ["readTextFile": fsRead, "writeTextFile": fsWrite],
-                    // Terminal is not bridged in v1; the sandbox confines any
-                    // direct command execution the agent performs instead.
+                    // Terminal is not bridged in v1: KT doesn't advertise the
+                    // terminal capability, so a well-behaved agent runs commands
+                    // in its own (unsandboxed) process rather than via terminal/*.
                     "terminal": false,
                 ],
                 "clientInfo": [
@@ -367,13 +453,27 @@ private actor ACPSession {
         } catch {
             throw ACPManagerError.sessionFailed("encode \(method): \(error.localizedDescription)")
         }
-        let responseData: Data = try await withCheckedThrowingContinuation { continuation in
-            pending[id] = continuation
-            Task { [weak self, transport] in
-                do { try await transport.send(data) } catch {
-                    await self?.failRequest(id, error)
+        // The continuation MUST observe cancellation: withTimeout cancels this
+        // task when it fires, and a bare withCheckedThrowingContinuation never
+        // unwinds on cancel — which would leave the task-group awaiting a
+        // suspended child forever and defeat the timeout. withTaskCancellationHandler
+        // (plus the already-cancelled fast path) makes request() self-cleaning.
+        let responseData: Data = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Data, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                pending[id] = continuation
+                Task { [weak self, transport] in
+                    do { try await transport.send(data) } catch {
+                        await self?.failRequest(id, error)
+                    }
                 }
             }
+        } onCancel: {
+            Task { [weak self] in await self?.failRequest(id, CancellationError()) }
         }
         let object = try? JSONSerialization.jsonObject(with: responseData)
         return (object as? [String: Any])?["result"] as? [String: Any] ?? [:]

@@ -19,7 +19,7 @@ public final class KeepTalkingNodeIdentityKey: Model, @unchecked Sendable {
     public init() {}
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         relation: KeepTalkingNodeRelation,
         publicKey: String
     ) throws {

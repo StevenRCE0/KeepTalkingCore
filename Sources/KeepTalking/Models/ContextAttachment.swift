@@ -176,7 +176,7 @@ public final class KeepTalkingContextAttachment: Model, @unchecked Sendable {
     public init() {}
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         context: KeepTalkingContext,
         parentMessageID: UUID? = nil,
         sender: KeepTalkingContextMessage.Sender,

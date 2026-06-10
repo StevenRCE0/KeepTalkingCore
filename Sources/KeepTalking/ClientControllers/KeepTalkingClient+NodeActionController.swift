@@ -246,7 +246,7 @@ extension KeepTalkingClient {
         let payload = action.payload
 
         if action.id == nil {
-            action.id = UUID()
+            action.id = UUID.v7()
         }
         if action.$node.id == nil {
             let node = try await getCurrentNodeInstance()

@@ -39,7 +39,7 @@ public struct KeepTalkingSkillBundle: KeepTalkingActionBundle {
     public var grantedNetworkHosts: [String]
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         name: String,
         indexDescription: String,
         directory: URL? = nil,
@@ -74,7 +74,7 @@ public struct KeepTalkingSkillBundle: KeepTalkingActionBundle {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        self.id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID.v7()
         self.name = try c.decode(String.self, forKey: .name)
         self.indexDescription = (try? c.decode(String.self, forKey: .indexDescription)) ?? ""
         self.directory = try? c.decode(URL.self, forKey: .directory)

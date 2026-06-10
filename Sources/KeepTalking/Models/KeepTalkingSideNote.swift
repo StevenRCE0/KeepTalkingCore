@@ -28,7 +28,7 @@ public final class KeepTalkingSideNote: Model, @unchecked Sendable {
     public init() {}
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         contextID: UUID,
         key: String,
         value: String,

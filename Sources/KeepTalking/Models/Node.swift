@@ -28,7 +28,7 @@ public final class KeepTalkingNode: Model, @unchecked Sendable {
     public init() {}
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         lastSeenAt: Date = Date()
     ) {
         self.id = id
@@ -46,7 +46,7 @@ extension KeepTalkingNode: Codable {
 
     public convenience init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID.v7()
         let lastSeenAt =
             try container.decodeIfPresent(
                 Date.self,

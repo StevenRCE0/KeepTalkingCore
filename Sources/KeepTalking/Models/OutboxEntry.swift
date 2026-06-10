@@ -43,7 +43,7 @@ public final class KeepTalkingOutboxEntry: Model, @unchecked Sendable {
     public init() {}
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         contextMessage: KeepTalkingContextMessage,
         context: KeepTalkingContext,
         createdAt: Date = Date(),

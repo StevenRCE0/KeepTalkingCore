@@ -16,7 +16,7 @@ public struct KeepTalkingPushWakeHandle: Codable, Sendable, Hashable {
     public var environment: String
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         purpose: KeepTalkingPushWakePurpose,
         contextID: UUID? = nil,
         relationID: UUID? = nil,

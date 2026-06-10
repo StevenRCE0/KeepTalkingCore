@@ -15,7 +15,7 @@ public struct KeepTalkingSemanticRetrievalBundle: KeepTalkingActionBundle {
     public var contextIDs: [UUID]
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         name: String = "Search Thread Memory",
         indexDescription: String =
             "Search stored and live thread memory for earlier topics, facts, decisions, and unfinished work.",

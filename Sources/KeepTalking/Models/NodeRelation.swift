@@ -62,7 +62,7 @@ public final class KeepTalkingNodeRelation: Model, @unchecked Sendable {
     }
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         from: KeepTalkingNode,
         to: KeepTalkingNode,
         relationship: KeepTalkingRelationship,

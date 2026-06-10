@@ -48,7 +48,7 @@ public final class KeepTalkingThread: Model, @unchecked Sendable {
     public init() {}
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         context: KeepTalkingContext,
         startMessage: KeepTalkingContextMessage?,
         endMessage: KeepTalkingContextMessage?,

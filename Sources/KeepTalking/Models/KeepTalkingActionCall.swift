@@ -44,7 +44,7 @@ public struct KeepTalkingActionCallRequest: Codable, Sendable {
     public var call: KeepTalkingActionCall
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         contextID: UUID,
         callerNodeID: UUID,
         targetNodeID: UUID,
@@ -206,7 +206,7 @@ public struct KeepTalkingActionCatalogRequest: Codable, Sendable {
     public var queries: [KeepTalkingActionCatalogQuery]
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         contextID: UUID,
         callerNodeID: UUID,
         targetNodeID: UUID,

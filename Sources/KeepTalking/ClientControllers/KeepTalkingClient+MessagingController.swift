@@ -114,7 +114,7 @@ extension KeepTalkingClient {
         let sender = try sender ?? .node(node: node.requireID())
 
         let message = KeepTalkingContextMessage(
-            id: id ?? UUID(),
+            id: id ?? UUID.v7(),
             context: persistedContext,
             sender: sender,
             content: text,

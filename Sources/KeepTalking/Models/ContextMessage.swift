@@ -57,7 +57,7 @@ public final class KeepTalkingContextMessage: Model, Hashable, @unchecked Sendab
     public init() {}
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         context: KeepTalkingContext,
         sender: Sender,
         content: String,

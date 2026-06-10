@@ -56,7 +56,7 @@ public struct KeepTalkingFilesystemBundle: KeepTalkingActionBundle {
     public var rootPath: String
 
     public init(
-        id: UUID = UUID(),
+        id: UUID = UUID.v7(),
         name: String = "filesystem",
         indexDescription: String =
             "Access local files and directories on the action host.",
