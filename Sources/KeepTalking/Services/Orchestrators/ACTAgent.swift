@@ -206,6 +206,7 @@ extension KeepTalkingClient {
         ]
 
         var summary = ""
+        var successfulOutputs: [String] = []
         let maxACTTurns = 4
         var stepIndex = 0
 
@@ -287,6 +288,9 @@ extension KeepTalkingClient {
                     aliasLookup: aliasLookup
                 )
                 let resultText = ACTAgentResultExtractor.text(from: exec.messages) ?? ""
+                if !resultText.isEmpty, !ACTAgentResultExtractor.isError(from: exec.messages) {
+                    successfulOutputs.append(resultText)
+                }
                 let params = ACTAgentResultExtractor.parameters(
                     stepIndex: stepIndex,
                     toolDisplayName: displayName,
@@ -305,16 +309,20 @@ extension KeepTalkingClient {
             summary = "Action executed successfully. No specific output to report."
         }
         actLog(
-            "final-result action=\(actionID.uuidString.lowercased()) summary=\(clipped(summary, maxCharacters: 240))"
+            "final-result action=\(actionID.uuidString.lowercased()) successful_calls=\(successfulOutputs.count) summary=\(clipped(summary, maxCharacters: 240))"
         )
 
+        var payload: [String: Any] = [
+            "ok": true,
+            "action_id": actionID.uuidString.lowercased(),
+            "act_result": summary,
+        ]
+        if !successfulOutputs.isEmpty {
+            payload["act_output"] = successfulOutputs.joined(separator: "\n\n---\n\n")
+        }
         return [
             toolMessage(
-                payload: jsonString([
-                    "ok": true,
-                    "action_id": actionID.uuidString.lowercased(),
-                    "act_result": summary,
-                ]),
+                payload: jsonString(payload),
                 toolCallID: toolCallID
             )
         ]
@@ -833,6 +841,45 @@ extension KeepTalkingClient {
 /// parent's "Inspecting · <action>" row. Kept as a free enum so the logic
 /// is unit-testable without spinning up the full ACT machinery.
 enum ACTAgentResultExtractor {
+    /// Returns true when the tool-role message in `messages` carries a failure
+    /// payload. Detects JSON payloads via `"ok":false` and script-result blocks
+    /// via a non-zero `exit_code`. Defaults to false (success) for formats that
+    /// can't be parsed, so non-JSON tool results are never silently dropped.
+    static func isError(from messages: [AIMessage]) -> Bool {
+        for message in messages where message.role == .tool {
+            let text: String
+            if case .text(let str)? = message.content {
+                text = str
+            } else {
+                text = message.content?.text ?? ""
+            }
+            guard !text.isEmpty else { continue }
+
+            if let data = text.data(using: .utf8),
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let ok = json["ok"] as? Bool
+            {
+                return !ok
+            }
+            // Script result block emitted by SkillManager.executeRunScript
+            if text.hasPrefix("command:") || text.contains("\nexit_code:") {
+                for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    if trimmed.hasPrefix("exit_code:"),
+                        let codeStr = trimmed.dropFirst("exit_code:".count)
+                            .trimmingCharacters(in: .whitespaces)
+                            .split(separator: " ").first,
+                        let code = Int(codeStr)
+                    {
+                        return code != 0
+                    }
+                }
+            }
+            return false
+        }
+        return false
+    }
+
     /// Pull the first `.tool`-role message's text out of a list of messages.
     static func text(from messages: [AIMessage]) -> String? {
         for message in messages where message.role == .tool {

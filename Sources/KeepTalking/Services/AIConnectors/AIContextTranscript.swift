@@ -414,13 +414,19 @@ extension KeepTalkingClient {
 
     // MARK: - Voice routing context
 
-    /// Compact, text-only context block for the audio bridge's `extractIntent` turn.
-    /// Never throws — any fetch failure produces an empty string so the bridge
-    /// always has *something* to inject (even if it's blank).
+    /// Text-only context block injected into the audio bridge's `extractIntent`
+    /// turn. The audio model uses it both to route accurately AND to answer
+    /// simple things directly without a round trip to the main agent — so it
+    /// carries real conversation content, not just a routing hint. Never throws —
+    /// any fetch failure produces an empty string so the bridge always has
+    /// *something* to inject (even if it's blank).
     ///
-    /// Two sections, both char-capped:
-    /// - Recent conversation tail (~8 turns, ≤800 chars)
-    /// - Ongoing voice transcript lines (~20 lines, ≤400 chars) — omitted when `sessionID` is nil
+    /// Sections (all bounded):
+    /// - Environment (local time / timezone / platform)
+    /// - Conversation thread topics (what's been discussed)
+    /// - Known participant names
+    /// - Recent conversation tail (~8 turns, per-message capped)
+    /// - Ongoing voice transcript lines (~20 lines) — omitted when `sessionID` is nil
     public func voiceRoutingContext(
         contextID: UUID,
         sessionID: UUID?
@@ -433,9 +439,26 @@ extension KeepTalkingClient {
         // about "now" correctly instead of being time-blind.
         sections.append("Environment:\n\(KeepTalkingEnvironmentContext.summaryLine())")
 
-        // --- Conversation tail ---
-        if let tail = try? await voiceRoutingContextTail(contextID: contextID), !tail.isEmpty {
-            sections.append(tail)
+        // --- Conversation-derived sections (single load) ---
+        // One load feeds thread topics, participant names, and the recent tail —
+        // the situational picture the model needs to answer in place.
+        if let aliasLookup = try? await aliasLookup(),
+            let (allMessages, threadedSegments, _) = try? await loadContextSelection(
+                contextID: contextID)
+        {
+            // Thread topics — lets the model tell a follow-up from a new request.
+            let threadMap = renderThreadMapSummary(
+                segments: threadedSegments, aliasLookup: aliasLookup)
+            if !threadMap.isEmpty { sections.append(threadMap) }
+
+            // Participant names — so it can attribute and answer "who" questions.
+            let nodeNames = renderNodeNameSummary(
+                recentMessages: allMessages, aliasLookup: aliasLookup)
+            if !nodeNames.isEmpty { sections.append(nodeNames) }
+
+            // Recent conversation tail — actual message content.
+            let tail = voiceRoutingTail(messages: allMessages, aliasLookup: aliasLookup)
+            if !tail.isEmpty { sections.append(tail) }
         }
 
         // --- Ongoing voice transcript ---
@@ -459,15 +482,21 @@ extension KeepTalkingClient {
         return sections.joined(separator: "\n\n")
     }
 
-    private func voiceRoutingContextTail(contextID: UUID) async throws -> String {
-        let aliasLookup = try await aliasLookup()
-        let (_, _, selected) = try await loadContextSelection(contextID: contextID)
-
-        let turns = selected.flatMap(\.messages).filter { $0.type == .message }.suffix(8)
+    /// Formats the recent conversation tail for the audio bridge. Pure — takes
+    /// pre-loaded, timestamp-sorted messages (so the tail is always the most
+    /// recent turns regardless of thread structure). Keeps the last 8 `.message`
+    /// turns, each capped independently so a long earlier turn can't starve the
+    /// most recent — and most relevant — ones the way a shared budget would.
+    private func voiceRoutingTail(
+        messages: [KeepTalkingContextMessage],
+        aliasLookup: KeepTalkingAliasLookup
+    ) -> String {
+        let turns = messages.filter { $0.type == .message }.suffix(8)
         guard !turns.isEmpty else { return "" }
 
-        var block = "Recent conversation (routing reference only — do not answer from this):"
-        var remaining = 800
+        let perMessageCap = 600
+        var block =
+            "Recent conversation (use this to understand what's going on and to answer directly when you can):"
         for message in turns {
             let speaker: String
             switch message.sender {
@@ -476,11 +505,11 @@ extension KeepTalkingClient {
                 case .node(let nodeID):
                     speaker = aliasLookup.resolve(.node(nodeID)).primary(.uppercase)
             }
-            let entry = "\n[\(speaker)]: \(message.content)"
-            guard remaining > 0 else { break }
-            let clipped = String(entry.prefix(remaining))
-            block += clipped
-            remaining -= clipped.count
+            let content =
+                message.content.count > perMessageCap
+                ? String(message.content.prefix(perMessageCap)) + "…"
+                : message.content
+            block += "\n[\(speaker)]: \(content)"
         }
         return block
     }
