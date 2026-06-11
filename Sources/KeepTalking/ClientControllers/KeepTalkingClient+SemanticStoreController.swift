@@ -11,9 +11,10 @@ extension KeepTalkingClient {
         semanticStore: any KeepTalkingSemanticStore
     ) {
         Task.detached(priority: .background) {
-            let contextThreads = (try? await KeepTalkingThread.query(on: database)
-                .filter(\.$context.$id == contextID)
-                .all()) ?? []
+            let contextThreads =
+                (try? await KeepTalkingThread.query(on: database)
+                    .filter(\.$context.$id == contextID)
+                    .all()) ?? []
             let knownIDs = Set(
                 ((try? await KeepTalkingThread.query(on: database).all()) ?? []).compactMap(\.id)
             )
@@ -46,6 +47,53 @@ extension KeepTalkingClient {
         }
     }
 
+    /// Reconciles the entire semantic index against the thread store across all
+    /// contexts: indexes any thread that's missing (e.g. one committed before the
+    /// store finished loading), refreshes the text of already-indexed threads, and
+    /// prunes documents whose thread no longer exists.
+    ///
+    /// Unlike ``autoEmbedContext(_:on:semanticStore:)`` this awaits completion, so
+    /// a caller (e.g. a "Reindex" button) can report progress and refresh counts.
+    /// - Parameter onProgress: invoked after each thread with `(completed, total)`.
+    ///   Use it to surface progress and to drain the embedder's memory between
+    ///   documents — bulk embedding is the heaviest part and benefits from a
+    ///   periodic cache release.
+    public static func reindexAllThreads(
+        on database: any Database,
+        semanticStore: any KeepTalkingSemanticStore,
+        onProgress: (@Sendable (_ completed: Int, _ total: Int) async -> Void)? = nil
+    ) async {
+        let allThreads = (try? await KeepTalkingThread.query(on: database).all()) ?? []
+        let knownIDs = Set(allThreads.compactMap(\.id))
+        let indexed = (try? await semanticStore.allDocuments()) ?? []
+        let indexedIDs = Set(indexed.map(\.id))
+
+        for staleID in indexedIDs.subtracting(knownIDs) {
+            try? await semanticStore.removeThread(id: staleID)
+        }
+
+        // Sequential on purpose: embedding is GPU-bound, so parallelism would
+        // spike memory. Yield + onProgress between documents lets the caller keep
+        // the footprint flat (drain the embedder cache) and report progress.
+        let total = allThreads.count
+        var completed = 0
+        for thread in allThreads {
+            completed += 1
+            if let threadID = thread.id {
+                let text = (try? await threadDocumentText(for: thread, on: database)) ?? ""
+                if !text.isEmpty {
+                    if indexedIDs.contains(threadID) {
+                        try? await semanticStore.updateThread(id: threadID, text: text)
+                    } else {
+                        try? await semanticStore.indexThread(id: threadID, text: text)
+                    }
+                }
+            }
+            await Task.yield()
+            await onProgress?(completed, total)
+        }
+    }
+
     /// Builds the indexable text content for a thread.
     /// Includes the full thread transcript, prefixed by the thread summary when
     /// available, plus attachment metadata for any attachments in range.
@@ -73,7 +121,8 @@ extension KeepTalkingClient {
         let rangeMessages = messages[range]
         let messageIDs = Set(rangeMessages.compactMap(\.id))
 
-        let messageText = rangeMessages
+        let messageText =
+            rangeMessages
             .filter { msg in
                 guard let msgID = msg.id else { return true }
                 return !chitterSet.contains(msgID)

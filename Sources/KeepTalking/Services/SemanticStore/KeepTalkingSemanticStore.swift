@@ -26,8 +26,18 @@ public protocol KeepTalkingSemanticStore: Sendable {
     /// Remove a thread's document from the index.
     func removeThread(id: UUID) async throws
 
-    /// Semantic search: return the top-k threads most relevant to the query.
-    func search(query: String, topK: Int) async throws -> [KeepTalkingSemanticSearchResult]
+    /// Hybrid (semantic + keyword) search: return the top-k threads most
+    /// relevant to the query.
+    ///
+    /// - Parameter threshold: the minimum combined relevance score (0…1) a
+    ///   result must clear, or `nil` to use the store's default. Unattended
+    ///   retrieval (agents) should pass a low value for recall; interactive
+    ///   search should pass a higher value for precision.
+    func search(
+        query: String,
+        topK: Int,
+        threshold: Float?
+    ) async throws -> [KeepTalkingSemanticSearchResult]
 
     /// Remove all documents from the index.
     func reset() async throws
