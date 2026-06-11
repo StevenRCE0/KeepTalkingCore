@@ -32,6 +32,12 @@ public enum KeepTalkingSkillPlannerEvent: Sendable {
     /// the skill needs this file — the host MUST surface it on the picker so
     /// the user knows which path is being asked for.
     case requiringFile(label: String, purpose: String, contentTypes: [String])
+    /// Mid-plan request to permit running a system executable the planner found
+    /// on PATH (via `kt_probe_command`) but that sits outside the sandbox exec
+    /// allowlist. `path` is the resolved absolute path the probe reported, so
+    /// the host shows an Allow/Deny prompt for that known path rather than a
+    /// file picker. Return "granted" to permit; anything else (or nil) denies.
+    case requiringExecutable(name: String, path: String, purpose: String)
     case requiringNetwork(host: String, purpose: String)
     case requiringHTTPURL(serviceName: String)
     case registeringScript(toolName: String, path: String)
@@ -105,6 +111,7 @@ public actor KeepTalkingSkillPlanner {
     static let probeCommandTool = "kt_probe_command"
     static let checkPathTool = "kt_check_path"
     static let tryRunTool = "kt_try_run"
+    private static let requireExecutableTool = "kt_require_executable"
     private static let refuseTool = "kt_refuse"
     private static let finalizeTool = "kt_finalize"
 
@@ -159,6 +166,10 @@ public actor KeepTalkingSkillPlanner {
     /// Pass the same value the rest of the agent loop uses so the planner
     /// doesn't 404 on providers that don't recognise the default.
     private let model: String
+    /// Optional ACT agent. When set, `kt_run_action` is added to the planner's
+    /// tool list and delegated to this agent, letting the planner call existing
+    /// actions to gather context before finalising a skill plan.
+    private let actAgent: AIOrchestrator.ACTAgent?
 
     /// Mutable state for the currently-open planning session. Persisted across
     /// turns on the actor so `continuePlanning` can resume the same transcript
@@ -205,9 +216,14 @@ public actor KeepTalkingSkillPlanner {
     /// `continuePlanning`.
     private var run: PlanningRun?
 
-    public init(aiConnector: any AIConnector, model: String = "gpt-5-codex") {
+    public init(
+        aiConnector: any AIConnector,
+        model: String = "gpt-5-codex",
+        actAgent: AIOrchestrator.ACTAgent? = nil
+    ) {
         self.skillManager = SkillManager(aiConnector: aiConnector)
         self.model = model
+        self.actAgent = actAgent
     }
 
     // MARK: - Public
@@ -497,6 +513,38 @@ public actor KeepTalkingSkillPlanner {
                             result = "Noted. User skipped — no file granted."
                         }
 
+                    case Self.requireExecutableTool:
+                        let name = string(args["name"]) ?? ""
+                        let path = string(args["path"]) ?? ""
+                        let purpose = string(args["purpose"]) ?? ""
+                        let label = name.isEmpty ? path : name
+                        guard path.hasPrefix("/") else {
+                            result =
+                                "Error: kt_require_executable needs the absolute `path` that kt_probe_command reported."
+                            break
+                        }
+                        // Store the grant exactly like kt_require_file so it flows
+                        // to the runtime exec allowlist identically — ScopeResolver
+                        // maps a requiredFiles-keyed absolute-path parameter to a
+                        // [.read, .execute] resource. The only difference is the
+                        // path comes from the probe (Allow/Deny), not a picker.
+                        if !label.isEmpty && !requiredFiles.contains(label) {
+                            requiredFiles.append(label)
+                        }
+                        if let existing = collectedParameters[label], !existing.isEmpty {
+                            result = "Already granted earlier. The skill may run \(existing)."
+                            break
+                        }
+                        let execGranted = await onEvent?(
+                            .requiringExecutable(name: label, path: path, purpose: purpose))
+                        if let execGranted, execGranted.lowercased() == "granted" {
+                            collectedParameters[label] = path
+                            result = "Granted. The skill may run \(label) at \(path) at runtime."
+                        } else {
+                            result =
+                                "User denied — \(label) stays unrunnable. Pick another tool or kt_refuse."
+                        }
+
                     case Self.requireNetworkTool:
                         let host = string(args["host"]) ?? ""
                         let purpose = string(args["purpose"]) ?? ""
@@ -745,6 +793,16 @@ public actor KeepTalkingSkillPlanner {
                         finalized = true
                         result = "Done."
 
+                    case KeepTalkingClient.runActionToolFunctionName:
+                        if let actAgent {
+                            let executions = try await actAgent.execute([call], model)
+                            for exec in executions {
+                                toolResults.append(contentsOf: exec.messages)
+                            }
+                            continue
+                        }
+                        result = "{\"ok\":false,\"error\":\"act_not_configured\"}"
+
                     default:
                         result = "Unknown tool: \(call.name)"
                 }
@@ -956,15 +1014,16 @@ public actor KeepTalkingSkillPlanner {
             - Call kt_probe_command(name) to confirm it is installed AND runnable inside \
             the skill's runtime sandbox. The sandbox only executes tools under \
             /opt/homebrew/bin, /usr/local/bin, the standard interpreters, or a path the \
-            user grants via kt_require_file.
+            user permits via kt_require_executable.
             - If the step needs a project or working directory (e.g. a uv / npm project), \
             call kt_require_directory for the root and kt_check_path to confirm it exists.
             - Use kt_try_run for a safe, read-only smoke check (e.g. `uv --version`, \
             `uv tree`) to confirm the actual invocation works.
-            - If a tool is found but NOT runnable from the sandbox, ask the user to grant \
-            it with kt_require_file. If it's missing entirely, kt_ask_user where it lives \
-            or kt_refuse with the install command. Never declare a command you have not \
-            verified can run.
+            - If a tool is found but NOT runnable from the sandbox, permit it with \
+            kt_require_executable(name, path, purpose) — pass the exact path the probe \
+            reported so the user just taps Allow (no file picker). If it's missing \
+            entirely, kt_ask_user where it lives or kt_refuse with the install command. \
+            Never declare a command you have not verified can run.
             """
         #else
         let probeGuidance = ""
@@ -1279,7 +1338,27 @@ public actor KeepTalkingSkillPlanner {
         // Environment-probing tools let the planner verify the runtime instead
         // of declaring on faith — only available where script execution is.
         tools.append(contentsOf: makeProbeTools())
+        tools.append(
+            tool(
+                name: Self.requireExecutableTool,
+                description:
+                    "Permit the skill to run a system executable that kt_probe_command found on PATH but reported as runnable_in_skill_sandbox: false. Pass the exact `path` the probe resolved — the host shows the user a one-tap Allow/Deny prompt for that path (NOT a file picker; the path is already known). Use this for executables on PATH; reserve kt_require_file for files the user must locate themselves (config files, videos, scripts not on PATH).",
+                properties: [
+                    "name": (.string, "The command name, e.g. 'screencapture'. Used as the grant label."),
+                    "path": (
+                        .string,
+                        "Absolute path the probe resolved, e.g. '/usr/sbin/screencapture'. Must start with '/'."
+                    ),
+                    "purpose": (
+                        .string,
+                        "One-sentence reason the skill needs to run it. Shown to the user on the Allow/Deny prompt."
+                    ),
+                ],
+                required: ["name", "path", "purpose"]))
         #endif
+        if actAgent != nil {
+            tools.append(KeepTalkingClient.makeRunActionTool())
+        }
         return tools
     }
 
@@ -1289,7 +1368,7 @@ public actor KeepTalkingSkillPlanner {
             tool(
                 name: Self.probeCommandTool,
                 description:
-                    "Check whether a command-line tool is installed and runnable BEFORE you declare a step that uses it. Runs `command -v <name>` and `<name> --version` in a login shell, then reports the resolved path, version, and whether it is runnable inside the skill's runtime sandbox. The sandbox only allows executing tools under /opt/homebrew/bin, /usr/local/bin, the standard interpreters, or a path the user explicitly grants via kt_require_file. If a tool is found on PATH but not runnable, ask the user to grant it with kt_require_file.",
+                    "Check whether a command-line tool is installed and runnable BEFORE you declare a step that uses it. Runs `command -v <name>` and `<name> --version` in a login shell, then reports the resolved path, version, and whether it is runnable inside the skill's runtime sandbox. The sandbox only allows executing tools under /opt/homebrew/bin, /usr/local/bin, the standard interpreters, or a path the user explicitly permits. If a tool is found on PATH but not runnable, permit it with kt_require_executable (pass the reported path).",
                 properties: [
                     "name": (.string, "The command to look for, e.g. 'uv', 'ffmpeg', 'node'. Bare name only.")
                 ],

@@ -76,8 +76,9 @@ extension KeepTalkingSkillPlanner {
             runnable
             ? "Runnable as-is."
             : "Found, but \(path) is outside the skill sandbox's exec allowlist "
-                + "(/opt/homebrew/bin, /usr/local/bin, standard interpreters). Ask the "
-                + "user to grant it with kt_require_file so the skill can execute it."
+                + "(/opt/homebrew/bin, /usr/local/bin, standard interpreters). Permit it "
+                + "with kt_require_executable(name: \"\(name)\", path: \"\(path)\", purpose) "
+                + "so the skill can run it — the user taps Allow, no file picker."
         return ProbeOutcome(
             summary: summary,
             toolResult: """

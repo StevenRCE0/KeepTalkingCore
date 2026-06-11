@@ -23,7 +23,7 @@ extension KeepTalkingClient {
 
     /// Builds the `kt_run_action` tool that the primary model uses to delegate
     /// an action to the ACT agent.
-    func makeRunActionTool() -> KeepTalkingActionToolDefinition {
+    static func makeRunActionTool() -> KeepTalkingActionToolDefinition {
         .init(
             functionName: Self.runActionToolFunctionName,
             actionID: UUID(),

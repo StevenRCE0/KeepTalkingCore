@@ -297,7 +297,7 @@ extension KeepTalkingClient {
         // end-to-end (tool discovery, argument construction, execution, distillation).
         // The primary loop does not receive direct action tools.
         let allTools: [KeepTalkingActionToolDefinition] = [
-            makeRunActionTool(),
+            Self.makeRunActionTool(),
             ktSkillMetainfoTool,
             attachmentListingTool,
             attachmentReadTool,
@@ -989,6 +989,50 @@ extension KeepTalkingClient {
     /// ACT role only diverges when explicitly configured with its own provider.
     func resolveACTConnector() async throws -> (any AIConnector)? {
         actConnector ?? aiConnector
+    }
+
+    /// Builds a bound `AIOrchestrator.ACTAgent` for use inside `KeepTalkingSkillPlanner`
+    /// when the planner is launched from within an existing conversation context.
+    /// The returned agent captures the context's runtime catalog and a no-op publisher
+    /// (planner turns don't emit intermediate trace rows to the conversation).
+    public func makeSkillPlannerACTAgent(
+        contextID: UUID,
+        actModel: String?
+    ) async throws -> AIOrchestrator.ACTAgent {
+        let actResolved = try await resolveACTConnector()
+        let mainResolved = try await resolveAIConnector()
+        guard let connector = actResolved ?? mainResolved
+        else { throw KeepTalkingClientError.aiNotConfigured }
+        let db = localStore.database
+        guard let context = try await KeepTalkingContext.find(contextID, on: db)
+        else { throw KeepTalkingClientError.aiNotConfigured }
+        let runtimeCatalog = try await resolveActionRuntimeCatalog(in: context)
+        return AIOrchestrator.ACTAgent(
+            canHandle: { $0.name == Self.runActionToolFunctionName },
+            execute: { [self] toolCalls, activeModel in
+                var executions: [AIOrchestrator.ToolExecution] = []
+                for toolCall in toolCalls {
+                    let toolCallID =
+                        toolCall.id.isEmpty ? UUID().uuidString.lowercased() : toolCall.id
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: try await executeRunActionToolCall(
+                                toolCallID: toolCallID,
+                                rawArguments: toolCall.argumentsJSON,
+                                runtimeCatalog: runtimeCatalog,
+                                context: context,
+                                actConnector: connector,
+                                actModel: actModel ?? activeModel,
+                                publisher: { @Sendable _ in },
+                                agentTurnID: nil
+                            )
+                        )
+                    )
+                }
+                return executions
+            }
+        )
     }
 
     func publishAgentRunFailure(
