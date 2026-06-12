@@ -40,6 +40,13 @@ public enum SkillScriptRunner {
         sandboxPolicy: KTSandboxPolicy? = nil,
         onProgress: (@Sendable (String) -> Void)? = nil
     ) async throws -> SkillScriptExecutionResult {
+        // argv is NOT a shell, so a manifest resource handle the agent passed as an
+        // argument (e.g. "$KT_OTB_…", copied from the resources prompt) would
+        // otherwise reach the script as a literal string. Expand `$NAME`/`${NAME}`
+        // references against the INJECTED environment (manifest keys, SKILL_DIR,
+        // bundle params — not the inherited parent env) so the script receives the
+        // real staged path, exactly as a shell would have expanded it.
+        let command = expandInjectedReferences(in: command, using: environment)
         guard let executable = command.first else {
             return SkillScriptExecutionResult(
                 command: [],
@@ -70,6 +77,61 @@ public enum SkillScriptRunner {
             terminateProcessIfRunning(processBox.process)
             scheduleForceKill(processBox)
         }
+    }
+
+    /// Expands `$NAME` / `${NAME}` references in each command token to an INJECTED
+    /// environment value. Scoped to the run-specific `environment` dict (manifest
+    /// resource keys, SKILL_DIR, bundle params) — NOT the inherited parent env — so
+    /// only KeepTalking-provisioned handles resolve, predictably. Unknown tokens are
+    /// left untouched.
+    static func expandInjectedReferences(
+        in command: [String], using environment: [String: String]
+    ) -> [String] {
+        guard !environment.isEmpty else { return command }
+        return command.map { expandInjectedReferences(in: $0, using: environment) }
+    }
+
+    static func expandInjectedReferences(
+        in string: String, using environment: [String: String]
+    ) -> String {
+        guard string.contains("$") else { return string }
+        func isIdentifier(_ character: Character) -> Bool {
+            character == "_" || character.isLetter || character.isNumber
+        }
+        let characters = Array(string)
+        var result = ""
+        var index = 0
+        while index < characters.count {
+            guard characters[index] == "$" else {
+                result.append(characters[index])
+                index += 1
+                continue
+            }
+            var cursor = index + 1
+            let braced = cursor < characters.count && characters[cursor] == "{"
+            if braced { cursor += 1 }
+            var name = ""
+            while cursor < characters.count && isIdentifier(characters[cursor]) {
+                name.append(characters[cursor])
+                cursor += 1
+            }
+            if braced {
+                guard cursor < characters.count, characters[cursor] == "}" else {
+                    result.append(characters[index])
+                    index += 1
+                    continue
+                }
+                cursor += 1
+            }
+            if !name.isEmpty, let value = environment[name] {
+                result.append(value)
+                index = cursor
+            } else {
+                result.append(characters[index])
+                index += 1
+            }
+        }
+        return result
     }
 
     private final class SkillScriptProcessBox: @unchecked Sendable {

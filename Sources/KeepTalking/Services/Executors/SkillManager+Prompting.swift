@@ -11,7 +11,8 @@ extension SkillManager {
                 ownerNodeID: UUID(),
                 source: .skill,
                 description:
-                    "Read a file from the skill directory or any accessible directory. "
+                    "Read a PLAIN-TEXT (UTF-8) file from the skill directory or any accessible directory. "
+                    + "Binary files (PDF, images, .docx, etc.) are not readable this way — run a script/tool that extracts their text instead. "
                     + "Use a directory label (e.g. \"input_dir/file.txt\") or a path relative to the skill directory.",
                 parameters: [
                     "type": .string("object"),
@@ -140,7 +141,7 @@ extension SkillManager {
 
             ## File tools
             - \(Self.listFilesToolName): List files in an accessible directory by label.
-            - \(Self.getFileToolName): Read a file from the skill directory or an accessible directory.
+            - \(Self.getFileToolName): Read a PLAIN-TEXT (UTF-8) file from the skill directory or an accessible directory. Binary files (PDF, images, .docx) are not readable this way — use a script that extracts their text.
 
             ## Execution requirements
             - ALWAYS call a declared tool to fulfill the request. Never just describe a command.

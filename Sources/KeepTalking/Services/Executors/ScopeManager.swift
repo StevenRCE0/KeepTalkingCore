@@ -145,14 +145,16 @@ public actor ScopeManager {
         )
     }
 
-    /// Resolves a policy that additionally grants read access to one or more
-    /// extra directories (e.g. a per-call attachment staging dir). The extra
-    /// dirs are injected into the *merged* descriptor's `directories` — so they
-    /// compile to `(allow file-read* (subpath …))` rules — and symlink-resolved
-    /// so the granted path matches what the kernel canonicalizes at access time.
+    /// Resolves a policy that additionally grants one or more extra directories
+    /// with a per-directory data-flow direction (e.g. a read-only attachment
+    /// staging dir, or a read-write filesystem root). The extra dirs are injected
+    /// into the *merged* descriptor's `directories` (with their direction recorded
+    /// in `directoryDirections`) and symlink-resolved so the granted path matches
+    /// what the kernel canonicalizes at access time. `.input` → read-only,
+    /// `.output`/`.inputOutput` → read + write.
     public func resolvedPolicy(
         for action: KeepTalkingAction,
-        extraReadDirectories: [String: URL],
+        extraDirectories: [String: (url: URL, direction: KeepTalkingResourceDirection)],
         callerScope: KeepTalkingActionScope = .all
     ) throws -> KTSandboxPolicy {
         let grants = Array(activeGrants.values)
@@ -161,12 +163,15 @@ public actor ScopeManager {
             additionalGrants: grants,
             callerScope: callerScope
         )
-        if !extraReadDirectories.isEmpty {
+        if !extraDirectories.isEmpty {
             var dirs = descriptor.directories ?? [:]
-            for (label, url) in extraReadDirectories {
-                dirs[label] = url.resolvingSymlinksInPath()
+            var directions = descriptor.directoryDirections ?? [:]
+            for (label, entry) in extraDirectories {
+                dirs[label] = entry.url.resolvingSymlinksInPath()
+                directions[label] = entry.direction
             }
             descriptor.directories = dirs
+            descriptor.directoryDirections = directions
         }
         return try sandbox.compilePolicy(descriptor: descriptor)
     }

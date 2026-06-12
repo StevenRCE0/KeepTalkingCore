@@ -10,7 +10,7 @@ struct KeepTalkingStagedAttachments {
     /// Canonical (symlink-resolved) directory path, so it matches the granted
     /// seatbelt subpath and what the kernel resolves at access time.
     let directory: URL
-    let files: [(filename: String, path: String)]
+    let files: [(id: UUID, filename: String, path: String)]
 }
 
 extension KeepTalkingClient {
@@ -42,7 +42,7 @@ extension KeepTalkingClient {
         else { return nil }
         let canonical = scratch.resolvingSymlinksInPath()
 
-        var staged: [(filename: String, path: String)] = []
+        var staged: [(id: UUID, filename: String, path: String)] = []
         var usedNames = Set<String>()
         for (index, attachment) in attachments.enumerated() {
             guard let record = records[attachment.blobID],
@@ -65,7 +65,7 @@ extension KeepTalkingClient {
                 guard (try? fileManager.copyItem(at: source, to: destination)) != nil
                 else { continue }
             }
-            staged.append((filename: name, path: destination.path))
+            staged.append((id: attachment.id ?? UUID(), filename: name, path: destination.path))
         }
 
         guard !staged.isEmpty else {

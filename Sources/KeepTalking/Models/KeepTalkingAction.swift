@@ -187,6 +187,12 @@ public struct KeepTalkingActionDescriptor: Codable, Sendable {
     /// Named base directories the action needs access to (e.g. "project_root").
     /// Values are absolute paths on the host, resolved before sandbox compilation.
     public var directories: [String: URL]?
+    /// Per-directory data-flow direction, keyed by the SAME label as
+    /// `directories`. Drives per-directory sandbox write grants: `.input` →
+    /// read-only, `.output`/`.inputOutput` → read + write. A label absent from
+    /// this map falls back to the legacy rule (read always; write only when the
+    /// policy's verbs include `.write`). `nil` preserves pre-direction behavior.
+    public var directoryDirections: [String: KeepTalkingResourceDirection]?
 
     public init(
         subject: KeepTalkingActionResourceWithDescription? = nil,
@@ -194,7 +200,8 @@ public struct KeepTalkingActionDescriptor: Codable, Sendable {
         object: KeepTalkingActionResourceWithDescription? = nil,
         objects: [KeepTalkingActionObject]? = nil,
         environment: [String: String]? = nil,
-        directories: [String: URL]? = nil
+        directories: [String: URL]? = nil,
+        directoryDirections: [String: KeepTalkingResourceDirection]? = nil
     ) {
         self.subject = subject
         self.action = action
@@ -202,6 +209,7 @@ public struct KeepTalkingActionDescriptor: Codable, Sendable {
         self.objects = objects
         self.environment = environment
         self.directories = directories
+        self.directoryDirections = directoryDirections
     }
 
     /// Whether this descriptor carries enough information to compile a sandbox policy.

@@ -150,16 +150,16 @@ extension KeepTalkingClient {
         _ call: KeepTalkingActionCall,
         callerNodeID: UUID,
         into directory: URL
-    ) async throws -> [URL] {
+    ) async throws -> [(handle: UUID, url: URL)] {
         guard let handles = call.inputHandles, !handles.isEmpty else { return [] }
         try FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true)
-        var resolved: [URL] = []
+        var resolved: [(handle: UUID, url: URL)] = []
         for handle in handles {
             if let dest = try? await stagedFileStore.copyStagedFile(
                 handle: handle, callerNodeID: callerNodeID, into: directory)
             {
-                resolved.append(dest)
+                resolved.append((handle: handle, url: dest))
             }
         }
         return resolved

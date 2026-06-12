@@ -480,6 +480,12 @@ public actor MCPManager {
     ///   containing the `.callTool` class wildcard permits all tools; otherwise
     ///   only tools named by `.named(...)` tokens are permitted (an empty set
     ///   rejects every call).
+    ///
+    /// MCP tool calls do NOT receive a per-call resource manifest (the
+    /// `KT_<KIND>_<H8>` env vars Skills and ACP get): the stdio server is launched
+    /// once with a static environment and reused for every call, so per-call
+    /// resource injection is not applicable. Pass resources as tool arguments, or
+    /// stage them via the filesystem actions, instead.
     public func callAction(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,

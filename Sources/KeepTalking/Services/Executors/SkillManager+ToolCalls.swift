@@ -62,7 +62,8 @@ extension SkillManager {
         manifestContext: SkillManifestContext,
         sandboxPolicy: KTSandboxPolicy? = nil,
         scriptTrace: SkillScriptTraceCollector? = nil,
-        attachmentsDir: URL? = nil
+        attachmentsDir: URL? = nil,
+        manifest: KTResourceManifest? = nil
     ) async throws -> [AIMessage] {
         var messages: [AIMessage] = []
         for toolCall in toolCalls {
@@ -109,7 +110,8 @@ extension SkillManager {
                     skillDirectory: skillDirectory,
                     parameters: parameters,
                     sandboxPolicy: sandboxPolicy,
-                    attachmentsDir: attachmentsDir
+                    attachmentsDir: attachmentsDir,
+                    manifest: manifest
                 )
                 // The skill loop reports its final answer back to the outer
                 // chat as one tool result; without this, the structured
@@ -176,7 +178,8 @@ extension SkillManager {
         skillDirectory: URL?,
         parameters: [String: String] = [:],
         sandboxPolicy: KTSandboxPolicy? = nil,
-        attachmentsDir: URL? = nil
+        attachmentsDir: URL? = nil,
+        manifest: KTResourceManifest? = nil
     ) async throws -> String {
         guard let scriptExecutor else {
             throw SkillManagerError.scriptExecutionUnavailableOnThisPlatform
@@ -191,13 +194,21 @@ extension SkillManager {
         )
         let scriptArguments = extractScriptArguments(arguments)
 
-        // Build env from bundle parameters; always inject SKILL_DIR
-        var environment = parameters
+        // Build env from bundle parameters; always inject SKILL_DIR. The KT_
+        // namespace is reserved for the resource manifest, so an author parameter
+        // can never shadow a generated resource key.
+        var environment = parameters.filter { !$0.key.hasPrefix("KT_") }
         if let skillDir = skillDirectory {
             environment["SKILL_DIR"] = skillDir.path
         }
-        // Expose staged context attachments to the script.
-        if let attachmentsDir {
+        // Expose staged resources via the manifest: per-resource KT_<KIND>_<H8>
+        // keys plus the KT_ATTACHMENTS umbrella, all canonical absolute paths.
+        // Falls back to the bare umbrella var when no manifest was built.
+        if let manifest {
+            for (key, value) in manifest.environmentVariables() {
+                environment[key] = value
+            }
+        } else if let attachmentsDir {
             environment["KT_ATTACHMENTS"] = attachmentsDir.path
         }
 

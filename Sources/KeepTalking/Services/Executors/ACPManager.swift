@@ -206,9 +206,25 @@ public actor ACPManager {
         let stderr = ACPStderrBuffer()
         log?("[acp] launching agent action=\(actionLabel) cmd=\(bundle.command.first ?? "?")")
 
+        // Advertise the agent's working root as a KT_FS_<H8> resource handle.
+        // Advisory only (ACP runs unsandboxed), but it gives the agent the same
+        // env-var convention as sandboxed skills, via the shared manifest renderer.
+        let manifest = KTResourceManifest.build(
+            grantedCandidates: [
+                KTResourceManifest.Candidate(
+                    kind: .fs, id: bundle.id, path: bundle.cwd,
+                    direction: .readWrite, displayName: "agent working root",
+                    isDirectory: true)
+            ],
+            umbrellaAttachmentsDir: nil)
+        var environment = bundle.environment
+        for (key, value) in manifest.environmentVariables() {
+            environment[key] = value
+        }
+
         let launched = try await launcher.launchTransport(
             command: bundle.command,
-            environment: bundle.environment,
+            environment: environment,
             stderrHandler: { data in
                 guard !data.isEmpty else { return }
                 let text = String(decoding: data, as: UTF8.self)
@@ -256,15 +272,23 @@ public actor ACPManager {
             let sessionID = try await withTimeout(handshakeTimeoutSeconds, label: "session/new") {
                 try await session.newSession(cwd: bundle.cwd.path)
             }
-            // Owner's manual limitation for remote callers — injected ahead of the
-            // prompt. Local/owner calls are unconstrained.
+            // Preamble = the owner's manual limitation for remote callers (local/
+            // owner calls are unconstrained) followed by the resource manifest the
+            // agent's environment exposes, both injected ahead of the prompt.
             let systemPreamble: String? = {
-                guard callerIsRemote,
+                var parts: [String] = []
+                if callerIsRemote,
                     let extra = bundle.remoteSystemPrompt?.trimmingCharacters(
                         in: .whitespacesAndNewlines),
                     !extra.isEmpty
-                else { return nil }
-                return "The following constraints are set by the host operator and MUST be respected:\n\(extra)"
+                {
+                    parts.append(
+                        "The following constraints are set by the host operator and MUST be respected:\n\(extra)")
+                }
+                if let block = manifest.promptBlock() {
+                    parts.append(block)
+                }
+                return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
             }()
             // The prompt turn has NO deadline: the agent may legitimately work for
             // many minutes. patientWait polls the subprocess's liveness instead of

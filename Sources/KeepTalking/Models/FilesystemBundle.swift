@@ -90,7 +90,8 @@ extension KeepTalkingFilesystemOperation {
             case .ls:
                 return "List the contents of a directory."
             case .readFile:
-                return "Read the text content of a file."
+                return
+                    "Read the text content of a PLAIN-TEXT (UTF-8) file. Binary files — PDF, images, .docx, archives, etc. — are NOT readable this way; use get-file to pull their bytes instead."
             case .grep:
                 return "Search file trees recursively with a regex pattern."
             case .sed:

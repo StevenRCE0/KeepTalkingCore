@@ -221,8 +221,15 @@ public enum ScopeResolver {
                     resource: $0
                 )
             },
+            // NOTE: `objects` (directioned file objects) are intentionally NOT
+            // forwarded here. `hasSandboxConstraints` counts a non-empty `objects`
+            // as a constraint, but `compileProfile` emits no grants for it — so
+            // forwarding it without the matching grant path would sandbox an action
+            // and then deny its own declared files. Forward it together with that
+            // grant logic when directioned objects are actually populated.
             environment: base.environment,
-            directories: base.directories
+            directories: base.directories,
+            directoryDirections: base.directoryDirections
         )
     }
 

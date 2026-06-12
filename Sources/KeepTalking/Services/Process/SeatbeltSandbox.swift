@@ -27,7 +27,8 @@ public struct SeatbeltSandbox: ProcessSandboxing {
         let profile = compileProfile(
             verbs: verbs,
             resource: descriptor.object?.resource,
-            directories: descriptor.directories
+            directories: descriptor.directories,
+            directoryDirections: descriptor.directoryDirections
         )
         guard let data = profile.data(using: .utf8) else {
             throw SeatbeltSandboxError.profileEncodingFailed
@@ -74,7 +75,8 @@ public struct SeatbeltSandbox: ProcessSandboxing {
     private func compileProfile(
         verbs: Set<KeepTalkingActionVerb>,
         resource: KeepTalkingActionResource?,
-        directories: [String: URL]?
+        directories: [String: URL]?,
+        directoryDirections: [String: KeepTalkingResourceDirection]? = nil
     ) -> String {
         var rules: [String] = []
 
@@ -123,12 +125,21 @@ public struct SeatbeltSandbox: ProcessSandboxing {
             }
         }
 
-        // Named base directories from the descriptor
+        // Named base directories from the descriptor. Each is readable; write is
+        // granted per-directory by its declared direction (`.output`/`.inputOutput`
+        // → writable), falling back to the global `.write` verb for any directory
+        // without a direction entry (legacy named dirs like "project_root").
         if let directories, !directories.isEmpty {
-            for (_, url) in directories {
+            for (label, url) in directories {
                 let path = url.standardizedFileURL.path
                 rules.append("(allow file-read* (subpath \"\(escapeSeatbelt(path))\"))")
-                if verbs.contains(.write) {
+                let wantsWrite: Bool
+                if let direction = directoryDirections?[label] {
+                    wantsWrite = direction == .output || direction == .inputOutput
+                } else {
+                    wantsWrite = verbs.contains(.write)
+                }
+                if wantsWrite {
                     rules.append("(allow file-write* (subpath \"\(escapeSeatbelt(path))\"))")
                 }
             }

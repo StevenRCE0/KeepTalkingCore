@@ -247,7 +247,8 @@ public enum AIPromptPresets {
             case .filesystem:
                 return """
                     Filesystem action — tools operate on the owning node's sandboxed directories.
-                    Text ops (ls, read-file, grep, sed, write-file, stat) take/return strings inline.
+                    Routing: when the action's node IS the current node (local), its files are on local disk and directly accessible — pass a file's local path (a `$KT_*` resource handle or an absolute path) straight to tools/scripts. When it is a REMOTE node there is no shared local path: use get-file to pull a file's bytes to you, and put-file to send one.
+                    Text ops (ls, read-file, grep, sed, write-file, stat) take/return strings inline. read-file only returns PLAIN-TEXT (UTF-8) content — for a binary file (PDF, image, .docx, etc.) use get-file to pull its bytes, or a skill that extracts its text.
                     get-file: reads a file on the owning node and returns its bytes to you via a one-time ENCRYPTED, point-to-point transfer — private, NOT published to the conversation and NOT visible to other participants. Use when the task asks to fetch/pull a file from that node.
                     put-file: streams YOUR local file (the `source` path) to a destination `path` on the owning node, also as a one-time encrypted transfer — private, not a shared attachment. Use when the task asks to send/upload a file to that node.
                     These transfers are ephemeral: they are not recorded as context attachments and are discarded after use.

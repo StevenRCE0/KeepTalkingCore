@@ -331,7 +331,7 @@ extension KeepTalkingClient {
             targetName: "skill_file",
             displayName: bundle.name,
             description:
-                "Read a file from skill bundle \(bundle.name). Paths must stay within the skill directory.",
+                "Read a PLAIN-TEXT (UTF-8) file from skill bundle \(bundle.name). Binary files (PDF, images, .docx, etc.) are not readable this way. Paths must stay within the skill directory.",
             parameters: [
                 "type": .string("object"),
                 "properties": .object([

@@ -171,6 +171,7 @@ extension KeepTalkingClient {
                     let staged = await stageContextAttachments(in: request.contextID)
                     var attachmentsDir: URL? = staged?.directory
                     var ownedInputDir: URL? = nil
+                    var otbInputs: [(handle: UUID, url: URL)] = []
                     // Arm cleanup BEFORE materializing — a throw mid-loop must not
                     // leave decrypted plaintext at rest in the staging dir.
                     defer {
@@ -204,38 +205,74 @@ extension KeepTalkingClient {
                                     isDirectory: true)
                             ownedInputDir = dir
                         }
-                        _ = try await resolveStagedInputs(
+                        otbInputs = try await resolveStagedInputs(
                             request.call, callerNodeID: request.callerNodeID, into: dir)
                         attachmentsDir = dir
                     }
+                    // Best-effort grant of the staging dir (read-only). Injecting a
+                    // directory only ADDS constraints, so the policy can only fail
+                    // to compile when the plain policy ALSO fails (an inherently
+                    // unsandboxed skill whose staged file is readable anyway) — so
+                    // fall back rather than hard-failing; never downgrades a
+                    // would-be-sandboxed skill. `attachmentsGranted` records whether
+                    // the dir is actually reachable so the manifest can fail closed.
+                    var attachmentsGranted = false
                     let sandboxPolicy: KTSandboxPolicy?
                     if let attachmentsDir {
-                        // Best-effort grant of the staging dir. Injecting a
-                        // directory only ADDS constraints, so the policy can only
-                        // fail to compile in cases where the plain policy ALSO
-                        // fails (an inherently-unsandboxed skill whose staged file
-                        // is readable anyway) — so fall back rather than
-                        // hard-failing; never downgrades a would-be-sandboxed skill.
                         if let granted = try? await scopeManager.resolvedPolicy(
                             for: action,
-                            extraReadDirectories: ["KT_ATTACHMENTS": attachmentsDir],
+                            extraDirectories: ["KT_ATTACHMENTS": (attachmentsDir, .input)],
                             callerScope: grant
                         ) {
                             sandboxPolicy = granted
+                            attachmentsGranted = true
                         } else {
                             sandboxPolicy = try? await scopeManager.resolvedPolicy(
                                 for: action, callerScope: grant)
+                            // A nil policy means the skill is inherently unsandboxed,
+                            // so the staged files are reachable regardless.
+                            attachmentsGranted = (sandboxPolicy == nil)
                         }
                     } else {
                         sandboxPolicy = try? await scopeManager.resolvedPolicy(
                             for: action, callerScope: grant)
+                    }
+                    // Resource manifest: built ONLY from granted, locally-staged
+                    // files (fail closed — if the staging dir wasn't granted the
+                    // script can't reach them, so advertise nothing). Single source
+                    // of truth for the env dict AND the agent prompt block.
+                    var manifest: KTResourceManifest? = nil
+                    if attachmentsGranted, let attachmentsDir {
+                        var candidates: [KTResourceManifest.Candidate] = []
+                        for file in staged?.files ?? [] {
+                            candidates.append(
+                                KTResourceManifest.Candidate(
+                                    kind: .attachment, id: file.id,
+                                    path: URL(fileURLWithPath: file.path),
+                                    direction: .read, displayName: file.filename,
+                                    isDirectory: false))
+                        }
+                        for input in otbInputs {
+                            candidates.append(
+                                KTResourceManifest.Candidate(
+                                    kind: .otb, id: input.handle, path: input.url,
+                                    direction: .read,
+                                    displayName: input.url.lastPathComponent,
+                                    isDirectory: false))
+                        }
+                        if !candidates.isEmpty {
+                            manifest = KTResourceManifest.build(
+                                grantedCandidates: candidates,
+                                umbrellaAttachmentsDir: attachmentsDir)
+                        }
                     }
                     callResult = try await skillManager.callAction(
                         action: action,
                         call: request.call,
                         sandboxPolicy: sandboxPolicy,
                         model: openAIModel ?? "gpt-5-codex",
-                        attachmentsDir: attachmentsDir
+                        attachmentsDir: attachmentsDir,
+                        manifest: manifest
                     )
                     #else
                     callResult = (content: [], isError: true)
