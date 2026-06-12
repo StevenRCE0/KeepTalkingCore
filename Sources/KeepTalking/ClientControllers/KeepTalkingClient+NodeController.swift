@@ -459,6 +459,68 @@ extension KeepTalkingClient {
         }
     }
 
+    /// Removes a node and everything anchored to it from the local database:
+    /// every relation where it is `from` or `to` (with their identity keys and
+    /// action-grant links), plus any actions it owns. The self node can't be
+    /// deleted this way.
+    ///
+    /// Deletes are issued explicitly rather than leaning on the schema's
+    /// `onDelete: .cascade` rules so the result is the same whether or not the
+    /// SQLite connection has foreign-key enforcement on. The orphaned keychain
+    /// private keys (keyed by relation id) are left in place, matching the
+    /// existing relation-revoke path.
+    ///
+    /// The node may reappear as `.pending` the next time it is encountered —
+    /// that's by design.
+    public static func deleteNodeLocally(
+        _ nodeID: UUID,
+        localNodeID: UUID,
+        on database: any Database
+    ) async throws {
+        guard nodeID != localNodeID else { return }
+
+        try await database.transaction { database in
+            // Relations in either direction, plus their identity keys and
+            // action-grant links.
+            let relations = try await KeepTalkingNodeRelation.query(on: database)
+                .group(.or) { group in
+                    group.filter(\.$from.$id, .equal, nodeID)
+                    group.filter(\.$to.$id, .equal, nodeID)
+                }
+                .all()
+            let relationIDs = relations.compactMap(\.id)
+            if !relationIDs.isEmpty {
+                try await KeepTalkingNodeIdentityKey.query(on: database)
+                    .filter(\.$relation.$id ~~ relationIDs)
+                    .delete()
+                try await KeepTalkingNodeRelationActionRelation.query(on: database)
+                    .filter(\.$relation.$id ~~ relationIDs)
+                    .delete()
+            }
+            for relation in relations {
+                try await relation.delete(on: database)
+            }
+
+            // Actions this node owns, and any grant links that point at them.
+            let ownedActions = try await KeepTalkingAction.query(on: database)
+                .filter(\.$node.$id, .equal, nodeID)
+                .all()
+            let ownedActionIDs = ownedActions.compactMap(\.id)
+            if !ownedActionIDs.isEmpty {
+                try await KeepTalkingNodeRelationActionRelation.query(on: database)
+                    .filter(\.$action.$id ~~ ownedActionIDs)
+                    .delete()
+            }
+            for action in ownedActions {
+                try await action.delete(on: database)
+            }
+
+            if let node = try await KeepTalkingNode.find(nodeID, on: database) {
+                try await node.delete(on: database)
+            }
+        }
+    }
+
     func currentNodeStatus(
         context: KeepTalkingContext? = nil,
         recipientNodeID: UUID? = nil

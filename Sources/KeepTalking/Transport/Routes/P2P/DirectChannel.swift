@@ -102,6 +102,11 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
             case store
             case apply(KeepTalkingJuiceP2PSession)
             case restart
+            /// Peer minted a new attempt while we're mid-handshake or backing
+            /// off. Stash it (already done) but don't re-gather now — the
+            /// in-flight attempt's timeout→backoff (or the running backoff
+            /// timer) will pick up the latest pending SDP on its next attempt.
+            case deferToBackoff
         }
 
         let action = stateQueue.sync { () -> SDPAction in
@@ -124,7 +129,21 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
                 self.activeRemoteAttemptID = remoteAttemptID
                 activeRemoteSDP = sdp
                 if let issuedAtMs { lastRemoteSDPIssuedAtMs = issuedAtMs }
-                return .restart
+                // Follow the peer's new attempt immediately only from a settled
+                // state. While we're mid-handshake or backing off, an immediate
+                // restartHandshake bypasses the attempt timeout / backoff *and*
+                // allocates a fresh state machine that resets failureCount — so
+                // two peers that can't complete ICE (symmetric NAT, no TURN)
+                // would ping-pong restarts at RTT speed, re-gathering candidates
+                // in a tight loop that never trips the circuit breaker. Defer
+                // instead: the stashed SDP is applied on the next timeout/backoff
+                // attempt, letting failures accrue toward .abandoned.
+                switch current {
+                    case .negotiating, .backingOff:
+                        return .deferToBackoff
+                    default:  // .ready, .interrupted
+                        return .restart
+                }
             }
             self.activeRemoteAttemptID = remoteAttemptID
             activeRemoteSDP = sdp
@@ -144,6 +163,8 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
             case .restart:
                 debug("replacing p2p handshake remoteAttempt=\(remoteAttemptID)")
                 restartHandshake()
+            case .deferToBackoff:
+                debug("deferring peer restart until current attempt resolves remoteAttempt=\(remoteAttemptID)")
         }
     }
 

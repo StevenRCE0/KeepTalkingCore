@@ -373,9 +373,21 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
             reportPeerConnected(node, source: "presence")
         }
 
-        // Presence alone is enough to attempt direct upgrade.
+        // A direct upgrade kicks off a fresh ICE candidate gather, so drive it
+        // only on a real reachability edge (offline→online) — never on every
+        // ~13s heartbeat. Per-beat prods re-gather candidates each cycle (the
+        // SDP-gathering storm) and, because handleParticipantJoined calls
+        // requestRetrial, reset the channel's backoff and failure budget every
+        // beat — defeating both the exponential backoff and the maxFailures
+        // circuit breaker. This is the same wave→edge lesson the liveness state
+        // already applies to reportPeerConnected and presence-echo; keep them
+        // aligned. The `!hasChannel` backstop only fires until the channel
+        // object exists, so it can't itself storm.
         if node != config.node {
-            handleParticipantJoined(node)
+            let hasChannel = stateQueue.sync { directChannels[node] != nil }
+            if observation.isNewConnection || !hasChannel {
+                handleParticipantJoined(node)
+            }
         }
 
         // Forward presence to the app for higher-level handling

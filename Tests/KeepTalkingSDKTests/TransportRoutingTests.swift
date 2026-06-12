@@ -59,6 +59,29 @@ struct TransportRoutingTests {
         #expect(direct.attemptUpgradeCount == 1)
     }
 
+    @Test("repeated presence does not re-upgrade an established direct channel")
+    func repeatedPresenceDoesNotRestormUpgrade() async throws {
+        let harness = makeHarness()
+        try await harness.transport.start()
+        defer { harness.transport.stop() }
+
+        let remote = UUID(uuidString: "41500000-0000-0000-0000-000000000000")!
+
+        // First presence is the connect edge → create the channel, upgrade once.
+        harness.deliverPresence(from: remote)
+        let direct = try #require(harness.registry.channel(for: remote))
+        #expect(direct.attemptUpgradeCount == 1)
+
+        // Further heartbeats from a still-online peer must NOT re-attempt the
+        // upgrade — that per-beat prod was the SDP-gathering storm, and it reset
+        // the channel's backoff/failure budget every beat. Upgrade stays at 1 and
+        // retrial is never forced for a peer that simply keeps being present.
+        harness.deliverPresence(from: remote)
+        harness.deliverPresence(from: remote)
+        #expect(direct.attemptUpgradeCount == 1)
+        #expect(direct.retrialCount == 0)
+    }
+
     @Test("service envelopes route through a ready direct channel")
     func serviceEnvelopeRoutesThroughDirect() async throws {
         let harness = makeHarness()
@@ -562,6 +585,14 @@ private struct TransportHarness {
 
     @discardableResult
     func registerPeer(_ peerNodeID: UUID, isReady: Bool) -> FakePeerChannel {
+        deliverPresence(from: peerNodeID)
+        let channel = registry.channel(for: peerNodeID) ?? registry.makeChannel(peerNodeID: peerNodeID)
+        channel.isReady = isReady
+        return channel
+    }
+
+    /// Simulate one inbound presence heartbeat from `peerNodeID`.
+    func deliverPresence(from peerNodeID: UUID) {
         broadcast.simulateReceive(
             KeepTalkingSequencedEnvelope(
                 senderNode: peerNodeID,
@@ -569,9 +600,6 @@ private struct TransportHarness {
                 envelope: KeepTalkingP2PPresencePayload(node: peerNodeID)
             )
         )
-        let channel = registry.channel(for: peerNodeID) ?? registry.makeChannel(peerNodeID: peerNodeID)
-        channel.isReady = isReady
-        return channel
     }
 }
 
