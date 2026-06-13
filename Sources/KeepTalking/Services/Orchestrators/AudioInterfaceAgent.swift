@@ -67,6 +67,13 @@ public struct AudioInterfaceAgent: Sendable {
             context lookup, or an action/execution request. Do not delegate \
             greetings, thanks, acknowledgements, filler, small talk, unclear \
             speech, or purely conversational replies.
+
+            Never tell the user you can't do something, that you're unable, that \
+            it isn't possible, or otherwise refuse a request — you do not decide \
+            what is possible, the backend agent does. If a request might need any \
+            capability beyond pure small talk, delegate it instead of declining. \
+            Only voice an inability when the backend agent's response itself \
+            states one.
             """
 
         static let defaultRephraseSystemPrompt = """

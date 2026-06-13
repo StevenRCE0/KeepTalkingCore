@@ -65,11 +65,6 @@ public enum AIPromptPresets {
             Action types in the listing — mcp: external server tools; skill: a directory-based agent skill you can read and invoke; primitive: a direct built-in operation; filesystem: sandboxed file access on the owning node (text ops ls/read-file/grep/sed/write-file/stat, plus get-file/put-file which transfer file bytes point-to-point and encrypted between you and the owning node — private, not shared with the conversation); semanticretrieval: remote thread-memory search on another node.
             For skill actions, you may call \(ktSkillMetainfoToolFunctionName) first to read the skill's manifest and instructions so you can frame a precise task. You never call a skill's own sub-tools — they run inside the ACT agent. Execute the skill by calling \(ktRunActionToolFunctionName)(action_id, task); the skill's tools never appear in your own tool list, so do not wait for them or ask the user to advance a turn.
             Notice that you also have built-in tools like web search and context attachment access.
-            You do not have general filesystem access. Attachment tools expose only files that are already attached to the active context.
-            If the user needs a different earlier attachment from the active context, call \(attachmentListingToolFunctionName) to inspect the available attachments.
-            Prefer \(attachmentReaderToolFunctionName) with mode=metadata or mode=preview_text first, and use mode=native only when you need the actual file or image content added to the next model turn.
-            When a file or image is already present in the current turn, or was just injected into the transcript after a tool call, inspect that provided content directly instead of listing or re-reading the same attachment.
-            A file or image injected immediately after ask-for-file is the user-provided attachment you requested. Treat it as authoritative for that request and do not call \(attachmentListingToolFunctionName) or \(attachmentReaderToolFunctionName) for the same file unless you truly need a different earlier context attachment.
             \(searchThreadsToolFunctionName) is your thread-memory retrieval tool. Use it proactively — do not wait to be asked. Call it at the start of any turn where prior context, a past decision, or unfinished work from an older thread would materially affect your answer.
             Prefer \(searchThreadsToolFunctionName) over guessing what happened in earlier conversation history.
             \(currentPromptGuidance)
@@ -85,6 +80,13 @@ public enum AIPromptPresets {
             3) Treat is_current_node=true entries as actions on the current or local node.
             4) Use the transcript, especially the "Known node names in this context" section, to match the user's wording to the correct node name before choosing an action.
             5) Do not reinterpret the tool argument as a node target. It selects the wrapped underlying MCP or skill sub-tool only.
+
+            File access:
+            You have no general filesystem of your own, and you never open files yourself. Files relate to you three ways — pick the right one:
+            1) Attachments — files the user attached to this context (your inputs). A file or image already in the current turn is authoritative; use it directly. For an earlier one, call \(attachmentListingToolFunctionName) then \(attachmentReaderToolFunctionName) (mode=metadata or preview_text first; mode=native only to add the bytes to the next turn). The reader returns PLAIN-TEXT only — for a PDF, image, .docx, or archive, do not read it as text; have a skill/action extract it.
+            2) Filesystem actions — read, write, and operate on files that live on a node's REAL filesystem. Use these when the task works over real files, or must PRODUCE a durable output file that you or a later step will operate on again — that persistent file is what makes long-running, multi-step work possible. You never touch the files: call \(ktRunActionToolFunctionName)(action_id, task) naming the file or directory, and the ACT agent performs the access (locally on the owning node, or pulling remote bytes privately).
+            3) Intermediate files (OTB) — ephemeral, private, point-to-point transfers for passing a file between you and an action, not durable storage. To hand a local file to a (usually remote) action, stage it with kt_send_file (it returns a handle), then call \(ktRunActionToolFunctionName) with that handle in input_handles; a remote action's produced bytes come back the same private way and then expire.
+            A run's command output (stdout/stderr) is returned to you inline as text — that is the run's report, not a file. Never fabricate or guess absolute paths; refer to a file by its attachment, its name, or the action that owns it.
 
             Skill execution policy:
             1) To understand a skill before running it, call \(ktSkillMetainfoToolFunctionName) with its action_id to read the manifest and instructions. This is optional context-gathering, not a required handshake.

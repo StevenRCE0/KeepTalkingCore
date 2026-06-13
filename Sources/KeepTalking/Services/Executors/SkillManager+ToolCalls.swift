@@ -249,13 +249,23 @@ extension SkillManager {
         )
         #endif
 
-        let joinedCommand = execution.command.joined(separator: " ")
+        // Scrub absolute paths the agent (and the chat output) must not see: map
+        // each staged resource path back to its $KT_<KIND>_<H8> handle, the skill
+        // dir to $SKILL_DIR, and the home dir to ~. The runner expands handles to
+        // real paths for the child process, so the command line and any path the
+        // script echoes would otherwise leak the staging location. Sanitize BEFORE
+        // clipping so a full path is matched even when the raw output is long.
+        let joinedCommand = sanitizeAgentVisiblePaths(
+            execution.command.joined(separator: " "),
+            manifest: manifest, skillDirectory: skillDirectory)
         let stdout = clipped(
-            execution.stdout,
+            sanitizeAgentVisiblePaths(
+                execution.stdout, manifest: manifest, skillDirectory: skillDirectory),
             maxCharacters: Self.scriptOutputMaxCharacters
         )
         let stderr = clipped(
-            execution.stderr,
+            sanitizeAgentVisiblePaths(
+                execution.stderr, manifest: manifest, skillDirectory: skillDirectory),
             maxCharacters: Self.scriptOutputMaxCharacters
         )
 
@@ -280,18 +290,65 @@ extension SkillManager {
             """
     }
 
+    /// Replaces absolute paths the agent must not see with stable handles: each
+    /// manifest resource path → its `$KT_<KIND>_<H8>` env key, the skill directory
+    /// → `$SKILL_DIR`, and the user's home directory → `~`. Used to scrub a skill
+    /// script's command line + stdout/stderr before they reach the agent or the
+    /// chat output. Longest paths are replaced first so a file path is rewritten
+    /// before its containing directory.
+    func sanitizeAgentVisiblePaths(
+        _ text: String,
+        manifest: KTResourceManifest?,
+        skillDirectory: URL?
+    ) -> String {
+        guard text.contains("/") else { return text }
+        var replacements: [(from: String, to: String)] = []
+        if let manifest {
+            for (key, value) in manifest.environmentVariables() where !value.isEmpty {
+                replacements.append((value, "$\(key)"))
+            }
+        }
+        if let skillDirectory, !skillDirectory.path.isEmpty {
+            replacements.append((skillDirectory.path, "$SKILL_DIR"))
+        }
+        let home = NSHomeDirectory()
+        if !home.isEmpty {
+            replacements.append((home, "~"))
+        }
+        // Longest source first so a file path is rewritten before its parent dir.
+        replacements.sort { $0.from.count > $1.from.count }
+        var result = text
+        for (from, to) in replacements {
+            result = result.replacingOccurrences(of: from, with: to)
+        }
+        return result
+    }
+
     func extractScriptArguments(_ arguments: [String: Value]) -> [String] {
         // ACT provides args as a raw CLI string — split respecting shell quoting
         if let raw = arguments["args"]?.stringValue {
-            return shellSplit(raw)
+            return stripShellControlTokens(shellSplit(raw))
         }
         if let raw = arguments["arguments"]?.stringValue {
-            return shellSplit(raw)
+            return stripShellControlTokens(shellSplit(raw))
         }
         if let array = arguments["args"]?.arrayValue {
-            return array.compactMap(scriptArgumentString(for:))
+            return stripShellControlTokens(array.compactMap(scriptArgumentString(for:)))
         }
         return []
+    }
+
+    /// Drops standalone shell control/redirection tokens (`2>&1`, `|`, `>`, `&&`,
+    /// `;`, …) the agent sometimes appends out of shell habit. Scripts run via
+    /// Process with NO shell, so these are never valid argv — passed literally they
+    /// are rejected by the program (the observed `unrecognized arguments: 2>&1`).
+    /// stdout/stderr are captured by the runner regardless, so they're never needed.
+    private func stripShellControlTokens(_ tokens: [String]) -> [String] {
+        let shellOperators: Set<String> = [
+            "2>&1", "1>&2", ">&1", ">&2", "&>", "&>>",
+            "|", "||", "&&", ";", "&", ">", ">>", "<", "<<", "2>", "1>",
+        ]
+        return tokens.filter { !shellOperators.contains($0) }
     }
 
     /// Splits a string into shell-style tokens, respecting double and single quotes.

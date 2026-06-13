@@ -79,7 +79,10 @@ extension SkillManager {
                                 "type": .string("string"),
                                 "description": .string(
                                     "Raw CLI arguments string, e.g. '--text \"hello world\" --voice Samantha'. "
-                                        + "Use directory labels (e.g. input_dir/file.txt) for paths."
+                                        + "Use directory labels (e.g. input_dir/file.txt) for paths. "
+                                        + "Arguments are passed DIRECTLY to the program — there is no shell, so do NOT "
+                                        + "add redirections or operators (2>&1, |, >, <, &&, ;) or globs; stdout and "
+                                        + "stderr are already captured and returned for you."
                                 ),
                             ])
                         ]),
@@ -146,7 +149,9 @@ extension SkillManager {
             ## Execution requirements
             - ALWAYS call a declared tool to fulfill the request. Never just describe a command.
             - If a filename is ambiguous or uncertain, call \(Self.listFilesToolName) first to find the exact name.
-            - Script output (stdout/stderr) is returned directly.
+            - Script output (stdout/stderr) is returned directly, along with the exit code.
+            - Pass only the program's own arguments — there is no shell, so never add 2>&1, pipes, redirections, or globs.
+            - Report results faithfully from the tool output: a non-zero exit_code, or a stderr error, means the run FAILED. Never claim success or "exit code 0" unless the returned exit_code is actually 0 — if it failed, say so and quote the error.
             - Be explicit and concise in the final answer.
 
             Request metadata JSON:

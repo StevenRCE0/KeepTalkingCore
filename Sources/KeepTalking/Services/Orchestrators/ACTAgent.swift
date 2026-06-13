@@ -197,6 +197,7 @@ extension KeepTalkingClient {
             \(typeGuidance)
 
             Be factual and direct. Only report what the tool returned. Do not speculate.
+            If the tool result shows a non-zero exit code or an error, report that FAILURE honestly — never claim success when the output shows an error.
             Your job is to get the user's task done — not to ask for clarification or request more information. Make your best judgment and execute.
             """
 
