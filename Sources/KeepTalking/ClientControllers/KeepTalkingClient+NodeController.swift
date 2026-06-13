@@ -1087,9 +1087,9 @@ extension KeepTalkingClient {
             return nil
         }
 
-        // Skip un-analysed local skills. We never want to ship a skill to a
-        // peer until our analyser has filled in `atomicTools` etc., otherwise
-        // they materialise an empty stub that the planner can't dispatch.
+        // Skip un-analysed local skills. We never ship a skill to a peer until
+        // the analyser has determined its sandbox scope, otherwise they
+        // materialise an unbounded stub.
         if case .skill(let bundle) = payload, !bundle.toolsAnalysed {
             return nil
         }

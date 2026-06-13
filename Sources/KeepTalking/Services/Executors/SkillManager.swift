@@ -53,9 +53,6 @@ struct SkillManifestContext: Sendable {
     let referencesFiles: [String]
     let scripts: [String]
     let assets: [String]
-    /// Tool name → script relative path, parsed from `scripts.<name>` frontmatter keys.
-    /// These are the only tools the agent is allowed to call.
-    let declaredTools: [String: String]
 }
 
 /// Executes skill-backed actions by exposing skill files and scripts as AI tools.
@@ -63,6 +60,7 @@ public actor SkillManager {
     static let getFileToolName = "kt_skill_get_file"
     static let listFilesToolName = "kt_skill_list_files"
     static let runScriptToolName = "kt_skill_run_script"
+    static let shellToolName = "kt_shell"
     static let manifestMaxCharacters = 20_000
     static let fileReadMaxCharacters = 30_000
     static let scriptOutputMaxCharacters = 18_000
@@ -152,7 +150,8 @@ public actor SkillManager {
         sandboxPolicy: KTSandboxPolicy? = nil,
         model: String = "gpt-5-codex",
         attachmentsDir: URL? = nil,
-        manifest: KTResourceManifest? = nil
+        manifest: KTResourceManifest? = nil,
+        workspaceDirectory: URL? = nil
     ) async throws -> (content: [MCP.Tool.Content], isError: Bool?) {
         guard let actionID = action.id else {
             throw SkillManagerError.missingActionID
@@ -166,27 +165,10 @@ public actor SkillManager {
 
         try await registerIfNeeded(action)
 
-        var manifestContext = try loadManifestContext(
+        let resolvedContext = try loadManifestContext(
             for: skillBundle.directory,
             parameters: skillBundle.parameters
         )
-        // Tool declarations come from the bundle's atomicTools (persisted in DB),
-        // not from SKILL.md frontmatter parsing.
-        let bundleTools = skillBundle.declaredTools
-        if !bundleTools.isEmpty {
-            var merged = manifestContext.declaredTools
-            for (name, path) in bundleTools { merged[name] = path }
-            manifestContext = SkillManifestContext(
-                manifestURL: manifestContext.manifestURL,
-                manifestText: manifestContext.manifestText,
-                manifestMetadata: manifestContext.manifestMetadata,
-                referencesFiles: manifestContext.referencesFiles,
-                scripts: manifestContext.scripts,
-                assets: manifestContext.assets,
-                declaredTools: merged
-            )
-        }
-        let resolvedContext = manifestContext
         let tools = makeSkillTools(context: resolvedContext)
         var messages: [AIMessage] = [
             .system(
@@ -222,7 +204,8 @@ public actor SkillManager {
                         sandboxPolicy: sandboxPolicy,
                         scriptTrace: scriptTrace,
                         attachmentsDir: attachmentsDir,
-                        manifest: manifest
+                        manifest: manifest,
+                        workspaceDirectory: workspaceDirectory
                     )
                 }
             )
@@ -247,7 +230,8 @@ public actor SkillManager {
                     sandboxPolicy: sandboxPolicy,
                     scriptTrace: scriptTrace,
                     attachmentsDir: attachmentsDir,
-                    manifest: manifest
+                    manifest: manifest,
+                    workspaceDirectory: workspaceDirectory
                 )
             )
         }

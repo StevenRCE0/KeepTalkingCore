@@ -38,7 +38,7 @@ extension KeepTalkingClient {
             continuationMessageID: response.continuationMessageID,
             state: response.state
         )
-        await agentRunQueue.deliverContinuationResponse(response)
+        await agentCoordinator.deliverContinuationResponse(response)
     }
 
     private func updateContinuationMessageState(
@@ -159,7 +159,7 @@ extension KeepTalkingClient {
                 let turnID = message.agentTurnID
             else { continue }
 
-            let isActive = await agentRunQueue.hasActiveTurn(agentTurnID: turnID)
+            let isActive = await agentCoordinator.hasActiveTurn(agentTurnID: turnID)
             guard !isActive else { continue }
 
             message.type = .agentTurnContinuation(
@@ -331,7 +331,7 @@ extension KeepTalkingClient {
             )
         )
 
-        let response = try await agentRunQueue.awaitContinuation(
+        let response = try await agentCoordinator.awaitContinuation(
             agentTurnID: agentTurnID,
             contextID: contextID
         )

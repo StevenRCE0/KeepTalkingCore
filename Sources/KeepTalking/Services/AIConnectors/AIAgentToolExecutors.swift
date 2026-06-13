@@ -600,33 +600,10 @@ extension KeepTalkingClient {
             return (context.manifestPath as NSString).lastPathComponent
         }()
 
-        // Analysed state from the planner. Only field NAMES are surfaced —
-        // the actual env values and directory paths live in
-        // `bundle.parameters` and stay local to the action host. Network
-        // hosts are not secret (they're already part of the skill manifest)
-        // so they're exposed verbatim.
-        let analysedTools: [[String: Any]] = context.bundle.atomicTools
-            .sorted { $0.index < $1.index }
-            .map { cmd in
-                var entry: [String: Any] = [
-                    "index": cmd.index,
-                    "intent": cmd.intent,
-                ]
-                if let verb = cmd.descriptor.action?.verbs?.first {
-                    entry["verb"] = verb.rawValue
-                }
-                if let toolName = cmd.toolName, !toolName.isEmpty {
-                    entry["tool_name"] = toolName
-                }
-                // Script paths are relative to the skill directory (e.g.
-                // "scripts/foo.py"); the skill directory itself is local-only,
-                // so a relative path doesn't leak the host's filesystem.
-                if let scriptPath = cmd.scriptPath, !scriptPath.isEmpty {
-                    entry["script_path"] = scriptPath
-                }
-                return entry
-            }
-
+        // Analysed sandbox scope from the planner. Only field NAMES are surfaced —
+        // the actual env values and directory paths live in `bundle.parameters` and
+        // stay local to the action host. Network hosts are not secret (already part
+        // of the skill manifest) so they're exposed verbatim.
         return jsonString([
             "ok": context.loadError == nil,
             "function_name": functionName,
@@ -643,7 +620,6 @@ extension KeepTalkingClient {
             "configured_directories": dirParams,
             "configured_parameters": otherParams,
             "tools_analysed": context.bundle.toolsAnalysed,
-            "analysed_tools": analysedTools,
             "required_env": context.bundle.requiredEnv.sorted(),
             "required_directories": context.bundle.requiredDirectories.sorted(),
             "required_files": context.bundle.requiredFiles.sorted(),

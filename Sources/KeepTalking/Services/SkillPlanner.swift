@@ -20,10 +20,31 @@ public enum KeepTalkingSkillPlannerError: LocalizedError {
     }
 }
 
+/// Why the planner declined to build an action. The planner categorises its own
+/// decline when it calls `kt_refuse`; the host frames the message accordingly.
+public enum KeepTalkingSkillPlannerDeclineKind: String, Sendable {
+    /// Blocked: the request is legitimate but the planner lacks the permission or
+    /// information to complete it (a denied grant, missing info after asking).
+    case blocked
+    /// Too broad: the request demands access too broad or inappropriate for a
+    /// narrow, dedicated skill — it should not be built as stated.
+    case tooBroad = "too_broad"
+
+    /// Maps the free-form `category` argument the model supplies to a known kind,
+    /// defaulting to `.blocked` for anything unrecognised.
+    public init(rawCategory: String?) {
+        switch rawCategory?.lowercased() {
+            case "too_broad", "toobroad", "too-broad", "broad", "reject", "rejected", "overbroad":
+                self = .tooBroad
+            default:
+                self = .blocked
+        }
+    }
+}
+
 /// A single observable event emitted by `KeepTalkingSkillPlanner` during planning.
 public enum KeepTalkingSkillPlannerEvent: Sendable {
     case readingFile(path: String)
-    case declaringTool(verb: String, intent: String)
     case requiringEnv(name: String)
     case requiringDirectory(label: String, purpose: String)
     /// Mid-plan request for a single file. `contentTypes` is a list of UTI
@@ -38,10 +59,18 @@ public enum KeepTalkingSkillPlannerEvent: Sendable {
     /// the host shows an Allow/Deny prompt for that known path rather than a
     /// file picker. Return "granted" to permit; anything else (or nil) denies.
     case requiringExecutable(name: String, path: String, purpose: String)
+    /// RUNTIME network ask — the skill needs egress to `host` when it executes.
     case requiringNetwork(host: String, purpose: String)
+    /// SETUP-time network ask — the planner's `setup_environment` step needs to
+    /// reach `host` while provisioning the environment (e.g. a package index).
+    /// A SEPARATE consent from `requiringNetwork`: granting setup egress does
+    /// not grant runtime egress, and vice-versa. Return "granted" to permit.
+    case requiringSetupNetwork(host: String, purpose: String)
+    /// The planner ran a `setup_environment` command to provision the env.
+    /// `summary` is a short activity line (e.g. "exit 0"); `detail` carries the
+    /// command. Informational — return nil.
+    case settingUpEnvironment(summary: String, detail: String)
     case requiringHTTPURL(serviceName: String)
-    case registeringScript(toolName: String, path: String)
-    case suggestingScript(path: String)
     case creatingShortcut(name: String)
     case creatingPrimitive(kind: String)
     case creatingHTTPMCP(url: URL, name: String)
@@ -67,9 +96,11 @@ public enum KeepTalkingSkillPlannerEvent: Sendable {
     /// `summary` is a short human description; `detail` is the finding (e.g.
     /// "uv 0.4.18 at /opt/homebrew/bin/uv"). Informational — return nil.
     case probing(summary: String, detail: String)
-    /// Planner refused to plan because of missing permission or info. The
-    /// host should surface `reason` to the user. Return value is ignored.
-    case refusing(reason: String)
+    /// Planner declined to plan. `category` distinguishes "blocked" (missing
+    /// permission/info) from "too broad" (the request demands inappropriate
+    /// access for a dedicated skill). The host surfaces `reason` to the user and
+    /// can frame it by category. Return value is ignored.
+    case refusing(reason: String, category: KeepTalkingSkillPlannerDeclineKind)
 }
 
 /// The outcome of a planner run: either a full skill plan or a direct primitive/shortcut/HTTP-MCP action.
@@ -77,40 +108,40 @@ public enum KeepTalkingSkillPlannerResult: Sendable {
     case plan(KTSkillCommandPlan)
     case directAction(KeepTalkingPrimitiveBundle)
     case directHTTPMCP(url: URL, name: String, indexDescription: String, headers: [String: String])
-    /// Planner declined to build an action because it lacks permission or
-    /// information needed to proceed. The host should surface `reason` to
-    /// the user verbatim instead of treating this as an error.
-    case refused(reason: String)
+    /// Planner declined to build an action. `category` says whether it was
+    /// blocked (lacks permission/info — supply what's missing) or the request was
+    /// too broad (should be narrowed, not built as stated). Surface `reason`
+    /// verbatim instead of treating this as an error.
+    case refused(reason: String, category: KeepTalkingSkillPlannerDeclineKind)
 }
 
-/// AI-driven planner that analyses a skill bundle by calling structured tools
-/// to declare atomic tools, scopes, and script registrations.
+/// AI-driven planner that determines a skill's SANDBOX SCOPE (env, directories,
+/// files, network egress) by calling structured tools — and classifies the user's
+/// intent into a primitive / shortcut / HTTP-MCP / skill action. It does NOT
+/// enumerate per-operation tools: skills execute through one sandboxed shell.
 ///
-/// The model reads skill files via `kt_read_skill_file`, then calls declaration
-/// tools (`kt_declare_tool`, `kt_require_env`, etc.) to build the plan
-/// incrementally. It must call `kt_finalize(rationale:)` to complete.
+/// The model reads skill files via `kt_read_skill_file`, then calls scope tools
+/// (`kt_require_env`, `kt_require_directory`, `kt_require_network`, …) to build the
+/// plan incrementally. It must call `kt_finalize(rationale:)` to complete.
 /// No prose output is expected or rendered.
 public actor KeepTalkingSkillPlanner {
 
     // MARK: - Tool names
 
     private static let readFileTool = "kt_read_skill_file"
-    private static let declareToolTool = "kt_declare_tool"
     private static let requireEnvTool = "kt_require_env"
     private static let requireDirTool = "kt_require_directory"
     private static let requireFileTool = "kt_require_file"
     private static let requireNetworkTool = "kt_require_network"
-    private static let registerScriptTool = "kt_register_script"
-    private static let suggestScriptTool = "kt_suggest_script"
     private static let createShortcutTool = "kt_create_shortcut"
     private static let createPrimitiveTool = "kt_create_primitive"
     private static let requireHTTPURLTool = "kt_require_http_url"
     private static let createHTTPMCPTool = "kt_create_http_mcp"
     private static let askUserTool = "kt_ask_user"
-    private static let dropToolTool = "kt_drop_tool"
     static let probeCommandTool = "kt_probe_command"
     static let checkPathTool = "kt_check_path"
     static let tryRunTool = "kt_try_run"
+    static let setupEnvironmentTool = "setup_environment"
     private static let requireExecutableTool = "kt_require_executable"
     private static let refuseTool = "kt_refuse"
     private static let finalizeTool = "kt_finalize"
@@ -184,19 +215,17 @@ public actor KeepTalkingSkillPlanner {
         // Conversation transcript (system + user + assistant + tool messages)
         var messages: [AIMessage]
 
-        // Accumulated declarations / grants
-        var commands: [KTSkillAtomicCommand] = []
+        // Accumulated sandbox scope / grants
         var requiredEnv: [String] = []
         var requiredDirectories: [String] = []
         var requiredFiles: [String] = []
         var requiredNetworkHosts: [String] = []
         var grantedNetworkHosts: [String] = []
-        var toolDeclarations: [String: String] = [:]
-        var suggestedScripts: [String: String] = [:]
+        var setupNetworkHosts: [String] = []
+        var grantedSetupNetworkHosts: [String] = []
         var collectedParameters: [String: String] = [:]
         var skillName: String
         var rationale: String?
-        var commandIndex = 0
 
         init(
             bundle: KeepTalkingSkillBundle,
@@ -304,18 +333,16 @@ public actor KeepTalkingSkillPlanner {
         let tools = run.tools
 
         var messages = run.messages
-        var commands = run.commands
         var requiredEnv = run.requiredEnv
         var requiredDirectories = run.requiredDirectories
         var requiredFiles = run.requiredFiles
         var requiredNetworkHosts = run.requiredNetworkHosts
         var grantedNetworkHosts = run.grantedNetworkHosts
-        var toolDeclarations = run.toolDeclarations
-        var suggestedScripts = run.suggestedScripts
+        var setupNetworkHosts = run.setupNetworkHosts
+        var grantedSetupNetworkHosts = run.grantedSetupNetworkHosts
         var collectedParameters = run.collectedParameters
         var skillName = run.skillName
         var rationale = run.rationale
-        var commandIndex = run.commandIndex
         var finalized = false
 
         // Writes the working state back onto the session so the next
@@ -324,18 +351,16 @@ public actor KeepTalkingSkillPlanner {
         // may argue with).
         func persist() {
             run.messages = messages
-            run.commands = commands
             run.requiredEnv = requiredEnv
             run.requiredDirectories = requiredDirectories
             run.requiredFiles = requiredFiles
             run.requiredNetworkHosts = requiredNetworkHosts
             run.grantedNetworkHosts = grantedNetworkHosts
-            run.toolDeclarations = toolDeclarations
-            run.suggestedScripts = suggestedScripts
+            run.setupNetworkHosts = setupNetworkHosts
+            run.grantedSetupNetworkHosts = grantedSetupNetworkHosts
             run.collectedParameters = collectedParameters
             run.skillName = skillName
             run.rationale = rationale
-            run.commandIndex = commandIndex
         }
 
         var nudged = false
@@ -359,7 +384,8 @@ public actor KeepTalkingSkillPlanner {
                     messages.append(
                         .user(
                             "You must call kt_finalize now to complete the analysis. "
-                                + "Declare any remaining tools first, then call kt_finalize with a rationale."
+                                + "Record any remaining required env/dirs/files/network first, "
+                                + "then call kt_finalize with a rationale."
                         )
                     )
                     continue
@@ -392,74 +418,6 @@ public actor KeepTalkingSkillPlanner {
                         } catch {
                             result = "Error: \(error.localizedDescription)"
                         }
-
-                    case Self.declareToolTool:
-                        let verbStr = string(args["verb"]) ?? "execute"
-                        let intent = string(args["intent"]) ?? ""
-                        _ = await onEvent?(.declaringTool(verb: verbStr, intent: intent))
-                        let verb = KeepTalkingActionVerb(rawValue: verbStr) ?? .execute
-                        let objectDesc = string(args["object_description"]) ?? ""
-                        let objectKind = string(args["object_kind"]) ?? "command"
-                        let subjectDesc = string(args["subject_description"])
-
-                        let objectResource: KeepTalkingActionResource? = {
-                            switch objectKind {
-                                case "file":
-                                    let paths = (args["object_paths"].flatMap { arrayOfStrings($0) } ?? [])
-                                        .map { p -> URL in
-                                            p.hasPrefix("/")
-                                                ? URL(fileURLWithPath: p)
-                                                : bundle.directory?.appendingPathComponent(p)
-                                                    ?? URL(fileURLWithPath: p)
-                                        }
-                                    return paths.isEmpty ? nil : .filePaths(paths)
-                                case "url":
-                                    let urls = (args["object_urls"].flatMap { arrayOfStrings($0) } ?? [])
-                                        .compactMap { URL(string: $0) }
-                                    return urls.isEmpty ? nil : .urls(urls)
-                                default:
-                                    let cmd = args["object_command"].flatMap { arrayOfStrings($0) } ?? []
-                                    return cmd.isEmpty ? nil : .command([cmd])
-                            }
-                        }()
-
-                        let descriptor = KeepTalkingActionDescriptor(
-                            subject: subjectDesc.map {
-                                KeepTalkingActionResourceWithDescription(
-                                    description: $0,
-                                    resource: .command([[bundle.directory?.path ?? "/"]])
-                                )
-                            },
-                            action: KeepTalkingActionWithDescription(description: verbStr, verbs: [verb]),
-                            object: objectResource.map {
-                                KeepTalkingActionResourceWithDescription(description: objectDesc, resource: $0)
-                            }
-                        )
-                        // Optional rich argument schema. Accept it as a JSON object
-                        // (preferred — preserves nested types) or as a raw JSON string.
-                        let argumentsSchema: String? = {
-                            if case .object = args["arguments_schema"] ?? .null,
-                                let raw = args["arguments_schema"],
-                                let str = jsonString(from: raw)
-                            {
-                                return str
-                            }
-                            if case .string(let s) = args["arguments_schema"] ?? .null,
-                                !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            {
-                                return s
-                            }
-                            return nil
-                        }()
-                        commands.append(
-                            KTSkillAtomicCommand(
-                                index: commandIndex,
-                                descriptor: descriptor,
-                                intent: intent,
-                                argumentsSchema: argumentsSchema
-                            ))
-                        commandIndex += 1
-                        result = "Declared (index \(commandIndex - 1))."
 
                     case Self.requireEnvTool:
                         let name = string(args["name"]) ?? ""
@@ -563,25 +521,6 @@ public actor KeepTalkingSkillPlanner {
                             result = "User denied or skipped network access to \(host)."
                         }
 
-                    case Self.dropToolTool:
-                        let reference = (string(args["reference"]) ?? "")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !reference.isEmpty else {
-                            result =
-                                "Error: reference is required (a tool name, script path, or command index)."
-                            break
-                        }
-                        let dropped = dropCommands(
-                            matching: reference,
-                            commands: &commands,
-                            toolDeclarations: &toolDeclarations,
-                            suggestedScripts: &suggestedScripts
-                        )
-                        result =
-                            dropped.isEmpty
-                            ? "No declared tool matched '\(reference)'. Nothing dropped."
-                            : "Dropped: \(dropped.joined(separator: ", "))."
-
                     #if os(macOS)
                         case Self.probeCommandTool:
                             let name = (string(args["name"]) ?? "")
@@ -604,36 +543,55 @@ public actor KeepTalkingSkillPlanner {
                             let outcome = await tryRun(command: command, cwd: cwd)
                             _ = await onEvent?(.probing(summary: "Run: \(command)", detail: outcome.summary))
                             result = outcome.toolResult
+
+                        case Self.setupEnvironmentTool:
+                            let command = (string(args["command"]) ?? "")
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            let purpose = string(args["purpose"]) ?? ""
+                            let cwd = string(args["cwd"])
+                            let hosts =
+                                (arrayOfStrings(args["network_hosts"] ?? .null) ?? [])
+                                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                                .filter { !$0.isEmpty }
+                            guard !command.isEmpty else {
+                                result = "Error: setup_environment needs a non-empty `command`."
+                                break
+                            }
+                            // Setup-time network is a SEPARATE consent from runtime
+                            // network: ask for each declared host BEFORE running the
+                            // provisioning command. A denied host blocks the run — the
+                            // user did not consent to reaching it during setup.
+                            var deniedSetupHost: String?
+                            for host in hosts {
+                                if !setupNetworkHosts.contains(host) { setupNetworkHosts.append(host) }
+                                if grantedSetupNetworkHosts.contains(host) { continue }
+                                let granted = await onEvent?(
+                                    .requiringSetupNetwork(host: host, purpose: purpose))
+                                if let granted, granted.lowercased() == "granted" {
+                                    grantedSetupNetworkHosts.append(host)
+                                } else {
+                                    deniedSetupHost = host
+                                    break
+                                }
+                            }
+                            if let deniedSetupHost {
+                                result =
+                                    "User denied setup network access to \(deniedSetupHost). The setup "
+                                    + "command was NOT run. Try an approach that doesn't reach "
+                                    + "\(deniedSetupHost), or decline with kt_refuse (category \"blocked\")."
+                                break
+                            }
+                            // Default cwd to a granted directory when the agent didn't
+                            // pass one, so installs land in the project the user pointed at.
+                            let grantedDir =
+                                requiredDirectories
+                                .compactMap { collectedParameters[$0] }
+                                .first(where: { $0.hasPrefix("/") })
+                            let outcome = await runSetup(command: command, cwd: cwd ?? grantedDir)
+                            _ = await onEvent?(
+                                .settingUpEnvironment(summary: outcome.summary, detail: command))
+                            result = outcome.toolResult
                     #endif
-
-                    case Self.registerScriptTool:
-                        let toolName = string(args["tool_name"]) ?? ""
-                        var scriptPath = string(args["script_path"]) ?? ""
-                        if !scriptPath.isEmpty && !scriptPath.hasPrefix("scripts/") {
-                            scriptPath =
-                                "scripts/"
-                                + scriptPath.trimmingCharacters(
-                                    in: CharacterSet(charactersIn: "/"))
-                        }
-                        _ = await onEvent?(.registeringScript(toolName: toolName, path: scriptPath))
-                        if !toolName.isEmpty && !scriptPath.isEmpty {
-                            toolDeclarations[toolName] = scriptPath
-                        }
-                        result = "Registered."
-
-                    case Self.suggestScriptTool:
-                        var path = string(args["path"]) ?? ""
-                        let content = string(args["content"]) ?? ""
-                        if !path.isEmpty && !path.hasPrefix("scripts/")
-                            && !path.hasPrefix("references/") && !path.hasPrefix("assets/")
-                        {
-                            path =
-                                "scripts/"
-                                + path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                        }
-                        _ = await onEvent?(.suggestingScript(path: path))
-                        if !path.isEmpty { suggestedScripts[path] = content }
-                        result = "Recorded."
 
                     case Self.createShortcutTool:
                         let shortcutName = string(args["shortcut_name"]) ?? ""
@@ -776,15 +734,17 @@ public actor KeepTalkingSkillPlanner {
                         }
 
                     case Self.refuseTool:
-                        let reason = string(args["reason"]) ?? "Planner refused."
-                        _ = await onEvent?(.refusing(reason: reason))
-                        // Flush this turn's tool results (the refusal included) so
+                        let reason = string(args["reason"]) ?? "Planner declined."
+                        let category = KeepTalkingSkillPlannerDeclineKind(
+                            rawCategory: string(args["category"]))
+                        _ = await onEvent?(.refusing(reason: reason, category: category))
+                        // Flush this turn's tool results (the decline included) so
                         // the transcript stays valid — every tool call needs a
                         // matching result — if the user argues back next turn.
-                        toolResults.append(.tool("Refused.", toolCallID: call.id))
+                        toolResults.append(.tool("Declined.", toolCallID: call.id))
                         messages.append(contentsOf: toolResults)
                         persist()
-                        return .refused(reason: reason)
+                        return .refused(reason: reason, category: category)
 
                     case Self.finalizeTool:
                         rationale = string(args["rationale"]) ?? ""
@@ -816,98 +776,13 @@ public actor KeepTalkingSkillPlanner {
 
         guard finalized else { throw KeepTalkingSkillPlannerError.planNotFinalized }
 
-        // Auto-link script bindings the planner forgot to register. Models
-        // frequently call kt_suggest_script + kt_declare_tool but skip the
-        // kt_register_script step that pairs them — leaving the runtime
-        // unable to dispatch the declared tool to its script. For each
-        // execute/call-tool command whose descriptor command references a
-        // known script (suggested or already on disk), synthesize a tool
-        // name and stamp it. The user-facing effect is that the skill
-        // actually runs the script the planner intended to wrap.
-        let knownScriptPaths: Set<String> = {
-            var paths = Set(suggestedScripts.keys)
-            if let dir = bundle.directory {
-                let scripts = SkillDirectoryDefinitions.entryURL(.scripts, in: dir)
-                if let enumerator = FileManager.default.enumerator(at: scripts, includingPropertiesForKeys: nil) {
-                    for case let url as URL in enumerator {
-                        let rel = url.path.replacingOccurrences(of: dir.path + "/", with: "")
-                        paths.insert(rel)
-                    }
-                }
-            }
-            return paths
-        }()
-
-        // Track scripts the planner already explicitly registered so the
-        // auto-link doesn't double-bind them and create duplicate-name tool
-        // entries (which fail with "tools contains duplicate names" at the
-        // provider level).
-        let registeredScriptPaths: Set<String> = Set(toolDeclarations.values)
-
-        for idx in commands.indices where commands[idx].toolName == nil && commands[idx].scriptPath == nil {
-            let cmd = commands[idx]
-            guard let verb = cmd.descriptor.action?.verbs?.first,
-                verb == .execute || verb == .callTool,
-                case .command(let groups) = cmd.descriptor.object?.resource,
-                let tokens = groups.first
-            else { continue }
-            // Find a token that names a known script path. Tokens are
-            // shell-style ("bash", "scripts/foo.sh", "{{arg}}") so we just
-            // look for an exact match or a basename match.
-            let matchedScript = tokens.first { token in
-                knownScriptPaths.contains(token)
-                    || knownScriptPaths.contains { $0.hasSuffix("/" + token) || $0 == token }
-            }
-            guard let script = matchedScript else { continue }
-            let resolvedPath = knownScriptPaths.first { $0 == script || $0.hasSuffix("/" + script) } ?? script
-            // Skip if the planner already registered this script — pairing
-            // happens via the `toolDeclarations` loop below.
-            if registeredScriptPaths.contains(resolvedPath) { continue }
-            let synthesizedName = synthesizeToolName(for: cmd, fallback: resolvedPath)
-            // Avoid colliding with an already-registered tool name.
-            if toolDeclarations[synthesizedName] != nil { continue }
-            commands[idx].toolName = synthesizedName
-            commands[idx].scriptPath = resolvedPath
-            toolDeclarations[synthesizedName] = resolvedPath
-        }
-
-        // Stamp toolName/scriptPath onto commands from registered tool declarations
-        for (toolName, scriptPath) in toolDeclarations {
-            // Skip if any command already binds this script — the auto-link
-            // pass above (or a prior iteration) handled it. Without this
-            // guard, registering a script the planner already declared as an
-            // atomicTool produced a duplicate command sharing the same
-            // toolName, which the model provider rejects with
-            // "tools contains duplicate names".
-            if commands.contains(where: { $0.toolName == toolName || $0.scriptPath == scriptPath }) {
-                continue
-            }
-            // Otherwise: find a matching unbound command by intent reference,
-            // or synthesize a fresh execute command for the script.
-            if let idx = commands.firstIndex(where: {
-                $0.scriptPath == nil && $0.intent.localizedCaseInsensitiveContains(toolName)
-            }) {
-                commands[idx].toolName = toolName
-                commands[idx].scriptPath = scriptPath
-            } else {
-                let cmd = KTSkillAtomicCommand(
-                    index: commandIndex,
-                    descriptor: KeepTalkingActionDescriptor(
-                        action: KeepTalkingActionWithDescription(description: toolName, verbs: [.execute])
-                    ),
-                    intent: "Run \(toolName) via \(scriptPath)",
-                    toolName: toolName,
-                    scriptPath: scriptPath
-                )
-                commands.append(cmd)
-                commandIndex += 1
-            }
-        }
-
         // Persist the (possibly revised) session state so a later
         // continuePlanning resumes from here instead of re-deriving it.
         persist()
 
+        // The plan is the skill's SANDBOX RESOURCE — its scope (env/dirs/files/
+        // network) and collected parameters. No per-operation command list: skills
+        // execute via kt_shell, and the seatbelt boundary comes from this scope.
         var planResult = KTSkillCommandPlan(
             skillActionID: run.skillActionID,
             skillName: skillName,
@@ -917,10 +792,9 @@ public actor KeepTalkingSkillPlanner {
             requiredFiles: requiredFiles,
             requiredNetworkHosts: requiredNetworkHosts,
             grantedNetworkHosts: grantedNetworkHosts,
-            commands: commands
+            setupNetworkHosts: setupNetworkHosts,
+            grantedSetupNetworkHosts: grantedSetupNetworkHosts
         )
-        if !toolDeclarations.isEmpty { planResult.toolDeclarations = toolDeclarations }
-        if !suggestedScripts.isEmpty { planResult.suggestedScripts = suggestedScripts }
         if !collectedParameters.isEmpty { planResult.collectedParameters = collectedParameters }
         return .plan(planResult)
     }
@@ -991,15 +865,19 @@ public actor KeepTalkingSkillPlanner {
         let modeContext: String
         if isExisting {
             modeContext = """
-                You are registering tools for an existing KeepTalking skill.
+                You are determining the SANDBOX SCOPE for an existing KeepTalking skill.
                 The skill directory is at: \(bundle.directory!.path)
-                Read the available files to understand what the skill does, then declare its tools.
+                Read the available files to understand what the skill does, then record the
+                env vars, directories, files, and network hosts it needs to run. The skill is
+                executed by an agent through a single sandboxed shell — you do NOT declare
+                per-operation tools or register scripts; you define the boundary it runs inside.
                 """
         } else {
             modeContext = """
-                You are bootstrapping a new KeepTalking skill from scratch.
-                No skill directory exists yet. Use kt_suggest_script to create the necessary files,
-                then declare the tools those scripts will expose.
+                You are creating a new KeepTalking skill from a description.
+                No skill directory exists yet. Determine the sandbox scope (env/dirs/files/
+                network) the skill will need. The skill is executed by an agent through a single
+                sandboxed shell; you define the boundary, not a tool list.
                 """
         }
 
@@ -1008,14 +886,14 @@ public actor KeepTalkingSkillPlanner {
         #if os(macOS)
         let probeGuidance = """
 
-            ## Verify before you declare — assume nothing about this machine
-            You have NO prior knowledge of what is installed or where. Before declaring \
-            any step that runs an external command-line tool (uv, ffmpeg, node, etc.):
+            ## Verify before you scope — assume nothing about this machine
+            You have NO prior knowledge of what is installed or where. Before relying on \
+            any external command-line tool (uv, ffmpeg, node, etc.):
             - Call kt_probe_command(name) to confirm it is installed AND runnable inside \
             the skill's runtime sandbox. The sandbox only executes tools under \
             /opt/homebrew/bin, /usr/local/bin, the standard interpreters, or a path the \
             user permits via kt_require_executable.
-            - If the step needs a project or working directory (e.g. a uv / npm project), \
+            - If the skill needs a project or working directory (e.g. a uv / npm project), \
             call kt_require_directory for the root and kt_check_path to confirm it exists.
             - Use kt_try_run for a safe, read-only smoke check (e.g. `uv --version`, \
             `uv tree`) to confirm the actual invocation works.
@@ -1023,7 +901,23 @@ public actor KeepTalkingSkillPlanner {
             kt_require_executable(name, path, purpose) — pass the exact path the probe \
             reported so the user just taps Allow (no file picker). If it's missing \
             entirely, kt_ask_user where it lives or kt_refuse with the install command. \
-            Never declare a command you have not verified can run.
+            Never scope in a command you have not verified can run.
+
+            ## Set up the environment — you own provisioning
+            You are responsible for getting the skill's environment ready, not just \
+            describing it. When the skill needs dependencies installed, a virtualenv \
+            created, or assets fetched:
+            - Call setup_environment(command, …) to actually run the provisioning step \
+            (e.g. `uv sync`, `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`). \
+            Verify it worked from the returned exit_code/stdout/stderr; re-run a fixed \
+            command if it failed.
+            - Network during setup is a SEPARATE consent from runtime network. If a \
+            setup command downloads anything, pass the hosts it contacts in \
+            `network_hosts` (e.g. ['pypi.org', 'files.pythonhosted.org']) — the user \
+            permits SETUP access once. Hosts the skill calls every time it RUNS go \
+            through kt_require_network instead. Don't conflate the two.
+            - Do setup BEFORE you finalize, so the action is ready to run the moment \
+            it's created.
             """
         #else
         let probeGuidance = ""
@@ -1064,7 +958,9 @@ public actor KeepTalkingSkillPlanner {
             Rules:
             - Do NOT output prose, explanations, or commentary. Use ONLY the provided tools.
             - Read only the files you need — typically the manifest and scripts.
-            - For each distinct operation the skill performs, call kt_declare_tool.
+            - Determine the skill's sandbox scope: what it needs to read/run/reach. You do
+              NOT enumerate operations or register scripts — the skill runs in one sandboxed
+              shell. Your job is to bound that shell with the env/dirs/files/network below.
             - For each env var needed at runtime (API keys, tokens), call kt_require_env.
             - For each external resource the skill needs from the user, choose carefully:
               * kt_require_directory — only when the skill walks or reads many files \
@@ -1076,27 +972,33 @@ public actor KeepTalkingSkillPlanner {
               actually needs to point at. If a step needs both a working directory \
               AND a specific file inside (or unrelated to) it, call BOTH tools — \
               once per resource, with distinct labels.
-            - For each remote host the skill must reach (HTTP APIs, etc.), call kt_require_network \
-              with the bare hostname and a short purpose. The user grants access per host.
-            - For each script callable as a named tool, call kt_register_script.
-            - If bootstrapping a new skill, call kt_suggest_script for each file to create.
+            - For each remote host the skill must reach AT RUNTIME (an API it calls \
+              every time it runs), call kt_require_network with the bare hostname \
+              and a short purpose. The user grants access per host. Do NOT use it \
+              for hosts contacted only while installing dependencies — those belong \
+              to setup_environment's setup-time network, a separate consent.
             - You are allowed to be interactive: when intent is genuinely ambiguous, \
               call kt_ask_user with a specific question and a one-sentence context. \
               Do this BEFORE making assumptions that would lock the action into the \
               wrong shape. Do not over-ask — only when the answer changes the plan.
-            - You may refuse: if you lack the permission or information to build a \
-              correct action (user denied a required scope, no matching primitive, \
-              critical info still missing after asking), call kt_refuse with a clear \
-              reason. Do not finalize a half-built plan as a fallback.
+            - You may decline with kt_refuse — do not finalize a half-built plan as \
+              a fallback. Set `category`: \
+              * "blocked" — the request is legitimate but you can't complete it \
+                (user denied a required scope, no matching primitive, critical info \
+                still missing after asking). Say what would unblock it. \
+              * "too_broad" — a skill must be a narrow, dedicated task; if the \
+                request only makes sense with sweeping access (read/write/exec over \
+                `/`, the whole home directory, "control the entire computer"), \
+                decline rather than scoping that in, and explain what a properly \
+                bounded version would look like.
             - You MUST call kt_finalize as your final tool call when you DO produce a \
               plan. (Refusal via kt_refuse is the alternative terminal call.)
-            - If there is nothing to declare (empty skill), still call kt_finalize explaining why.
+            - If the skill needs no special scope, still call kt_finalize explaining why.
             - Planning is a CONVERSATION. After you finalize, the user may send \
-              follow-up messages to revise the plan. Everything you already \
-              declared stays in effect across turns, so on a revision only \
-              declare what's changing and call kt_drop_tool to remove any step \
-              the change makes obsolete. Don't re-ask for resources the user \
-              already granted. Finalize again when the revision is complete.
+              follow-up messages to revise the scope. Everything you already \
+              recorded stays in effect across turns, so on a revision only add \
+              what's changing. Don't re-ask for resources the user already \
+              granted. Finalize again when the revision is complete.
             \(probeGuidance)
             """
     }
@@ -1115,7 +1017,7 @@ public actor KeepTalkingSkillPlanner {
             args = ""
         }
         if isExisting {
-            return "Analyse this skill and register its tools.\(args)"
+            return "Analyse this skill and determine its sandbox scope.\(args)"
         }
         return "Create an action for: \(bundle.indexDescription)\(args)"
     }
@@ -1130,12 +1032,9 @@ public actor KeepTalkingSkillPlanner {
         \(userMessage)
 
         Rules for revising:
-        - The plan so far (every tool, env, directory, file, and network grant \
-        you declared) is STILL IN EFFECT. Do not re-declare things that are \
+        - The scope so far (every env, directory, file, and network grant \
+        you recorded) is STILL IN EFFECT. Do not re-record things that are \
         unchanged, and do not re-ask for resources the user already granted.
-        - To change an approach, declare the new step(s) AND call kt_drop_tool \
-        for any step the change makes obsolete — declaring a replacement does \
-        not remove the original.
         - If the request needs a resource you don't have yet, use the \
         kt_require_* / kt_ask_user tools as usual.
         - When the revised plan is complete, call kt_finalize again. If the \
@@ -1152,26 +1051,6 @@ public actor KeepTalkingSkillPlanner {
                 description: "Read a file within the skill directory. Use relative paths.",
                 properties: ["path": (.string, "Path relative to the skill directory.")],
                 required: ["path"]),
-
-            tool(
-                name: Self.declareToolTool,
-                description:
-                    "Declare one atomic tool/step the skill performs. For execute/call-tool steps that wrap a script with named arguments, also pass `arguments_schema` so the resulting MCP tool exposes the script's real input shape instead of a generic blob.",
-                properties: [
-                    "verb": (.string, "One of: read, write, execute, network, grep, ls, call-tool"),
-                    "intent": (.string, "Why this step is needed."),
-                    "subject_description": (.string, "Who or what performs this step (optional)."),
-                    "object_description": (.string, "Human-readable description of what is accessed."),
-                    "object_kind": (.string, "One of: file, url, command"),
-                    "object_paths": (.array, "File paths when object_kind is 'file'."),
-                    "object_urls": (.array, "URLs when object_kind is 'url'."),
-                    "object_command": (.array, "Command tokens when object_kind is 'command'."),
-                    "arguments_schema": (
-                        .object,
-                        "Optional JSON Schema (object) describing the tool's full input. When present this is used verbatim as the MCP tool's inputSchema. Use this for execute/call-tool steps that wrap a script with named arguments — e.g. {\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}."
-                    ),
-                ],
-                required: ["verb", "intent", "object_description", "object_kind"]),
 
             tool(
                 name: Self.requireEnvTool,
@@ -1212,30 +1091,12 @@ public actor KeepTalkingSkillPlanner {
             tool(
                 name: Self.requireNetworkTool,
                 description:
-                    "Request network egress to a specific host the skill needs to reach. The user grants per host.",
+                    "Request RUNTIME network egress to a host the skill needs to reach WHEN IT EXECUTES (e.g. an API it calls every run). The user grants per host. This is distinct from setup_environment's network: hosts contacted only while installing dependencies belong to setup_environment, not here.",
                 properties: [
                     "host": (.string, "Hostname only, e.g. 'api.github.com'. Do not include scheme or path."),
-                    "purpose": (.string, "Short reason this host is needed."),
+                    "purpose": (.string, "Short reason the skill reaches this host at runtime."),
                 ],
                 required: ["host", "purpose"]),
-
-            tool(
-                name: Self.registerScriptTool,
-                description: "Register a script as a named callable tool in SKILL.md frontmatter.",
-                properties: [
-                    "tool_name": (.string, "Public tool name agents will use."),
-                    "script_path": (.string, "Path relative to the skill directory."),
-                ],
-                required: ["tool_name", "script_path"]),
-
-            tool(
-                name: Self.suggestScriptTool,
-                description: "Suggest a new script file to create (for bootstrapping a new skill).",
-                properties: [
-                    "path": (.string, "Path relative to the skill directory."),
-                    "content": (.string, "Full content of the script."),
-                ],
-                required: ["path", "content"]),
 
             tool(
                 name: Self.createShortcutTool,
@@ -1299,32 +1160,24 @@ public actor KeepTalkingSkillPlanner {
                 required: ["question"]),
 
             tool(
-                name: Self.dropToolTool,
-                description:
-                    "Remove a previously-declared step from the plan. Use this when the user's follow-up message changes the approach and a step you already declared no longer applies (e.g. the user says \"use uv instead of pip\" — drop the pip step, then declare the uv step). The plan persists across turns, so declaring a replacement does NOT remove the original; you must drop it explicitly.",
-                properties: [
-                    "reference": (
-                        .string,
-                        "Which step to drop: a registered tool name, a script path (or its basename), or a command index number."
-                    )
-                ],
-                required: ["reference"]),
-
-            tool(
                 name: Self.refuseTool,
                 description:
-                    "Refuse to plan because you lack the permission or information needed to proceed safely. Use when: the user denied a required directory/file/network grant; the request asks for a capability not exposed (no matching primitive, no scriptable path); critical info is still missing after kt_ask_user. Terminating — do NOT call any other tool after.",
+                    "Decline to build the action. Set `category` to say WHY: \"blocked\" — the request is legitimate but you can't complete it (user denied a required directory/file/network grant, a capability isn't exposed, critical info still missing after kt_ask_user); or \"too_broad\" — the request demands access too broad or inappropriate for a narrow, dedicated skill (read/write/exec over `/` or the whole home directory, \"control the entire computer\"), so it should not be built as stated. Terminating — do NOT call any other tool after.",
                 properties: [
+                    "category": (
+                        .string,
+                        "Why you're declining: \"blocked\" (lack permission/info to proceed) or \"too_broad\" (request demands inappropriately broad access for a dedicated skill). Defaults to \"blocked\"."
+                    ),
                     "reason": (
                         .string,
-                        "One-paragraph explanation of what's blocking, what would unblock it, and what the user can try next. Shown verbatim."
-                    )
+                        "One-paragraph explanation shown verbatim. For \"blocked\": what's blocking, what would unblock it, what to try next. For \"too_broad\": why the access is too broad and what a narrower, acceptable version would scope to."
+                    ),
                 ],
                 required: ["reason"]),
 
             tool(
                 name: Self.finalizeTool,
-                description: "Finalize the analysis. MUST be called once all tools and scopes are declared.",
+                description: "Finalize the analysis. MUST be called once the sandbox scope is determined.",
                 properties: [
                     "name": (
                         .string,
@@ -1338,6 +1191,30 @@ public actor KeepTalkingSkillPlanner {
         // Environment-probing tools let the planner verify the runtime instead
         // of declaring on faith — only available where script execution is.
         tools.append(contentsOf: makeProbeTools())
+        tools.append(
+            tool(
+                name: Self.setupEnvironmentTool,
+                description:
+                    "Provision the skill's runtime environment by running a shell command (install dependencies, create a virtualenv, fetch a model, etc.). Runs in a login shell with the user's real PATH. If the command needs to reach the network during setup (a package index, a download), list those hosts in `network_hosts` — the user is asked to permit SETUP network access SEPARATELY from runtime network (kt_require_network). A denied setup host blocks the run. Use this to prepare the environment BEFORE you finalize; verify it worked via the returned exit_code/stdout/stderr.",
+                properties: [
+                    "command": (
+                        .string,
+                        "The shell command to run, e.g. 'uv sync' or 'python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'."
+                    ),
+                    "network_hosts": (
+                        .array,
+                        "Hosts this setup step will contact (e.g. ['pypi.org', 'files.pythonhosted.org']). Each triggers a one-time SETUP-network consent. Omit for a purely local setup step."
+                    ),
+                    "cwd": (
+                        .string,
+                        "Optional working directory (absolute path). Defaults to a directory the user already granted, else a temp dir."
+                    ),
+                    "purpose": (
+                        .string,
+                        "Short reason for this setup step. Shown to the user on any setup-network prompt it triggers."
+                    ),
+                ],
+                required: ["command"]))
         tools.append(
             tool(
                 name: Self.requireExecutableTool,
@@ -1466,78 +1343,9 @@ public actor KeepTalkingSkillPlanner {
         return arr.compactMap { if case .string(let s) = $0 { return s } else { return nil } }
     }
 
-    /// Remove every declared command that matches `reference` — a tool name, a
-    /// script path (or its basename), or a numeric command index — and unbind
-    /// the matching tool declarations / suggested scripts. Returns short labels
-    /// for what was dropped so the model gets concrete feedback. Used by
-    /// `kt_drop_tool` when a follow-up turn makes a prior step obsolete.
-    private func dropCommands(
-        matching reference: String,
-        commands: inout [KTSkillAtomicCommand],
-        toolDeclarations: inout [String: String],
-        suggestedScripts: inout [String: String]
-    ) -> [String] {
-        let ref = reference.trimmingCharacters(in: .whitespacesAndNewlines)
-        let refIndex = Int(ref)
-        let refLower = ref.lowercased()
-
-        func matches(_ cmd: KTSkillAtomicCommand) -> Bool {
-            if let refIndex, cmd.index == refIndex { return true }
-            if let name = cmd.toolName, name.lowercased() == refLower { return true }
-            if let path = cmd.scriptPath {
-                let lower = path.lowercased()
-                let base = ((path as NSString).lastPathComponent as NSString)
-                    .deletingPathExtension.lowercased()
-                if lower == refLower || base == refLower
-                    || lower.hasSuffix("/" + refLower)
-                {
-                    return true
-                }
-            }
-            return false
-        }
-
-        var dropped: [String] = []
-        for cmd in commands where matches(cmd) {
-            dropped.append(cmd.toolName ?? cmd.scriptPath ?? "command \(cmd.index)")
-            if let name = cmd.toolName { toolDeclarations.removeValue(forKey: name) }
-            if let path = cmd.scriptPath { suggestedScripts.removeValue(forKey: path) }
-        }
-        commands.removeAll(where: matches)
-
-        // Also drop a bare tool-name/script-path declaration with no command.
-        if toolDeclarations[ref] != nil {
-            suggestedScripts.removeValue(forKey: toolDeclarations[ref] ?? "")
-            toolDeclarations.removeValue(forKey: ref)
-            if !dropped.contains(ref) { dropped.append(ref) }
-        }
-
-        return dropped
-    }
-
-    /// Derive a stable, user-readable tool name when the planner skipped
-    /// `kt_register_script`. Prefer the script's basename (without extension)
-    /// since that's usually a meaningful verb (`run_command_script`); fall
-    /// back to slugified intent if the path is too generic.
-    private func synthesizeToolName(for cmd: KTSkillAtomicCommand, fallback path: String) -> String {
-        let base = ((path as NSString).lastPathComponent as NSString)
-            .deletingPathExtension
-        let cleaned = base.replacingOccurrences(of: "-", with: "_")
-        if !cleaned.isEmpty && cleaned != "index" && cleaned != "main" {
-            return cleaned
-        }
-        let slug = cmd.intent
-            .lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-            .prefix(4)
-            .joined(separator: "_")
-        return slug.isEmpty ? "run_script" : slug
-    }
-
     /// Re-encode an `MCP.Value` (which is itself JSON-compatible) into a compact
-    /// JSON string. Used to capture the `arguments_schema` blob the planner LLM
-    /// supplies on `kt_declare_tool` so it can be stored verbatim on the command.
+    /// JSON string. Used to capture kind-specific scope blobs (e.g. the primitive
+    /// `scope` object) verbatim.
     private func jsonString(from value: MCP.Value) -> String? {
         guard let data = try? JSONEncoder().encode(value),
             let str = String(data: data, encoding: .utf8)

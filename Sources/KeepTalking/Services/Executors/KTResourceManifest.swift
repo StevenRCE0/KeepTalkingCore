@@ -12,11 +12,16 @@ import Foundation
 /// cross-platform-testable value with no platform-specific APIs.
 public struct KTResourceManifest: Sendable {
 
-    /// The resource family — also the `<KIND>` token in the env-var name.
+    /// The resource family — also the fallback `<KIND>` token in the env-var name
+    /// (used only when a resource carries no declared object name).
     public enum Kind: String, Sendable {
         case attachment = "ATTACHMENT"
         case otb = "OTB"
         case fs = "FS"
+        /// A declared `.output` slot allocated under the thread workspace — bytes
+        /// written here after the run are harvested back to the caller as a
+        /// one-time blob.
+        case output = "OUTPUT"
     }
 
     /// Sandbox-relevant data flow for a resource, projected from the SDK's
@@ -48,6 +53,12 @@ public struct KTResourceManifest: Sendable {
         public let direction: Direction
         public let displayName: String
         public let isDirectory: Bool
+        /// The declared SVO object name this resource binds to (e.g. "source",
+        /// "result"). When present it drives the env-key token (`KT_<NAME>_<H8>`)
+        /// so the agent references resources by their declared role rather than an
+        /// opaque family tag. `nil` for catch-all context attachments that map to
+        /// no declared object — those fall back to `KT_<KIND>_<H8>`.
+        public let objectName: String?
 
         public init(
             kind: Kind,
@@ -55,7 +66,8 @@ public struct KTResourceManifest: Sendable {
             path: URL?,
             direction: Direction,
             displayName: String,
-            isDirectory: Bool
+            isDirectory: Bool,
+            objectName: String? = nil
         ) {
             self.kind = kind
             self.id = id
@@ -63,6 +75,7 @@ public struct KTResourceManifest: Sendable {
             self.direction = direction
             self.displayName = displayName
             self.isDirectory = isDirectory
+            self.objectName = objectName
         }
     }
 
@@ -76,6 +89,10 @@ public struct KTResourceManifest: Sendable {
         public let direction: Direction
         public let displayName: String
         public let isDirectory: Bool
+        /// The declared object name, carried through from `Candidate` so the
+        /// provider can correlate a harvested output file back to its declared
+        /// `.output` slot.
+        public let objectName: String?
     }
 
     public let entries: [Entry]
@@ -98,9 +115,38 @@ public struct KTResourceManifest: Sendable {
         return String(hex.suffix(length)).uppercased()
     }
 
-    /// The env-var key for a resource at a given suffix length.
-    static func envKey(kind: Kind, id: UUID, length: Int = 8) -> String {
-        "KT_\(kind.rawValue)_\(hexSuffix(id, length: length))"
+    /// The env-var key for a resource at a given suffix length. When `objectName`
+    /// is present and sanitizes to a non-empty token, the declared name drives the
+    /// key (`KT_<NAME>_<H8>`); otherwise the resource family is used
+    /// (`KT_<KIND>_<H8>`).
+    static func envKey(
+        kind: Kind, id: UUID, objectName: String? = nil, length: Int = 8
+    ) -> String {
+        let token = objectName.flatMap(sanitizedKeyToken) ?? kind.rawValue
+        return "KT_\(token)_\(hexSuffix(id, length: length))"
+    }
+
+    /// Folds a declared object name into a valid env-var token: uppercased, every
+    /// non-`[A-Z0-9_]` scalar replaced with `_`, runs of `_` collapsed, and edges
+    /// trimmed. Returns `nil` when nothing usable survives (so the caller falls
+    /// back to the family kind) — a wire-controlled name can never inject an empty
+    /// or malformed `KT_` key.
+    static func sanitizedKeyToken(_ name: String) -> String? {
+        let mapped = name.uppercased().unicodeScalars.map { scalar -> Character in
+            if scalar == "_"
+                || ("A"..."Z").contains(scalar)
+                || ("0"..."9").contains(scalar)
+            {
+                return Character(scalar)
+            }
+            return "_"
+        }
+        var token = String(mapped)
+        while token.contains("__") {
+            token = token.replacingOccurrences(of: "__", with: "_")
+        }
+        token = token.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        return token.isEmpty ? nil : token
     }
 
     // MARK: - Build
@@ -124,7 +170,8 @@ public struct KTResourceManifest: Sendable {
                 path: candidate.path?.resolvingSymlinksInPath().standardizedFileURL,
                 direction: candidate.direction,
                 displayName: sanitizedDisplayName(candidate.displayName),
-                isDirectory: candidate.isDirectory
+                isDirectory: candidate.isDirectory,
+                objectName: candidate.objectName
             )
         }
         return KTResourceManifest(
@@ -138,7 +185,9 @@ public struct KTResourceManifest: Sendable {
     /// (8 → 12 → 16 → 32) only for keys that collide. Distinct UUIDs of the same
     /// kind are unique at full length, so termination is guaranteed.
     private static func assignKeys(_ candidates: [Candidate]) -> [String] {
-        var keys = candidates.map { envKey(kind: $0.kind, id: $0.id, length: 8) }
+        var keys = candidates.map {
+            envKey(kind: $0.kind, id: $0.id, objectName: $0.objectName, length: 8)
+        }
         for length in [12, 16, 32] {
             var counts: [String: Int] = [:]
             for key in keys { counts[key, default: 0] += 1 }
@@ -148,6 +197,7 @@ public struct KTResourceManifest: Sendable {
                 keys[index] = envKey(
                     kind: candidates[index].kind,
                     id: candidates[index].id,
+                    objectName: candidates[index].objectName,
                     length: length
                 )
             }
@@ -160,9 +210,15 @@ public struct KTResourceManifest: Sendable {
         // the Unicode line/paragraph separators U+2028/U+2029 (categories Zl/Zp),
         // which `.newlines` covers. A wire-controlled filename must not be able to
         // forge extra lines in the prompt block or the ACP system preamble.
+        // ALSO strip the double-quote / backtick / dollar: promptBlock() renders the
+        // name inside double-quotes, so an un-neutralised `"` would let a filename
+        // close the field and append a same-line instruction the agent ingests as
+        // trusted manifest text (single-line prompt injection); backtick/$ are
+        // dropped too so a leaked name can't seed command substitution downstream.
         name
             .components(separatedBy: .controlCharacters).joined()
             .components(separatedBy: .newlines).joined()
+            .components(separatedBy: CharacterSet(charactersIn: "\"`$")).joined()
     }
 
     // MARK: - Emission

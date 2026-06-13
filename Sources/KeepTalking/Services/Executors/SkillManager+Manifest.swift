@@ -32,8 +32,7 @@ extension SkillManager {
                 manifestMetadata: [:],
                 referencesFiles: [],
                 scripts: [],
-                assets: [],
-                declaredTools: [:]
+                assets: []
             )
         }
         let manifestURL = SkillDirectoryDefinitions.entryURL(
@@ -49,15 +48,6 @@ extension SkillManager {
             maxCharacters: Self.manifestMaxCharacters
         )
         let metadata = parseManifestMetadata(substituted)
-        let declaredTools =
-            metadata
-            .filter { $0.key.hasPrefix("scripts.") }
-            .reduce(into: [String: String]()) { result, pair in
-                let raw = String(pair.key.dropFirst("scripts.".count))
-                let toolName = String(
-                    raw.map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "_" })
-                if !toolName.isEmpty { result[toolName] = pair.value }
-            }
 
         return SkillManifestContext(
             manifestURL: manifestURL,
@@ -74,8 +64,7 @@ extension SkillManager {
             assets: listRelativeFiles(
                 in: SkillDirectoryDefinitions.entryURL(.assets, in: directory),
                 root: directory
-            ),
-            declaredTools: declaredTools
+            )
         )
     }
 

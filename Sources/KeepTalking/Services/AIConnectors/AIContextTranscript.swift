@@ -371,15 +371,38 @@ extension KeepTalkingClient {
             let nodeTag = stub.isCurrentNode ? "\(nodeName) (current)" : nodeName
             let desc = stub.description.trimmingCharacters(in: .whitespacesAndNewlines)
             let descSuffix = desc.isEmpty ? "" : "  description: \(desc)"
-            return
+            var line =
                 "- action_id: \(stub.actionID.uuidString.lowercased())  name: \(stub.name)  type: \(stub.kind.rawValue)  node: \(nodeTag)\(descSuffix)"
+            if !stub.objectContracts.isEmpty {
+                line += "\n    objects: \(Self.renderObjectContracts(stub.objectContracts))"
+            }
+            return line
         }
 
         return """
             Available actions (use \(Self.runActionToolFunctionName) to execute, \(Self.ktSkillMetainfoToolFunctionName) to inspect skill manifests):
             Types: mcp=external server tools · skill=directory-based agent skill · primitive=built-in operation · filesystem=sandboxed file access + context blob bridge · semanticretrieval=remote thread-memory search
+            An `objects:` line lists an action's declared inputs/outputs (direction + whether it's a file) so you can plan data flow BETWEEN actions — feed one action's `out` to another's `in`. You never see or pass provider file paths; reference a produced file by the handle the action returns.
             \(lines.joined(separator: "\n"))
             """
+    }
+
+    /// Renders declared object contracts PATH-FREE for the main agent: each shows
+    /// name, file/value, direction (in/out/in·out), and description — never a path.
+    static func renderObjectContracts(_ contracts: [KeepTalkingObjectContract]) -> String {
+        contracts.map { contract in
+            let direction: String
+            switch contract.direction {
+                case .input: direction = "in"
+                case .output: direction = "out"
+                case .inputOutput: direction = "in·out"
+            }
+            let kind = contract.isFile ? "file" : "value"
+            let name = contract.name.isEmpty ? "(unnamed)" : contract.name
+            let trimmed = contract.description.trimmingCharacters(in: .whitespacesAndNewlines)
+            let suffix = trimmed.isEmpty ? "" : " — \(trimmed)"
+            return "\(name) (\(kind), \(direction))\(suffix)"
+        }.joined(separator: "; ")
     }
 
     func renderNodeNameSummary(

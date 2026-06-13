@@ -20,6 +20,32 @@ public struct KeepTalkingActionStub: Sendable {
     public let description: String
     public let supportsWakeAssist: Bool
     public let isCurrentNode: Bool
+    /// The action's declared SVO objects projected PATH-FREE for the main /
+    /// orchestration agent — name, direction, description, isFile, never a
+    /// provider path. This is the device-side half of the two-view split: the
+    /// main agent plans data flow BETWEEN actions from these contracts; the
+    /// provider's ACT agent sees the resolved `KTResourceManifest` (with paths).
+    public let objectContracts: [KeepTalkingObjectContract]
+
+    public init(
+        actionID: UUID,
+        ownerNodeID: UUID,
+        name: String,
+        kind: Kind,
+        description: String,
+        supportsWakeAssist: Bool,
+        isCurrentNode: Bool,
+        objectContracts: [KeepTalkingObjectContract] = []
+    ) {
+        self.actionID = actionID
+        self.ownerNodeID = ownerNodeID
+        self.name = name
+        self.kind = kind
+        self.description = description
+        self.supportsWakeAssist = supportsWakeAssist
+        self.isCurrentNode = isCurrentNode
+        self.objectContracts = objectContracts
+    }
 }
 
 // MARK: - Lazy tool registry

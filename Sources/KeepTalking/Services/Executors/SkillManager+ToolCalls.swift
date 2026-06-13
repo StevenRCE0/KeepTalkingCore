@@ -63,7 +63,8 @@ extension SkillManager {
         sandboxPolicy: KTSandboxPolicy? = nil,
         scriptTrace: SkillScriptTraceCollector? = nil,
         attachmentsDir: URL? = nil,
-        manifest: KTResourceManifest? = nil
+        manifest: KTResourceManifest? = nil,
+        workspaceDirectory: URL? = nil
     ) async throws -> [AIMessage] {
         var messages: [AIMessage] = []
         for toolCall in toolCalls {
@@ -96,31 +97,26 @@ extension SkillManager {
                 payload = executeListFiles(
                     directory: dirLabel, parameters: parameters,
                     skillDirectory: skillDirectory, attachmentsDir: attachmentsDir)
-            } else if let scriptPath = manifestContext.declaredTools[functionName] {
-                // Route declared tool call to its script — ACT provides raw CLI args string
-                let rawArgs = arguments["args"]?.stringValue ?? ""
-                let resolvedArgs = resolveDirectoryLabel(rawArgs, parameters: parameters)
-                let scriptArgs: [String: Value] = [
-                    "script": .string(scriptPath),
-                    "args": .string(resolvedArgs),
-                ]
-                payload = try await executeRunScript(
-                    scriptArgs,
+            } else if functionName == Self.shellToolName {
+                payload = try await executeShellCommand(
+                    arguments,
                     actionID: actionID,
                     skillDirectory: skillDirectory,
                     parameters: parameters,
                     sandboxPolicy: sandboxPolicy,
                     attachmentsDir: attachmentsDir,
-                    manifest: manifest
+                    manifest: manifest,
+                    workspaceDirectory: workspaceDirectory
                 )
-                // The skill loop reports its final answer back to the outer
-                // chat as one tool result; without this, the structured
-                // command/stdout/stderr fields would only live in the inner
-                // transcript and the user would see just the inner LLM's
-                // prose summary in the Output card.
+                // The skill loop reports its final answer back to the outer chat as
+                // one tool result; appending the structured command/stdout/stderr
+                // block here is what lets the Output card show real terminal output
+                // instead of only the inner LLM's prose summary.
                 scriptTrace?.append(toolName: functionName, structuredResult: payload)
             } else {
-                payload = "Tool '\(functionName)' is not declared in this skill's manifest."
+                payload =
+                    "Tool '\(functionName)' is not available. Use \(Self.shellToolName) "
+                    + "to run scripts and commands."
             }
 
             messages.append(
@@ -172,38 +168,77 @@ extension SkillManager {
         )
     }
 
-    func executeRunScript(
+    /// Runs a shell command line (the `kt_shell` tool) under the sandbox in the
+    /// thread workspace, with the resource manifest injected so `$KT_*` handles
+    /// resolve. The sole execution path now that per-declared-script tools are
+    /// retired — a real shell, so no argv expansion or control-token stripping is
+    /// needed; it scrubs paths and renders the canonical result block.
+    func executeShellCommand(
         _ arguments: [String: Value],
         actionID: UUID,
         skillDirectory: URL?,
         parameters: [String: String] = [:],
         sandboxPolicy: KTSandboxPolicy? = nil,
         attachmentsDir: URL? = nil,
-        manifest: KTResourceManifest? = nil
+        manifest: KTResourceManifest? = nil,
+        workspaceDirectory: URL? = nil
     ) async throws -> String {
         guard let scriptExecutor else {
             throw SkillManagerError.scriptExecutionUnavailableOnThisPlatform
         }
-        let rawScript =
-            arguments["script"]?.stringValue
-            ?? arguments["path"]?.stringValue
-            ?? ""
-        let scriptURL = try resolveScriptURL(
-            rawScript,
-            skillDirectory: skillDirectory
+        let command =
+            (arguments["command"]?.stringValue
+            ?? arguments["cmd"]?.stringValue
+            ?? arguments["script"]?.stringValue
+            ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else {
+            throw SkillManagerError.invalidToolArguments("kt_shell requires a 'command' string")
+        }
+        let environment = skillExecutionEnvironment(
+            parameters: parameters,
+            skillDirectory: skillDirectory,
+            manifest: manifest,
+            attachmentsDir: attachmentsDir
         )
-        let scriptArguments = extractScriptArguments(arguments)
+        let cwd = workspaceDirectory ?? skillDirectory ?? URL(fileURLWithPath: "/")
 
-        // Build env from bundle parameters; always inject SKILL_DIR. The KT_
-        // namespace is reserved for the resource manifest, so an author parameter
-        // can never shadow a generated resource key.
+        #if os(macOS)
+        let execution = try await scriptExecutor.runShellCommand(
+            command: command,
+            currentDirectory: cwd,
+            environment: environment,
+            actionID: actionID,
+            timeoutSeconds: scriptTimeoutSeconds,
+            sandboxPolicy: sandboxPolicy
+        )
+        #else
+        _ = (environment, cwd, sandboxPolicy)
+        let execution = SkillScriptExecutionResult(
+            command: ["/bin/zsh", "-c", command], exitCode: 1, stdout: "",
+            stderr: "Shell execution is unavailable on this platform.")
+        #endif
+
+        return sanitizedExecutionBlock(
+            execution, manifest: manifest, skillDirectory: skillDirectory,
+            workspaceDirectory: workspaceDirectory)
+    }
+
+    /// Builds the execution environment shared by `executeRunScript` and
+    /// `executeShellCommand`: bundle parameters (minus the reserved `KT_` namespace,
+    /// so an author parameter can never shadow a generated resource key), always
+    /// `SKILL_DIR`, and the manifest's per-resource `KT_<KIND>_<H8>` keys plus the
+    /// `KT_ATTACHMENTS` umbrella (falling back to the bare umbrella when no manifest
+    /// was built). All values are canonical absolute paths.
+    func skillExecutionEnvironment(
+        parameters: [String: String],
+        skillDirectory: URL?,
+        manifest: KTResourceManifest?,
+        attachmentsDir: URL?
+    ) -> [String: String] {
         var environment = parameters.filter { !$0.key.hasPrefix("KT_") }
         if let skillDir = skillDirectory {
             environment["SKILL_DIR"] = skillDir.path
         }
-        // Expose staged resources via the manifest: per-resource KT_<KIND>_<H8>
-        // keys plus the KT_ATTACHMENTS umbrella, all canonical absolute paths.
-        // Falls back to the bare umbrella var when no manifest was built.
         if let manifest {
             for (key, value) in manifest.environmentVariables() {
                 environment[key] = value
@@ -211,75 +246,39 @@ extension SkillManager {
         } else if let attachmentsDir {
             environment["KT_ATTACHMENTS"] = attachmentsDir.path
         }
+        return environment
+    }
 
-        #if os(macOS)
-        let execution = try await scriptExecutor.runScript(
-            scriptURL: scriptURL,
-            arguments: scriptArguments,
-            currentDirectory: skillDirectory ?? URL(fileURLWithPath: "/"),
-            environment: environment,
-            actionID: actionID,
-            timeoutSeconds: scriptTimeoutSeconds,
-            sandboxPolicy: sandboxPolicy
-        )
-
-        if let sandboxPolicy = sandboxPolicy {
-            if let env = sandboxPolicy.descriptor.environment, !env.isEmpty {
-                let envString = env.keys.sorted().map { "\($0)=\(env[$0] ?? "")" }.joined(separator: " ")
-                let msg = "[ACT/env] \(envString)"
-                onLog?(msg)
-            }
-            if let directories = sandboxPolicy.descriptor.directories, !directories.isEmpty {
-                let dirString = directories.keys.sorted().map { "\($0)=\(directories[$0]?.path ?? "")" }.joined(
-                    separator: " ")
-                let msg = "[ACT/dirs] \(dirString)"
-                onLog?(msg)
-            }
-        }
-        #else
-        // iOS protocol does not accept `environment` or `sandboxPolicy`; the
-        // env dict is dropped on this platform.
-        _ = environment
-        let execution = try await scriptExecutor.runScript(
-            scriptURL: scriptURL,
-            arguments: scriptArguments,
-            currentDirectory: skillDirectory ?? URL(fileURLWithPath: "/"),
-            actionID: actionID,
-            timeoutSeconds: scriptTimeoutSeconds
-        )
-        #endif
-
-        // Scrub absolute paths the agent (and the chat output) must not see: map
-        // each staged resource path back to its $KT_<KIND>_<H8> handle, the skill
-        // dir to $SKILL_DIR, and the home dir to ~. The runner expands handles to
-        // real paths for the child process, so the command line and any path the
-        // script echoes would otherwise leak the staging location. Sanitize BEFORE
-        // clipping so a full path is matched even when the raw output is long.
+    /// Scrubs a finished run's command line + stdout/stderr (path handles, clip to
+    /// the output cap), logs the `[ACT]` trace, and renders the canonical
+    /// `command/exit_code/stdout/stderr` block the outer chat parses into rows.
+    func sanitizedExecutionBlock(
+        _ execution: SkillScriptExecutionResult,
+        manifest: KTResourceManifest?,
+        skillDirectory: URL?,
+        workspaceDirectory: URL? = nil
+    ) -> String {
         let joinedCommand = sanitizeAgentVisiblePaths(
             execution.command.joined(separator: " "),
-            manifest: manifest, skillDirectory: skillDirectory)
+            manifest: manifest, skillDirectory: skillDirectory,
+            workspaceDirectory: workspaceDirectory)
         let stdout = clipped(
             sanitizeAgentVisiblePaths(
-                execution.stdout, manifest: manifest, skillDirectory: skillDirectory),
+                execution.stdout, manifest: manifest, skillDirectory: skillDirectory,
+                workspaceDirectory: workspaceDirectory),
             maxCharacters: Self.scriptOutputMaxCharacters
         )
         let stderr = clipped(
             sanitizeAgentVisiblePaths(
-                execution.stderr, manifest: manifest, skillDirectory: skillDirectory),
+                execution.stderr, manifest: manifest, skillDirectory: skillDirectory,
+                workspaceDirectory: workspaceDirectory),
             maxCharacters: Self.scriptOutputMaxCharacters
         )
 
-        let logMsg = "[ACT] command='\(joinedCommand)' exit=\(execution.exitCode)"
-        onLog?(logMsg)
+        onLog?("[ACT] command='\(joinedCommand)' exit=\(execution.exitCode)")
+        if !stdout.isEmpty { onLog?("[ACT/stdout] \(stdout)") }
+        if !stderr.isEmpty { onLog?("[ACT/stderr] \(stderr)") }
 
-        if !stdout.isEmpty {
-            let outMsg = "[ACT/stdout] \(stdout)"
-            onLog?(outMsg)
-        }
-        if !stderr.isEmpty {
-            let errMsg = "[ACT/stderr] \(stderr)"
-            onLog?(errMsg)
-        }
         return """
             command: \(joinedCommand)
             exit_code: \(execution.exitCode)
@@ -291,15 +290,20 @@ extension SkillManager {
     }
 
     /// Replaces absolute paths the agent must not see with stable handles: each
-    /// manifest resource path → its `$KT_<KIND>_<H8>` env key, the skill directory
-    /// → `$SKILL_DIR`, and the user's home directory → `~`. Used to scrub a skill
-    /// script's command line + stdout/stderr before they reach the agent or the
-    /// chat output. Longest paths are replaced first so a file path is rewritten
-    /// before its containing directory.
+    /// manifest resource path → its `$KT_<KIND>_<H8>` env key, the workspace →
+    /// `$KT_WORKSPACE`, the skill directory → `$SKILL_DIR`, and home → `~`. Used to
+    /// scrub a run's command line + stdout/stderr before they reach the agent or
+    /// the chat output. Longest source first so a file path is rewritten before its
+    /// containing directory. Each macOS firmlink-rooted path (/var, /tmp, /etc) is
+    /// registered in BOTH its `/var…` and `/private/var…` forms: env vars carry one
+    /// form but symlink-resolving tools (`pwd`/`getcwd`, `realpath`, `ls`) emit the
+    /// other, so without both a `/private` prefix (or the whole workspace path)
+    /// would leak through.
     func sanitizeAgentVisiblePaths(
         _ text: String,
         manifest: KTResourceManifest?,
-        skillDirectory: URL?
+        skillDirectory: URL?,
+        workspaceDirectory: URL? = nil
     ) -> String {
         guard text.contains("/") else { return text }
         var replacements: [(from: String, to: String)] = []
@@ -308,6 +312,9 @@ extension SkillManager {
                 replacements.append((value, "$\(key)"))
             }
         }
+        if let workspaceDirectory, !workspaceDirectory.path.isEmpty {
+            replacements.append((workspaceDirectory.path, "$KT_WORKSPACE"))
+        }
         if let skillDirectory, !skillDirectory.path.isEmpty {
             replacements.append((skillDirectory.path, "$SKILL_DIR"))
         }
@@ -315,86 +322,28 @@ extension SkillManager {
         if !home.isEmpty {
             replacements.append((home, "~"))
         }
-        // Longest source first so a file path is rewritten before its parent dir.
-        replacements.sort { $0.from.count > $1.from.count }
-        var result = text
+        // Register both firmlink forms for every path so the resolved form a tool
+        // prints is scrubbed regardless of which form the env var carried.
+        let firmlinks = ["/var/", "/tmp/", "/etc/"]
+        var expanded: [(from: String, to: String)] = []
         for (from, to) in replacements {
+            expanded.append((from, to))
+            if firmlinks.contains(where: { from.hasPrefix($0) }) {
+                expanded.append(("/private" + from, to))
+            } else if from.hasPrefix("/private/var/")
+                || from.hasPrefix("/private/tmp/")
+                || from.hasPrefix("/private/etc/")
+            {
+                expanded.append((String(from.dropFirst("/private".count)), to))
+            }
+        }
+        // Longest source first so a file path is rewritten before its parent dir.
+        expanded.sort { $0.from.count > $1.from.count }
+        var result = text
+        for (from, to) in expanded {
             result = result.replacingOccurrences(of: from, with: to)
         }
         return result
-    }
-
-    func extractScriptArguments(_ arguments: [String: Value]) -> [String] {
-        // ACT provides args as a raw CLI string — split respecting shell quoting
-        if let raw = arguments["args"]?.stringValue {
-            return stripShellControlTokens(shellSplit(raw))
-        }
-        if let raw = arguments["arguments"]?.stringValue {
-            return stripShellControlTokens(shellSplit(raw))
-        }
-        if let array = arguments["args"]?.arrayValue {
-            return stripShellControlTokens(array.compactMap(scriptArgumentString(for:)))
-        }
-        return []
-    }
-
-    /// Drops standalone shell control/redirection tokens (`2>&1`, `|`, `>`, `&&`,
-    /// `;`, …) the agent sometimes appends out of shell habit. Scripts run via
-    /// Process with NO shell, so these are never valid argv — passed literally they
-    /// are rejected by the program (the observed `unrecognized arguments: 2>&1`).
-    /// stdout/stderr are captured by the runner regardless, so they're never needed.
-    private func stripShellControlTokens(_ tokens: [String]) -> [String] {
-        let shellOperators: Set<String> = [
-            "2>&1", "1>&2", ">&1", ">&2", "&>", "&>>",
-            "|", "||", "&&", ";", "&", ">", ">>", "<", "<<", "2>", "1>",
-        ]
-        return tokens.filter { !shellOperators.contains($0) }
-    }
-
-    /// Splits a string into shell-style tokens, respecting double and single quotes.
-    private func shellSplit(_ string: String) -> [String] {
-        var tokens: [String] = []
-        var current = ""
-        var inDouble = false
-        var inSingle = false
-        var escape = false
-        for ch in string {
-            if escape {
-                current.append(ch)
-                escape = false
-                continue
-            }
-            if ch == "\\" && !inSingle {
-                escape = true
-                continue
-            }
-            if ch == "\"" && !inSingle {
-                inDouble.toggle()
-                continue
-            }
-            if ch == "'" && !inDouble {
-                inSingle.toggle()
-                continue
-            }
-            if ch.isWhitespace && !inDouble && !inSingle {
-                if !current.isEmpty {
-                    tokens.append(current)
-                    current = ""
-                }
-                continue
-            }
-            current.append(ch)
-        }
-        if !current.isEmpty { tokens.append(current) }
-        return tokens
-    }
-
-    func scriptArgumentString(for value: Value) -> String? {
-        if let string = value.stringValue { return string }
-        if let int = value.intValue { return String(int) }
-        if let double = value.doubleValue { return String(double) }
-        if let bool = value.boolValue { return String(bool) }
-        return nil
     }
 
     func normalizedSkillToolArguments(_ arguments: [String: Value]) -> [String: Value] {
@@ -520,32 +469,4 @@ extension SkillManager {
         return resolved
     }
 
-    func resolveScriptURL(
-        _ rawScript: String,
-        skillDirectory: URL?
-    ) throws -> URL {
-        let trimmed = rawScript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw SkillManagerError.invalidToolArguments(rawScript)
-        }
-        let primary = try resolveSkillFileURL(trimmed, skillDirectory: skillDirectory)
-        var isDirectory: ObjCBool = false
-        if FileManager.default.fileExists(atPath: primary.path, isDirectory: &isDirectory),
-            !isDirectory.boolValue
-        {
-            return primary
-        }
-        let scriptsCandidate = "scripts/\(trimmed)"
-        let resolvedScriptsCandidate = try resolveSkillFileURL(
-            scriptsCandidate,
-            skillDirectory: skillDirectory
-        )
-        if FileManager.default.fileExists(
-            atPath: resolvedScriptsCandidate.path,
-            isDirectory: &isDirectory
-        ), !isDirectory.boolValue {
-            return resolvedScriptsCandidate
-        }
-        throw SkillManagerError.invalidSkillPath(trimmed)
-    }
 }

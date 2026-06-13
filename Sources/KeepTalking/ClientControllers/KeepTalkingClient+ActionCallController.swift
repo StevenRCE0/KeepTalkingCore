@@ -122,6 +122,14 @@ extension KeepTalkingClient {
             return await handleStageFilePreflight(request)
         }
         #endif
+        // Cross-node cancellation rides the same channel (reserved id, encrypted +
+        // authorized like any action call); handled before normal resolution.
+        if request.call.action == Self.cancelActionID {
+            if let onAcknowledgement {
+                await onAcknowledgement(.accepted, "Cancellation received.")
+            }
+            return handleIncomingCancelRequest(request)
+        }
         let action: KeepTalkingAction
         let grant: KeepTalkingActionScope
         do {
@@ -172,9 +180,22 @@ extension KeepTalkingClient {
                     var attachmentsDir: URL? = staged?.directory
                     var ownedInputDir: URL? = nil
                     var otbInputs: [(handle: UUID, url: URL)] = []
+                    var workspaceThreadID: UUID? = nil
+                    var workspaceDir: URL? = nil
+                    // Tracks whether the run-bracket was ACTUALLY taken (beginRun
+                    // called). The thread id can be resolved while the workspace dir
+                    // fails to create, so the defer must key off this, not the id —
+                    // an unbalanced endRun on a thread another concurrent run holds
+                    // would clear its refcount and fire a premature seal.
+                    var workspaceRunStarted = false
                     // Arm cleanup BEFORE materializing — a throw mid-loop must not
                     // leave decrypted plaintext at rest in the staging dir.
                     defer {
+                        // Release the workspace run-bracket so a deferred seal
+                        // (thread archived mid-run) can complete once we drain.
+                        if workspaceRunStarted, let tid = workspaceThreadID {
+                            Task { [weak self] in await self?.endThreadWorkspaceRun(tid) }
+                        }
                         staged.map { cleanupStagedAttachments($0) }
                         ownedInputDir.map { try? FileManager.default.removeItem(at: $0) }
                         // Turn-scoped: drop the staged plaintext we consumed this
@@ -209,62 +230,101 @@ extension KeepTalkingClient {
                             request.call, callerNodeID: request.callerNodeID, into: dir)
                         attachmentsDir = dir
                     }
-                    // Best-effort grant of the staging dir (read-only). Injecting a
-                    // directory only ADDS constraints, so the policy can only fail
-                    // to compile when the plain policy ALSO fails (an inherently
-                    // unsandboxed skill whose staged file is readable anyway) — so
-                    // fall back rather than hard-failing; never downgrades a
-                    // would-be-sandboxed skill. `attachmentsGranted` records whether
-                    // the dir is actually reachable so the manifest can fail closed.
+                    // Resolve the thread's isolated execution workspace: the
+                    // read-write scratch/output dir used as the script's cwd, so a
+                    // relative write lands in scratch, not the read-only skill dir.
+                    workspaceThreadID =
+                        (try? await ensureContextMainThread(
+                            for: request.contextID))?.id
+                    if let tid = workspaceThreadID {
+                        workspaceDir = try? await threadWorkspace(for: tid)
+                        if workspaceDir != nil {
+                            await beginThreadWorkspaceRun(tid)
+                            workspaceRunStarted = true
+                        }
+                    }
+                    // Bind declared SVO objects to the resolved resources for this
+                    // run: names relayed inputs by their declared role and allocates
+                    // `.output` write slots under the workspace. With no declared
+                    // objects (every skill today) this is a no-op — inputs stay
+                    // unnamed, no output slots — preserving behavior exactly.
+                    let binding = prepareCallBinding(
+                        action: action,
+                        call: request.call,
+                        attachments: (staged?.files ?? []).map {
+                            StagedInputResource(
+                                id: $0.id,
+                                path: URL(fileURLWithPath: $0.path),
+                                displayName: $0.filename)
+                        },
+                        otbInputs: otbInputs,
+                        attachmentsDir: attachmentsDir,
+                        workspaceDir: workspaceDir)
+                    // Best-effort grant of the staging dir (read-only) + the thread
+                    // workspace (read-write). Injecting dirs only ADDS constraints,
+                    // so the policy can only fail to compile when the plain policy
+                    // ALSO fails (an inherently unsandboxed skill) — fall back rather
+                    // than hard-failing. `attachmentsGranted` records whether staged
+                    // files are reachable so the manifest can fail closed.
+                    var extraDirectories: [String: (url: URL, direction: KeepTalkingResourceDirection)] = [:]
+                    for (label, directory) in binding.grantedDirectories {
+                        extraDirectories[label] = (directory.url, directory.direction)
+                    }
                     var attachmentsGranted = false
                     let sandboxPolicy: KTSandboxPolicy?
-                    if let attachmentsDir {
+                    if !extraDirectories.isEmpty {
                         if let granted = try? await scopeManager.resolvedPolicy(
                             for: action,
-                            extraDirectories: ["KT_ATTACHMENTS": (attachmentsDir, .input)],
+                            extraDirectories: extraDirectories,
                             callerScope: grant
                         ) {
                             sandboxPolicy = granted
-                            attachmentsGranted = true
+                            attachmentsGranted = (attachmentsDir != nil)
                         } else {
                             sandboxPolicy = try? await scopeManager.resolvedPolicy(
                                 for: action, callerScope: grant)
-                            // A nil policy means the skill is inherently unsandboxed,
-                            // so the staged files are reachable regardless.
-                            attachmentsGranted = (sandboxPolicy == nil)
+                            // nil policy = inherently unsandboxed (reachable anyway);
+                            // a non-nil fallback lacks the dir grants, so the
+                            // workspace can't be the write cwd — drop it.
+                            attachmentsGranted = (attachmentsDir != nil) && (sandboxPolicy == nil)
+                            if sandboxPolicy != nil { workspaceDir = nil }
                         }
                     } else {
                         sandboxPolicy = try? await scopeManager.resolvedPolicy(
                             for: action, callerScope: grant)
                     }
-                    // Resource manifest: built ONLY from granted, locally-staged
-                    // files (fail closed — if the staging dir wasn't granted the
-                    // script can't reach them, so advertise nothing). Single source
-                    // of truth for the env dict AND the agent prompt block.
+                    // Resource manifest + harvestable outputs, built ONLY from
+                    // resources whose dirs the sandbox actually granted (fail
+                    // closed). Inputs require the staging dir; output slots require
+                    // the workspace to have survived the policy dance (it's dropped
+                    // on the unsandboxed-fallback path, line above). Single source of
+                    // truth for the env dict AND the agent prompt block.
                     var manifest: KTResourceManifest? = nil
-                    if attachmentsGranted, let attachmentsDir {
-                        var candidates: [KTResourceManifest.Candidate] = []
-                        for file in staged?.files ?? [] {
-                            candidates.append(
-                                KTResourceManifest.Candidate(
-                                    kind: .attachment, id: file.id,
-                                    path: URL(fileURLWithPath: file.path),
-                                    direction: .read, displayName: file.filename,
-                                    isDirectory: false))
-                        }
-                        for input in otbInputs {
-                            candidates.append(
-                                KTResourceManifest.Candidate(
-                                    kind: .otb, id: input.handle, path: input.url,
-                                    direction: .read,
-                                    displayName: input.url.lastPathComponent,
-                                    isDirectory: false))
-                        }
-                        if !candidates.isEmpty {
-                            manifest = KTResourceManifest.build(
-                                grantedCandidates: candidates,
-                                umbrellaAttachmentsDir: attachmentsDir)
-                        }
+                    var activeOutputs: [KTCallBinding.BoundObject] = []
+                    var candidates: [KTResourceManifest.Candidate] = []
+                    if attachmentsGranted {
+                        candidates.append(
+                            contentsOf: binding.inputs.map { $0.manifestCandidate })
+                    }
+                    if workspaceDir != nil {
+                        activeOutputs = binding.outputs
+                        candidates.append(
+                            contentsOf: activeOutputs.map { $0.manifestCandidate })
+                    }
+                    if !candidates.isEmpty {
+                        manifest = KTResourceManifest.build(
+                            grantedCandidates: candidates,
+                            umbrellaAttachmentsDir: attachmentsGranted
+                                ? attachmentsDir : nil)
+                    }
+                    // Clear any stale file at an output slot BEFORE the run. The
+                    // thread workspace is persistent and slot paths are deterministic
+                    // (workspace/<object-name>), so a leftover from a prior run — or a
+                    // prior REMOTE caller — would otherwise satisfy the post-run
+                    // `fileExists` check and be harvested as this run's output (wrong
+                    // output + cross-caller leak). Only a file this run writes survives.
+                    for output in activeOutputs {
+                        try? FileManager.default.removeItem(at: output.path)
                     }
                     callResult = try await skillManager.callAction(
                         action: action,
@@ -272,8 +332,24 @@ extension KeepTalkingClient {
                         sandboxPolicy: sandboxPolicy,
                         model: openAIModel ?? "gpt-5-codex",
                         attachmentsDir: attachmentsDir,
-                        manifest: manifest
+                        manifest: manifest,
+                        workspaceDirectory: workspaceDir
                     )
+                    // Harvest declared `.output` slots back to a REMOTE caller as
+                    // one-time blobs (a local caller already has the files in its
+                    // own thread workspace). Only slots advertised this run are
+                    // eligible. On the success path ONLY — a thrown or cancelled run
+                    // never reaches here, so a cancelled run ships no partial output
+                    // (matches the cancellation guarantee).
+                    if request.callerNodeID != config.node, !activeOutputs.isEmpty {
+                        let harvested = await harvestCallOutputs(
+                            activeOutputs, to: request.callerNodeID)
+                        if !harvested.isEmpty { outputTransfers = harvested }
+                        onLog?(
+                            "[delegation/harvest] action=\(request.call.action.uuidString.prefix(8)) "
+                                + "slots=\(activeOutputs.count) shipped=\(harvested.count) "
+                                + "to=\(request.callerNodeID.uuidString.prefix(8))")
+                    }
                     #else
                     callResult = (content: [], isError: true)
                     #endif
@@ -476,6 +552,31 @@ extension KeepTalkingClient {
             message: "Received by target node."
         )
 
+        // Cross-node cancel rides the same channel but MUST act on the (possibly
+        // ACTIVE) target run immediately. Handle it here, synchronously, BEFORE the
+        // per-context queue/delegation dispatch below — routing it through the
+        // coordinator would queue it behind the very run it is meant to stop (the
+        // run holds the context's only active slot), so the cancel could never
+        // preempt it. Mirrors the stage-file / cancelled-before-arrival short-circuits.
+        if request.call.action == Self.cancelActionID {
+            let cancelResult = handleIncomingCancelRequest(request)
+            try await sendIncomingActionCallResult(
+                cancelResult, requestID: requestID, actionID: actionID)
+            return
+        }
+
+        // A cancel that raced ahead of this request short-circuits it (no spawn).
+        if consumeCancelledBeforeArrival(for: request) {
+            onLog?(
+                "[action-call/cancel] request=\(requestID) cancelled before arrival; short-circuiting"
+            )
+            let cancelled = Self.actionCallCancelledResult(request)
+            finalizeIncomingActionCall(requestID: request.id, result: cancelled)
+            try await sendIncomingActionCallResult(
+                cancelled, requestID: requestID, actionID: actionID)
+            return
+        }
+
         if let cachedResult = cachedIncomingActionCallResult(for: request.id) {
             onLog?(
                 "[action-call/request] duplicate completed request=\(requestID) action=\(actionID) resending cached result"
@@ -516,17 +617,37 @@ extension KeepTalkingClient {
                     let context = try await self.upsertContext(
                         KeepTalkingContext(id: request.contextID)
                     )
-                    return await self.executeActionCallRequest(
-                        request,
-                        context: context,
-                        onAcknowledgement: { state, message in
-                            await self.sendActionCallAcknowledgementBestEffort(
-                                request,
-                                state: state,
-                                message: message
+                    let execute: @Sendable () async -> KeepTalkingActionCallResult = {
+                        await self.executeActionCallRequest(
+                            request,
+                            context: context,
+                            onAcknowledgement: { state, message in
+                                await self.sendActionCallAcknowledgementBestEffort(
+                                    request,
+                                    state: state,
+                                    message: message
+                                )
+                            }
+                        )
+                    }
+                    // A genuinely DELEGATED (remote-caller) execution runs as a
+                    // cancel-only run in the agent coordinator: visible, serialized
+                    // per context, and stoppable via the queue or a cross-node
+                    // cancel. A local self-call runs inline — it is already nested
+                    // under the caller's own run, so re-entering the per-context
+                    // queue would deadlock behind the slot that very run holds.
+                    if request.callerNodeID != self.config.node {
+                        do {
+                            return try await self.delegationCoordinator.runDelegatedSync(
+                                contextID: request.contextID,
+                                label: "delegated action \(actionID)",
+                                work: execute
                             )
+                        } catch is CancellationError {
+                            return Self.actionCallCancelledResult(request)
                         }
-                    )
+                    }
+                    return await execute()
                 } catch {
                     await self.sendActionCallAcknowledgementBestEffort(
                         request,
@@ -536,7 +657,8 @@ extension KeepTalkingClient {
                     return Self.actionCallErrorResult(request, error: error)
                 }
             }
-            storeIncomingActionCallTask(createdTask, for: request.id)
+            storeIncomingActionCallTask(
+                createdTask, for: request.id, caller: request.callerNodeID)
             inFlightTask = createdTask
         }
 
@@ -652,10 +774,12 @@ extension KeepTalkingClient {
 
     private func storeIncomingActionCallTask(
         _ task: Task<KeepTalkingActionCallResult, Never>,
-        for requestID: UUID
+        for requestID: UUID,
+        caller: UUID
     ) {
         actionCallQueue.sync {
             inFlightIncomingActionCalls[requestID] = task
+            incomingActionCallCallers[requestID] = caller
         }
     }
 
@@ -665,6 +789,7 @@ extension KeepTalkingClient {
     ) {
         actionCallQueue.sync {
             inFlightIncomingActionCalls.removeValue(forKey: requestID)
+            incomingActionCallCallers.removeValue(forKey: requestID)
             completedIncomingActionCallResults[requestID] = result
             completedIncomingActionCallOrder.removeAll {
                 $0 == requestID
@@ -745,10 +870,19 @@ extension KeepTalkingClient {
 
         try await sendRemoteActionCallRequest(effectiveRequest, deliveryDescription: "rtc")
 
-        let result = try await waitForActionCallResult(
-            requestID: effectiveRequest.id,
-            targetNodeID: deliveryNodeID
-        )
+        let result = try await withTaskCancellationHandler {
+            try await waitForActionCallResult(
+                requestID: effectiveRequest.id,
+                targetNodeID: deliveryNodeID
+            )
+        } onCancel: {
+            // The caller's run was cancelled — tell the provider to stop too, so a
+            // long remote run isn't orphaned. Local unwind happens via the throw.
+            self.sendCancelFireAndForget(
+                requestID: effectiveRequest.id,
+                targetNodeID: deliveryNodeID,
+                contextID: request.contextID)
+        }
         guard result.outputTransfers?.isEmpty == false else { return result }
         let receiveDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent(

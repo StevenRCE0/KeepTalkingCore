@@ -1,4 +1,4 @@
-// The macOS impl (+Process) uses SeatbeltSandbox/SkillScriptRunner and is
+// The macOS impl (+Process) uses SeatbeltSandbox/SandboxedProcessRunner and is
 // #if os(macOS); this "unavailable" stub must therefore cover every non-macOS
 // platform (iOS family AND Linux/Windows), not just the Apple ones.
 #if !os(macOS)

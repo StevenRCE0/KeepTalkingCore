@@ -45,6 +45,11 @@ public final class KeepTalkingThread: Model, @unchecked Sendable {
     @Timestamp(key: "updated_at", on: .update)
     public var updatedAt: Date?
 
+    /// Execution workspaces (isolated scratch/output dirs) owned by this thread —
+    /// one per thread today, reaped when the thread is archived or deleted.
+    @Children(for: \.$thread)
+    public var workspaces: [KeepTalkingThreadWorkspace]
+
     public init() {}
 
     public init(

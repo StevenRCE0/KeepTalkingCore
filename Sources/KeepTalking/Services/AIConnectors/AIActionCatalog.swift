@@ -235,6 +235,15 @@ extension KeepTalkingClient {
 
             let isCurrentNode = ownerNodeID == config.node
             let supportsWakeAssist = action.blockingAuthorisation == true
+            // Path-free projection of the declared objects for the main agent's
+            // cross-action data-flow planning (the provider sees resolved paths).
+            let objectContracts = (action.descriptor?.objects ?? []).map { object in
+                KeepTalkingObjectContract(
+                    name: object.name ?? "",
+                    direction: object.direction,
+                    description: object.description,
+                    isFile: object.isFile)
+            }
 
             switch action.payload {
                 case .mcpBundle(let bundle):
@@ -249,7 +258,8 @@ extension KeepTalkingClient {
                             kind: .mcp,
                             description: description,
                             supportsWakeAssist: supportsWakeAssist,
-                            isCurrentNode: isCurrentNode
+                            isCurrentNode: isCurrentNode,
+                            objectContracts: objectContracts
                         ))
 
                 case .skill(let bundle):
@@ -264,7 +274,8 @@ extension KeepTalkingClient {
                             kind: .skill,
                             description: description,
                             supportsWakeAssist: supportsWakeAssist,
-                            isCurrentNode: isCurrentNode
+                            isCurrentNode: isCurrentNode,
+                            objectContracts: objectContracts
                         ))
                     // Without this, skill actions never reach the remote
                     // tool catalog — callers see the stub but no callable
@@ -294,7 +305,8 @@ extension KeepTalkingClient {
                             kind: .primitive,
                             description: description,
                             supportsWakeAssist: supportsWakeAssist,
-                            isCurrentNode: isCurrentNode
+                            isCurrentNode: isCurrentNode,
+                            objectContracts: objectContracts
                         ))
                     let primitiveActionDefinition =
                         makePrimitiveActionProxyDefinition(
@@ -333,7 +345,8 @@ extension KeepTalkingClient {
                             kind: .filesystem,
                             description: description,
                             supportsWakeAssist: supportsWakeAssist,
-                            isCurrentNode: isCurrentNode
+                            isCurrentNode: isCurrentNode,
+                            objectContracts: objectContracts
                         ))
 
                 case .acp(let bundle):
@@ -348,7 +361,8 @@ extension KeepTalkingClient {
                             kind: .acp,
                             description: description,
                             supportsWakeAssist: supportsWakeAssist,
-                            isCurrentNode: isCurrentNode
+                            isCurrentNode: isCurrentNode,
+                            objectContracts: objectContracts
                         ))
                     // Expose ACP as a callable tool (single `prompt` arg), like
                     // skills/primitives — without this the agent can't dispatch it.

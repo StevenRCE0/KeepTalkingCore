@@ -159,10 +159,44 @@ extension KeepTalkingSkillPlanner {
         )
     }
 
+    /// Provisions the skill's environment by running `command` in a login shell.
+    /// Unsandboxed, like `tryRun`, but with a longer budget because installs are
+    /// slow. Setup-time network consent is gated by the planner BEFORE this runs,
+    /// so by the time we get here the user has permitted the hosts the step
+    /// declared. Output is truncated generously so the planner can read install
+    /// logs and confirm success.
+    func runSetup(command: String, cwd: String?, timeout: TimeInterval = 240) async -> ProbeOutcome {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return ProbeOutcome(summary: "empty command", toolResult: "error: empty command.")
+        }
+        let workdir =
+            (cwd?.hasPrefix("/") == true)
+            ? URL(fileURLWithPath: cwd!) : probeWorkingDirectory()
+        let result = await runBounded(
+            ["/bin/zsh", "-lc", trimmed],
+            cwd: workdir,
+            timeout: timeout
+        )
+        let out = String(result.stdout.prefix(6_000))
+        let err = String(result.stderr.prefix(3_000))
+        return ProbeOutcome(
+            summary: "exit \(result.exitCode)",
+            toolResult: """
+                command: \(trimmed)
+                exit_code: \(result.exitCode)
+                stdout:
+                \(out.isEmpty ? "<empty>" : out)
+                stderr:
+                \(err.isEmpty ? "<empty>" : err)
+                """
+        )
+    }
+
     // MARK: - Runtime
 
     /// Runs `command` with a hard timeout by racing the (otherwise patient)
-    /// `SkillScriptRunner` against a sleep and cancelling it — cancellation
+    /// `SandboxedProcessRunner` against a sleep and cancelling it — cancellation
     /// terminates the subprocess. Returns a synthetic 124 result on timeout.
     private func runBounded(
         _ command: [String],
@@ -177,7 +211,7 @@ extension KeepTalkingSkillPlanner {
                 of: SkillScriptExecutionResult?.self
             ) { group in
                 group.addTask {
-                    try await SkillScriptRunner.run(
+                    try await SandboxedProcessRunner.run(
                         command: command,
                         currentDirectory: cwd,
                         environment: [:],

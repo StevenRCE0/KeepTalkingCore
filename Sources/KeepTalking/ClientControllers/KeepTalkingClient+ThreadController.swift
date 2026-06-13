@@ -143,6 +143,7 @@ extension KeepTalkingClient {
         }
         thread.state = .archived
         try await thread.save(on: localStore.database)
+        await sealThreadWorkspace(threadID)
     }
 
     public func deleteThread(_ threadID: UUID) async throws {
@@ -151,6 +152,7 @@ extension KeepTalkingClient {
         else {
             return
         }
+        await sealThreadWorkspace(threadID)
         try await thread.delete(on: localStore.database)
     }
 

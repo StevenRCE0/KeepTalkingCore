@@ -19,7 +19,7 @@ import Foundation
 /// `.unique(on: "context_message")` index — one outbox entry per message
 /// at most.
 ///
-/// Distinct from `AgentRunQueue` (which orchestrates AI turns). Nothing
+/// Distinct from `AgentCoordinator` (which orchestrates AI turns). Nothing
 /// in here talks to the LLM.
 extension KeepTalkingClient {
 

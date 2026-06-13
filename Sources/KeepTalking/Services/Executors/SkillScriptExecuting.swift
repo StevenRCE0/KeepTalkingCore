@@ -21,9 +21,13 @@ public struct SkillScriptExecutionResult: Sendable {
 
 #if os(macOS)
 public protocol SkillScriptExecuting: Sendable {
-    func runScript(
-        scriptURL: URL,
-        arguments: [String],
+    /// Runs an arbitrary command LINE through a real shell under the sandbox — the
+    /// agent's sole execution primitive now that per-declared-script tools are
+    /// retired (a genuine shell, so resource handles, pipes, and redirections
+    /// expand natively). The configured timeout is the patient-wait grace period,
+    /// not a hard kill.
+    func runShellCommand(
+        command: String,
         currentDirectory: URL,
         environment: [String: String],
         actionID: UUID,
@@ -32,15 +36,9 @@ public protocol SkillScriptExecuting: Sendable {
     ) async throws -> SkillScriptExecutionResult
 }
 #else
-public protocol SkillScriptExecuting: Sendable {
-    func runScript(
-        scriptURL: URL,
-        arguments: [String],
-        currentDirectory: URL,
-        actionID: UUID,
-        timeoutSeconds: TimeInterval
-    ) async throws -> SkillScriptExecutionResult
-}
+/// No script execution off macOS (sandbox-exec is macOS-only); the executor is
+/// `nil` on other platforms. Empty by design — see task to extend to Linux.
+public protocol SkillScriptExecuting: Sendable {}
 #endif
 
 public enum DefaultSkillScriptExecutor {

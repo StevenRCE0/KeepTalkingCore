@@ -57,40 +57,47 @@ extension SkillManager {
             ),
         ]
 
-        guard scriptExecutor != nil, !context.declaredTools.isEmpty else {
-            return tools
-        }
-
-        for toolName in context.declaredTools.keys.sorted() {
-            let scriptPath = context.declaredTools[toolName]!
+        // The general-purpose execution primitive: a real sandboxed shell. The
+        // agent writes a command line; resource handles ($KT_<KIND>_<H8>), pipes,
+        // redirections, and globs all work because a genuine shell interprets it.
+        if scriptExecutor != nil {
             tools.append(
                 .init(
-                    functionName: toolName,
+                    functionName: Self.shellToolName,
                     actionID: UUID(),
                     ownerNodeID: UUID(),
                     source: .skill,
-                    description: "Run the \(toolName) skill tool (\(scriptPath)). "
-                        + "Pass the full CLI arguments as a plain text string — "
-                        + "the runtime resolves directory labels and env values automatically.",
+                    description:
+                        "Run a command line in a sandboxed shell (zsh), with the current "
+                        + "directory set to your writable workspace. This is a REAL shell: "
+                        + "pipes, redirections (2>&1, >file), quoting, and globs all work, "
+                        + "and stdout/stderr/exit_code are returned. Reference KeepTalking "
+                        + "resources by their environment variable — e.g. cat \"$KT_ATTACHMENT_ABCD1234\" "
+                        + "— never hardcode an absolute path. Only the skill directory, the "
+                        + "provisioned resources, and the workspace are reachable; anything "
+                        + "else is blocked by the sandbox.",
                     parameters: [
                         "type": .string("object"),
                         "properties": .object([
-                            "args": .object([
+                            "command": .object([
                                 "type": .string("string"),
                                 "description": .string(
-                                    "Raw CLI arguments string, e.g. '--text \"hello world\" --voice Samantha'. "
-                                        + "Use directory labels (e.g. input_dir/file.txt) for paths. "
-                                        + "Arguments are passed DIRECTLY to the program — there is no shell, so do NOT "
-                                        + "add redirections or operators (2>&1, |, >, <, &&, ;) or globs; stdout and "
-                                        + "stderr are already captured and returned for you."
+                                    "The shell command line to run, e.g. "
+                                        + "'python3 \"$SKILL_DIR/scripts/run.py\" --in \"$KT_OTB_1A2B3C4D\" > \"$KT_RESULT_5E6F\"'."
                                 ),
                             ])
                         ]),
+                        "required": .array([.string("command")]),
                         "additionalProperties": .bool(false),
                     ]
                 )
             )
         }
+
+        // Per-declared-script tools are retired: the agent runs scripts through
+        // `kt_shell` (`zsh "$SKILL_DIR/scripts/foo.py" …`) instead of a generated
+        // tool per `scripts.<name>` frontmatter entry. The shell is the single,
+        // universal execution surface — no tool registry to keep in sync.
         return tools
     }
 
@@ -106,12 +113,6 @@ extension SkillManager {
         let scriptIndex = manifestContext.scripts.joined(separator: "\n")
         let referenceIndex = manifestContext.referencesFiles.joined(separator: "\n")
         let assetIndex = manifestContext.assets.joined(separator: "\n")
-
-        let declaredToolsList =
-            manifestContext.declaredTools.isEmpty
-            ? "<none>"
-            : manifestContext.declaredTools.sorted(by: { $0.key < $1.key })
-                .map { "- \($0.key) → \($0.value)" }.joined(separator: "\n")
 
         // Build accessible directories list from parameters that look like paths
         let directoryParams = bundle.parameters.filter { _, value in
@@ -131,27 +132,31 @@ extension SkillManager {
             Action ID: \(actionID.uuidString.lowercased())
             Skill Name: \(bundle.name)
 
-            ## CRITICAL: You MUST call tool functions to execute scripts.
-            You have the following executable tools available. Call them directly — do NOT output
-            shell commands or ask the user to run anything manually.
-            \(declaredToolsList)
+            ## Shell (\(Self.shellToolName)) — your execution tool
+            Run scripts, CLI tools, and multi-step pipelines through \(Self.shellToolName).
+            It is a REAL sandboxed shell whose current directory is your writable
+            workspace, so pipes, redirections (2>&1, > out.txt), quoting, and globs all
+            work. Invoke a skill script by path, e.g.
+            `python3 "$SKILL_DIR/scripts/run.py" --in "$KT_ATTACHMENT_ABCD1234"`. Reference
+            provisioned resources by their environment variable — never hardcode an
+            absolute path. Place any file you want returned to the caller at a write-slot
+            variable. Do NOT ask the user to run anything manually.
 
             ## Accessible directories
             These directories were granted by the user. Use \(Self.listFilesToolName) to discover
-            files, and reference them by label (e.g. "input_dir/filename.ext") when passing paths
-            to scripts. The runtime resolves labels to real paths automatically.
+            files, and reference them by label (e.g. "input_dir/filename.ext"); the runtime
+            resolves labels to real paths.
             \(accessibleDirsList)
 
             ## File tools
             - \(Self.listFilesToolName): List files in an accessible directory by label.
-            - \(Self.getFileToolName): Read a PLAIN-TEXT (UTF-8) file from the skill directory or an accessible directory. Binary files (PDF, images, .docx) are not readable this way — use a script that extracts their text.
+            - \(Self.getFileToolName): Read a PLAIN-TEXT (UTF-8) file from the skill directory or an accessible directory. Binary files (PDF, images, .docx) are not readable this way — use \(Self.shellToolName) with a tool that extracts their text.
 
             ## Execution requirements
-            - ALWAYS call a declared tool to fulfill the request. Never just describe a command.
+            - Use \(Self.shellToolName) to do the work. Never just describe a command.
             - If a filename is ambiguous or uncertain, call \(Self.listFilesToolName) first to find the exact name.
-            - Script output (stdout/stderr) is returned directly, along with the exit code.
-            - Pass only the program's own arguments — there is no shell, so never add 2>&1, pipes, redirections, or globs.
-            - Report results faithfully from the tool output: a non-zero exit_code, or a stderr error, means the run FAILED. Never claim success or "exit code 0" unless the returned exit_code is actually 0 — if it failed, say so and quote the error.
+            - stdout/stderr and the exit code are returned to you after each run.
+            - Report results faithfully: a non-zero exit_code, or a stderr error, means the run FAILED. Never claim success or "exit code 0" unless the returned exit_code is actually 0 — if it failed, say so and quote the error.
             - Be explicit and concise in the final answer.
 
             Request metadata JSON:

@@ -106,7 +106,7 @@ extension KeepTalkingClient {
             try await runAIClosure()
         }
 
-        return await agentRunQueue.enqueue(
+        return await agentCoordinator.enqueue(
             contextID: contextID,
             agentTurnID: agentTurnID,
             promptPreview: preview,
@@ -141,9 +141,9 @@ extension KeepTalkingClient {
         Task { [self] in
             // Resolve the contextID from the current snapshots BEFORE
             // cancelling — once we cancel, the run vanishes from snapshots.
-            let snapshots = await agentRunQueue.currentSnapshots
+            let snapshots = await agentCoordinator.currentSnapshots
             let contextID = snapshots.first { $0.id == runID }?.contextID
-            await agentRunQueue.cancel(runID: runID)
+            await agentCoordinator.cancel(runID: runID)
             if let contextID {
                 await publishAgentRunCancellation(contextID: contextID)
             }
@@ -154,18 +154,18 @@ extension KeepTalkingClient {
     /// already in the context from the first attempt, so retry only re-runs
     /// the AI side — no duplicate user message is appended.
     public func retryAgentRun(_ runID: UUID) {
-        Task { await agentRunQueue.retry(runID: runID) }
+        Task { await agentCoordinator.retry(runID: runID) }
     }
 
     /// Removes a failed agent run from the queue (no further side effects).
     public func dismissAgentRun(_ runID: UUID) {
-        Task { await agentRunQueue.dismiss(runID: runID) }
+        Task { await agentCoordinator.dismiss(runID: runID) }
     }
 
     /// Executes one already-dequeued durable app queue item.
     ///
     /// Unlike `enqueueAIPrompt`, this method does not add work to the
-    /// SDK's in-memory `AgentRunQueue`; callers that need persistence across
+    /// SDK's in-memory `AgentCoordinator`; callers that need persistence across
     /// navigation, app switching, or process death should own the durable
     /// queue and call this only when the item reaches the head.
     /// - Parameters:

@@ -1,4 +1,5 @@
 #if os(macOS)
+import Darwin
 import Foundation
 
 enum SeatbeltSandboxError: Error {
@@ -61,13 +62,30 @@ public struct SeatbeltSandbox: ProcessSandboxing {
         }
 
         // Inject directory paths as environment variables (e.g. PROJECT_ROOT=/path).
+        // Use the STANDARDIZED (not realpath) path so the value matches the form the
+        // resource manifest emits and the agent-path scrubber rewrites — the grant
+        // itself is realpath-canonical, and the kernel resolves the /var → /private
+        // symlink when the process opens the path, so access still matches the grant.
+        // (Injecting the realpath form here would leak a "/private/var…" the scrubber
+        // can't match against its "/var…" table.)
         if let dirs = policy.descriptor.directories, !dirs.isEmpty {
             var merged = process.environment ?? ProcessInfo.processInfo.environment
             for (name, url) in dirs {
-                merged[name.uppercased()] = url.path
+                merged[name.uppercased()] = url.standardizedFileURL.path
             }
             process.environment = merged
         }
+    }
+
+    /// The kernel-resolved real path (via `realpath`), matching how seatbelt
+    /// canonicalises an accessed path before testing it against the profile.
+    /// Falls back to the standardized path when the target doesn't exist yet
+    /// (e.g. a not-yet-created output file — covered by its parent dir grant).
+    func canonicalPath(_ url: URL) -> String {
+        let raw = url.standardizedFileURL.path
+        guard let resolved = realpath(raw, nil) else { return raw }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 
     // MARK: - Profile compilation
@@ -87,7 +105,12 @@ public struct SeatbeltSandbox: ProcessSandboxing {
         if let resource {
             switch resource {
                 case .filePaths(let urls):
-                    let paths = urls.map { $0.standardizedFileURL.path }
+                    // Canonicalise via realpath: seatbelt matches against the
+                    // kernel-resolved real path (/var → /private/var, /tmp →
+                    // /private/tmp), and `resolvingSymlinksInPath()` does NOT
+                    // resolve those (Foundation's /private special-casing), so a
+                    // grant on a staged file under /var/folders would never match.
+                    let paths = urls.map { canonicalPath($0) }
                     for path in paths {
                         if verbs.contains(.read) || verbs.contains(.grep) || verbs.contains(.ls) {
                             rules.append("(allow file-read* (subpath \"\(escapeSeatbelt(path))\"))")
@@ -131,7 +154,10 @@ public struct SeatbeltSandbox: ProcessSandboxing {
         // without a direction entry (legacy named dirs like "project_root").
         if let directories, !directories.isEmpty {
             for (label, url) in directories {
-                let path = url.standardizedFileURL.path
+                // realpath-canonicalised for the same reason as file-path grants
+                // above — a workspace/staging dir under /var/folders must be granted
+                // by its /private/var/folders real path or seatbelt denies access.
+                let path = canonicalPath(url)
                 rules.append("(allow file-read* (subpath \"\(escapeSeatbelt(path))\"))")
                 let wantsWrite: Bool
                 if let direction = directoryDirections?[label] {
@@ -158,7 +184,18 @@ public struct SeatbeltSandbox: ProcessSandboxing {
             environment: ProcessInfo.processInfo.environment
         )
         return [
-            // Process metadata and basic syscalls
+            // Low-level system foundation. dyld + any real binary need a set of
+            // mach services, shared-cache reads, and syscalls that a hand-rolled
+            // allow-list misses on modern macOS — without this even `/bin/cat`
+            // aborts with SIGABRT before running. `bsd.sb` provides exactly that
+            // floor while leaving `(deny default)` in force for files and network,
+            // so confinement is unchanged (ungranted reads/writes and network stay
+            // denied; the explicit grants below re-open only what the action needs).
+            "(import \"bsd.sb\")",
+
+            // Process metadata and basic syscalls. `bsd.sb` does NOT grant
+            // process-fork, so without this a shell pipeline (which forks) fails
+            // with "fork failed: operation not permitted".
             "(allow process-fork)",
             "(allow sysctl-read)",
             "(allow mach-lookup)",
@@ -180,21 +217,29 @@ public struct SeatbeltSandbox: ProcessSandboxing {
         ]
     }
 
+    /// Exec grants for the execution environment (active only with the `execute`
+    /// verb). The agent's `kt_shell` runs `/bin/zsh -c …` and from there reaches
+    /// for ordinary system tools (cat/ls/grep/head/python3/git/…), so a shell that
+    /// could exec only five interpreters would be useless. We therefore allow
+    /// `process-exec` of the system binary directories. This is NOT a confinement
+    /// hole: the file-read*/file-write* rules still gate what those tools can touch
+    /// (only the skill dir, granted directories, the workspace, and /tmp), network
+    /// stays denied unless the `network` verb opened it, and `appleevent-send` is
+    /// never granted, so a tool like `osascript` cannot drive other apps.
     private func interpreterRules() -> [String] {
-        let interpreters = [
-            "/usr/bin/env",
-            "/bin/zsh",
-            "/bin/sh",
-            "/bin/bash",
-            "/usr/bin/python3",
-        ]
         var rules: [String] = []
-        for path in interpreters {
-            rules.append("(allow process-exec (literal \"\(escapeSeatbelt(path))\"))")
-            rules.append("(allow file-read* (literal \"\(escapeSeatbelt(path))\"))")
-        }
-        // Homebrew interpreters
-        for prefix in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        // Standard system + package-manager binary directories — read + exec.
+        let executableRoots = [
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+            // Full trees: Homebrew/local binaries are symlinks into Cellar/opt, so
+            // following them to exec the real file needs the whole subtree.
+            "/opt/homebrew",
+            "/usr/local",
+        ]
+        for prefix in executableRoots {
             rules.append("(allow process-exec (subpath \"\(escapeSeatbelt(prefix))\"))")
             rules.append("(allow file-read* (subpath \"\(escapeSeatbelt(prefix))\"))")
         }

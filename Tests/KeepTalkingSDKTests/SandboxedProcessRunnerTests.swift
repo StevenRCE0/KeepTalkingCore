@@ -3,7 +3,7 @@ import Testing
 
 @testable import KeepTalkingSDK
 
-struct SkillScriptRunnerTests {
+struct SandboxedProcessRunnerTests {
     @Test("script runner drains large stdout without hanging")
     func drainsLargeStdout() async throws {
         let fixture = try makeFixtureDirectory()
@@ -18,11 +18,8 @@ struct SkillScriptRunnerTests {
         """
         .write(to: scriptURL, atomically: true, encoding: .utf8)
 
-        let result = try await SkillScriptRunner.run(
-            command: SkillScriptRunner.makeCommand(
-                scriptURL: scriptURL,
-                arguments: []
-            ),
+        let result = try await SandboxedProcessRunner.run(
+            command: ["/bin/zsh", scriptURL.path],
             currentDirectory: fixture,
             actionID: UUID(),
             graceSeconds: 5
@@ -53,11 +50,8 @@ struct SkillScriptRunnerTests {
         // cancellation stops it. Cancelling the surrounding task must terminate
         // the process and surface a CancellationError.
         let task = Task {
-            try await SkillScriptRunner.run(
-                command: SkillScriptRunner.makeCommand(
-                    scriptURL: scriptURL,
-                    arguments: [markerURL.path]
-                ),
+            try await SandboxedProcessRunner.run(
+                command: ["/bin/zsh", scriptURL.path, markerURL.path],
                 currentDirectory: fixture,
                 actionID: UUID(),
                 graceSeconds: 1

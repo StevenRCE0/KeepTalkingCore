@@ -8,22 +8,16 @@ extension DefaultSkillScriptExecutor {
 }
 
 private struct Executor: SkillScriptExecuting {
-    func runScript(
-        scriptURL: URL,
-        arguments: [String],
+    func runShellCommand(
+        command: String,
         currentDirectory: URL,
         environment: [String: String],
         actionID: UUID,
         timeoutSeconds: TimeInterval,
         sandboxPolicy: KTSandboxPolicy?
     ) async throws -> SkillScriptExecutionResult {
-        // The configured timeout is now the *grace* period: after it elapses the
-        // run keeps waiting patiently (polling) instead of being killed.
-        try await SkillScriptRunner.run(
-            command: SkillScriptRunner.makeCommand(
-                scriptURL: scriptURL,
-                arguments: arguments
-            ),
+        try await SandboxedProcessRunner.runShell(
+            command: command,
             currentDirectory: currentDirectory,
             environment: environment,
             actionID: actionID,

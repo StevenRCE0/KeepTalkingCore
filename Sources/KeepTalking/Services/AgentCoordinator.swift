@@ -34,12 +34,14 @@ public struct KeepTalkingAgentRunSnapshot: Sendable, Identifiable {
     }
 }
 
-// MARK: - Queue actor
+// MARK: - Agent coordinator
 
-/// Serial per-context run queue.  At most one AI run is active per context;
-/// additional enqueues are held in order and started automatically when the
-/// preceding run finishes.
-actor AgentRunQueue {
+/// Coordinates agent runs across contexts. A context's LOCAL turns are still
+/// serialized — at most one active, the rest queued and started automatically —
+/// but runs no longer execute strictly one-at-a-time overall: a suspended turn
+/// frees its slot so the next can start, and delegated runs (`runDelegated`) bring
+/// in work this node does on behalf of others. Hence "coordinator", not "queue".
+actor AgentCoordinator {
 
     private struct RunItem {
         let id: UUID
@@ -148,13 +150,17 @@ actor AgentRunQueue {
             emit()
             return
         }
-        // Queued run: drop silently.
+        // Queued run: remove it. It never started, so its task can't deliver
+        // completion — invoke `onCompleted` directly so anything awaiting it (a
+        // `runDelegated` continuation) unwinds with cancellation instead of
+        // hanging on a resume that would otherwise never come.
         for contextID in queued.keys {
             guard
                 let idx = queued[contextID]?.firstIndex(where: { $0.id == runID })
             else { continue }
-            queued[contextID]?.remove(at: idx)
+            let removed = queued[contextID]?.remove(at: idx)
             if queued[contextID]?.isEmpty == true { queued[contextID] = nil }
+            removed?.onCompleted?(CancellationError())
             emit()
             return
         }
@@ -198,6 +204,79 @@ actor AgentRunQueue {
         }
         emit()
         return true
+    }
+
+    // MARK: - Delegated runs
+
+    /// Holds a delegated run's typed result across the queue's `Void` work
+    /// boundary. Safe as `@unchecked Sendable`: the write (in `work`) and the read
+    /// (in `onCompleted`) both run inside this actor's isolation and are serialized
+    /// with the awaiting continuation, so there is no concurrent access.
+    private final class ResultBox<R>: @unchecked Sendable { var value: R? }
+
+    /// Runs `work` as a CANCEL-ONLY run — no `agentTurnID`, so it is never parked
+    /// for continuation/resume and is simply discarded if interrupted — and AWAITS
+    /// its typed result. Cancelling the awaiting task (or `cancel(runID:)`) cancels
+    /// the run, unwinding `work` as `CancellationError`. This is the delegation
+    /// primitive: a node executing a unit of work on behalf of a caller, visible
+    /// and stoppable in the same queue as local turns but never resumed like one.
+    func runDelegated<R: Sendable>(
+        runID: UUID = UUID(),
+        contextID: UUID,
+        label: String,
+        work: @escaping @Sendable () async throws -> R
+    ) async throws -> R {
+        let box = ResultBox<R>()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<R, Error>) in
+                enqueue(
+                    id: runID,
+                    contextID: contextID,
+                    agentTurnID: nil,
+                    promptPreview: label,
+                    work: { box.value = try await work() },
+                    onCompleted: { error in
+                        if let value = box.value {
+                            continuation.resume(returning: value)
+                        } else {
+                            continuation.resume(throwing: error ?? CancellationError())
+                        }
+                    }
+                )
+            }
+        } onCancel: {
+            Task { await self.cancel(runID: runID) }
+        }
+    }
+
+    /// Enqueues `work` as a cancel-only run and RETURNS the run id IMMEDIATELY;
+    /// `onComplete` fires when it finishes (success, failure, or cancellation) —
+    /// the push-wake hook for callers that must not hold the connection open.
+    @discardableResult
+    func runDelegatedDetached<R: Sendable>(
+        runID: UUID = UUID(),
+        contextID: UUID,
+        label: String,
+        work: @escaping @Sendable () async throws -> R,
+        onComplete: @escaping @Sendable (Result<R, Error>) -> Void
+    ) -> UUID {
+        let box = ResultBox<R>()
+        enqueue(
+            id: runID,
+            contextID: contextID,
+            agentTurnID: nil,
+            promptPreview: label,
+            work: { box.value = try await work() },
+            onCompleted: { error in
+                if let value = box.value {
+                    onComplete(.success(value))
+                } else {
+                    onComplete(.failure(error ?? CancellationError()))
+                }
+            }
+        )
+        return runID
     }
 
     var currentSnapshots: [KeepTalkingAgentRunSnapshot] { makeSnapshots() }
@@ -330,8 +409,13 @@ actor AgentRunQueue {
             startNextQueued(contextID: item.contextID)
         }
 
-        // Park failures so the UI can offer Retry / Dismiss.
-        if let error, !(error is CancellationError) {
+        // Park failures so the UI can offer Retry / Dismiss — but ONLY resumable
+        // local turns (agentTurnID != nil). A delegated/cancel-only run has
+        // already unwound its awaiter via `onCompleted` (which resumed a one-shot
+        // continuation); parking it would let `retry` re-run it and fire that
+        // continuation a SECOND time → fatal "continuation misuse". Delegated runs
+        // are discard-on-failure by design.
+        if let error, !(error is CancellationError), item.agentTurnID != nil {
             failed[item.id] = (item: item, message: error.localizedDescription)
         }
 

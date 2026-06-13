@@ -172,7 +172,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public var onThreadsChanged: (@Sendable () -> Void)?
     public var onMappingsChanged: (@Sendable () -> Void)?
     public var onAgentRunsChanged: (@Sendable ([KeepTalkingAgentRunSnapshot]) -> Void)? {
-        didSet { agentRunQueue.onChanged = onAgentRunsChanged }
+        didSet { agentCoordinator.onChanged = onAgentRunsChanged }
     }
     /// Called when an agent run finishes (normally, with error, or after cancellation).
     /// Receives the context ID and the error if the run failed, or nil on success/cancel.
@@ -250,6 +250,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// agent. Resolved via `resolveACTConnector()`.
     let actConnector: (any AIConnector)?
     let blobStore: KeepTalkingBlobStore
+    /// Per-thread isolated execution workspaces (scratch/output dirs used as the
+    /// cwd for skill / provider-side ACT runs); reaped on thread archive/delete.
+    let threadWorkspaces: KeepTalkingThreadWorkspaceManager
     private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
     var actionApprovalHandler: ActionApprovalHandler?
     var primitiveActionPostResultHandler: PrimitiveActionPostResultHandler?
@@ -258,8 +261,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
     var webSearchProvider: WebSearchProvider?
     var jsRuntime: (any KeepTalkingJSRuntime)?
 
-    // MARK: Agent Run Queue
-    let agentRunQueue = AgentRunQueue()
+    // MARK: Agent coordination
+    let agentCoordinator = AgentCoordinator()
+    /// Coordinates work this node runs ON BEHALF OF a caller (provider-side ACT
+    /// today; task delegation on the roadmap) — cancel-only runs in the
+    /// `agentCoordinator`, plus the orchestrator-summon seam.
+    lazy var delegationCoordinator = KeepTalkingDelegationCoordinator(
+        queue: agentCoordinator, log: { [weak self] in self?.onLog?($0) })
 
     // MARK: Action Call properties
     let actionCallQueue = DispatchQueue(
@@ -274,6 +282,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
     var inFlightIncomingActionCalls: [UUID: Task<KeepTalkingActionCallResult, Never>] = [:]
     var completedIncomingActionCallResults: [UUID: KeepTalkingActionCallResult] = [:]
     var completedIncomingActionCallOrder: [UUID] = []
+    /// Caller node per in-flight incoming action call — the authorization key for a
+    /// cancel (only the original caller may cancel its run). Cleared on finalize.
+    var incomingActionCallCallers: [UUID: UUID] = [:]
+    /// Cancels that arrived before their target request (reorder / push-wake-first):
+    /// target requestID → canceller node. Consumed when the request lands.
+    var cancelledBeforeArrival: [UUID: UUID] = [:]
+    var cancelledBeforeArrivalOrder: [UUID] = []
 
     // MARK: Action Catalog properties
     let actionCatalogQueue = DispatchQueue(
@@ -406,6 +421,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
             result.append(trimmed)
         }
         self.blobStore = KeepTalkingBlobStore.makeDefault(for: localStore)
+        self.threadWorkspaces = KeepTalkingThreadWorkspaceManager.makeDefault(for: localStore)
         livenessState = KeepTalkingContextLivenessState(
             localNode: config.node
         )
@@ -481,6 +497,24 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
         // Clear any decrypted/ciphertext OTB temp dirs orphaned by a prior run.
         KeepTalkingClient.pruneStaleOneTimeBlobTempDirs()
+        // Reap execution workspaces whose thread was archived/deleted while away.
+        Task { [weak self] in await self?.reapOrphanThreadWorkspaces() }
+
+        // Resolve the lazy delegation coordinator on the init thread so its first
+        // touch can't race two concurrent callers, then wire the orchestrator-
+        // summon seam: a delegated TASK (roadmap) drives a full main turn.
+        _ = delegationCoordinator
+        Task { [weak self] in
+            guard let self else { return }
+            await self.delegationCoordinator.setOrchestratorSummon {
+                [weak self] contextID, prompt, _ in
+                guard let self else { return }
+                let context =
+                    (try? await self.upsertContext(KeepTalkingContext(id: contextID)))
+                    ?? KeepTalkingContext(id: contextID)
+                _ = try? await self.runAI(prompt: prompt, in: context)
+            }
+        }
 
         rtcClient.onLog = { [weak self] line in
             self?.onLog?(line)

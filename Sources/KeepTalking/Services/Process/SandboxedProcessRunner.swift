@@ -2,26 +2,13 @@
 import Darwin
 import Foundation
 
-public enum SkillScriptRunner {
-    public static func makeCommand(
-        scriptURL: URL,
-        arguments: [String]
-    ) -> [String] {
-        let path = scriptURL.path
-        switch scriptURL.pathExtension.lowercased() {
-            case "py":
-                return ["/usr/bin/env", "python3", path] + arguments
-            case "sh", "command":
-                return ["/bin/zsh", path] + arguments
-            default:
-                if FileManager.default.isExecutableFile(atPath: path) {
-                    return [path] + arguments
-                }
-                return ["/bin/zsh", path] + arguments
-        }
-    }
-
-    /// Runs a skill script *patiently*: rather than killing the process at a
+/// Sandboxed process + shell runner — the SDK's execution primitive. Runs an argv
+/// (`run(command:)`) or a real shell command line (`runShell`) under a compiled
+/// sandbox policy, with patient-wait and SIGTERM→SIGKILL cancellation. Formerly
+/// `SkillScriptRunner`; generalised as the agent moved from per-declared-script
+/// tools to a sandboxed shell.
+public enum SandboxedProcessRunner {
+    /// Runs a command *patiently*: rather than killing the process at a
     /// fixed `graceSeconds`, it waits the grace period quietly and then waits
     /// indefinitely for the process to finish, polling every `pollSeconds`. The
     /// child's stdout/stderr are redirected to temp files (inherited fds, so the
@@ -74,6 +61,63 @@ public enum SkillScriptRunner {
             // Runs synchronously on whoever cancels (often the MainActor), so it
             // must not block: send SIGTERM now and escalate to SIGKILL
             // out-of-band if the process ignores it.
+            terminateProcessIfRunning(processBox.process)
+            scheduleForceKill(processBox)
+        }
+    }
+
+    /// Runs an arbitrary command LINE through a real shell (`/bin/zsh -c`) under
+    /// the same sandbox + patient-wait + cancellation machinery as `run(command:)`.
+    /// This is the agent's general-purpose execution primitive: because a genuine
+    /// shell interprets the string, `$KT_<KIND>_<H8>` resource handles, quoting,
+    /// pipes, redirections, and globs all expand natively — there is NO argv
+    /// pre-expansion (`expandInjectedReferences`) and no control-token stripping,
+    /// the very workarounds the no-shell script path needed. The KeepTalking
+    /// resource env vars are injected, so the shell resolves handles to real paths.
+    /// The shell `runShell` invokes. macOS ships zsh as the default login shell and
+    /// it's guaranteed on our deployment floor; Linux (the KeepTalkingDemon port)
+    /// may not have zsh, so prefer bash there. A runtime existence check keeps it
+    /// robust on either platform, falling back to `/bin/sh` as a last resort.
+    public static func resolveShellExecutable() -> String {
+        #if os(macOS)
+        let candidates = ["/bin/zsh", "/bin/bash", "/bin/sh"]
+        #else
+        let candidates = ["/bin/bash", "/usr/bin/bash", "/bin/sh"]
+        #endif
+        let fileManager = FileManager.default
+        for path in candidates where fileManager.isExecutableFile(atPath: path) {
+            return path
+        }
+        return candidates.last ?? "/bin/sh"
+    }
+
+    public static func runShell(
+        command: String,
+        currentDirectory: URL,
+        environment: [String: String] = [:],
+        actionID: UUID,
+        graceSeconds: TimeInterval = 10,
+        pollSeconds: TimeInterval = 5,
+        sandboxPolicy: KTSandboxPolicy? = nil,
+        onProgress: (@Sendable (String) -> Void)? = nil
+    ) async throws -> SkillScriptExecutionResult {
+        let shell = resolveShellExecutable()
+        let argv = [shell, "-c", command]
+        let processBox = SkillScriptProcessBox()
+        return try await withTaskCancellationHandler {
+            try await run(
+                process: processBox.process,
+                executable: shell,
+                command: argv,
+                currentDirectory: currentDirectory,
+                environment: environment,
+                actionID: actionID,
+                graceSeconds: graceSeconds,
+                pollSeconds: pollSeconds,
+                sandboxPolicy: sandboxPolicy,
+                onProgress: onProgress
+            )
+        } onCancel: {
             terminateProcessIfRunning(processBox.process)
             scheduleForceKill(processBox)
         }
