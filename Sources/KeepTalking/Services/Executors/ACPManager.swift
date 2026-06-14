@@ -213,7 +213,7 @@ public actor ACPManager {
             grantedCandidates: [
                 KTResourceManifest.Candidate(
                     kind: .fs, id: bundle.id, path: bundle.cwd,
-                    direction: .readWrite, displayName: "agent working root",
+                    direction: .write, displayName: "agent working root",
                     isDirectory: true)
             ],
             umbrellaAttachmentsDir: nil)

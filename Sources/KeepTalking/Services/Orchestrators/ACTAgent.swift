@@ -37,7 +37,12 @@ extension KeepTalkingClient {
                 with arguments derived from the conversation, and returns a
                 concise summary of the result. To feed a file into the action,
                 first stage it on the action's owner node with kt_send_file, then
-                pass the returned handle(s) in `input_handles` here.
+                pass the returned handle(s) in `input_handles` here. To capture a
+                file the action PRODUCES, request it in `outputs`; the result's
+                `produced_resources` lists each produced resource with a `handle`
+                you can read (kt_get_context_attachment) or pass to a later action.
+                Identify resources by `handle`, not by name: identical filenames
+                across resources are DISTINCT files, never the same one.
                 """,
             parameters: [
                 "type": .string("object"),
@@ -58,7 +63,38 @@ extension KeepTalkingClient {
                         "type": .string("array"),
                         "items": .object(["type": .string("string")]),
                         "description": .string(
-                            "Optional staged-file handles (from kt_send_file) to deliver as the action's file input. Only use handles staged on this action's owner node."
+                            "Optional resource handles (KT_<KIND>_<HEX> form — from kt_send_file or a prior produced_resources entry) to deliver as the action's file input. Only use handles staged on this action's owner node."
+                        ),
+                    ]),
+                    "outputs": .object([
+                        "type": .string("array"),
+                        "items": .object([
+                            "type": .string("object"),
+                            "properties": .object([
+                                "name": .object([
+                                    "type": .string("string"),
+                                    "description": .string(
+                                        "Logical name for this output (e.g. \"result\"); the action writes it to $KT_<NAME>."
+                                    ),
+                                ]),
+                                "persistence": .object([
+                                    "type": .string("string"),
+                                    "enum": .array([.string("attachment"), .string("otb")]),
+                                    "description": .string(
+                                        "attachment = durable, shared with this context's participants; otb = private, ephemeral, delivered point-to-point to you only."
+                                    ),
+                                ]),
+                                "multiple": .object([
+                                    "type": .string("boolean"),
+                                    "description": .string(
+                                        "True if this output may be several files (a collection) rather than one."
+                                    ),
+                                ]),
+                            ]),
+                            "required": .array([.string("name"), .string("persistence")]),
+                        ]),
+                        "description": .string(
+                            "Optional outputs you want this action to PRODUCE. Each becomes a write handle the action fills; KeepTalking delivers it as a durable attachment or a private file per `persistence`. Use this to capture an action's file output (and later reference it)."
                         ),
                     ]),
                 ]),
@@ -111,11 +147,42 @@ extension KeepTalkingClient {
         }
 
         let task = args["task"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let inputHandles = args["input_handles"]?.arrayValue?.compactMap {
-            $0.stringValue.flatMap { UUID(uuidString: $0) }
-        }
+        // Keep the resolved (kind, id) — not just the bare UUID — so the ACT agent
+        // can be TOLD which canonical handles it holds (the bare-UUID side-channel
+        // alone left the agent blind to its own handles).
+        let resolvedInputHandles: [(kind: KTResourceManifest.Kind?, id: UUID)] =
+            args["input_handles"]?.arrayValue?.compactMap {
+                $0.stringValue.flatMap { KTResourceManifest.resolveAgentHandle($0) }
+            } ?? []
+        let inputHandles = resolvedInputHandles.map(\.id)
+        // Caller-requested OUTPUTS the action should PRODUCE. We mint each handle id
+        // here (caller-side) so it round-trips with the produced output; `persistence`
+        // is the caller's switch (durable attachment vs private OTB).
+        let outputHandles: [KeepTalkingActionOutputHandle]? = {
+            guard case .array(let entries)? = args["outputs"] else { return nil }
+            let handles: [KeepTalkingActionOutputHandle] = entries.compactMap { entry in
+                guard case .object(let obj) = entry,
+                    case .string(let rawName)? = obj["name"]
+                else { return nil }
+                let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else { return nil }
+                let persistence: KeepTalkingActionOutputHandle.Persistence = {
+                    if case .string(let p)? = obj["persistence"], p.lowercased() == "otb" {
+                        return .otb
+                    }
+                    return .attachment
+                }()
+                let multiple: Bool = {
+                    if case .bool(let m)? = obj["multiple"] { return m }
+                    return false
+                }()
+                return KeepTalkingActionOutputHandle(
+                    name: name, persistence: persistence, multiple: multiple)
+            }
+            return handles.isEmpty ? nil : handles
+        }()
         actLog(
-            "start action=\(actionID.uuidString.lowercased()) kind=\(stub.kind.rawValue) node=\(stub.ownerNodeID.uuidString.lowercased()) handles=\(inputHandles?.count ?? 0) task=\(clipped(task.isEmpty ? "(empty)" : task, maxCharacters: 160))"
+            "start action=\(actionID.uuidString.lowercased()) kind=\(stub.kind.rawValue) node=\(stub.ownerNodeID.uuidString.lowercased()) handles=\(inputHandles.count) task=\(clipped(task.isEmpty ? "(empty)" : task, maxCharacters: 160))"
         )
 
         return try await runACTMiniLoop(
@@ -129,7 +196,9 @@ extension KeepTalkingClient {
             actModel: actModel,
             publisher: publisher,
             agentTurnID: agentTurnID,
-            inputHandles: (inputHandles?.isEmpty == false) ? inputHandles : nil
+            inputHandles: inputHandles.isEmpty ? nil : inputHandles,
+            resolvedInputHandles: resolvedInputHandles,
+            outputHandles: outputHandles
         )
     }
 
@@ -146,7 +215,9 @@ extension KeepTalkingClient {
         actModel: String,
         publisher: AIOrchestrator.AssistantPublisher,
         agentTurnID: UUID? = nil,
-        inputHandles: [UUID]? = nil
+        inputHandles: [UUID]? = nil,
+        resolvedInputHandles: [(kind: KTResourceManifest.Kind?, id: UUID)] = [],
+        outputHandles: [KeepTalkingActionOutputHandle]? = nil
     ) async throws -> [AIMessage] {
         let resolvedAction = try await resolvedACTAction(
             actionID: actionID,
@@ -180,6 +251,8 @@ extension KeepTalkingClient {
         let selfNodeName = aliasLookup.resolve(.node(config.node)).primary()
 
         let typeGuidance = AIPromptPresets.actAgentTypeGuidance(for: stub.kind)
+        let resourceBlock = await describeDelegatedInputResources(
+            resolvedInputHandles, in: context)
         let systemPrompt = """
             You are an Action Execution Agent (ACT agent) for the KeepTalking platform.
 
@@ -193,7 +266,7 @@ extension KeepTalkingClient {
             Current node: \(selfNodeName)
             Action: \(stub.name) (id: \(actionID.uuidString.lowercased()), type: \(stub.kind.rawValue), node: \(ownerNodeName))
             Task: \(task.isEmpty ? "(no specific task provided — use your best judgment)" : task)
-            \(resolvedAction.promptContext.isEmpty ? "" : "\nAction metadata:\n\(resolvedAction.promptContext)\n")
+            \(resolvedAction.promptContext.isEmpty ? "" : "\nAction metadata:\n\(resolvedAction.promptContext)\n")\(resourceBlock)
             \(typeGuidance)
 
             Be factual and direct. Only report what the tool returned. Do not speculate.
@@ -208,6 +281,11 @@ extension KeepTalkingClient {
 
         var summary = ""
         var successfulOutputs: [String] = []
+        // Resources the delegated action PRODUCED, aggregated across inner steps and
+        // surfaced to the MAIN agent in this loop's result — otherwise the ACT
+        // summary would swallow them and the orchestrator would never see the
+        // produced attachment/output handles (the unified resource-manifest flow).
+        var producedResources: [Any] = []
         let maxACTTurns = 4
         var stepIndex = 0
 
@@ -257,7 +335,8 @@ extension KeepTalkingClient {
                 context: context,
                 agentTurnID: agentTurnID,
                 agentIntention: task,
-                inputHandles: inputHandles
+                inputHandles: inputHandles,
+                outputHandles: outputHandles
             )
             actLog(
                 "action-result action=\(actionID.uuidString.lowercased()) calls=\(turn.toolCalls.map(\.name).joined(separator: ",")) payload=\(actExecutionPreview(executions, source: stub.kind))"
@@ -265,15 +344,17 @@ extension KeepTalkingClient {
             for exec in executions {
                 actTranscript.append(contentsOf: exec.messages)
             }
-            // Inject native file content inline so the ACT agent can work with
-            // files directly without needing to call kt_get_context_attachment.
-            let injected = try await adaptMidTurnInjectionMessages(
-                executions,
-                runtimeCatalog: runtimeCatalog,
-                context: context,
-                transferReceiptTimeout: .seconds(0)  // blobs already synced
-            )
-            actTranscript.append(contentsOf: injected)
+            // Aggregate any `produced_resources` the inner action results carry, so
+            // they reach the main agent through this loop's result instead of being
+            // lost in the prose summary.
+            for exec in executions {
+                guard let resultText = ACTAgentResultExtractor.text(from: exec.messages),
+                    let data = resultText.data(using: .utf8),
+                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let resources = json["produced_resources"] as? [[String: Any]]
+                else { continue }
+                producedResources.append(contentsOf: resources)
+            }
 
             // Fold this step's call+result into the parent's expand. The
             // chat renderer merges Output intermediates with matching
@@ -321,6 +402,12 @@ extension KeepTalkingClient {
         if !successfulOutputs.isEmpty {
             payload["act_output"] = successfulOutputs.joined(separator: "\n\n---\n\n")
         }
+        // Surface produced resources (attachments / outputs) to the main agent in
+        // the unified resource-manifest format — the same `produced_resources`
+        // vocabulary direct tool calls and the context-attachment listing use.
+        if !producedResources.isEmpty {
+            payload["produced_resources"] = producedResources
+        }
         return [
             toolMessage(
                 payload: jsonString(payload),
@@ -330,6 +417,42 @@ extension KeepTalkingClient {
     }
 
     // MARK: - Helpers
+
+    /// Renders the resource handles relayed for THIS delegation into a prompt
+    /// block, so the ACT agent actually KNOWS which handles it holds — otherwise
+    /// they ride along as an invisible side-channel and the agent can't reference
+    /// them (to fill a tool's file argument, or as `$KT_…` in a shell command).
+    /// Each line carries the canonical `KT_<KIND>_<HEX>` handle and, when
+    /// resolvable, the filename. Returns "" when no handles were relayed.
+    private func describeDelegatedInputResources(
+        _ handles: [(kind: KTResourceManifest.Kind?, id: UUID)],
+        in context: KeepTalkingContext
+    ) async -> String {
+        guard !handles.isEmpty else { return "" }
+        let contextID = try? context.requireID()
+        var lines: [String] = []
+        for handle in handles {
+            let token =
+                handle.kind.map { KTResourceManifest.agentHandle(kind: $0, id: handle.id) }
+                ?? handle.id.uuidString.lowercased()
+            var name: String?
+            if handle.kind == .attachment || handle.kind == nil, let contextID {
+                name = (try? await contextAttachment(handle.id, in: contextID))?.filename
+            }
+            if name == nil, handle.kind == .otb || handle.kind == nil {
+                name = await stagedFileStore.file(
+                    handle: handle.id, callerNodeID: config.node)?.filename
+            }
+            lines.append(name.map { "- \(token) — \"\($0)\"" } ?? "- \(token)")
+        }
+        return """
+
+            Resources provided for this run — the file(s) the task refers to. Reference each
+            by its HANDLE (the handle IS the file): pass it verbatim as a tool's file
+            argument, or use it in $-form as the path in a shell command (e.g. "$\(handles.first.flatMap { h in h.kind.map { KTResourceManifest.agentHandle(kind: $0, id: h.id) } } ?? "KT_…")").
+            \(lines.joined(separator: "\n"))
+            """
+    }
 
     private func resolvedACTAction(
         actionID: UUID,

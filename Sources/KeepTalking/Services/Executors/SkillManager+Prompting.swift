@@ -58,7 +58,7 @@ extension SkillManager {
         ]
 
         // The general-purpose execution primitive: a real sandboxed shell. The
-        // agent writes a command line; resource handles ($KT_<KIND>_<H8>), pipes,
+        // agent writes a command line; resource handles ($KT_<KIND>_<HEX>), pipes,
         // redirections, and globs all work because a genuine shell interprets it.
         if scriptExecutor != nil {
             tools.append(
@@ -71,19 +71,21 @@ extension SkillManager {
                         "Run a command line in a sandboxed shell (zsh), with the current "
                         + "directory set to your writable workspace. This is a REAL shell: "
                         + "pipes, redirections (2>&1, >file), quoting, and globs all work, "
-                        + "and stdout/stderr/exit_code are returned. Reference KeepTalking "
-                        + "resources by their environment variable — e.g. cat \"$KT_ATTACHMENT_ABCD1234\" "
-                        + "— never hardcode an absolute path. Only the skill directory, the "
-                        + "provisioned resources, and the workspace are reachable; anything "
-                        + "else is blocked by the sandbox.",
+                        + "and stdout/stderr/exit_code are returned. Every KeepTalking resource "
+                        + "handle is an environment variable whose VALUE is that file's absolute "
+                        + "path — use the handle in its $-form AS the path, e.g. "
+                        + "cat \"$KT_ATTACHMENT_<HEX>\". Never hardcode an absolute path and never "
+                        + "invent a handle. Only the skill directory, the provisioned resources, "
+                        + "and the workspace are reachable; anything else is blocked by the sandbox.",
                     parameters: [
                         "type": .string("object"),
                         "properties": .object([
                             "command": .object([
                                 "type": .string("string"),
                                 "description": .string(
-                                    "The shell command line to run, e.g. "
-                                        + "'python3 \"$SKILL_DIR/scripts/run.py\" --in \"$KT_OTB_1A2B3C4D\" > \"$KT_RESULT_5E6F\"'."
+                                    "The shell command line to run. Pass resource handles in their "
+                                        + "$-form as paths, e.g. "
+                                        + "'python3 \"$SKILL_DIR/scripts/run.py\" --in \"$KT_OTB_<HEX>\" > \"$KT_ATTACHMENT_<HEX>\"'."
                                 ),
                             ])
                         ]),
@@ -136,11 +138,13 @@ extension SkillManager {
             Run scripts, CLI tools, and multi-step pipelines through \(Self.shellToolName).
             It is a REAL sandboxed shell whose current directory is your writable
             workspace, so pipes, redirections (2>&1, > out.txt), quoting, and globs all
-            work. Invoke a skill script by path, e.g.
-            `python3 "$SKILL_DIR/scripts/run.py" --in "$KT_ATTACHMENT_ABCD1234"`. Reference
-            provisioned resources by their environment variable — never hardcode an
-            absolute path. Place any file you want returned to the caller at a write-slot
-            variable. Do NOT ask the user to run anything manually.
+            work. Every provisioned resource is an environment variable (`KT_<KIND>_<HEX>`)
+            whose VALUE is that file's absolute path — so use the handle in its $-form AS
+            the concrete path, e.g.
+            `python3 "$SKILL_DIR/scripts/run.py" --in "$KT_ATTACHMENT_<HEX>"` (always quote
+            it; paths can contain spaces). Never hardcode an absolute path and never invent
+            a handle that wasn't provided. Place any file you want returned to the caller at
+            a write-slot variable. Do NOT ask the user to run anything manually.
 
             ## Accessible directories
             These directories were granted by the user. Use \(Self.listFilesToolName) to discover

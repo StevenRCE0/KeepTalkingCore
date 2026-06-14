@@ -28,7 +28,8 @@ extension KeepTalkingClient {
         context: KeepTalkingContext,
         agentTurnID: UUID? = nil,
         agentIntention: String? = nil,
-        inputHandles: [UUID]? = nil
+        inputHandles: [UUID]? = nil,
+        outputHandles: [KeepTalkingActionOutputHandle]? = nil
     ) async throws -> [AIOrchestrator.ToolExecution] {
         var executions: [AIOrchestrator.ToolExecution] = []
 
@@ -252,7 +253,8 @@ extension KeepTalkingClient {
                             context: context,
                             agentTurnID: agentTurnID,
                             agentIntention: agentIntention,
-                            inputHandles: inputHandles
+                            inputHandles: inputHandles,
+                            outputHandles: outputHandles
                         )
                         payload = proxyResult.payload
                         extraInlineMessages = proxyResult.inlineMessages
@@ -342,7 +344,8 @@ extension KeepTalkingClient {
         context: KeepTalkingContext,
         agentTurnID: UUID? = nil,
         agentIntention: String? = nil,
-        inputHandles: [UUID]? = nil
+        inputHandles: [UUID]? = nil,
+        outputHandles: [KeepTalkingActionOutputHandle]? = nil
     ) async throws -> AgentToolProxyResult {
         let arguments = try parsedActionCallArguments(
             definition: definition,
@@ -381,6 +384,12 @@ extension KeepTalkingClient {
         // action's input staging area.
         if let inputHandles, !inputHandles.isEmpty {
             actionCall.inputHandles = inputHandles
+        }
+        // Caller-requested outputs the action should produce — round-trip with
+        // caller-minted ids so the produced files are summoned/shipped per the
+        // chosen persistence (see prepareCallBinding / harvest / summon).
+        if let outputHandles, !outputHandles.isEmpty {
+            actionCall.outputHandles = outputHandles
         }
 
         let result = try await dispatchActionCall(
@@ -434,7 +443,7 @@ extension KeepTalkingClient {
                 to: target, contextID: try context.requireID())
             return jsonString([
                 "ok": true,
-                "handle": handle.uuidString.lowercased(),
+                "handle": KTResourceManifest.agentHandle(kind: .otb, id: handle),
                 "filename": filename,
                 "target_node_id": target.uuidString.lowercased(),
                 "note":
@@ -514,7 +523,7 @@ extension KeepTalkingClient {
             }
         }
 
-        let payload = jsonString([
+        var payloadObject: [String: Any] = [
             "ok": !result.isError,
             "function_name": functionName,
             "request_id": result.requestID.uuidString.lowercased(),
@@ -523,17 +532,47 @@ extension KeepTalkingClient {
             "target_node_id": result.targetNodeID.uuidString.lowercased(),
             "error_message": result.errorMessage ?? "",
             "content": renderedContent,
-        ])
+        ]
+        // Resources this call PRODUCED, in the unified resource-manifest format —
+        // the same vocabulary as the context-attachment listing, so the agent can
+        // reference a produced attachment by its `handle` exactly as it references
+        // a listed one.
+        if let produced = result.producedResources, !produced.isEmpty {
+            payloadObject["produced_resources"] = produced.map { $0.jsonObject() }
+        }
+        let payload = jsonString(payloadObject)
         return AgentToolProxyResult(payload: payload, inlineMessages: inlineMessages)
     }
 
     private func imagePart(base64: String, mimeType: String) -> AIMessage.Part? {
-        // `base64` may already be a data URL (`data:image/png;base64,...`).
-        if base64.hasPrefix("data:"), let url = URL(string: base64) {
-            return .imageURL(url)
+        // Extract the raw base64 + mime (input may be a `data:` URL or bare base64),
+        // then cap the longest side at 4000px before handing the image to a model.
+        var rawBase64 = base64
+        var effectiveMime = mimeType
+        if base64.hasPrefix("data:") {
+            let body = base64.dropFirst("data:".count)
+            if let range = body.range(of: ";base64,") {
+                effectiveMime = String(body[body.startIndex..<range.lowerBound])
+                rawBase64 = String(body[range.upperBound...])
+            } else if let url = URL(string: base64) {
+                return .imageURL(url)  // unparseable data URL — pass through unchanged
+            } else {
+                return nil
+            }
         }
-        let cleaned = base64.replacingOccurrences(of: "\n", with: "")
-        guard let url = URL(string: "data:\(mimeType);base64,\(cleaned)") else {
+        let cleaned = rawBase64.replacingOccurrences(of: "\n", with: "")
+        // If we can decode the bytes, downscale; otherwise fall back to the raw payload.
+        let (outData, outMime): (String, String)
+        if let data = Data(base64Encoded: cleaned) {
+            let scaled = KeepTalkingImageDownscaler.downscaledIfNeeded(
+                data, mimeType: effectiveMime)
+            outData = scaled.data.base64EncodedString()
+            outMime = scaled.mimeType
+        } else {
+            outData = cleaned
+            outMime = effectiveMime
+        }
+        guard let url = URL(string: "data:\(outMime);base64,\(outData)") else {
             return nil
         }
         return .imageURL(url)

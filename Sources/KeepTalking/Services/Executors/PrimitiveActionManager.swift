@@ -65,7 +65,10 @@ public actor PrimitiveActionManager {
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
         scope: KeepTalkingActionScope
-    ) async throws -> (content: [Tool.Content], isError: Bool?) {
+    ) async throws -> (
+        content: [Tool.Content], isError: Bool?,
+        outputFiles: [KeepTalkingLocalAttachmentInput]
+    ) {
         guard case .primitive(let primitiveBundle) = action.payload else {
             throw PrimitiveActionManagerError.invalidAction
         }
@@ -80,7 +83,8 @@ public actor PrimitiveActionManager {
         let response = try await registry.callAction(primitiveBundle, call, allowedScopeKeys)
         return (
             content: [.text(text: response.text, annotations: nil, _meta: nil)],
-            isError: response.isError
+            isError: response.isError,
+            outputFiles: response.outputFiles
         )
     }
 }

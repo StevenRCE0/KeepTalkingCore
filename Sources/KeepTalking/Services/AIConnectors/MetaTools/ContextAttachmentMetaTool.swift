@@ -91,7 +91,7 @@ extension KeepTalkingClient {
             ]
         }
         guard let contextID = context.id,
-            let attachmentID = UUID(uuidString: attachmentIDText)
+            let attachmentID = KTResourceManifest.resolveAgentHandle(attachmentIDText)?.id
         else {
             return [
                 toolMessage(
@@ -119,6 +119,17 @@ extension KeepTalkingClient {
                 functionName: functionName
             ) {
                 return transcriptResult
+            }
+            // Not a stored/synced attachment — it may be a PRIVATE `.otb` resource
+            // in the staged-file store (never broadcast). Resolve it by handle.
+            if let stagedResult = await stagedFileReadResult(
+                handle: attachmentID,
+                mode: mode,
+                maxCharacters: maxCharacters,
+                toolCallID: toolCallID,
+                functionName: functionName
+            ) {
+                return stagedResult
             }
             return [
                 toolMessage(
@@ -299,7 +310,7 @@ extension KeepTalkingClient {
             let attachmentIDText = arguments["attachment_id"]?.stringValue?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
             !attachmentIDText.isEmpty,
-            let attachmentID = UUID(uuidString: attachmentIDText),
+            let attachmentID = KTResourceManifest.resolveAgentHandle(attachmentIDText)?.id,
             let contextID = context.id
         else {
             return jsonString([
@@ -392,13 +403,183 @@ extension KeepTalkingClient {
         )
     }
 
+    /// Reads a PRIVATE `.otb` resource from the staged-file store by handle (never
+    /// an attachment, never synced). Mirrors the attachment read modes so the agent
+    /// reads any resource — attachment or otb — by handle through one tool. Returns
+    /// nil when the handle isn't a staged file this node owns.
+    /// Native user messages for the resources a turn's tool calls PRODUCED, so the
+    /// agent CONSUMES them immediately instead of being handed a handle and asking
+    /// whether to pull them in. Unified across attachment + otb resources (one
+    /// vocabulary): parses `produced_resources` from each execution payload and
+    /// injects each readable resource (under the native size cap) as a user message.
+    func nativeMessagesForProducedResources(
+        from executions: [AIOrchestrator.ToolExecution],
+        context: KeepTalkingContext
+    ) async -> [AIMessage] {
+        guard let contextID = try? context.requireID() else { return [] }
+        var messages: [AIMessage] = []
+        for execution in executions {
+            guard let text = ACTAgentResultExtractor.text(from: execution.messages),
+                let data = text.data(using: .utf8),
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let resources = json["produced_resources"] as? [[String: Any]]
+            else { continue }
+            for dict in resources {
+                guard let resource = KTResourceManifest.AgentResource(jsonObject: dict)
+                else { continue }
+                // Skip oversize content — it stays referenceable by handle.
+                if let byteCount = resource.byteCount,
+                    byteCount > Self.maxAINativeAttachmentBytes
+                {
+                    continue
+                }
+                if let message = await nativeMessageForResource(resource, in: contextID) {
+                    messages.append(message)
+                }
+            }
+        }
+        return messages
+    }
+
+    /// Reads a produced resource by handle and renders it as a native user message
+    /// whose lead carries the resource's manifest IDENTITY (handle/kind/name) — so
+    /// the injected content is bound to its handle, not just a filename. Resolves
+    /// attachment handles (synced) and otb handles (private staged store).
+    private func nativeMessageForResource(
+        _ resource: KTResourceManifest.AgentResource, in contextID: UUID
+    ) async -> AIMessage? {
+        guard let handle = KTResourceManifest.resolveAgentHandle(resource.handle)?.id
+        else { return nil }
+        let leadText =
+            "[\(resource.transcriptDescription())] — content of this resource follows; "
+            + "reference it by its handle (filenames may repeat; the handle is the identity):"
+        switch resource.kind {
+            case "attachment":
+                guard let attachment = try? await contextAttachment(handle, in: contextID),
+                    let blobRecord = try? await KeepTalkingBlobRecord.query(
+                        on: localStore.database
+                    )
+                    .filter(\.$id, .equal, attachment.blobID).first(),
+                    blobRecord.availability == .ready,
+                    let data = try? blobStore.read(
+                        relativePath: blobRecord.relativePath, blobID: attachment.blobID)
+                else { return nil }
+                return .user(
+                    parts: attachmentContentParts(
+                        filename: resource.name, mimeType: attachment.mimeType, data: data,
+                        leadText: leadText))
+            case "otb":
+                guard
+                    let staged = await stagedFileStore.file(
+                        handle: handle, callerNodeID: config.node),
+                    let data = try? Data(contentsOf: staged.url)
+                else { return nil }
+                let mime =
+                    resource.mimeType
+                    ?? MIMEType.preferredMIMEType(
+                        forExtension: (resource.name as NSString).pathExtension)
+                    ?? "application/octet-stream"
+                return .user(
+                    parts: attachmentContentParts(
+                        filename: resource.name, mimeType: mime, data: data,
+                        leadText: leadText))
+            default:
+                return nil
+        }
+    }
+
+    fileprivate func stagedFileReadResult(
+        handle: UUID,
+        mode: ContextAttachmentReadMode,
+        maxCharacters: Int,
+        toolCallID: String,
+        functionName: String
+    ) async -> [AIMessage]? {
+        guard let staged = await stagedFileStore.file(handle: handle, callerNodeID: config.node)
+        else { return nil }
+        let handleText = KTResourceManifest.agentHandle(kind: .otb, id: handle)
+        let ext = (staged.filename as NSString).pathExtension
+        let mime = MIMEType.preferredMIMEType(forExtension: ext) ?? "application/octet-stream"
+
+        switch mode {
+            case .metadata:
+                return [
+                    toolMessage(
+                        payload: jsonString([
+                            "ok": true,
+                            "function_name": functionName,
+                            "mode": mode.rawValue,
+                            "resource": [
+                                "handle": handleText,
+                                "kind": "otb",
+                                "direction": "read",
+                                "name": staged.filename,
+                                "mime_type": mime,
+                                "byte_count": staged.byteCount,
+                                "origin": "produced",
+                            ],
+                        ]),
+                        toolCallID: toolCallID)
+                ]
+            case .previewText:
+                let data = (try? Data(contentsOf: staged.url)) ?? Data()
+                let text =
+                    String(data: data, encoding: .utf8)
+                    .map { clipped($0, maxCharacters: maxCharacters) }
+                    ?? "<binary file, \(staged.byteCount) bytes — use native mode>"
+                return [
+                    toolMessage(
+                        payload: jsonString([
+                            "ok": true,
+                            "function_name": functionName,
+                            "mode": mode.rawValue,
+                            "handle": handleText,
+                            "name": staged.filename,
+                            "content": text,
+                        ]),
+                        toolCallID: toolCallID)
+                ]
+            case .native:
+                guard let data = try? Data(contentsOf: staged.url) else { return nil }
+                let leadText = AIPromptPresets.attachmentInjectionLeadText(
+                    filename: staged.filename, isImage: mime.hasPrefix("image/"))
+                return [
+                    .user(
+                        parts: attachmentContentParts(
+                            filename: staged.filename, mimeType: mime, data: data,
+                            leadText: leadText)),
+                    toolMessage(
+                        payload: jsonString([
+                            "ok": true,
+                            "function_name": functionName,
+                            "mode": mode.rawValue,
+                            "handle": handleText,
+                            "name": staged.filename,
+                            "note": "file content attached as a user message",
+                        ]),
+                        toolCallID: toolCallID),
+                ]
+        }
+    }
+
     func contextAttachmentJSONObject(
         _ attachment: KeepTalkingContextAttachment,
         blobRecord: KeepTalkingBlobRecord?,
         nodeAliasResolver: ((UUID) -> String?)? = nil
     ) -> [String: Any] {
-        [
-            "attachment_id": attachment.id?.uuidString.lowercased() ?? "",
+        let attachmentUUID = attachment.id ?? UUID()
+        let attachmentID = attachmentUUID.uuidString.lowercased()
+        return [
+            // Unified resource-manifest vocabulary (shared with produced_resources):
+            // the agent references the resource by its canonical `KT_<KIND>_<HEX>`
+            // handle — the SAME value kt_get_context_attachment / input_handles
+            // accept — with a consistent kind / direction / origin across the
+            // listing and action-output surfacing.
+            "handle": KTResourceManifest.agentHandle(kind: .attachment, id: attachmentUUID),
+            "kind": "attachment",
+            "direction": "read",
+            "origin": "context",
+            "attachment_id": attachmentID,
             "parent_message_id":
                 attachment.$parentMessage.id?.uuidString.lowercased()
                 ?? NSNull(),
@@ -498,8 +679,17 @@ extension KeepTalkingClient {
         let date = DateFormatter()
         date.dateStyle = .medium
         date.timeStyle = .short
+        let sessionID = summary.sessionID.uuidString.lowercased()
         return [
-            "attachment_id": summary.sessionID.uuidString.lowercased(),
+            // Unified resource-manifest vocabulary (shared with the listing +
+            // produced_resources). `kind` is the distinct "voice_transcript" family
+            // for display; the canonical `handle` carries the session id (the read
+            // tool resolves it back to live transcript text via its fallback chain).
+            "handle": KTResourceManifest.agentHandle(
+                kind: .attachment, id: summary.sessionID),
+            "direction": "read",
+            "origin": "context",
+            "attachment_id": sessionID,
             "parent_message_id": NSNull(),
             "sender": "voice_call",
             "blob_id": NSNull(),

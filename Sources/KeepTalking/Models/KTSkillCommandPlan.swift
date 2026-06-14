@@ -22,15 +22,13 @@ public struct KTSkillCommandPlan: Codable, Sendable {
     public var requiredNetworkHosts: [String]
     /// Subset of `requiredNetworkHosts` the user explicitly granted at plan time.
     public var grantedNetworkHosts: [String]
-    /// SETUP-time network hosts: hosts the planner's `setup_environment` step
-    /// contacted to provision the env (install deps, fetch models). A SEPARATE
-    /// consent from runtime egress — these are reached once, at plan time, not
-    /// when the skill later runs.
+    /// SETUP-time network hosts: hosts a planner `kt_shell` command contacted to
+    /// provision the env (install deps, fetch models). A SEPARATE consent from
+    /// runtime egress — these are reached once, at plan time, not when the skill
+    /// later runs.
     public var setupNetworkHosts: [String]
     /// Subset of `setupNetworkHosts` the user granted for the setup phase.
     public var grantedSetupNetworkHosts: [String]
-    public var suggestedManifest: String?
-    public var suggestedScripts: [String: String]?  // [Path: Content]
     /// Parameters collected interactively during planning (env values, directory
     /// paths, file paths). Stored directly in the skill bundle's `parameters` dict.
     public var collectedParameters: [String: String]?
@@ -57,16 +55,13 @@ public struct KTSkillCommandPlan: Codable, Sendable {
         self.grantedNetworkHosts = grantedNetworkHosts
         self.setupNetworkHosts = setupNetworkHosts
         self.grantedSetupNetworkHosts = grantedSetupNetworkHosts
-        self.suggestedManifest = nil
-        self.suggestedScripts = nil
         self.collectedParameters = nil
     }
 
     private enum CodingKeys: String, CodingKey {
         case skillActionID, skillName, rationale, requiredEnv, requiredDirectories,
             requiredFiles, requiredNetworkHosts, grantedNetworkHosts,
-            setupNetworkHosts, grantedSetupNetworkHosts,
-            suggestedManifest, suggestedScripts, collectedParameters
+            setupNetworkHosts, grantedSetupNetworkHosts, collectedParameters
     }
 
     public init(from decoder: Decoder) throws {
@@ -81,8 +76,6 @@ public struct KTSkillCommandPlan: Codable, Sendable {
         self.grantedNetworkHosts = (try? c.decode([String].self, forKey: .grantedNetworkHosts)) ?? []
         self.setupNetworkHosts = (try? c.decode([String].self, forKey: .setupNetworkHosts)) ?? []
         self.grantedSetupNetworkHosts = (try? c.decode([String].self, forKey: .grantedSetupNetworkHosts)) ?? []
-        self.suggestedManifest = try c.decodeIfPresent(String.self, forKey: .suggestedManifest)
-        self.suggestedScripts = try c.decodeIfPresent([String: String].self, forKey: .suggestedScripts)
         self.collectedParameters = try c.decodeIfPresent([String: String].self, forKey: .collectedParameters)
     }
 }

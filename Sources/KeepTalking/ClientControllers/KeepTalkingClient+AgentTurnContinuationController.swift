@@ -1,6 +1,18 @@
 import Foundation
 import MCP
 
+/// The result ferried back through a continuation response. A blocking /
+/// wake-assisted action (iOS forces blocking for all actions) can't use the
+/// direct result path, so the continuation must carry EVERYTHING that path does:
+/// the content PLUS the unified produced resources and any private output
+/// transfers. Without this, a remote ask-for-file delivered only its text content
+/// and the produced file's handle/identity was silently dropped.
+struct KeepTalkingContinuationResult: Codable, Sendable {
+    let content: [Tool.Content]
+    let producedResources: [KTResourceManifest.AgentResource]?
+    let outputTransfers: [KeepTalkingOneTimeBlobRef]?
+}
+
 /// Emitted the moment an agent turn suspends to wait on an out-of-band
 /// continuation (a remote node's response, a local authorization bubble, an
 /// ask-for-file pick). Lets a driver that can't block — e.g. the voice bridge —
@@ -20,6 +32,20 @@ public struct KeepTalkingAgentTurnSuspension: Sendable {
         self.contextID = contextID
         self.kind = kind
         self.targetNodeID = targetNodeID
+    }
+}
+
+/// Emitted when a previously suspended agent turn resumes — its continuation was
+/// answered (fulfilled or rejected) or an early response was already waiting.
+/// Symmetric with `KeepTalkingAgentTurnSuspension`: a driver that detached on
+/// suspend uses this to flip the run from "waiting" back to "running".
+public struct KeepTalkingAgentTurnResumption: Sendable {
+    public let agentTurnID: UUID
+    public let contextID: UUID
+
+    public init(agentTurnID: UUID, contextID: UUID) {
+        self.agentTurnID = agentTurnID
+        self.contextID = contextID
     }
 }
 
@@ -66,44 +92,6 @@ extension KeepTalkingClient {
         // Each node updates its own copy independently — we don't broadcast, because
         // the message-sync dedup filter would drop the update on the remote side.
         onEnvelope?(message)
-    }
-
-    // MARK: - Blob sync wait
-
-    /// For ask-for-file continuations, waits until all referenced blobs are locally
-    /// available so the agent can immediately read files when its turn resumes.
-    func waitForContinuationBlobs(
-        from content: [Tool.Content],
-        in contextID: UUID,
-        timeout: Duration = .seconds(60)
-    ) async {
-        let blobIDs = blobIDsFromAskForFileContent(content)
-        guard !blobIDs.isEmpty else { return }
-
-        let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
-            let attachments = (try? await contextAttachments(in: contextID)) ?? []
-            let matches = attachments.filter { blobIDs.contains($0.blobID) }
-            if !matches.isEmpty {
-                try? await requestAttachmentBlobsIfNeeded(for: matches, in: contextID)
-            }
-            let records = (try? await blobRecordsByBlobID(blobIDs)) ?? [:]
-            if blobIDs.allSatisfy({ records[$0]?.availability == .ready }) { return }
-            try? await Task.sleep(for: .milliseconds(200))
-        }
-    }
-
-    private func blobIDsFromAskForFileContent(_ content: [Tool.Content]) -> [String] {
-        for item in content {
-            guard case .text(let text, _, _) = item,
-                let data = text.data(using: .utf8),
-                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                json["status"] as? String == "sent_to_context",
-                let attachments = json["attachments"] as? [[String: Any]]
-            else { continue }
-            return attachments.compactMap { $0["blob_id"] as? String }
-        }
-        return []
     }
 
     // MARK: - Stale continuation invalidation
@@ -184,10 +172,17 @@ extension KeepTalkingClient {
         agentTurnID: UUID,
         originNodeID: UUID,
         state: KeepTalkingContextMessage.AgentTurnContinuationState,
-        resultContent: [Tool.Content] = []
+        resultContent: [Tool.Content] = [],
+        producedResources: [KTResourceManifest.AgentResource]? = nil,
+        outputTransfers: [KeepTalkingOneTimeBlobRef]? = nil
     ) async throws {
-        // Encrypt [Tool.Content] directly — no wrapper needed.
-        let encodedContent = try JSONEncoder().encode(resultContent)
+        // Carry the FULL result (content + produced resources + output transfers)
+        // so a blocking action delivers everything the direct path does.
+        let encodedContent = try JSONEncoder().encode(
+            KeepTalkingContinuationResult(
+                content: resultContent,
+                producedResources: producedResources,
+                outputTransfers: outputTransfers))
         let encryptedContent = try await encryptAsymmetricPayload(
             encodedContent,
             recipientNodeID: originNodeID,
@@ -277,7 +272,9 @@ extension KeepTalkingClient {
             agentTurnID: message.agentTurnID ?? UUID(),
             originNodeID: originNodeID,
             state: result.isError ? .rejected : .fulfilled,
-            resultContent: result.content
+            resultContent: result.content,
+            producedResources: result.producedResources,
+            outputTransfers: result.outputTransfers
         )
     }
 
@@ -294,7 +291,7 @@ extension KeepTalkingClient {
         encryptedPayload: Data,
         context: KeepTalkingContext,
         sender: KeepTalkingContextMessage.Sender
-    ) async throws -> [Tool.Content] {
+    ) async throws -> KeepTalkingContinuationResult {
         let contextID = try context.requireID()
 
         let continuationMessage = KeepTalkingContextMessage(
@@ -336,8 +333,21 @@ extension KeepTalkingClient {
             contextID: contextID
         )
 
+        // Mirror `onAgentTurnSuspended`: the turn is no longer parked — it is
+        // running again regardless of whether the continuation was fulfilled or
+        // rejected. A detached driver flips its run's UI back to "running" here.
+        // (Cancellation throws out of `awaitContinuation` above, so this only
+        // fires on a genuine resume — the cancelled task unwinds separately.)
+        onAgentTurnResumed?(
+            KeepTalkingAgentTurnResumption(
+                agentTurnID: agentTurnID,
+                contextID: contextID
+            )
+        )
+
         guard response.state == .fulfilled else {
-            return []
+            return KeepTalkingContinuationResult(
+                content: [], producedResources: nil, outputTransfers: nil)
         }
 
         let cipher = KeepTalkingAsymmetricCipherEnvelope(
@@ -350,6 +360,7 @@ extension KeepTalkingClient {
             expectedSenderNodeID: response.responderNodeID,
             purpose: "agent-turn-continuation-result"
         )
-        return try JSONDecoder().decode([Tool.Content].self, from: decryptedData)
+        return try JSONDecoder().decode(
+            KeepTalkingContinuationResult.self, from: decryptedData)
     }
 }

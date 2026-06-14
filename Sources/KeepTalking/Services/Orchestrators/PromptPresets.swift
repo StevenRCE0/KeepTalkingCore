@@ -162,7 +162,14 @@ public enum AIPromptPresets {
     static func sideNotesSection(_ notes: [KeepTalkingSideNoteDTO]) -> String {
         guard !notes.isEmpty else { return "" }
         let body = notes.map { "[\($0.key)] \($0.value)" }.joined(separator: "\n")
-        return "Side notes:\n\(body)\n\n"
+        return """
+            Side notes:
+            These track plans, open questions, and state that must survive across turns. \
+            They may also contain conventions, standard operating procedures, and \
+            instructions you must follow.
+            \(body)
+
+            """
     }
 
     // MARK: - On-device system prompt (Apple Intelligence / FoundationModels)
@@ -259,8 +266,10 @@ public enum AIPromptPresets {
                 return
                     "MCP action — tools are provided by an external MCP server. Call only the tools relevant to the task; do not probe or invoke tools speculatively."
             case .skill:
-                return
-                    "Skill action — this skill provides a directory of files, scripts, and a manifest. Manifest metadata and file tools are pre-loaded in your tool list. Read the most relevant files before calling the skill's action tool."
+                return """
+                    Skill action — this skill provides a directory of files, scripts, and a manifest. Manifest metadata and file tools are pre-loaded in your tool list. Read the most relevant files before calling the skill's action tool.
+                    Resource handles ARE concrete paths here: a `KT_<KIND>_<HEX>` handle is injected into the run as an environment variable whose value is that file's real absolute path. So when a tool/script argument needs a file, pass the handle in its env-var form — `$KT_<KIND>_<HEX>` — verbatim as the path (always quoted, e.g. `cat "$KT_ATTACHMENT_<HEX>"`); the shell expands it for you. Never hardcode a real filesystem path and never invent a handle that wasn't provided. All staged input files are also gathered under `$KT_ATTACHMENTS`.
+                    """
             case .primitive:
                 return
                     "Primitive action — this is a direct built-in operation. Pass the required arguments and call it once."

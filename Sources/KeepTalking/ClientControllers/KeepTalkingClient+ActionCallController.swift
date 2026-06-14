@@ -162,6 +162,9 @@ extension KeepTalkingClient {
             // One-time blobs the executor streams back to the caller (filesystem
             // get-file); surfaced on the result for the caller to materialize.
             var outputTransfers: [KeepTalkingOneTimeBlobRef]? = nil
+            // Resources this call PRODUCED (summoned attachments + private OTB
+            // outputs), in the unified agent-facing format — surfaced on the result.
+            var producedResources: [KTResourceManifest.AgentResource] = []
             switch action.payload {
                 case .mcpBundle:
                     callResult = try await mcpManager.callAction(
@@ -198,15 +201,18 @@ extension KeepTalkingClient {
                         }
                         staged.map { cleanupStagedAttachments($0) }
                         ownedInputDir.map { try? FileManager.default.removeItem(at: $0) }
-                        // Turn-scoped: drop the staged plaintext we consumed this
-                        // call rather than letting it linger to the store TTL. The
-                        // handle survives concurrent references within the turn
-                        // (each resolve copies its own file under isolation); its
-                        // backing plaintext is removed once this call finishes.
+                        // Turn-scoped cleanup of CONSUME-ONCE inputs (peer preflight /
+                        // kt_send_file relays): drop the staged plaintext we consumed
+                        // this call rather than letting it linger to the store TTL.
+                        // `discardIfConsumable` LEAVES re-feedable PRODUCED outputs
+                        // (an action's `.otb` result) intact, so the same handle can
+                        // flow into a later action — chaining an unconditional discard
+                        // silently broke (the produced OTB vanished before re-use, so
+                        // no $KT_OTB env var was ever provisioned).
                         if let consumed = request.call.inputHandles, !consumed.isEmpty {
                             Task { [stagedFileStore] in
                                 for handle in consumed {
-                                    await stagedFileStore.discard(handle: handle)
+                                    await stagedFileStore.discardIfConsumable(handle: handle)
                                 }
                             }
                         }
@@ -317,14 +323,28 @@ extension KeepTalkingClient {
                             umbrellaAttachmentsDir: attachmentsGranted
                                 ? attachmentsDir : nil)
                     }
-                    // Clear any stale file at an output slot BEFORE the run. The
-                    // thread workspace is persistent and slot paths are deterministic
+                    // Clear any stale file at an output slot BEFORE the run, and
+                    // create the slot DIRECTORY for a collection (`multiple`) output
+                    // so the skill can write its files into it. The thread workspace
+                    // is persistent and slot paths are deterministic
                     // (workspace/<object-name>), so a leftover from a prior run — or a
                     // prior REMOTE caller — would otherwise satisfy the post-run
                     // `fileExists` check and be harvested as this run's output (wrong
                     // output + cross-caller leak). Only a file this run writes survives.
                     for output in activeOutputs {
                         try? FileManager.default.removeItem(at: output.path)
+                        if output.isDirectory {
+                            try? FileManager.default.createDirectory(
+                                at: output.path, withIntermediateDirectories: true)
+                        }
+                    }
+                    if !activeOutputs.isEmpty {
+                        onLog?(
+                            "[io/slots] action=\(request.call.action.uuidString.prefix(8)) "
+                                + "prepared=\(activeOutputs.count) "
+                                + "attachment=\(activeOutputs.filter { $0.kind == .attachment }.count) "
+                                + "otb=\(activeOutputs.filter { $0.kind == .otb }.count) "
+                                + "collections=\(activeOutputs.filter { $0.isDirectory }.count)")
                     }
                     callResult = try await skillManager.callAction(
                         action: action,
@@ -335,20 +355,41 @@ extension KeepTalkingClient {
                         manifest: manifest,
                         workspaceDirectory: workspaceDir
                     )
-                    // Harvest declared `.output` slots back to a REMOTE caller as
-                    // one-time blobs (a local caller already has the files in its
-                    // own thread workspace). Only slots advertised this run are
-                    // eligible. On the success path ONLY — a thrown or cancelled run
-                    // never reaches here, so a cancelled run ships no partial output
-                    // (matches the cancellation guarantee).
-                    if request.callerNodeID != config.node, !activeOutputs.isEmpty {
-                        let harvested = await harvestCallOutputs(
-                            activeOutputs, to: request.callerNodeID)
-                        if !harvested.isEmpty { outputTransfers = harvested }
+                    // Process declared `.output` slots by persistence. On the success
+                    // path ONLY — a thrown or cancelled run never reaches here, so a
+                    // cancelled run ships no partial output (cancellation guarantee).
+                    if !activeOutputs.isEmpty {
+                        // Deliver every declared `.output` slot through the SAME
+                        // per-persistence deliverer the primitive path uses
+                        // (`deliverProducedOutputFiles`): `.attachment` → summon a
+                        // synced context attachment; `.otb` → stage re-feedable for a
+                        // LOCAL caller or ship point-to-point for a REMOTE one. Grouped
+                        // by Kind because the deliverer takes one persistence per batch.
+                        // On the success path ONLY — a thrown/cancelled run never reaches
+                        // here, so it ships no partial output (cancellation guarantee).
+                        let attFiles = producedOutputFiles(
+                            from: activeOutputs.filter { $0.kind == .attachment })
+                        if !attFiles.isEmpty {
+                            let delivered = await deliverProducedOutputFiles(
+                                attFiles, persistence: .attachment,
+                                in: request.contextID, to: request.callerNodeID)
+                            producedResources.append(contentsOf: delivered.resources)
+                        }
+                        let otbFiles = producedOutputFiles(
+                            from: activeOutputs.filter { $0.kind != .attachment })
+                        if !otbFiles.isEmpty {
+                            let delivered = await deliverProducedOutputFiles(
+                                otbFiles, persistence: .otb,
+                                in: request.contextID, to: request.callerNodeID)
+                            producedResources.append(contentsOf: delivered.resources)
+                            if !delivered.transfers.isEmpty {
+                                outputTransfers = (outputTransfers ?? []) + delivered.transfers
+                            }
+                        }
                         onLog?(
-                            "[delegation/harvest] action=\(request.call.action.uuidString.prefix(8)) "
-                                + "slots=\(activeOutputs.count) shipped=\(harvested.count) "
-                                + "to=\(request.callerNodeID.uuidString.prefix(8))")
+                            "[io/outputs] action=\(request.call.action.uuidString.prefix(8)) "
+                                + "attachment=\(attFiles.count) otb=\(otbFiles.count) "
+                                + "caller=\(request.callerNodeID.uuidString.prefix(8))")
                     }
                     #else
                     callResult = (content: [], isError: true)
@@ -356,11 +397,39 @@ extension KeepTalkingClient {
                 case .primitive:
                     var call = request.call
                     call.metadata.fields["caller_id"] = .string(request.callerNodeID.uuidString.lowercased())
-                    callResult = try await primitiveActionManager.callAction(
+                    let primitiveResult = try await primitiveActionManager.callAction(
                         action: action,
                         call: call,
                         scope: grant
                     )
+                    callResult = (
+                        content: primitiveResult.content, isError: primitiveResult.isError
+                    )
+                    // Route any files the primitive produced (e.g. ask-for-file's
+                    // picked files) per the caller's persistence switch into the
+                    // unified producedResources — same path as skill/action outputs.
+                    if !primitiveResult.outputFiles.isEmpty {
+                        // Default to PRIVATE (.otb): a picked file (ask-for-file) is for
+                        // the requesting agent, delivered in-band — not auto-broadcast to
+                        // every participant. The caller opts into a shared attachment
+                        // explicitly via `outputs[].persistence = "attachment"`.
+                        let persistence =
+                            request.call.outputHandles?.first?.persistence ?? .otb
+                        let delivered = await deliverProducedOutputFiles(
+                            primitiveResult.outputFiles,
+                            persistence: persistence,
+                            in: request.contextID,
+                            to: request.callerNodeID)
+                        producedResources.append(contentsOf: delivered.resources)
+                        if !delivered.transfers.isEmpty {
+                            outputTransfers = (outputTransfers ?? []) + delivered.transfers
+                        }
+                        onLog?(
+                            "[io/primitive-output] action=\(request.call.action.uuidString.prefix(8)) "
+                                + "files=\(primitiveResult.outputFiles.count) "
+                                + "persistence=\(persistence.rawValue) "
+                                + "produced=\(delivered.resources.count)")
+                    }
                 case .filesystem:
                     let isLocalExecution = request.callerNodeID == config.node
                     // Materialize streamed one-time blobs ONLY for put-file — the
@@ -451,7 +520,8 @@ extension KeepTalkingClient {
                 content: callResult.content,
                 isError: callResult.isError ?? false,
                 errorMessage: nil,
-                outputTransfers: outputTransfers
+                outputTransfers: outputTransfers,
+                producedResources: producedResources.isEmpty ? nil : producedResources
             )
         } catch {
             return KeepTalkingActionCallResult(
@@ -817,6 +887,15 @@ extension KeepTalkingClient {
             forRemoteOwnerNodeID: actionOwner
         )
 
+        // Cross-node OTB re-feed: a produced/staged input the agent referenced lives
+        // in THIS caller's staged store; ship it to a REMOTE executor (preserving the
+        // handle) so the executor can resolve it — otherwise resolveStagedInputs
+        // MISSes (the file was never on that node). No-op for a local delivery.
+        if deliveryNodeID != config.node {
+            await relayLocalStagedInputs(
+                call, to: deliveryNodeID, contextID: try context.requireID())
+        }
+
         let request = KeepTalkingActionCallRequest(
             contextID: try context.requireID(),
             callerNodeID: config.node,
@@ -883,12 +962,38 @@ extension KeepTalkingClient {
                 targetNodeID: deliveryNodeID,
                 contextID: request.contextID)
         }
-        guard result.outputTransfers?.isEmpty == false else { return result }
+        guard let transfers = result.outputTransfers, !transfers.isEmpty else {
+            return result
+        }
+        // Produced `.otb` outputs (chainable) → stage into THIS caller's store under
+        // transferID so the agent can read / auto-inject AND re-feed them (A→B
+        // chaining), mirroring the continuation path. They're identified by an `otb`
+        // produced_resources entry whose handle == KT_OTB_<transferID>; anything else
+        // (a filesystem get-file result, which carries NO produced_resources) falls
+        // through to the temp-dir + path-note materialization below. When
+        // produced_resources is absent (older/other actions) this is a no-op and the
+        // original behavior is preserved.
+        let producedOTBIDs = Set(
+            (result.producedResources ?? []).compactMap {
+                $0.kind == "otb" ? KTResourceManifest.parseAgentHandle($0.handle)?.id : nil
+            })
+        let producedOTBTransfers = transfers.filter { producedOTBIDs.contains($0.transferID) }
+        if !producedOTBTransfers.isEmpty {
+            await materializeProducedOTBOutputs(producedOTBTransfers, from: deliveryNodeID)
+        }
+        let fsTransfers = transfers.filter { !producedOTBIDs.contains($0.transferID) }
+        guard !fsTransfers.isEmpty else {
+            var cleaned = result
+            cleaned.outputTransfers = nil
+            return cleaned
+        }
+        var fsResult = result
+        fsResult.outputTransfers = fsTransfers
         let receiveDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent(
                 "kt-otb-recv-\(request.id.uuidString.lowercased())", isDirectory: true)
         return try await materializingIncomingFilesystemTransfers(
-            result, from: deliveryNodeID, into: receiveDir)
+            fsResult, from: deliveryNodeID, into: receiveDir)
     }
 
     private func dispatchBlockingActionCallViaContinuation(
@@ -933,7 +1038,7 @@ extension KeepTalkingClient {
             context: context
         )
 
-        let content = try await suspendAgentTurnForContinuation(
+        let continuationResult = try await suspendAgentTurnForContinuation(
             agentTurnID: agentTurnID,
             toolCallID: request.id.uuidString.lowercased(),
             actionID: call.action,
@@ -944,21 +1049,27 @@ extension KeepTalkingClient {
             sender: sender
         )
 
-        // For file requests, wait until blobs have synced before returning
-        // control to the agent so it can immediately read the files.
-        if kind == KeepTalkingPrimitiveActionKind.askForFile.rawValue, !content.isEmpty {
-            let contextID = try context.requireID()
-            await waitForContinuationBlobs(from: content, in: contextID)
+        // Materialize any private output transfers the target shipped (e.g. a
+        // remote ask-for-file's picked file) into our staged store, keyed by their
+        // transfer id == the produced_resources handle, so the agent can read /
+        // auto-inject them locally.
+        if let transfers = continuationResult.outputTransfers, !transfers.isEmpty {
+            await materializeProducedOTBOutputs(transfers, from: targetNodeID)
         }
 
+        // Carry the produced resources + output transfers the target computed
+        // (e.g. a remote ask-for-file's picked file) all the way back — the
+        // continuation path now delivers everything the direct path does.
         return KeepTalkingActionCallResult(
             requestID: request.id,
             contextID: request.contextID,
             callerNodeID: config.node,
             targetNodeID: targetNodeID,
             actionID: call.action,
-            content: content,
-            isError: content.isEmpty
+            content: continuationResult.content,
+            isError: continuationResult.content.isEmpty,
+            outputTransfers: continuationResult.outputTransfers,
+            producedResources: continuationResult.producedResources
         )
     }
 

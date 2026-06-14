@@ -181,6 +181,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// continuation. A non-blocking driver (e.g. the voice bridge) uses this to
     /// acknowledge and detach — see `KeepTalkingAgentTurnSuspension`.
     public var onAgentTurnSuspended: (@Sendable (KeepTalkingAgentTurnSuspension) -> Void)?
+    /// Symmetric counterpart to `onAgentTurnSuspended`: fired when a previously
+    /// suspended turn resumes (its continuation was answered — fulfilled or
+    /// rejected — or an early response was already waiting). A driver that
+    /// detached on suspend uses this to flip the run's UI back from "waiting"
+    /// to "running" — see `KeepTalkingAgentTurnResumption`.
+    public var onAgentTurnResumed: (@Sendable (KeepTalkingAgentTurnResumption) -> Void)?
     /// Fired whenever a voice-call transcript line is persisted — both locally
     /// appended (own mic) and received from a peer. The app drives the live
     /// quick-panel + viewer from this. Carries the Sendable envelope payload so

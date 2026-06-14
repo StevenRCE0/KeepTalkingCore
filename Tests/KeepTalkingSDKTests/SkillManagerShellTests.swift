@@ -42,7 +42,6 @@ struct SkillManagerShellTests {
     func shellToolIsExposed() async throws {
         let manager = makeManager()
         let context = SkillManifestContext(
-            manifestURL: URL(fileURLWithPath: "/tmp"),
             manifestText: "", manifestMetadata: [:], referencesFiles: [],
             scripts: [], assets: [])
         let tools = await manager.makeSkillTools(context: context)
@@ -176,7 +175,7 @@ struct SkillManagerShellTests {
         let manager = makeManager()
 
         let context = SkillManifestContext(
-            manifestURL: workspace, manifestText: "", manifestMetadata: [:],
+            manifestText: "", manifestMetadata: [:],
             referencesFiles: [], scripts: [], assets: [])
         let toolCall = AIToolCall(
             id: "call-1", name: SkillManager.shellToolName,

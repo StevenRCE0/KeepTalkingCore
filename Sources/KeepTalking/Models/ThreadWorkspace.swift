@@ -30,12 +30,6 @@ public final class KeepTalkingThreadWorkspace: Model, @unchecked Sendable {
 
     public init() {}
 
-    public init(id: UUID = UUID.v7(), thread: KeepTalkingThread, path: String) {
-        self.id = id
-        self.$thread.id = thread.id!
-        self.path = path
-    }
-
     public init(id: UUID = UUID.v7(), threadID: UUID, path: String) {
         self.id = id
         self.$thread.id = threadID

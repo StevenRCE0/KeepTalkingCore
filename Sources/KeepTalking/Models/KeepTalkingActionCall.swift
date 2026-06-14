@@ -20,19 +20,66 @@ public struct KeepTalkingActionCall: Codable, Sendable {
     /// executor via `sendFile`. The executor resolves each to its staged path
     /// and feeds it to the action's input file object. Optional.
     public var inputHandles: [UUID]?
+    /// Caller-allocated OUTPUT handles: what the caller expects this call to
+    /// produce. The CALLER mints each `id` (so it can track the output and re-feed
+    /// it as a later call's input — A→B chaining), picks `persistence` (durable
+    /// synced attachment vs private ephemeral OTB), and sets `multiple` (whether the
+    /// handle may resolve to 0..N files). The provider binds its produced output(s)
+    /// to these instead of minting its own slot ids. Optional; absent ⇒ provider
+    /// mints slots from its declared `.output` objects (back-compat).
+    public var outputHandles: [KeepTalkingActionOutputHandle]?
 
     public init(
         action: UUID,
         arguments: [String: Value] = [:],
         metadata: Metadata = .init(),
         inputTransfers: [KeepTalkingOneTimeBlobRef]? = nil,
-        inputHandles: [UUID]? = nil
+        inputHandles: [UUID]? = nil,
+        outputHandles: [KeepTalkingActionOutputHandle]? = nil
     ) {
         self.action = action
         self.arguments = arguments
         self.metadata = metadata
         self.inputTransfers = inputTransfers
         self.inputHandles = inputHandles
+        self.outputHandles = outputHandles
+    }
+}
+
+/// A caller-allocated OUTPUT the caller expects a call to produce. The caller mints
+/// `id` (track + re-feed as a later call's input — A→B chaining), chooses
+/// `persistence` (durable synced attachment vs private ephemeral OTB), and sets
+/// `multiple` (resolves to 0..N files, not just one). Symmetric to
+/// `KeepTalkingActionCall.inputHandles`. Deliberately has NO `isDirectory`: a
+/// transferred output is always a file; "many files" is `multiple`, and local
+/// directories are sandbox grants, not outputs.
+public struct KeepTalkingActionOutputHandle: Codable, Sendable, Equatable {
+    /// Where a produced output is delivered.
+    public enum Persistence: String, Codable, Sendable {
+        /// Durable, broadcast/synced, immutable context attachment.
+        case attachment
+        /// Private, point-to-point, ephemeral one-time blob (no record, no broadcast).
+        case otb
+    }
+    /// Caller-minted id; the produced output(s) round-trip tagged with it.
+    public var id: UUID
+    /// Logical role name (e.g. "result"); drives the manifest handle token.
+    public var name: String
+    /// Delivery family for what this call produces.
+    public var persistence: Persistence
+    /// Whether this handle may resolve to 0..N files (a collection) rather than one.
+    public var multiple: Bool
+
+    public init(
+        id: UUID = UUID.v7(),
+        name: String,
+        persistence: Persistence,
+        multiple: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.persistence = persistence
+        self.multiple = multiple
     }
 }
 
@@ -70,6 +117,11 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
     /// One-time blobs the executor is streaming back to the caller (e.g. a file
     /// read from the remote host). Each carries the sealed per-transfer key.
     public var outputTransfers: [KeepTalkingOneTimeBlobRef]?
+    /// The resources this call PRODUCED, in the unified agent-facing resource
+    /// format — summoned durable attachments and/or private OTB outputs. Surfaced
+    /// to the orchestrating agent so it can reference them (same vocabulary as the
+    /// context-attachment listing).
+    public var producedResources: [KTResourceManifest.AgentResource]?
 
     public init(
         requestID: UUID,
@@ -80,7 +132,8 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
         content: [Tool.Content] = [],
         isError: Bool = false,
         errorMessage: String? = nil,
-        outputTransfers: [KeepTalkingOneTimeBlobRef]? = nil
+        outputTransfers: [KeepTalkingOneTimeBlobRef]? = nil,
+        producedResources: [KTResourceManifest.AgentResource]? = nil
     ) {
         self.requestID = requestID
         self.contextID = contextID
@@ -91,6 +144,7 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
         self.isError = isError
         self.errorMessage = errorMessage
         self.outputTransfers = outputTransfers
+        self.producedResources = producedResources
     }
 }
 

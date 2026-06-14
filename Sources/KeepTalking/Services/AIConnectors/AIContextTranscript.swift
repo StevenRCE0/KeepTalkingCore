@@ -462,6 +462,31 @@ extension KeepTalkingClient {
         // about "now" correctly instead of being time-blind.
         sections.append("Environment:\n\(KeepTalkingEnvironmentContext.summaryLine())")
 
+        // --- Side notes ---
+        // Persistent context notes the main agent maintains (key/value pairs).
+        // The audio bridge needs them to route intelligently — e.g. a note
+        // "Current project: X" should inform which requests get delegated.
+        let activeSideNotes =
+            (try? await KeepTalkingSideNote.query(on: localStore.database)
+                .filter(\.$context.$id, .equal, contextID)
+                .filter(\.$isArchived == false)
+                .sort(\.$updatedAt, .descending)
+                .all()
+                .compactMap { KeepTalkingSideNoteDTO($0) }) ?? []
+        if !activeSideNotes.isEmpty {
+            let body = activeSideNotes.map { "[\($0.key)] \($0.value)" }.joined(separator: "\n")
+            sections.append(
+                """
+                Side notes:
+                Active notes track plans, open questions, and state that must survive \
+                across turns. They may also contain conventions, standard operating \
+                procedures, and instructions you must follow. Archived notes no longer \
+                appear here. To create, update, or archive a note, delegate the request \
+                to the backend agent.
+                \(body)
+                """)
+        }
+
         // --- Conversation-derived sections (single load) ---
         // One load feeds thread topics, participant names, and the recent tail —
         // the situational picture the model needs to answer in place.

@@ -128,44 +128,13 @@ extension KeepTalkingSkillPlanner {
         )
     }
 
-    /// Dry-runs a candidate command (login shell, short timeout) so the planner
-    /// can confirm an invocation works before declaring it. Unsandboxed — the
-    /// tool description constrains it to safe read-only smoke checks.
-    func tryRun(command: String, cwd: String?) async -> ProbeOutcome {
-        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return ProbeOutcome(summary: "empty command", toolResult: "error: empty command.")
-        }
-        let workdir =
-            (cwd?.hasPrefix("/") == true)
-            ? URL(fileURLWithPath: cwd!) : probeWorkingDirectory()
-        let result = await runBounded(
-            ["/bin/zsh", "-lc", trimmed],
-            cwd: workdir,
-            timeout: 12
-        )
-        let out = String(result.stdout.prefix(4_000))
-        let err = String(result.stderr.prefix(2_000))
-        return ProbeOutcome(
-            summary: "exit \(result.exitCode)",
-            toolResult: """
-                command: \(trimmed)
-                exit_code: \(result.exitCode)
-                stdout:
-                \(out.isEmpty ? "<empty>" : out)
-                stderr:
-                \(err.isEmpty ? "<empty>" : err)
-                """
-        )
-    }
-
-    /// Provisions the skill's environment by running `command` in a login shell.
-    /// Unsandboxed, like `tryRun`, but with a longer budget because installs are
-    /// slow. Setup-time network consent is gated by the planner BEFORE this runs,
-    /// so by the time we get here the user has permitted the hosts the step
-    /// declared. Output is truncated generously so the planner can read install
-    /// logs and confirm success.
-    func runSetup(command: String, cwd: String?, timeout: TimeInterval = 240) async -> ProbeOutcome {
+    /// Runs a planner `kt_shell` command in a login shell (unsandboxed, the user's
+    /// real PATH). Used both to verify invocations and to provision the env
+    /// (installs), so the budget is generous and output is truncated loosely so the
+    /// planner can read install logs and confirm success. Setup-time network
+    /// consent is gated by the planner BEFORE this runs, so any hosts the command
+    /// reaches were already permitted by the user.
+    func runShellCommand(command: String, cwd: String?, timeout: TimeInterval = 240) async -> ProbeOutcome {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return ProbeOutcome(summary: "empty command", toolResult: "error: empty command.")

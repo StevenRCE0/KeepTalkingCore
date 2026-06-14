@@ -101,14 +101,19 @@ extension KeepTalkingClient {
                     isDirectory: false))
         }
 
-        // `.output` / `.inputOutput` objects → write slots under the workspace.
+        // Output write slots under the workspace. Prefer CALLER-allocated output
+        // handles (the caller mints the id + picks persistence so it can track the
+        // output and re-feed it as a later call's input — A→B chaining); fall back
+        // to provider-minted slots from declared `.output` objects when the caller
+        // declared none (back-compat). A harvested output is an OTB shipped
+        // provider→caller ("an output is another OTB, inverted"); `persistence`
+        // chooses the destination family (durable attachment vs ephemeral OTB).
+        // NOTE: variable cardinality (`multiple` → a 0..N collection slot) is
+        // handled in a later layer; here each handle allocates one file slot.
         var outputs: [KTCallBinding.BoundObject] = []
         if let workspaceDir {
             var usedNames = Set<String>()
-            for (index, object) in outputObjects.enumerated() {
-                let base =
-                    object.name.flatMap(Self.sanitizeFileComponent)
-                    ?? "output-\(index + 1)"
+            func uniqueFileName(_ base: String) -> String {
                 var fileName = base
                 var disambiguator = 2
                 while usedNames.contains(fileName) {
@@ -116,18 +121,51 @@ extension KeepTalkingClient {
                     disambiguator += 1
                 }
                 usedNames.insert(fileName)
-                let direction: KeepTalkingResourceDirection =
-                    object.direction == .inputOutput ? .inputOutput : .output
-                outputs.append(
-                    KTCallBinding.BoundObject(
-                        objectName: object.name,
-                        id: UUID.v7(),
-                        kind: .output,
-                        path: workspaceDir.appendingPathComponent(
-                            fileName, isDirectory: false),
-                        direction: direction,
-                        displayName: object.name ?? fileName,
-                        isDirectory: false))
+                return fileName
+            }
+
+            if let callerHandles = call.outputHandles, !callerHandles.isEmpty {
+                for (index, handle) in callerHandles.enumerated() {
+                    let base =
+                        Self.sanitizeFileComponent(handle.name) ?? "output-\(index + 1)"
+                    let fileName = uniqueFileName(base)
+                    let kind: KTResourceManifest.Kind =
+                        handle.persistence == .attachment ? .attachment : .otb
+                    // A `multiple` handle resolves to 0..N files: its slot is a
+                    // DIRECTORY the skill writes into; harvest enumerates it. A
+                    // single handle is one file slot. (isDirectory here marks the
+                    // collection slot — distinct from a transferred file's nature.)
+                    let isCollection = handle.multiple
+                    outputs.append(
+                        KTCallBinding.BoundObject(
+                            objectName: handle.name,
+                            id: handle.id,  // CALLER-allocated, round-trips with the output
+                            kind: kind,
+                            path: workspaceDir.appendingPathComponent(
+                                fileName, isDirectory: isCollection),
+                            direction: .output,
+                            displayName: handle.name,
+                            isDirectory: isCollection))
+                }
+            } else {
+                for (index, object) in outputObjects.enumerated() {
+                    let base =
+                        object.name.flatMap(Self.sanitizeFileComponent)
+                        ?? "output-\(index + 1)"
+                    let fileName = uniqueFileName(base)
+                    let direction: KeepTalkingResourceDirection =
+                        object.direction == .inputOutput ? .inputOutput : .output
+                    outputs.append(
+                        KTCallBinding.BoundObject(
+                            objectName: object.name,
+                            id: UUID.v7(),
+                            kind: .otb,
+                            path: workspaceDir.appendingPathComponent(
+                                fileName, isDirectory: false),
+                            direction: direction,
+                            displayName: object.name ?? fileName,
+                            isDirectory: false))
+                }
             }
         }
 
@@ -146,40 +184,183 @@ extension KeepTalkingClient {
             inputs: inputs, outputs: outputs, grantedDirectories: grantedDirectories)
     }
 
-    /// After a run, stream any file present at a declared `.output` slot back to
-    /// the caller as a one-time blob. Returns the refs to attach to the result.
-    /// Caller MUST gate on a remote caller and on the output slots actually being
-    /// granted — a slot whose workspace grant was dropped points at an ungranted
-    /// path the script never reached, so it stays empty and is silently skipped.
-    func harvestCallOutputs(
-        _ outputs: [KTCallBinding.BoundObject],
-        to recipientNodeID: UUID
-    ) async -> [KeepTalkingOneTimeBlobRef] {
-        var refs: [KeepTalkingOneTimeBlobRef] = []
-        let fileManager = FileManager.default
-        for output in outputs {
-            var isDirectory: ObjCBool = false
-            guard
-                fileManager.fileExists(
-                    atPath: output.path.path, isDirectory: &isDirectory),
-                !isDirectory.boolValue
-            else { continue }
-            let ext = output.path.pathExtension
-            let mimeType =
-                ext.isEmpty
-                ? "application/octet-stream"
-                : (MIMEType.preferredMIMEType(forExtension: ext)
-                    ?? "application/octet-stream")
-            if let ref = try? await sendOneTimeBlob(
-                fileURL: output.path,
-                filename: output.path.lastPathComponent,
-                mimeType: mimeType,
-                to: recipientNodeID)
-            {
-                refs.append(ref)
-            }
+    /// Flattens declared `.output` slots to the concrete file(s) they produced, as
+    /// `KeepTalkingLocalAttachmentInput`s ready for `deliverProducedOutputFiles`. A
+    /// single-file slot contributes its file; a collection slot (a directory, from a
+    /// `multiple` handle) contributes every regular file inside. A slot that produced
+    /// nothing (e.g. its workspace grant was dropped) contributes nothing. This is
+    /// the ONE place skill output slots become deliverable files — the per-Kind
+    /// routing then lives solely in `deliverProducedOutputFiles`.
+    func producedOutputFiles(
+        from outputs: [KTCallBinding.BoundObject]
+    ) -> [KeepTalkingLocalAttachmentInput] {
+        outputs.flatMap { resolveOutputFiles($0) }.map {
+            KeepTalkingLocalAttachmentInput(
+                sourceURL: $0, filename: $0.lastPathComponent, mimeType: nil)
         }
-        return refs
+    }
+
+    /// Delivers produced output files per the caller's persistence switch, into the
+    /// unified producedResources format — the SINGLE deliverer for every action
+    /// output (skill slots AND primitive results), so an output is indistinguishable
+    /// to the agent regardless of which action produced it.
+    /// - `.attachment`: summon durable, synced context attachment(s) (any caller).
+    /// - `.otb` to a REMOTE caller: ship private point-to-point (returns transfers).
+    /// - `.otb` for a LOCAL caller: stage RE-FEEDABLE in the private store (never
+    ///   broadcast) so the agent can read it AND chain it into a later action.
+    func deliverProducedOutputFiles(
+        _ inputs: [KeepTalkingLocalAttachmentInput],
+        persistence: KeepTalkingActionOutputHandle.Persistence,
+        in contextID: UUID,
+        to callerNodeID: UUID
+    ) async -> (
+        resources: [KTResourceManifest.AgentResource],
+        transfers: [KeepTalkingOneTimeBlobRef]
+    ) {
+        switch persistence {
+            case .attachment:
+                // Durable, shared: a broadcast (synced) attachment.
+                let saved = (try? await summonContextAttachments(inputs, in: contextID)) ?? []
+                return (saved.map { Self.attachmentResource($0) }, [])
+            case .otb where callerNodeID == config.node:
+                // PRIVATE local: register in the staged-file store — NEVER an
+                // attachment, NEVER synced/broadcast. The agent reads it by handle
+                // (kt_get_context_attachment resolves staged handles). The local
+                // node is its own "caller" so it owns + can read the handle.
+                var resources: [KTResourceManifest.AgentResource] = []
+                for input in inputs {
+                    let filename = input.filename ?? input.sourceURL.lastPathComponent
+                    let mime =
+                        input.mimeType
+                        ?? MIMEType.preferredMIMEType(
+                            forExtension: input.sourceURL.pathExtension)
+                        ?? "application/octet-stream"
+                    guard
+                        let staged = await stagedFileStore.stageLocalFile(
+                            at: input.sourceURL, filename: filename,
+                            callerNodeID: config.node)
+                    else {
+                        onLog?("[io/primitive-output] otb+local staging refused for \(filename)")
+                        continue
+                    }
+                    resources.append(
+                        KTResourceManifest.AgentResource(
+                            kind: .otb,
+                            id: staged.handle,
+                            direction: "read",
+                            name: filename,
+                            mimeType: mime,
+                            byteCount: staged.byteCount,
+                            origin: "produced"))
+                }
+                return (resources, [])
+            case .otb:
+                // PRIVATE remote: ship point-to-point; the caller materializes it.
+                var refs: [KeepTalkingOneTimeBlobRef] = []
+                for input in inputs {
+                    let filename = input.filename ?? input.sourceURL.lastPathComponent
+                    let mime =
+                        input.mimeType
+                        ?? MIMEType.preferredMIMEType(
+                            forExtension: input.sourceURL.pathExtension)
+                        ?? "application/octet-stream"
+                    if let ref = try? await sendOneTimeBlob(
+                        fileURL: input.sourceURL, filename: filename, mimeType: mime,
+                        to: callerNodeID)
+                    {
+                        refs.append(ref)
+                    }
+                }
+                return (producedOTBResources(refs), refs)
+        }
+    }
+
+    /// Maps a context attachment to the unified agent-facing resource (origin
+    /// "produced"). Shared by the skill-summon and primitive-output paths.
+    static func attachmentResource(_ attachment: KeepTalkingContextAttachment)
+        -> KTResourceManifest.AgentResource
+    {
+        KTResourceManifest.AgentResource(
+            kind: .attachment,
+            id: attachment.id ?? UUID(),
+            direction: "read",
+            name: attachment.filename,
+            mimeType: attachment.mimeType,
+            byteCount: attachment.byteCount,
+            summary: attachment.metadata.textPreview ?? attachment.metadata.imageDescription,
+            origin: "produced")
+    }
+
+    /// Materializes private `.otb` output transfers a remote action shipped back
+    /// (e.g. a produced output / a remote ask-for-file's picked file) into THIS
+    /// node's staged-file store, keyed by each transfer id — which is exactly the
+    /// `handle` in the matching `produced_resources` entry. So the agent can read /
+    /// auto-inject the produced file by handle AND re-feed it into a later action
+    /// (A→B chaining), even though it was produced on another node and never
+    /// broadcast. Registered re-feedable under config.node. Called by BOTH the
+    /// continuation path and the direct remote-result path.
+    func materializeProducedOTBOutputs(
+        _ refs: [KeepTalkingOneTimeBlobRef], from senderNodeID: UUID
+    ) async {
+        for ref in refs {
+            let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+                .appendingPathComponent(
+                    "kt-otb-out-\(ref.transferID.uuidString.lowercased())", isDirectory: true)
+            guard
+                let url = try? await materializeOneTimeBlob(
+                    ref, from: senderNodeID, into: dir)
+            else {
+                onLog?(
+                    "[io/materialize] FAILED transfer=\(ref.transferID.uuidString.prefix(8))")
+                continue
+            }
+            await stagedFileStore.register(
+                handle: ref.transferID, url: url, callerNodeID: config.node,
+                filename: ref.filename, byteCount: ref.byteCount,
+                // A remote-produced `.otb` materialized here is a re-feedable output
+                // (it can flow into a later action call), not a consume-once relay.
+                consumeOnUse: false)
+            onLog?(
+                "[io/materialize] staged transfer=\(ref.transferID.uuidString.prefix(8)) "
+                    + "name=\(ref.filename) for local read")
+        }
+    }
+
+    /// Maps harvested one-time-blob output refs into the unified agent-facing
+    /// resource format (private `.otb` outputs the caller now holds).
+    func producedOTBResources(_ refs: [KeepTalkingOneTimeBlobRef])
+        -> [KTResourceManifest.AgentResource]
+    {
+        refs.map { ref in
+            KTResourceManifest.AgentResource(
+                kind: .otb,
+                id: ref.transferID,
+                direction: "read",
+                name: ref.filename,
+                mimeType: ref.mimeType,
+                byteCount: ref.byteCount,
+                origin: "produced")
+        }
+    }
+
+    /// Resolves an output slot to the concrete file(s) it produced: a single-file
+    /// slot → that file (when it exists); a collection slot (a directory, from a
+    /// `multiple` output handle) → every regular file written into it, sorted for
+    /// determinism. Empty when the run produced nothing at the slot.
+    func resolveOutputFiles(_ output: KTCallBinding.BoundObject) -> [URL] {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: output.path.path, isDirectory: &isDir) else { return [] }
+        guard isDir.boolValue else { return [output.path] }
+        let items =
+            (try? fm.contentsOfDirectory(
+                at: output.path,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles])) ?? []
+        return
+            items
+            .filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+            .sorted { $0.path < $1.path }
     }
 
     /// Folds a declared object name into a safe single path component: control

@@ -47,7 +47,6 @@ public enum SkillManagerError: LocalizedError {
 }
 
 struct SkillManifestContext: Sendable {
-    let manifestURL: URL
     let manifestText: String
     let manifestMetadata: [String: String]
     let referencesFiles: [String]
@@ -59,7 +58,6 @@ struct SkillManifestContext: Sendable {
 public actor SkillManager {
     static let getFileToolName = "kt_skill_get_file"
     static let listFilesToolName = "kt_skill_list_files"
-    static let runScriptToolName = "kt_skill_run_script"
     static let shellToolName = "kt_shell"
     static let manifestMaxCharacters = 20_000
     static let fileReadMaxCharacters = 30_000

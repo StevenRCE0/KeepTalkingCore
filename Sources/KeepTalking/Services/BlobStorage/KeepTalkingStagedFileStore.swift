@@ -14,6 +14,13 @@ actor KeepTalkingStagedFileStore {
         let filename: String
         let byteCount: Int
         var createdAt: Date
+        /// Whether this entry is destroyed the first time an action call consumes
+        /// it (`discardIfConsumable`). TRUE for ephemeral INPUT relays (a peer
+        /// preflight or a `kt_send_file` stage made just ahead of one call). FALSE
+        /// for PRODUCED outputs (an action's `.otb` result staged for re-feeding /
+        /// A→B chaining) — those must survive consumption so the same handle can
+        /// flow into a later action; TTL + quota reclaim them instead.
+        let consumeOnUse: Bool
     }
 
     private let baseDirectory: URL
@@ -63,10 +70,15 @@ actor KeepTalkingStagedFileStore {
     }
 
     /// Registers an already-materialized staged file and accounts its bytes.
-    func register(handle: UUID, url: URL, callerNodeID: UUID, filename: String, byteCount: Int) {
+    /// `consumeOnUse` defaults true (an ephemeral input relay destroyed on first
+    /// consume); pass false for a PRODUCED output that must be re-feedable.
+    func register(
+        handle: UUID, url: URL, callerNodeID: UUID, filename: String,
+        byteCount: Int, consumeOnUse: Bool = true
+    ) {
         entries[handle] = Entry(
             url: url, callerNodeID: callerNodeID, filename: filename,
-            byteCount: byteCount, createdAt: Date())
+            byteCount: byteCount, createdAt: Date(), consumeOnUse: consumeOnUse)
         totalBytes += byteCount
         bytesByCaller[callerNodeID, default: 0] += byteCount
     }
@@ -90,12 +102,83 @@ actor KeepTalkingStagedFileStore {
         return dest
     }
 
+    /// Stages a LOCAL file into the private store (e.g. a primitive's private
+    /// `.otb` output) and returns its handle. Unlike peer preflight, the bytes are
+    /// already local — this reserves a quota-checked dir, copies the file in, and
+    /// registers it. The result is NEVER an attachment and NEVER synced/broadcast;
+    /// the agent reads it by handle. Returns nil if a quota refuses the stage.
+    /// Registered as RE-FEEDABLE (not consume-on-use): a produced `.otb` output is
+    /// meant to flow into a later action call (A→B chaining), so consuming it once
+    /// must not destroy it — TTL + quota reclaim it instead.
+    func stageLocalFile(
+        at sourceURL: URL, filename: String, callerNodeID: UUID
+    ) -> (handle: UUID, byteCount: Int)? {
+        let byteCount =
+            ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path))?[.size]
+                as? Int) ?? 0
+        guard
+            let (handle, dir) = makeStagingDirectory(
+                expectedBytes: byteCount, callerNodeID: callerNodeID)
+        else { return nil }
+        let safe = (filename as NSString).lastPathComponent
+        let name = safe.isEmpty ? "file" : safe
+        let dest = dir.appendingPathComponent(name, isDirectory: false)
+        do {
+            try FileManager.default.copyItem(at: sourceURL, to: dest)
+        } catch {
+            discard(handle: handle)
+            return nil
+        }
+        register(
+            handle: handle, url: dest, callerNodeID: callerNodeID,
+            filename: name, byteCount: byteCount, consumeOnUse: false)
+        return (handle, byteCount)
+    }
+
+    /// Resolves a caller-owned staged handle to its file + metadata so the agent
+    /// can READ a private resource by handle. Caller-scoped: a foreign or unknown
+    /// handle (or one whose bytes vanished) returns nil.
+    func file(
+        handle: UUID, callerNodeID: UUID
+    ) -> (url: URL, filename: String, byteCount: Int)? {
+        reap()
+        guard let entry = entries[handle], entry.callerNodeID == callerNodeID,
+            FileManager.default.fileExists(atPath: entry.url.path)
+        else { return nil }
+        return (entry.url, entry.filename, entry.byteCount)
+    }
+
+    /// Diagnostic (logs only): why `handle` won't resolve for `callerNodeID`.
+    /// `reap()` has already removed TTL-expired entries by the time a resolve
+    /// fails, so "absent" folds expired/discarded/never-staged together.
+    func resolutionDiagnosis(handle: UUID, callerNodeID: UUID) -> String {
+        guard let entry = entries[handle] else {
+            return "absent(never-staged-on-this-node, or expired/discarded)"
+        }
+        if entry.callerNodeID != callerNodeID {
+            return "foreign(owned-by=\(entry.callerNodeID.uuidString.prefix(8)))"
+        }
+        if !FileManager.default.fileExists(atPath: entry.url.path) {
+            return "bytes-vanished"
+        }
+        return "present(unexpected)"
+    }
+
     func discard(handle: UUID) {
         guard let entry = entries.removeValue(forKey: handle) else { return }
         totalBytes = max(0, totalBytes - entry.byteCount)
         let remaining = (bytesByCaller[entry.callerNodeID] ?? 0) - entry.byteCount
         bytesByCaller[entry.callerNodeID] = remaining > 0 ? remaining : nil
         try? FileManager.default.removeItem(at: entry.url.deletingLastPathComponent())
+    }
+
+    /// Post-consumption cleanup for an action call's input handles: discards ONLY
+    /// consume-on-use entries (ephemeral relays). A re-feedable PRODUCED output is
+    /// left intact so the same handle can flow into a later action call — exactly
+    /// the A→B chaining that an unconditional `discard` silently broke.
+    func discardIfConsumable(handle: UUID) {
+        guard let entry = entries[handle], entry.consumeOnUse else { return }
+        discard(handle: handle)
     }
 
     // MARK: - Private

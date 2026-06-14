@@ -445,11 +445,11 @@ extension KeepTalkingClient {
                     )
                 },
                 toolTranscriptAdapter: { [self] executions in
-                    try await adaptMidTurnInjectionMessages(
-                        executions,
-                        runtimeCatalog: runtimeCatalog,
-                        context: persistedContext
-                    )
+                    // Auto-inject produced resources (attachment/otb) so a file the
+                    // agent just requested — e.g. via ask-for-file — is CONSUMED this
+                    // turn, not handed back as a handle to optionally pull in later.
+                    await nativeMessagesForProducedResources(
+                        from: executions, context: persistedContext)
                 },
                 actAgent: actAgent,
                 assistantPublisher: assistantPublisher,
@@ -741,7 +741,12 @@ extension KeepTalkingClient {
             if let leadText = sanitizedAttachmentLeadText(leadText) {
                 parts.append(.text(leadText))
             }
-            if let url = URL(string: "data:\(mimeType);base64,\(data.base64EncodedString())") {
+            // Cap the longest side at 4000px before handing the image to a model.
+            let scaled = KeepTalkingImageDownscaler.downscaledIfNeeded(
+                data, mimeType: mimeType)
+            if let url = URL(
+                string: "data:\(scaled.mimeType);base64,\(scaled.data.base64EncodedString())")
+            {
                 parts.append(.imageURL(url))
             }
             return parts

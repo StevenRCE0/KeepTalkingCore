@@ -142,10 +142,21 @@ extension KeepTalkingPrimitiveActionKind {
 public struct KeepTalkingPrimitiveActionResponse: Sendable {
     public let text: String
     public let isError: Bool
+    /// Files this primitive PRODUCED (e.g. ask-for-file's picked files). The
+    /// execution layer routes them per the call's output persistence switch —
+    /// durable summoned attachment(s) or private OTB — landing as the call's
+    /// `producedResources`, uniform with skill/action outputs. Empty for
+    /// primitives that only return text.
+    public let outputFiles: [KeepTalkingLocalAttachmentInput]
 
-    public init(text: String, isError: Bool = false) {
+    public init(
+        text: String,
+        isError: Bool = false,
+        outputFiles: [KeepTalkingLocalAttachmentInput] = []
+    ) {
         self.text = text
         self.isError = isError
+        self.outputFiles = outputFiles
     }
 }
 

@@ -27,7 +27,6 @@ extension SkillManager {
         try validateSkillDirectory(directory)
         guard let directory else {
             return SkillManifestContext(
-                manifestURL: URL(fileURLWithPath: "/dev/null"),
                 manifestText: "",
                 manifestMetadata: [:],
                 referencesFiles: [],
@@ -50,7 +49,6 @@ extension SkillManager {
         let metadata = parseManifestMetadata(substituted)
 
         return SkillManifestContext(
-            manifestURL: manifestURL,
             manifestText: manifestText,
             manifestMetadata: metadata,
             referencesFiles: listRelativeFiles(

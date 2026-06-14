@@ -61,15 +61,11 @@ public enum KeepTalkingSkillPlannerEvent: Sendable {
     case requiringExecutable(name: String, path: String, purpose: String)
     /// RUNTIME network ask — the skill needs egress to `host` when it executes.
     case requiringNetwork(host: String, purpose: String)
-    /// SETUP-time network ask — the planner's `setup_environment` step needs to
-    /// reach `host` while provisioning the environment (e.g. a package index).
-    /// A SEPARATE consent from `requiringNetwork`: granting setup egress does
-    /// not grant runtime egress, and vice-versa. Return "granted" to permit.
+    /// SETUP-time network ask — a `kt_shell` command needs to reach `host` while
+    /// the planner provisions the environment (e.g. a package index). A SEPARATE
+    /// consent from `requiringNetwork`: granting setup egress does not grant
+    /// runtime egress, and vice-versa. Return "granted" to permit.
     case requiringSetupNetwork(host: String, purpose: String)
-    /// The planner ran a `setup_environment` command to provision the env.
-    /// `summary` is a short activity line (e.g. "exit 0"); `detail` carries the
-    /// command. Informational — return nil.
-    case settingUpEnvironment(summary: String, detail: String)
     case requiringHTTPURL(serviceName: String)
     case creatingShortcut(name: String)
     case creatingPrimitive(kind: String)
@@ -140,8 +136,7 @@ public actor KeepTalkingSkillPlanner {
     private static let askUserTool = "kt_ask_user"
     static let probeCommandTool = "kt_probe_command"
     static let checkPathTool = "kt_check_path"
-    static let tryRunTool = "kt_try_run"
-    static let setupEnvironmentTool = "setup_environment"
+    static let shellTool = "kt_shell"
     private static let requireExecutableTool = "kt_require_executable"
     private static let refuseTool = "kt_refuse"
     private static let finalizeTool = "kt_finalize"
@@ -301,8 +296,8 @@ public actor KeepTalkingSkillPlanner {
 
     /// Resumes the open planning session with a free-form user message. The
     /// planner sees the full prior transcript and every accumulated declaration,
-    /// so it can revise the plan in place — add steps, change tools, or drop
-    /// now-wrong steps via `kt_drop_tool` — instead of starting over. Resources
+    /// so it can revise the plan in place — declaring further steps or tools —
+    /// instead of starting over. Resources
     /// the user already granted are not re-requested. Throws `noActiveSession`
     /// if `plan(...)` has not been called yet.
     public func continuePlanning(
@@ -537,14 +532,14 @@ public actor KeepTalkingSkillPlanner {
                             _ = await onEvent?(.probing(summary: "Check \(path)", detail: info.summary))
                             result = info.toolResult
 
-                        case Self.tryRunTool:
-                            let command = string(args["command"]) ?? ""
-                            let cwd = string(args["cwd"])
-                            let outcome = await tryRun(command: command, cwd: cwd)
-                            _ = await onEvent?(.probing(summary: "Run: \(command)", detail: outcome.summary))
-                            result = outcome.toolResult
-
-                        case Self.setupEnvironmentTool:
+                        case Self.shellTool:
+                            // The planner's general shell — used every turn to both
+                            // inspect the machine AND provision the env (installs,
+                            // venvs). Unsandboxed login shell. When a command reaches
+                            // the network, the model lists the hosts in `network_hosts`
+                            // and we take SETUP-time consent per host (separate from
+                            // runtime network) BEFORE running; a denied host blocks the
+                            // run — the user didn't consent to reaching it during setup.
                             let command = (string(args["command"]) ?? "")
                                 .trimmingCharacters(in: .whitespacesAndNewlines)
                             let purpose = string(args["purpose"]) ?? ""
@@ -554,13 +549,9 @@ public actor KeepTalkingSkillPlanner {
                                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                                 .filter { !$0.isEmpty }
                             guard !command.isEmpty else {
-                                result = "Error: setup_environment needs a non-empty `command`."
+                                result = "Error: kt_shell needs a non-empty `command`."
                                 break
                             }
-                            // Setup-time network is a SEPARATE consent from runtime
-                            // network: ask for each declared host BEFORE running the
-                            // provisioning command. A denied host blocks the run — the
-                            // user did not consent to reaching it during setup.
                             var deniedSetupHost: String?
                             for host in hosts {
                                 if !setupNetworkHosts.contains(host) { setupNetworkHosts.append(host) }
@@ -576,7 +567,7 @@ public actor KeepTalkingSkillPlanner {
                             }
                             if let deniedSetupHost {
                                 result =
-                                    "User denied setup network access to \(deniedSetupHost). The setup "
+                                    "User denied setup network access to \(deniedSetupHost). The "
                                     + "command was NOT run. Try an approach that doesn't reach "
                                     + "\(deniedSetupHost), or decline with kt_refuse (category \"blocked\")."
                                 break
@@ -587,9 +578,8 @@ public actor KeepTalkingSkillPlanner {
                                 requiredDirectories
                                 .compactMap { collectedParameters[$0] }
                                 .first(where: { $0.hasPrefix("/") })
-                            let outcome = await runSetup(command: command, cwd: cwd ?? grantedDir)
-                            _ = await onEvent?(
-                                .settingUpEnvironment(summary: outcome.summary, detail: command))
+                            let outcome = await runShellCommand(command: command, cwd: cwd ?? grantedDir)
+                            _ = await onEvent?(.probing(summary: "shell: \(command)", detail: outcome.summary))
                             result = outcome.toolResult
                     #endif
 
@@ -886,38 +876,35 @@ public actor KeepTalkingSkillPlanner {
         #if os(macOS)
         let probeGuidance = """
 
-            ## Verify before you scope — assume nothing about this machine
-            You have NO prior knowledge of what is installed or where. Before relying on \
-            any external command-line tool (uv, ffmpeg, node, etc.):
-            - Call kt_probe_command(name) to confirm it is installed AND runnable inside \
-            the skill's runtime sandbox. The sandbox only executes tools under \
-            /opt/homebrew/bin, /usr/local/bin, the standard interpreters, or a path the \
-            user permits via kt_require_executable.
-            - If the skill needs a project or working directory (e.g. a uv / npm project), \
-            call kt_require_directory for the root and kt_check_path to confirm it exists.
-            - Use kt_try_run for a safe, read-only smoke check (e.g. `uv --version`, \
-            `uv tree`) to confirm the actual invocation works.
-            - If a tool is found but NOT runnable from the sandbox, permit it with \
-            kt_require_executable(name, path, purpose) — pass the exact path the probe \
-            reported so the user just taps Allow (no file picker). If it's missing \
-            entirely, kt_ask_user where it lives or kt_refuse with the install command. \
+            ## You have a shell — verify and provision with it
+            You have NO prior knowledge of what is installed or where, and a `kt_shell` \
+            you can call EVERY turn. Use it to find out and to make things ready:
+            - To check a tool is installed AND runnable inside the skill's RUNTIME \
+            sandbox, prefer kt_probe_command(name) — it reports the resolved path and \
+            whether it sits in the sandbox exec allowlist (/opt/homebrew/bin, \
+            /usr/local/bin, the standard interpreters, or a path the user permits via \
+            kt_require_executable). For anything else, just run it in kt_shell \
+            (`uv --version`, `cat pyproject.toml`, `ls`).
+            - If the skill needs a fixed project/working directory, call \
+            kt_require_directory for the root and kt_check_path to confirm it exists.
+            - If a tool is found but NOT runnable from the runtime sandbox, permit it \
+            with kt_require_executable(name, path, purpose) — pass the exact path the \
+            probe reported so the user just taps Allow (no file picker). If it's missing \
+            entirely, install it via kt_shell, kt_ask_user where it lives, or kt_refuse. \
             Never scope in a command you have not verified can run.
 
-            ## Set up the environment — you own provisioning
-            You are responsible for getting the skill's environment ready, not just \
-            describing it. When the skill needs dependencies installed, a virtualenv \
-            created, or assets fetched:
-            - Call setup_environment(command, …) to actually run the provisioning step \
-            (e.g. `uv sync`, `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`). \
-            Verify it worked from the returned exit_code/stdout/stderr; re-run a fixed \
-            command if it failed.
-            - Network during setup is a SEPARATE consent from runtime network. If a \
-            setup command downloads anything, pass the hosts it contacts in \
-            `network_hosts` (e.g. ['pypi.org', 'files.pythonhosted.org']) — the user \
-            permits SETUP access once. Hosts the skill calls every time it RUNS go \
-            through kt_require_network instead. Don't conflate the two.
-            - Do setup BEFORE you finalize, so the action is ready to run the moment \
-            it's created.
+            ## Setting up the environment is YOUR job — do it in the shell
+            Don't just describe the setup; perform it. When the skill needs dependencies \
+            installed, a virtualenv created, or assets fetched, run those commands in \
+            kt_shell (e.g. `uv sync`, `python3 -m venv .venv && .venv/bin/pip install \
+            -r requirements.txt`) and confirm each worked from the exit_code/stdout/stderr; \
+            re-run a fixed command if it failed. Do this BEFORE you finalize, so the \
+            action is ready to run the moment it's created.
+            - SETUP network is a SEPARATE consent from runtime network. When a kt_shell \
+            command downloads anything, pass the hosts it contacts in `network_hosts` \
+            (e.g. ['pypi.org', 'files.pythonhosted.org']) — the user permits SETUP access \
+            for that command. Hosts the skill calls every time it RUNS go through \
+            kt_require_network instead. Don't conflate the two.
             """
         #else
         let probeGuidance = ""
@@ -962,21 +949,35 @@ public actor KeepTalkingSkillPlanner {
               NOT enumerate operations or register scripts — the skill runs in one sandboxed
               shell. Your job is to bound that shell with the env/dirs/files/network below.
             - For each env var needed at runtime (API keys, tokens), call kt_require_env.
-            - For each external resource the skill needs from the user, choose carefully:
-              * kt_require_directory — only when the skill walks or reads many files \
-                under a folder (e.g. "project_root", "input_dir", "output_dir").
-              * kt_require_file — when the skill targets ONE specific file (a launch \
-                script, an executable, a config file, a video to process). Pass UTI \
-                content_types to constrain the picker when you can.
-              These are NOT interchangeable: pick the one that matches what the user \
-              actually needs to point at. If a step needs both a working directory \
-              AND a specific file inside (or unrelated to) it, call BOTH tools — \
-              once per resource, with distinct labels.
+            - DYNAMIC per-call inputs flow in at runtime — do NOT collect them now. \
+              The skill is invoked by ANOTHER agent that ATTACHES the data to process \
+              to each call. At runtime those inputs are staged read-only and gathered \
+              under $KT_ATTACHMENTS/ (different files EVERY run); $KT_WORKSPACE is the \
+              skill's writable scratch dir (its cwd) for intermediate files. So for \
+              the file/content the skill OPERATES ON — the thing that differs each \
+              invocation (the PDF to convert, the video to transcode, the text to \
+              summarise) — do NOT call kt_require_file or kt_require_directory. \
+              Pinning ONE fixed path into a reusable skill is wrong; the skill reads \
+              its input from $KT_ATTACHMENTS. It returns its RESULT as TEXTUAL output \
+              (what it prints / its summary) — files left in $KT_WORKSPACE are NOT \
+              automatically sent back to the caller, so emit any result the caller \
+              needs to stdout. Reflect that in the manifest/scripts.
+            - Only collect a path at creation for a FIXED resource — one that is the \
+              SAME across every run. Choose carefully:
+              * kt_require_directory — a fixed folder the skill always works in (a \
+                specific "project_root" it operates on every run).
+              * kt_require_file — ONE fixed file the skill always uses (its own entry \
+                script, a config file, an executable). Pass UTI content_types to \
+                constrain the picker when you can.
+              These are NOT interchangeable. If a step needs both a fixed directory \
+              AND a fixed file, call BOTH — once per resource, with distinct labels. \
+              If you're unsure whether an input is per-call or fixed, kt_ask_user \
+              before asking the user to pick a path.
             - For each remote host the skill must reach AT RUNTIME (an API it calls \
               every time it runs), call kt_require_network with the bare hostname \
               and a short purpose. The user grants access per host. Do NOT use it \
-              for hosts contacted only while installing dependencies — those belong \
-              to setup_environment's setup-time network, a separate consent.
+              for hosts contacted only while installing dependencies — those go \
+              through kt_shell's `network_hosts` (setup-time consent), a separate ask.
             - You are allowed to be interactive: when intent is genuinely ambiguous, \
               call kt_ask_user with a specific question and a one-sentence context. \
               Do this BEFORE making assumptions that would lock the action into the \
@@ -1061,7 +1062,7 @@ public actor KeepTalkingSkillPlanner {
             tool(
                 name: Self.requireDirTool,
                 description:
-                    "Declare an external DIRECTORY the skill needs access to. Use ONLY when the skill walks or reads many files under a folder. If the skill needs ONE specific file (a script entry point, a config file, etc.), use kt_require_file instead. ALWAYS pass a `purpose` — the user sees it on the picker.",
+                    "Declare a FIXED external DIRECTORY the skill always works in — the SAME folder on every run. Use ONLY when the skill walks or reads many files under one fixed folder. For ONE fixed file use kt_require_file instead. Do NOT use this for per-call inputs the caller supplies (those arrive under $KT_ATTACHMENTS at runtime, not via a folder picked now). ALWAYS pass a `purpose` — the user sees it on the picker.",
                 properties: [
                     "label": (.string, "Short label, e.g. project_root or output_dir."),
                     "purpose": (
@@ -1074,7 +1075,7 @@ public actor KeepTalkingSkillPlanner {
             tool(
                 name: Self.requireFileTool,
                 description:
-                    "Declare a single FILE the skill needs the user to point at. Prefer this over kt_require_directory whenever the skill targets one specific file (e.g. an executable launch script, a config file, a video to process). The host opens a file picker, not a folder picker. ALWAYS pass a `purpose` — the user sees it on the picker.",
+                    "Declare ONE FIXED file the skill needs the user to point at — a file that is the SAME on every run (the skill's own entry script, a config file, an executable). The host opens a file picker. Do NOT use this for the per-call data the skill processes (the document/video/text that differs each invocation) — that arrives at runtime under $KT_ATTACHMENTS and must not be pinned to one path here. ALWAYS pass a `purpose` — the user sees it on the picker.",
                 properties: [
                     "label": (.string, "Short label, e.g. entry_script or config_file."),
                     "purpose": (
@@ -1091,7 +1092,7 @@ public actor KeepTalkingSkillPlanner {
             tool(
                 name: Self.requireNetworkTool,
                 description:
-                    "Request RUNTIME network egress to a host the skill needs to reach WHEN IT EXECUTES (e.g. an API it calls every run). The user grants per host. This is distinct from setup_environment's network: hosts contacted only while installing dependencies belong to setup_environment, not here.",
+                    "Request RUNTIME network egress to a host the skill needs to reach WHEN IT EXECUTES (e.g. an API it calls every run). The user grants per host. This is distinct from setup-time network: hosts contacted only while installing dependencies go through kt_shell's `network_hosts`, not here.",
                 properties: [
                     "host": (.string, "Hostname only, e.g. 'api.github.com'. Do not include scheme or path."),
                     "purpose": (.string, "Short reason the skill reaches this host at runtime."),
@@ -1193,30 +1194,6 @@ public actor KeepTalkingSkillPlanner {
         tools.append(contentsOf: makeProbeTools())
         tools.append(
             tool(
-                name: Self.setupEnvironmentTool,
-                description:
-                    "Provision the skill's runtime environment by running a shell command (install dependencies, create a virtualenv, fetch a model, etc.). Runs in a login shell with the user's real PATH. If the command needs to reach the network during setup (a package index, a download), list those hosts in `network_hosts` — the user is asked to permit SETUP network access SEPARATELY from runtime network (kt_require_network). A denied setup host blocks the run. Use this to prepare the environment BEFORE you finalize; verify it worked via the returned exit_code/stdout/stderr.",
-                properties: [
-                    "command": (
-                        .string,
-                        "The shell command to run, e.g. 'uv sync' or 'python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'."
-                    ),
-                    "network_hosts": (
-                        .array,
-                        "Hosts this setup step will contact (e.g. ['pypi.org', 'files.pythonhosted.org']). Each triggers a one-time SETUP-network consent. Omit for a purely local setup step."
-                    ),
-                    "cwd": (
-                        .string,
-                        "Optional working directory (absolute path). Defaults to a directory the user already granted, else a temp dir."
-                    ),
-                    "purpose": (
-                        .string,
-                        "Short reason for this setup step. Shown to the user on any setup-network prompt it triggers."
-                    ),
-                ],
-                required: ["command"]))
-        tools.append(
-            tool(
                 name: Self.requireExecutableTool,
                 description:
                     "Permit the skill to run a system executable that kt_probe_command found on PATH but reported as runnable_in_skill_sandbox: false. Pass the exact `path` the probe resolved — the host shows the user a one-tap Allow/Deny prompt for that path (NOT a file picker; the path is already known). Use this for executables on PATH; reserve kt_require_file for files the user must locate themselves (config files, videos, scripts not on PATH).",
@@ -1261,12 +1238,26 @@ public actor KeepTalkingSkillPlanner {
                 required: ["path"]),
 
             tool(
-                name: Self.tryRunTool,
+                name: Self.shellTool,
                 description:
-                    "Dry-run a candidate command to verify it actually works before declaring it as a tool — captures exit code, stdout, and stderr. Runs unsandboxed in a login shell with a short timeout, so use ONLY safe, read-only smoke checks (e.g. `uv --version`, `uv tree`, `ffmpeg -version`), never anything that mutates state. Prefer this over assuming a command line is correct.",
+                    "Your shell — available every turn. Run any command to BOTH inspect the machine (verify a tool works, read a file) AND provision the skill's environment (install dependencies, create a virtualenv, fetch assets). Runs unsandboxed in a login shell with the user's real PATH; captures exit code, stdout, and stderr. Setting up the environment is YOUR job — do it here before you finalize, and verify each step from the output. If a command reaches the network (a package index, a download), list those hosts in `network_hosts`: the user grants SETUP network access SEPARATELY from the skill's runtime network (kt_require_network), and a denied host blocks that command.",
                 properties: [
-                    "command": (.string, "The full shell command to run, e.g. 'uv run python -V'."),
-                    "cwd": (.string, "Optional working directory (absolute path). Defaults to a temp dir."),
+                    "command": (
+                        .string,
+                        "The full shell command to run, e.g. 'uv sync', 'python3 -m venv .venv && .venv/bin/pip install -r requirements.txt', or 'uv --version'."
+                    ),
+                    "network_hosts": (
+                        .array,
+                        "Hosts this command will contact (e.g. ['pypi.org', 'files.pythonhosted.org']). Each triggers a one-time SETUP-network consent before the command runs. Omit for a purely local command."
+                    ),
+                    "cwd": (
+                        .string,
+                        "Optional working directory (absolute path). Defaults to a directory the user already granted, else a temp dir."
+                    ),
+                    "purpose": (
+                        .string,
+                        "Short reason for this command. Shown to the user on any setup-network prompt it triggers."
+                    ),
                 ],
                 required: ["command"]),
         ]
@@ -1341,15 +1332,5 @@ public actor KeepTalkingSkillPlanner {
     private func arrayOfStrings(_ value: MCP.Value) -> [String]? {
         guard case .array(let arr) = value else { return nil }
         return arr.compactMap { if case .string(let s) = $0 { return s } else { return nil } }
-    }
-
-    /// Re-encode an `MCP.Value` (which is itself JSON-compatible) into a compact
-    /// JSON string. Used to capture kind-specific scope blobs (e.g. the primitive
-    /// `scope` object) verbatim.
-    private func jsonString(from value: MCP.Value) -> String? {
-        guard let data = try? JSONEncoder().encode(value),
-            let str = String(data: data, encoding: .utf8)
-        else { return nil }
-        return str
     }
 }

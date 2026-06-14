@@ -775,6 +775,80 @@ extension KeepTalkingClient {
         return saved
     }
 
+    /// Summons NEW immutable context attachment(s) directly from local file(s):
+    /// an action OUTPUT becoming a durable, synced attachment with NO parent
+    /// message (action-produced, not user-authored — replaces the old
+    /// action→attachment-via-a-message path). Stores the bytes content-addressed
+    /// (so the value is immutable), persists a PARENTLESS row, then broadcasts each
+    /// DTO and schedules its blob transfer so participants receive it — exactly like
+    /// a message-attached file, minus the carrier message. Returns the saved rows.
+    @discardableResult
+    func summonContextAttachments(
+        _ inputs: [KeepTalkingLocalAttachmentInput],
+        in contextID: UUID,
+        sender: KeepTalkingContextMessage.Sender? = nil
+    ) async throws -> [KeepTalkingContextAttachment] {
+        guard !inputs.isEmpty else { return [] }
+        guard
+            let context = try await KeepTalkingContext.find(
+                contextID, on: localStore.database)
+        else {
+            onLog?(
+                "[io/summon] context \(contextID.uuidString.prefix(8)) not found — "
+                    + "skipped \(inputs.count) output(s)")
+            return []
+        }
+        let node = try await getCurrentNodeInstance()
+        let resolvedSender = try sender ?? .node(node: node.requireID())
+        let prepared = try await prepareLocalAttachments(inputs)
+        let blobRecords = try await blobRecordsByBlobID(prepared.map(\.blobID))
+
+        var saved: [KeepTalkingContextAttachment] = []
+        saved.reserveCapacity(prepared.count)
+        for (index, attachmentInput) in prepared.enumerated() {
+            let attachment = KeepTalkingContextAttachment(
+                context: context,
+                parentMessageID: nil,  // PARENTLESS — action-summoned, not authored
+                sender: resolvedSender,
+                blobID: attachmentInput.blobID,
+                filename: attachmentInput.filename,
+                mimeType: attachmentInput.mimeType,
+                byteCount: attachmentInput.byteCount,
+                createdAt: Date(),
+                sortIndex: index,
+                metadata: .init()
+            )
+            if let blobRecord = blobRecords[attachmentInput.blobID],
+                let data = try? blobStore.read(
+                    relativePath: blobRecord.relativePath,
+                    blobID: attachmentInput.blobID)
+            {
+                attachment.metadata = derivedAttachmentMetadata(
+                    for: data,
+                    mimeType: attachmentInput.mimeType,
+                    filename: attachmentInput.filename)
+            }
+            try await attachment.save(on: localStore.database)
+            saved.append(attachment)
+        }
+        try await context.refreshSyncMetadata(on: localStore.database)
+
+        // Broadcast each DTO + schedule its blob transfer so participants receive
+        // the summoned attachments (transport failures are non-fatal — the rows are
+        // persisted locally and replicate via normal sync). Summon is for DURABLE,
+        // SHARED outputs only; private (.otb) outputs never become attachments —
+        // they use the staged-file store instead, so they are never broadcast/synced.
+        for attachment in saved {
+            guard let dto = KeepTalkingContextAttachmentDTO(attachment) else { continue }
+            try? rtcClient.sendEnvelope(dto)
+        }
+        scheduleOutgoingBlobTransfers(for: saved)
+        onLog?(
+            "[io/summon] context=\(contextID.uuidString.prefix(8)) "
+                + "summoned=\(saved.count) parentless attachment(s)")
+        return saved
+    }
+
     private func resolvedAttachmentFilename(
         _ attachmentInput: KeepTalkingLocalAttachmentInput
     ) -> String {

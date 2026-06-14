@@ -400,7 +400,7 @@ extension KeepTalkingClient {
                     "attachment_id": .object([
                         "type": .string("string"),
                         "description": .string(
-                            "Attachment identifier returned by kt_list_context_attachments."
+                            "The resource `handle` (KT_<KIND>_<HEX> form) from kt_list_context_attachments or a produced_resources entry."
                         ),
                     ]),
                     "mode": .object([
@@ -481,7 +481,9 @@ extension KeepTalkingClient {
                 "properties": .object([
                     "attachment_id": .object([
                         "type": .string("string"),
-                        "description": .string("Attachment identifier."),
+                        "description": .string(
+                            "The resource `handle` (KT_<KIND>_<HEX> form) from kt_list_context_attachments."
+                        ),
                     ]),
                     "image_description": .object([
                         "type": .string("string"),
@@ -571,8 +573,8 @@ extension KeepTalkingClient {
             source: .primitive,
             description: """
                 Stage a local file onto another node ahead of running a \
-                file-accepting action there (e.g. a skill). Returns an opaque \
-                handle; pass it in the `input_handles` array of a later \
+                file-accepting action there (e.g. a skill). Returns a resource \
+                handle (KT_<KIND>_<HEX> form); pass it in the `input_handles` array of a later \
                 kt_run_action whose action is hosted on that SAME node, and the \
                 file is delivered as the action's input. Use this to relay a \
                 file you hold locally — for example one you just pulled from \

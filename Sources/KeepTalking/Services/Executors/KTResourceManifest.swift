@@ -13,29 +13,34 @@ import Foundation
 public struct KTResourceManifest: Sendable {
 
     /// The resource family — also the fallback `<KIND>` token in the env-var name
-    /// (used only when a resource carries no declared object name).
+    /// (used only when a resource carries no declared object name). Family, not
+    /// flow: DIRECTION expresses data flow. A `.write` `.otb` entry is a harvested
+    /// output (an OTB shipped provider→caller — "an output is another OTB,
+    /// inverted"); a `.write` `.attachment` entry is a summoned durable attachment.
     public enum Kind: String, Sendable {
         case attachment = "ATTACHMENT"
         case otb = "OTB"
         case fs = "FS"
-        /// A declared `.output` slot allocated under the thread workspace — bytes
-        /// written here after the run are harvested back to the caller as a
-        /// one-time blob.
-        case output = "OUTPUT"
+
+        /// The lowercased family tag surfaced to the agent in `AgentResource.kind`
+        /// (the env-var token, `rawValue`, stays uppercase).
+        public var agentFamily: String { rawValue.lowercased() }
     }
 
-    /// Sandbox-relevant data flow for a resource, projected from the SDK's
-    /// `KeepTalkingResourceDirection`.
+    /// Mono-directional data flow for a manifest entry: a resource flows one way.
+    /// An in-place (`.inputOutput`) FILE object is decomposed into a read entry +
+    /// a write entry upstream (in `prepareCallBinding`), so it never reaches here;
+    /// a read-write scratch DIRECTORY (the thread workspace / an ACP working root)
+    /// projects to `.write` — it's the agent's own space to write into, read
+    /// implied by the sandbox grant.
     public enum Direction: Sendable {
         case read
         case write
-        case readWrite
 
         public init(_ direction: KeepTalkingResourceDirection) {
             switch direction {
                 case .input: self = .read
-                case .output: self = .write
-                case .inputOutput: self = .readWrite
+                case .output, .inputOutput: self = .write
             }
         }
     }
@@ -105,68 +110,79 @@ public struct KTResourceManifest: Sendable {
         self.umbrellaAttachmentsDir = umbrellaAttachmentsDir
     }
 
-    // MARK: - Key derivation
+    // MARK: - Canonical handle (agent token AND skill env-var key)
 
-    /// The `<H8>` suffix: the trailing `length` hex chars of the UUID, uppercased.
-    /// Sourced from the TRAILING (random) field because resource IDs are UUID v7
-    /// (time-prefixed) — the leading hex collides for IDs minted close together.
-    static func hexSuffix(_ id: UUID, length: Int) -> String {
-        let hex = id.uuidString.replacingOccurrences(of: "-", with: "")
-        return String(hex.suffix(length)).uppercased()
+    /// The ONE canonical token for a resource — `KT_<KIND>_<HEX>` (FULL 32-hex id).
+    /// This is BOTH the handle the orchestrating agent references AND the
+    /// environment-variable key the skill sees as `$KT_<KIND>_<HEX>`: the build
+    /// step assigns it verbatim to each manifest `Entry.envKey`, so the agent's
+    /// handle and the skill's env var are literally identical for the same
+    /// resource. Full hex (not a short suffix) makes it globally unique — no
+    /// collision escalation — and exactly reversible via `parseAgentHandle`.
+    public static func agentHandle(kind: Kind, id: UUID) -> String {
+        let hex = id.uuidString.replacingOccurrences(of: "-", with: "").uppercased()
+        return "KT_\(kind.rawValue)_\(hex)"
     }
 
-    /// The env-var key for a resource at a given suffix length. When `objectName`
-    /// is present and sanitizes to a non-empty token, the declared name drives the
-    /// key (`KT_<NAME>_<H8>`); otherwise the resource family is used
-    /// (`KT_<KIND>_<H8>`).
-    static func envKey(
-        kind: Kind, id: UUID, objectName: String? = nil, length: Int = 8
-    ) -> String {
-        let token = objectName.flatMap(sanitizedKeyToken) ?? kind.rawValue
-        return "KT_\(token)_\(hexSuffix(id, length: length))"
+    /// Inverts `agentHandle`: parses `KT_<KIND>_<HEX>` (a leading `$` tolerated)
+    /// back to its family + concrete id. Returns nil for anything that isn't a
+    /// well-formed KT handle (the caller then falls back to a bare-UUID parse).
+    public static func parseAgentHandle(_ raw: String) -> (kind: Kind, id: UUID)? {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("$") { s.removeFirst() }
+        guard s.hasPrefix("KT_") else { return nil }
+        let body = String(s.dropFirst(3))  // "<TOKEN>_<HEX>"
+        guard let underscore = body.lastIndex(of: "_") else { return nil }
+        let token = String(body[..<underscore]).uppercased()
+        let hex = String(body[body.index(after: underscore)...])
+        guard let kind = Kind(rawValue: token), let id = uuidFromHex(hex) else {
+            return nil
+        }
+        return (kind, id)
     }
 
-    /// Folds a declared object name into a valid env-var token: uppercased, every
-    /// non-`[A-Z0-9_]` scalar replaced with `_`, runs of `_` collapsed, and edges
-    /// trimmed. Returns `nil` when nothing usable survives (so the caller falls
-    /// back to the family kind) — a wire-controlled name can never inject an empty
-    /// or malformed `KT_` key.
-    static func sanitizedKeyToken(_ name: String) -> String? {
-        let mapped = name.uppercased().unicodeScalars.map { scalar -> Character in
-            if scalar == "_"
-                || ("A"..."Z").contains(scalar)
-                || ("0"..."9").contains(scalar)
-            {
-                return Character(scalar)
-            }
-            return "_"
-        }
-        var token = String(mapped)
-        while token.contains("__") {
-            token = token.replacingOccurrences(of: "__", with: "_")
-        }
-        token = token.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
-        return token.isEmpty ? nil : token
+    /// Reconstitutes a UUID from a 32-char dash-free hex string (the form
+    /// `agentHandle` emits). Returns nil for any other shape.
+    static func uuidFromHex(_ hex: String) -> UUID? {
+        let h = hex.uppercased()
+        guard h.count == 32, h.allSatisfy({ $0.isHexDigit }) else { return nil }
+        let c = Array(h)
+        let dashed =
+            "\(String(c[0..<8]))-\(String(c[8..<12]))-\(String(c[12..<16]))-"
+            + "\(String(c[16..<20]))-\(String(c[20..<32]))"
+        return UUID(uuidString: dashed)
+    }
+
+    /// Resolves an agent-supplied resource handle to a concrete id, accepting BOTH
+    /// the canonical `KT_<KIND>_<HEX>` form and a bare UUID (lenient ingest — the
+    /// agent is always SHOWN KT handles, but a raw id still resolves). Returns the
+    /// family when known (KT handles carry it; bare UUIDs don't).
+    public static func resolveAgentHandle(_ raw: String) -> (kind: Kind?, id: UUID)? {
+        if let parsed = parseAgentHandle(raw) { return (parsed.kind, parsed.id) }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let id = UUID(uuidString: trimmed) { return (nil, id) }
+        return nil
     }
 
     // MARK: - Build
 
-    /// Builds a manifest from already-granted candidates. Assigns collision-free
-    /// env keys (escalating the hex suffix when two same-kind resources share a
-    /// short suffix), canonicalises every path once (so the env value, the prompt
-    /// text, and the sandbox grant all agree on the /private/var form), and strips
-    /// control characters from display names so a wire-controlled filename cannot
-    /// forge prompt lines.
+    /// Builds a manifest from already-granted candidates. Each entry's env key is
+    /// the candidate's CANONICAL `agentHandle` (`KT_<KIND>_<HEX>`) — the same token
+    /// the agent references, so the agent's handle and the skill's `$KT_…` env var
+    /// are identical. Full-hex ids are globally unique, so no collision escalation
+    /// is needed. Canonicalises every path once (so the env value, the prompt text,
+    /// and the sandbox grant all agree on the /private/var form) and strips control
+    /// characters from display names so a wire-controlled filename cannot forge
+    /// prompt lines.
     public static func build(
         grantedCandidates: [Candidate],
         umbrellaAttachmentsDir: URL?
     ) -> KTResourceManifest {
-        let keys = assignKeys(grantedCandidates)
-        let entries = zip(grantedCandidates, keys).map { candidate, key in
+        let entries = grantedCandidates.map { candidate in
             Entry(
                 kind: candidate.kind,
                 id: candidate.id,
-                envKey: key,
+                envKey: agentHandle(kind: candidate.kind, id: candidate.id),
                 path: candidate.path?.resolvingSymlinksInPath().standardizedFileURL,
                 direction: candidate.direction,
                 displayName: sanitizedDisplayName(candidate.displayName),
@@ -179,30 +195,6 @@ public struct KTResourceManifest: Sendable {
             umbrellaAttachmentsDir: umbrellaAttachmentsDir?
                 .resolvingSymlinksInPath().standardizedFileURL
         )
-    }
-
-    /// Assigns each candidate a unique env key, escalating the hex-suffix length
-    /// (8 → 12 → 16 → 32) only for keys that collide. Distinct UUIDs of the same
-    /// kind are unique at full length, so termination is guaranteed.
-    private static func assignKeys(_ candidates: [Candidate]) -> [String] {
-        var keys = candidates.map {
-            envKey(kind: $0.kind, id: $0.id, objectName: $0.objectName, length: 8)
-        }
-        for length in [12, 16, 32] {
-            var counts: [String: Int] = [:]
-            for key in keys { counts[key, default: 0] += 1 }
-            let collided = Set(counts.filter { $0.value > 1 }.keys)
-            if collided.isEmpty { break }
-            for index in candidates.indices where collided.contains(keys[index]) {
-                keys[index] = envKey(
-                    kind: candidates[index].kind,
-                    id: candidates[index].id,
-                    objectName: candidates[index].objectName,
-                    length: length
-                )
-            }
-        }
-        return keys
     }
 
     private static func sanitizedDisplayName(_ name: String) -> String {
@@ -267,7 +259,6 @@ public struct KTResourceManifest: Sendable {
             switch entry.direction {
                 case .read: access = "read"
                 case .write: access = "write"
-                case .readWrite: access = "read/write"
             }
             var line = "  $\(entry.envKey)  \(type)  \"\(entry.displayName)\"  \(access)"
             if entry.path == nil {
@@ -281,9 +272,9 @@ public struct KTResourceManifest: Sendable {
             "Usage:",
             "- A `file` variable is the path to that file; a `dir` variable is a directory "
                 + "you may traverse. Always quote: ls \"$VAR\".",
-            "- `read` items are inputs — do not modify them. `write` and `read/write` items "
-                + "accept changes; place results you want returned at a `write` path and "
-                + "KeepTalking ships them back.",
+            "- `read` items are inputs — do not modify them. `write` items accept changes; "
+                + "place results you want returned at a `write` path and KeepTalking ships "
+                + "them back.",
             "- Items marked \"access via filesystem operations\" are remote; reach them with "
                 + "the filesystem tools (list/read/get-file/put-file), not a local path.",
             "- Only touch a resource the task actually needs.",
@@ -295,5 +286,129 @@ public struct KTResourceManifest: Sendable {
         }
 
         return lines.joined(separator: "\n")
+    }
+}
+
+extension KTResourceManifest {
+    /// The unified, path-free, Codable representation of a resource the
+    /// orchestrating agent operates on — a context attachment, a produced action
+    /// output, or any manifest resource. ONE vocabulary across the
+    /// context-attachment listing and the action-output surfacing, so the model
+    /// reasons about every resource the same way.
+    ///
+    /// IDENTITY is `handle` — the canonical `KT_<KIND>_<HEX>` token (see
+    /// `agentHandle`), the SAME `KT_` shape a skill sees as a `$KT_…` env var,
+    /// never a bare UUID and never a filesystem path. Filenames may repeat across
+    /// resources and identical names are DISTINCT files; only the handle is
+    /// canonical. This replaces the former standalone `KTAgentResource` so the
+    /// manifest is the single source of the handle vocabulary.
+    public struct AgentResource: Codable, Sendable, Equatable {
+        /// `KT_<KIND>_<HEX>` — the canonical handle the agent references downstream.
+        public var handle: String
+        /// Resource family: "attachment" (durable, synced), "otb" (private,
+        /// ephemeral), or "fs" (reached via filesystem operations).
+        public var kind: String
+        /// Mono data flow as the agent sees it: "read" (consumable) or "write".
+        public var direction: String
+        /// Filename / logical name.
+        public var name: String
+        public var mimeType: String?
+        public var byteCount: Int?
+        /// Short human description (attachment text preview / image description).
+        public var summary: String?
+        /// "context" (already present in the context) or "produced" (created by this call).
+        public var origin: String
+
+        public init(
+            handle: String,
+            kind: String,
+            direction: String,
+            name: String,
+            mimeType: String? = nil,
+            byteCount: Int? = nil,
+            summary: String? = nil,
+            origin: String
+        ) {
+            self.handle = handle
+            self.kind = kind
+            self.direction = direction
+            self.name = name
+            self.mimeType = mimeType
+            self.byteCount = byteCount
+            self.summary = summary
+            self.origin = origin
+        }
+
+        /// Builds a resource from its concrete IDENTITY (`kind` + `id`), deriving
+        /// the canonical `KT_<KIND>_<HEX>` handle — the only correct way to mint
+        /// one, so the handle and the resource can never disagree.
+        public init(
+            kind: KTResourceManifest.Kind,
+            id: UUID,
+            direction: String,
+            name: String,
+            mimeType: String? = nil,
+            byteCount: Int? = nil,
+            summary: String? = nil,
+            origin: String
+        ) {
+            self.init(
+                handle: KTResourceManifest.agentHandle(kind: kind, id: id),
+                kind: kind.agentFamily,
+                direction: direction,
+                name: name,
+                mimeType: mimeType,
+                byteCount: byteCount,
+                summary: summary,
+                origin: origin)
+        }
+
+        /// The canonical JSON object embedded in agent-facing tool payloads.
+        public func jsonObject() -> [String: Any] {
+            var obj: [String: Any] = [
+                "handle": handle,
+                "kind": kind,
+                "direction": direction,
+                "name": name,
+                "origin": origin,
+            ]
+            if let mimeType { obj["mime_type"] = mimeType }
+            if let byteCount { obj["byte_count"] = byteCount }
+            if let summary, !summary.isEmpty { obj["description"] = summary }
+            return obj
+        }
+
+        /// Reconstructs a resource from its `jsonObject()` form (e.g. a
+        /// `produced_resources` entry parsed back out of a tool payload).
+        public init?(jsonObject: [String: Any]) {
+            guard let handle = jsonObject["handle"] as? String,
+                let kind = jsonObject["kind"] as? String,
+                let name = jsonObject["name"] as? String
+            else { return nil }
+            self.handle = handle
+            self.kind = kind
+            self.direction = jsonObject["direction"] as? String ?? "read"
+            self.name = name
+            self.mimeType = jsonObject["mime_type"] as? String
+            self.byteCount = jsonObject["byte_count"] as? Int
+            self.summary = jsonObject["description"] as? String
+            self.origin = jsonObject["origin"] as? String ?? "produced"
+        }
+
+        /// A one-line, agent-facing description carrying the resource's IDENTITY —
+        /// provided to the transcript alongside any injected content so the model
+        /// references the resource by `handle` (filenames may repeat; the handle is
+        /// the identity).
+        public func transcriptDescription() -> String {
+            var fields = [
+                "handle=\(handle)",
+                "kind=\(kind)",
+                "name=\"\(name)\"",
+                "access=\(direction)",
+                origin,
+            ]
+            if let byteCount { fields.append("\(byteCount) bytes") }
+            return "resource(" + fields.joined(separator: ", ") + ")"
+        }
     }
 }

@@ -420,6 +420,9 @@ extension KeepTalkingClient {
         await invalidateActionToolCatalog(
             reason: "remove_mcp_action action=\(actionID.uuidString.lowercased())"
         )
+        await broadcastLocalNodeState(
+            reason: "remove_mcp_action action=\(actionID.uuidString.lowercased())"
+        )
     }
 
     public func removeSkillAction(actionID: UUID) async throws {
@@ -433,6 +436,9 @@ extension KeepTalkingClient {
             }
         )
         await invalidateActionToolCatalog(
+            reason: "remove_skill_action action=\(actionID.uuidString.lowercased())"
+        )
+        await broadcastLocalNodeState(
             reason: "remove_skill_action action=\(actionID.uuidString.lowercased())"
         )
     }
@@ -451,6 +457,10 @@ extension KeepTalkingClient {
             reason:
                 "remove_primitive_action action=\(actionID.uuidString.lowercased())"
         )
+        await broadcastLocalNodeState(
+            reason:
+                "remove_primitive_action action=\(actionID.uuidString.lowercased())"
+        )
     }
 
     /// Removes a semantic retrieval action and its grants. No executor to unregister.
@@ -463,6 +473,9 @@ extension KeepTalkingClient {
             callbackForUnregisteringAction: nil
         )
         await invalidateActionToolCatalog(
+            reason: "remove_semantic_retrieval_action action=\(actionID.uuidString.lowercased())"
+        )
+        await broadcastLocalNodeState(
             reason: "remove_semantic_retrieval_action action=\(actionID.uuidString.lowercased())"
         )
     }
@@ -480,6 +493,9 @@ extension KeepTalkingClient {
         await invalidateActionToolCatalog(
             reason: "remove_filesystem_action action=\(actionID.uuidString.lowercased())"
         )
+        await broadcastLocalNodeState(
+            reason: "remove_filesystem_action action=\(actionID.uuidString.lowercased())"
+        )
     }
 
     public func removeACPAction(actionID: UUID) async throws {
@@ -495,6 +511,9 @@ extension KeepTalkingClient {
             }
         )
         await invalidateActionToolCatalog(
+            reason: "remove_acp_action action=\(actionID.uuidString.lowercased())"
+        )
+        await broadcastLocalNodeState(
             reason: "remove_acp_action action=\(actionID.uuidString.lowercased())"
         )
     }

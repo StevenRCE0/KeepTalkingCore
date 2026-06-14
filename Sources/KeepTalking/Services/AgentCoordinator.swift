@@ -460,14 +460,20 @@ actor AgentCoordinator {
                     ))
             }
         }
-        for (_, item) in suspended {
+        for (turnID, item) in suspended {
+            // An item stays in `suspended` from the moment it parks until it
+            // actually finishes. It is only truly suspended WHILE its continuation
+            // is still pending; once `deliverContinuationResponse` resumes it (drops
+            // the pending continuation) it is running again — reflect that, otherwise
+            // a resumed run reads as "suspended" until it completes.
+            let isStillSuspended = suspensionContinuations[turnID] != nil
             result.append(
                 KeepTalkingAgentRunSnapshot(
                     id: item.id,
                     contextID: item.contextID,
                     promptPreview: item.promptPreview,
                     createdAt: item.createdAt,
-                    state: .suspended,
+                    state: isStillSuspended ? .suspended : .running,
                     agentTurnID: item.agentTurnID
                 ))
         }
