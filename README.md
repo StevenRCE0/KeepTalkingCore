@@ -1,6 +1,6 @@
 # KeepTalking SDK
 
-Swift package providing the core engine for KeepTalking — a distributed AI conversation platform with P2P transport, semantic threading, multi-provider AI, and MCP-based skill execution.
+Swift package providing the core engine for KeepTalking — a distributed AI conversation platform with P2P transport, semantic threading, multi-provider AI, MCP-based skill execution, and sandboxed script running.
 
 ## Products
 
@@ -30,23 +30,42 @@ Sources/KeepTalking/
 │   ├── AIConnectors/               # LLM provider abstraction layer
 │   │   ├── AIConnector.swift       # Protocol — completeTurn(messages:tools:...)
 │   │   ├── AIMessage.swift         # KT-native message IR (multimodal)
-│   │   ├── AIOrchestrator.swift    # Multi-turn loop driver
 │   │   ├── OpenAIConnector.swift   # OpenRouter + OpenAI + custom endpoints
 │   │   ├── AnthropicConnector.swift # Anthropic Messages API
-│   │   ├── ACTAgent.swift          # Autonomous tool-calling agent
-│   │   └── ActionToolAbstraction.swift # Tool definition + catalog
-│   ├── Executors/                  # Skill & MCP tool execution
-│   ├── SkillPlanner.swift          # Multi-step skill planning
-│   ├── ContextSyncing/             # Cross-node context sync
-│   └── SemanticStore/              # Vector / BM25 hybrid search
+│   │   ├── MetaTools/              # Agent-facing built-in tools (attachments, JS eval, semantic search)
+│   │   └── *WebSearchTool.swift    # Exa, OpenAI, and OpenRouter web search backends
+│   ├── Orchestrators/              # Multi-agent orchestration
+│   │   ├── MainAgent.swift         # Primary conversation agent
+│   │   ├── ACTAgent.swift          # Autonomous tool-calling agent loop
+│   │   └── AudioInterfaceAgent.swift # Voice-mode agent
+│   ├── AgentCoordinator.swift      # Cross-context agent run queue + suspension/resume
+│   ├── Executors/                  # Skill & tool execution managers
+│   │   ├── SkillManager.swift      # Skill lifecycle: planning, prompting, tool dispatch
+│   │   ├── ACPManager.swift        # Agent Communication Protocol
+│   │   ├── MCPManager.swift        # MCP server/client bridge
+│   │   ├── JSRuntime.swift         # JavaScript execution (JSCore host bridge)
+│   │   ├── KTResourceManifest.swift # Per-run I/O manifest (file grant + OTB routing)
+│   │   └── PrimitiveActionManager.swift # Platform primitive actions
+│   ├── Process/                    # Sandboxed script + process execution
+│   │   ├── SandboxedProcessRunner.swift # zsh/bash sandbox runner
+│   │   ├── SeatbeltSandbox.swift   # macOS sandbox-exec seatbelt profiles
+│   │   └── MCPStdioTransportLaunching.swift # Sandboxed MCP stdio launch
+│   ├── SkillPlanner.swift          # Multi-step, resumable skill planning
+│   ├── VoiceSession/               # P2P voice call session management
+│   ├── ContextLiveness/            # Peer liveness + presence state machine
+│   ├── ContextSyncing/             # Cross-node context sync controller
+│   └── SemanticStore/              # Vector / BM25 hybrid search protocol
 ├── Transport/
-│   ├── ContextTransport.swift      # P2P transport orchestrator
-│   ├── RTC/                        # WebRTC (ion-sfu) data channels
-│   └── Models/                     # Envelope, routing, sync shapes
+│   ├── ContextTransport.swift      # Routing orchestrator (SFU broadcast + P2P direct)
+│   ├── Channels/                   # Channel protocol + state machines
+│   │   ├── SFU/                    # SFU broadcast channel (KeepTalkingSFU package)
+│   │   └── P2P/                    # libjuice direct channel (SwiftNIO framing)
+│   ├── Models/                     # Envelope, routing, sync shapes
+│   └── Routes/                     # Routing strategy definitions
 ├── Envelope/                       # Message framing & serialization
 ├── Migrations/                     # SQLite schema (Fluent)
-├── Cryptos/                        # Key management & node identity
-└── Helpers/                        # Shared utilities
+├── Cryptos/                        # Key management & node identity (swift-crypto)
+└── Helpers/                        # Shared utilities (UUIDv7, extensions)
 ```
 
 ## Key Dependencies
@@ -54,8 +73,14 @@ Sources/KeepTalking/
 | Dependency | Purpose |
 |---|---|
 | `FluentKit` + `FluentSQLiteDriver` | ORM + SQLite persistence |
+| `KeepTalkingSFU` (local) | SFU client + protocol for broadcast transport channel |
+| `swift-libjuice` / `SwiftJUICE` | ICE/STUN/TURN for P2P direct channels |
+| `swift-nio` suite | NIO event loops, HTTP/2, TLS — framing the P2P channel |
+| `swift-crypto` | Cross-platform crypto (replaces CryptoKit for portability) |
+| `swift-certificates` + `swift-asn1` | X.509 / TLS identity |
 | `swift-sdk` (MCP) | MCP server/client for tool integration |
-| `AIProxyMultiPlatform` | Chat completions + embeddings client (local fork — see below) |
+| `AIProxyMultiPlatform` (local fork) | Chat completions + embeddings client (BYOK) |
+| `swift-uuidv7` | Time-ordered (RFC 9562 v7) UUIDs for primary keys |
 
 ### AIProxy fork
 
@@ -92,7 +117,26 @@ Built-in connectors:
 | `OpenAIConnector` | `.openRouter`, `.openAI`, `.custom(baseURL:)` |
 | `AnthropicConnector` | `.anthropic`, `.custom(baseURL:)` |
 
-The message IR (`AIMessage`, `AIToolCall`, `AIToolChoice`) supports multimodal content — text + image URLs — and maps cleanly to all three vendor formats (OpenAI Chat Completions, Anthropic Messages, Apple FoundationModels).
+The message IR (`AIMessage`, `AIToolCall`, `AIToolChoice`) supports multimodal content — text + image URLs — and maps cleanly to all vendor formats. `AITurnResult` surfaces optional reasoning (`thinking`) and audio output in addition to the assistant text and tool calls.
+
+## Transport
+
+The transport layer is protocol-abstracted: `ContextTransport` only knows about `KeepTalkingTransportChannelProtocol` and routing strategies — it has no WebRTC, ICE, or data-channel knowledge.
+
+Two concrete channel types sit below it:
+
+- **SFU broadcast** (`KeepTalkingSFU` package) — always-on backbone for context distribution.
+- **P2P direct** (`SwiftJUICE` + `SwiftNIO`) — optional direct upgrade for lower latency; negotiated via libjuice ICE on top of the SFU signaling path.
+
+Routing is envelope-level:
+
+| Strategy | Behavior |
+|---|---|
+| `.sfuOnly` | SFU broadcast only |
+| `.preferDirect` | direct → fallback broadcast |
+| `.conservative` | broadcast → fallback direct |
+
+**Prerequisites:** a running KeepTalkingSFU signaling server (see `../KeepTalkingSFU`).
 
 ## SDK Usage
 
@@ -109,41 +153,20 @@ let client = try KeepTalkingClient(config: config, kvService: nil, localStore: s
 try await client.connect()
 ```
 
-## Transport
-
-The transport layer uses `ion-sfu` JSON-RPC signaling (`/ws`) plus WebRTC DataChannels. Each context gets its own SFU session and channel namespace:
-
-| Channel | Label |
-|---|---|
-| Signaling | `keep-talking.signaling` |
-| Chat | `keep-talking.chat.<context-id>` |
-| Action/envelope | `keep-talking.action_call.<context-id>` |
-
-**Prerequisites:** a running ion-sfu JSON-RPC server, e.g.:
-```bash
-docker run --name ion-sfu -d -p 17000:7000 -p 5000-5200:5000-5200/udp \
-  pionwebrtc/ion-sfu:latest-jsonrpc
-```
-
 ## Build
 
-```bash
-swift build
-# Release
-swift build -c release
-```
+Use Xcode (`BuildProject` / ⌘B) or the Xcode MCP for compilation. Avoid `swift build` while the Xcode persistent build server is running — both processes share the `.build` lock and the CLI will hang indefinitely.
 
-## Tests
+For package tests independent of Xcode:
 
 ```bash
-swift test
+swift test --scratch-path /tmp/kt-test
 ```
 
 ## CLI
 
 The `KeepTalking` executable is a development tool for exercising the SDK interactively.
 
-**Interactive session:**
 ```bash
 swift run KeepTalking \
   --signal-url ws://127.0.0.1:17000/ws \
