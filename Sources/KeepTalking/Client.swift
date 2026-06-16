@@ -241,6 +241,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public let responseLanguages: [String]
     let livenessState: KeepTalkingContextLivenessState
     let mcpManager: MCPManager
+    let mcpCredentialStore: KeepTalkingMCPCredentialStore
     let skillManager: SkillManager
     let primitiveActionManager: PrimitiveActionManager
     let semanticRetrievalActionManager: SemanticRetrievalActionManager
@@ -435,9 +436,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
             config: config,
             livenessState: livenessState
         )
+        let mcpCredentialStore = KeepTalkingMCPCredentialStore(keychain: keychain)
+        self.mcpCredentialStore = mcpCredentialStore
         self.mcpManager = MCPManager(
             nodeConfig: config,
-            stdioTransportLauncher: stdioTransportLauncher
+            stdioTransportLauncher: stdioTransportLauncher,
+            credentialStore: mcpCredentialStore
         )
 
         if let aiConnector {
@@ -818,5 +822,36 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public func eraseLocalState() async throws {
         try await localStore.reset()
         try await keychain.deleteAll()
+    }
+
+    // MARK: - HTTP MCP credentials
+
+    /// Persists the keychain-only credentials (request headers + client secret)
+    /// for an HTTP MCP action. Never written to the action's database payload.
+    public func storeMCPCredentials(
+        actionID: UUID,
+        _ credentials: KeepTalkingMCPCredentials
+    ) async throws {
+        try await mcpCredentialStore.store(credentials, actionID: actionID)
+    }
+
+    /// Reads the stored credentials for an HTTP MCP action, or `nil` if none.
+    public func loadMCPCredentials(
+        actionID: UUID
+    ) async throws -> KeepTalkingMCPCredentials? {
+        try await mcpCredentialStore.load(actionID: actionID)
+    }
+
+    /// Updates only the OAuth client secret for an action, preserving headers.
+    public func setMCPClientSecret(
+        actionID: UUID,
+        _ secret: String?
+    ) async throws {
+        try await mcpCredentialStore.setClientSecret(secret, actionID: actionID)
+    }
+
+    /// Removes any stored credentials for an HTTP MCP action.
+    public func deleteMCPCredentials(actionID: UUID) async throws {
+        try await mcpCredentialStore.delete(actionID: actionID)
     }
 }

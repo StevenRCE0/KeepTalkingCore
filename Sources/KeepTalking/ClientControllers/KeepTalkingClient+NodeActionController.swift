@@ -240,6 +240,39 @@ extension KeepTalkingClient {
         try await mcpManager.preflightHTTPAuthentication(action: action)
     }
 
+    /// Moves any HTTP MCP request headers out of the action's database payload
+    /// and into the keychain-backed credential store, leaving the persisted
+    /// bundle with empty headers. Credentials (bearer tokens, API keys) must
+    /// never be written to the DB. A bundle whose headers are already empty is
+    /// left untouched, preserving whatever was stored directly via
+    /// `storeMCPCredentials`. Existing client secrets are preserved across the
+    /// move.
+    private func relocateHTTPMCPCredentials(
+        from action: KeepTalkingAction
+    ) async {
+        guard let actionID = action.id,
+            case .mcpBundle(var bundle) = action.payload,
+            case .http(let url, let payload, let headers, let scope) =
+                bundle.service,
+            !headers.isEmpty
+        else {
+            return
+        }
+        let existing = try? await mcpCredentialStore.load(actionID: actionID)
+        let merged = KeepTalkingMCPCredentials(
+            headers: headers,
+            clientSecret: existing?.clientSecret
+        )
+        try? await mcpCredentialStore.store(merged, actionID: actionID)
+        bundle.service = .http(
+            url: url,
+            payload: payload,
+            headers: [:],
+            scope: scope
+        )
+        action.payload = .mcpBundle(bundle)
+    }
+
     public func saveConstructedAction(
         _ action: KeepTalkingAction
     ) async throws -> KeepTalkingAction {
@@ -272,6 +305,7 @@ extension KeepTalkingClient {
             }
         }
 
+        await relocateHTTPMCPCredentials(from: action)
         try await action.save(on: localStore.database)
         // A freshly-saved action with `disabled = true` should not spin up
         // any runtime — register the metadata, then immediately tear down the
@@ -357,6 +391,7 @@ extension KeepTalkingClient {
             action.disabled = disabled
         }
 
+        await relocateHTTPMCPCredentials(from: action)
         try await action.save(on: localStore.database)
 
         let isDisabledNow = action.disabled == true
@@ -417,6 +452,8 @@ extension KeepTalkingClient {
                 await self.mcpManager.unregisterAction(actionID: $0)
             }
         )
+        // Drop the keychain-only credentials alongside the action itself.
+        try? await mcpCredentialStore.delete(actionID: actionID)
         await invalidateActionToolCatalog(
             reason: "remove_mcp_action action=\(actionID.uuidString.lowercased())"
         )

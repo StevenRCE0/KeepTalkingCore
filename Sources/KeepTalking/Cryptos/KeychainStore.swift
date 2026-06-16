@@ -5,6 +5,7 @@ public struct KeepTalkingKeychainKey: Hashable, Sendable {
         case groupSecret = "group-secret"
         case nodeIdentityPriv = "node-identity-priv"
         case loginCredential = "login-credential"
+        case mcpCredentials = "mcp-credentials"
     }
 
     public let kind: Kind
@@ -25,6 +26,14 @@ public struct KeepTalkingKeychainKey: Hashable, Sendable {
 
     public static func loginCredential(id: String) -> KeepTalkingKeychainKey {
         KeepTalkingKeychainKey(kind: .loginCredential, id: id)
+    }
+
+    /// HTTP MCP credentials (request headers incl. bearer tokens, plus the OAuth
+    /// client secret) for an action, keyed by action ID. Held only in the
+    /// keychain — never in the action's synced/database payload — and read back
+    /// on demand at connect time and token exchange.
+    public static func mcpCredentials(actionID: UUID) -> KeepTalkingKeychainKey {
+        KeepTalkingKeychainKey(kind: .mcpCredentials, id: actionID.uuidString.lowercased())
     }
 
 }

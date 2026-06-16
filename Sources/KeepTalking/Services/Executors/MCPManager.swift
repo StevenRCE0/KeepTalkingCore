@@ -295,6 +295,10 @@ public actor MCPManager {
 
     private let nodeConfig: KeepTalkingConfig
     private let stdioTransportLauncher: (any MCPStdioTransportLaunching)?
+    /// Keychain-backed source of per-action HTTP MCP credentials. Headers are
+    /// re-hydrated from here at connect/preflight time instead of being carried
+    /// in the (database-persisted) bundle.
+    private let credentialStore: KeepTalkingMCPCredentialStore?
     private let connectTimeoutSeconds: TimeInterval
     /// How long a tool call waits silently before it switches to patient
     /// liveness-polling. After this it waits indefinitely while the executor
@@ -315,12 +319,14 @@ public actor MCPManager {
         nodeConfig: KeepTalkingConfig,
         stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
             DefaultMCPStdioTransportLauncher.current,
+        credentialStore: KeepTalkingMCPCredentialStore? = nil,
         connectTimeoutSeconds: TimeInterval = 10,
         toolCallGraceSeconds: TimeInterval = 10,
         toolCallPollSeconds: TimeInterval = 5
     ) {
         self.nodeConfig = nodeConfig
         self.stdioTransportLauncher = stdioTransportLauncher
+        self.credentialStore = credentialStore
         self.connectTimeoutSeconds = connectTimeoutSeconds
         self.toolCallGraceSeconds = toolCallGraceSeconds
         self.toolCallPollSeconds = toolCallPollSeconds
@@ -841,7 +847,10 @@ public actor MCPManager {
                     )
                 case .http(let url, _, let headers, _):
                     let transportConfiguration = URLSessionConfiguration.default
-                    let sanitizedHeaders = Self.sanitizedHTTPHeaders(headers)
+                    let sanitizedHeaders = await injectedHTTPHeaders(
+                        actionID: actionID,
+                        bundleHeaders: headers
+                    )
 
                     let transport = HTTPClientTransport(
                         endpoint: url,
@@ -936,8 +945,31 @@ public actor MCPManager {
         try await preflightHTTPAuthenticationViaMCP(
             actionID: actionID,
             endpoint: endpoint,
-            headers: Self.sanitizedHTTPHeaders(headers)
+            headers: await injectedHTTPHeaders(
+                actionID: actionID,
+                bundleHeaders: headers
+            )
         )
+    }
+
+    /// Resolves the request headers for an HTTP MCP action by overlaying the
+    /// keychain-stored credential headers (bearer tokens, API keys) onto any
+    /// headers still carried in the bundle. Credentials take precedence; in the
+    /// post-refactor model the bundle headers are empty and this is purely the
+    /// stored set.
+    private func injectedHTTPHeaders(
+        actionID: UUID,
+        bundleHeaders: [String: String]
+    ) async -> [String: String] {
+        var headers = Self.sanitizedHTTPHeaders(bundleHeaders)
+        if let credentialStore,
+            let credentials = try? await credentialStore.load(actionID: actionID)
+        {
+            for (key, value) in Self.sanitizedHTTPHeaders(credentials.headers) {
+                headers[key] = value
+            }
+        }
+        return headers
     }
 
     private func terminateStdioProcess(for actionID: UUID) {
