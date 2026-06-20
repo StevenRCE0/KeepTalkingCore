@@ -73,6 +73,10 @@ final class KeepTalkingCLIController {
         try await client.connect()
         defer { client.disconnect() }
 
+        // Register local action executors explicitly, off the connection path.
+        // Forgiving: a failing executor must not abort the session.
+        try? await client.registerLocalActionsInExecutors()
+
         if let oneShot = cliConfig.singleMessage {
             try await client.send(oneShot, in: activeContext)
             print("[you] \(oneShot)")

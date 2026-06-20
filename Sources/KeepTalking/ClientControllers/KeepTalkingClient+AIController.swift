@@ -820,7 +820,17 @@ extension KeepTalkingClient {
         return trimmed
     }
 
-    func registerLocalActionsInExecutors() async throws {
+    /// Registers every granted local action with its executor (connecting HTTP
+    /// MCP servers, spawning stdio processes, etc.).
+    ///
+    /// Decoupled from `connect()` on purpose and forgiving by design: a single
+    /// executor that fails to register — an HTTP MCP endpoint needing re-auth, an
+    /// offline stdio binary — is logged and skipped, never aborting the batch and
+    /// never surfacing as a connection-level error that would pop a blocking auth
+    /// prompt. Re-authentication happens on demand, when the tool is actually
+    /// invoked. Call this explicitly after constructing a client (the App and CLI
+    /// do; the daemon opts out).
+    public func registerLocalActionsInExecutors() async throws {
         await ensureMCPToolChangeObserverInstalled()
 
         let selfNode = try await ensure(
@@ -842,7 +852,15 @@ extension KeepTalkingClient {
         )
 
         for action in grantedLocalActions {
-            try await registerLocalExecutor(action)
+            do {
+                try await registerLocalExecutor(action)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                onLog?(
+                    "[register] skipped action=\(action.id?.uuidString.lowercased() ?? "unknown") error=\(error.localizedDescription)"
+                )
+            }
         }
 
         await invalidateActionToolCatalog(
@@ -908,7 +926,12 @@ extension KeepTalkingClient {
                             action.id?.uuidString.lowercased()
                             ?? "unknown"
                         onLog?("[mcp] registering local action=\(actionID)")
-                        try await mcpManager.registerIfNeeded(action)
+                        // Register metadata only — do NOT connect here. The
+                        // connection (and any interactive OAuth, or a stdio
+                        // server's own browser/loopback auth) happens lazily on
+                        // first tool use, so opening a context never eagerly
+                        // prompts or spawns every MCP server.
+                        try await mcpManager.registerMCPAction(action)
                         onLog?("[mcp] registered local action=\(actionID)")
                     case .skill:
                         let actionID =

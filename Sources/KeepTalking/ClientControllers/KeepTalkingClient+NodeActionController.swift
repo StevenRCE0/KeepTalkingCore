@@ -258,11 +258,10 @@ extension KeepTalkingClient {
         else {
             return
         }
-        let existing = try? await mcpCredentialStore.load(actionID: actionID)
-        let merged = KeepTalkingMCPCredentials(
-            headers: headers,
-            clientSecret: existing?.clientSecret
-        )
+        var merged =
+            (try? await mcpCredentialStore.load(actionID: actionID))
+            ?? KeepTalkingMCPCredentials()
+        merged.headers = headers
         try? await mcpCredentialStore.store(merged, actionID: actionID)
         bundle.service = .http(
             url: url,

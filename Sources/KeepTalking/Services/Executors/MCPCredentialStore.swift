@@ -8,18 +8,45 @@ import Foundation
 /// anything synced to peers. The runtime re-hydrates headers from here at
 /// connect time; the OAuth flow reads the client secret here at token exchange.
 public struct KeepTalkingMCPCredentials: Codable, Sendable, Equatable {
+    /// Static request headers (e.g. a user-entered API key). The OAuth bearer is
+    /// NOT stored here — the SDK authorizer injects it from its token storage.
     public var headers: [String: String]
+    /// User/config-supplied OAuth client ID, when not coming from app config.
+    public var clientID: String?
+    /// OAuth confidential-client secret.
     public var clientSecret: String?
+    /// Last acquired OAuth access token (cached for cross-launch reuse).
+    public var accessToken: String?
+    /// Expiry of `accessToken`, if the authorization server reported one.
+    public var accessTokenExpiresAt: Date?
+    /// Refresh token, used to silently renew without re-prompting.
+    public var refreshToken: String?
 
-    public init(headers: [String: String] = [:], clientSecret: String? = nil) {
+    public init(
+        headers: [String: String] = [:],
+        clientID: String? = nil,
+        clientSecret: String? = nil,
+        accessToken: String? = nil,
+        accessTokenExpiresAt: Date? = nil,
+        refreshToken: String? = nil
+    ) {
         self.headers = headers
+        self.clientID = clientID
         self.clientSecret = clientSecret
+        self.accessToken = accessToken
+        self.accessTokenExpiresAt = accessTokenExpiresAt
+        self.refreshToken = refreshToken
     }
 
     /// True when there is nothing worth persisting — the store deletes the
     /// keychain entry in that case rather than writing an empty blob.
     public var isEmpty: Bool {
-        headers.isEmpty && (clientSecret?.isEmpty ?? true)
+        headers.isEmpty
+            && (clientID?.isEmpty ?? true)
+            && (clientSecret?.isEmpty ?? true)
+            && (accessToken?.isEmpty ?? true)
+            && (refreshToken?.isEmpty ?? true)
+            && accessTokenExpiresAt == nil
     }
 }
 

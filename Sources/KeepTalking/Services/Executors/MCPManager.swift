@@ -307,12 +307,27 @@ public actor MCPManager {
     /// Liveness poll cadence once a tool call exceeds its grace period.
     private let toolCallPollSeconds: TimeInterval
     private var clientsByActionID: [UUID: Client] = [:]
+    /// In-flight connect tasks, keyed by action, so concurrent callers
+    /// (callAction / listTools / lazy registration) share one connect instead of
+    /// each building a second Client+transport+authorizer — which would otherwise
+    /// double-prompt OAuth and leak the loser's transport.
+    private var connectingByActionID: [UUID: Task<Void, Error>] = [:]
+    /// Connect timeout for the per-action handshake. Generous because the
+    /// `initialize` request can drive interactive OAuth — the SDK HTTP authorizer
+    /// presenting a browser, or a stdio server (e.g. `npx mcp-remote`) running its
+    /// own browser + loopback callback flow — which must be allowed to complete
+    /// instead of being cancelled at the short default timeout.
+    private let interactiveConnectTimeoutSeconds: TimeInterval = 300
     private var stdioProcessesByActionID: [UUID: StdioProcessHandle] = [:]
     private var virtualToolNamesByActionID: [UUID: [String]] = [:]
     private var healthByActionID: [UUID: MCPActionHealth] = [:]
     private var onActionToolsChanged: (@Sendable (UUID) async -> Void)?
     private var onLog: (@Sendable (String) -> Void)?
     private var onHTTPAuthURL: (@Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult)?
+    /// Supplies a per-action OAuth authorizer for HTTP MCP transports so OAuth is
+    /// driven in-protocol (the transport reacts to 401/403 → the authorizer →
+    /// discovery/token/retry) instead of a bespoke preflight gate.
+    private var authorizerProvider: (@Sendable (UUID, URL) async -> (any HTTPClientAuthorizer)?)?
 
     /// Creates an MCP manager for a node runtime.
     public init(
@@ -349,6 +364,16 @@ public actor MCPManager {
         _ handler: (@Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult)?
     ) {
         onHTTPAuthURL = handler
+    }
+
+    /// Installs a factory that supplies a per-action `HTTPClientAuthorizer` for
+    /// HTTP MCP transports. When set, the SDK transport performs OAuth in-band on
+    /// a 401/403 challenge via the authorizer, rather than relying on a separate
+    /// preflight gate.
+    public func setAuthorizerProvider(
+        _ provider: (@Sendable (UUID, URL) async -> (any HTTPClientAuthorizer)?)?
+    ) {
+        authorizerProvider = provider
     }
 
     /// Registers an MCP-backed action with the runtime manager.
@@ -475,8 +500,26 @@ public actor MCPManager {
         if virtualToolNamesByActionID[actionID] != nil {
             return
         }
-        if clientsByActionID[actionID] == nil {
-            try await connectActionClient(actionID: actionID, action: action)
+        guard clientsByActionID[actionID] == nil else {
+            return
+        }
+        // Coalesce concurrent connects for the same action onto one task so a
+        // single OAuth consent runs (not one per caller) and no transport leaks.
+        if let existing = connectingByActionID[actionID] {
+            try await existing.value
+            return
+        }
+        let connectTask = Task<Void, Error> { [weak self] in
+            guard let self else { return }
+            try await self.connectActionClient(actionID: actionID, action: action)
+        }
+        connectingByActionID[actionID] = connectTask
+        do {
+            try await connectTask.value
+            connectingByActionID[actionID] = nil
+        } catch {
+            connectingByActionID[actionID] = nil
+            throw error
         }
     }
 
@@ -781,7 +824,7 @@ public actor MCPManager {
                     try await Self.connectClient(
                         client,
                         transport: launchedTransport,
-                        timeoutSeconds: self.connectTimeoutSeconds
+                        timeoutSeconds: self.interactiveConnectTimeoutSeconds
                     )
                 }
 
@@ -799,7 +842,7 @@ public actor MCPManager {
                 }
 
                 guard try await group.next() != nil else {
-                    throw MCPManagerError.connectionTimedOut(self.connectTimeoutSeconds)
+                    throw MCPManagerError.connectionTimedOut(self.interactiveConnectTimeoutSeconds)
                 }
                 group.cancelAll()
             }
@@ -847,15 +890,21 @@ public actor MCPManager {
                     )
                 case .http(let url, _, let headers, _):
                     let transportConfiguration = URLSessionConfiguration.default
+                    let authorizer = await authorizerProvider?(actionID, url)
+                    // When an authorizer owns the bearer it injects the
+                    // `Authorization` header itself (before requestModifier runs),
+                    // so the static-header modifier must not re-set it.
                     let sanitizedHeaders = await injectedHTTPHeaders(
                         actionID: actionID,
-                        bundleHeaders: headers
+                        bundleHeaders: headers,
+                        excludingAuthorization: authorizer != nil
                     )
 
                     let transport = HTTPClientTransport(
                         endpoint: url,
                         configuration: transportConfiguration,
                         streaming: true,
+                        authorizer: authorizer,
                         requestModifier: { request in
                             var modifiedRequest = request
                             for (key, value) in sanitizedHeaders {
@@ -870,7 +919,7 @@ public actor MCPManager {
                     try await Self.connectClient(
                         client,
                         transport: IncrementingRequestIDTransport(base: transport),
-                        timeoutSeconds: connectTimeoutSeconds
+                        timeoutSeconds: interactiveConnectTimeoutSeconds
                     )
             }
         } catch {
@@ -942,13 +991,16 @@ public actor MCPManager {
 
         try await registerMCPAction(action)
 
+        let authorizer = await authorizerProvider?(actionID, endpoint)
         try await preflightHTTPAuthenticationViaMCP(
             actionID: actionID,
             endpoint: endpoint,
             headers: await injectedHTTPHeaders(
                 actionID: actionID,
-                bundleHeaders: headers
-            )
+                bundleHeaders: headers,
+                excludingAuthorization: authorizer != nil
+            ),
+            authorizer: authorizer
         )
     }
 
@@ -959,7 +1011,8 @@ public actor MCPManager {
     /// stored set.
     private func injectedHTTPHeaders(
         actionID: UUID,
-        bundleHeaders: [String: String]
+        bundleHeaders: [String: String],
+        excludingAuthorization: Bool = false
     ) async -> [String: String] {
         var headers = Self.sanitizedHTTPHeaders(bundleHeaders)
         if let credentialStore,
@@ -967,6 +1020,12 @@ public actor MCPManager {
         {
             for (key, value) in Self.sanitizedHTTPHeaders(credentials.headers) {
                 headers[key] = value
+            }
+        }
+        if excludingAuthorization {
+            for key in headers.keys
+            where key.caseInsensitiveCompare("Authorization") == .orderedSame {
+                headers.removeValue(forKey: key)
             }
         }
         return headers
@@ -997,7 +1056,8 @@ public actor MCPManager {
     private func preflightHTTPAuthenticationViaMCP(
         actionID: UUID,
         endpoint: URL,
-        headers: [String: String]
+        headers: [String: String],
+        authorizer: (any HTTPClientAuthorizer)? = nil
     ) async throws {
         let client = Client(
             name: "KeepTalking:preflight:\(nodeConfig.node.uuidString):\(actionID.uuidString)",
@@ -1013,6 +1073,7 @@ public actor MCPManager {
             endpoint: endpoint,
             configuration: .default,
             streaming: true,
+            authorizer: authorizer,
             requestModifier: { request in
                 var modifiedRequest = request
                 for (key, value) in headers {

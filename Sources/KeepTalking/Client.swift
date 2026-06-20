@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import MCP
 
 public enum KeepTalkingClientError: LocalizedError {
     case kvServiceNotConfigured
@@ -638,7 +639,14 @@ public final class KeepTalkingClient: @unchecked Sendable {
         }
     }
 
-    /// Starts transports, persists local node state, and registers local actions.
+    /// Starts transports and persists local node state.
+    ///
+    /// Registering local action executors is intentionally NOT part of connect:
+    /// a failing executor (e.g. an HTTP MCP server that needs re-auth) must never
+    /// block bringing the transport up or pop a blocking auth prompt as a side
+    /// effect of connecting. Callers that want executors live should invoke
+    /// `registerLocalActionsInExecutors()` explicitly (the App and CLI do, off
+    /// the connection path); the daemon opts out.
     public func connect() async throws {
         // Ensure any in-flight teardown from a previous disconnect() completes
         // before bringing the transport back up.
@@ -651,8 +659,6 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
         try await rtcClient.start()
         try await persistMyNode()
-
-        try await registerLocalActionsInExecutors()
 
         if kvService != nil {
             do {
@@ -707,6 +713,16 @@ public final class KeepTalkingClient: @unchecked Sendable {
         Task { [weak self] in
             await self?.mcpManager.setHTTPAuthURLHandler(handler)
         }
+    }
+
+    /// Installs a factory supplying a per-action `HTTPClientAuthorizer` so the MCP
+    /// transport performs OAuth in-protocol (driven by 401/403 challenges) instead
+    /// of a bespoke preflight gate. The provider is invoked with the action ID and
+    /// the HTTP MCP endpoint, and returns the authorizer (or nil to skip).
+    public func setMCPAuthorizerProvider(
+        _ provider: (@Sendable (UUID, URL) async -> (any HTTPClientAuthorizer)?)?
+    ) async {
+        await mcpManager.setAuthorizerProvider(provider)
     }
 
     #if os(macOS)
