@@ -5,9 +5,13 @@ import Foundation
 /// produced-resource delivery, transcript injection, and run cleanup.
 final class KeepTalkingIOManager {
     unowned let client: KeepTalkingClient
+    private let staging: KeepTalkingStagingIOManager
 
     init(client: KeepTalkingClient) {
         self.client = client
+        self.staging = KeepTalkingStagingIOManager(
+            client: client,
+            store: client.stagedFileStore)
     }
 
     struct DeliveredOutputs {
@@ -25,305 +29,6 @@ final class KeepTalkingIOManager {
         case metadata
         case previewText = "preview_text"
         case native
-    }
-
-    private func clipped(_ text: String, maxCharacters: Int) -> String {
-        client.clipped(text, maxCharacters: maxCharacters)
-    }
-
-    private func tool(_ fields: [String: Any], _ toolCallID: String) -> AIMessage {
-        client.toolMessage(payload: client.jsonString(fields), toolCallID: toolCallID)
-    }
-
-    private func toolResult(_ fields: [String: Any], _ toolCallID: String) -> [AIMessage] {
-        [tool(fields, toolCallID)]
-    }
-
-    private func failedToolResult(
-        _ error: String,
-        functionName: String,
-        toolCallID: String,
-        fields: [String: Any] = [:]
-    ) -> [AIMessage] {
-        var payload = fields
-        payload["ok"] = false
-        payload["function_name"] = functionName
-        payload["error"] = error
-        return toolResult(payload, toolCallID)
-    }
-
-    private func readTool(
-        functionName: String,
-        mode: ReadMode,
-        toolCallID: String,
-        fields: [String: Any]
-    ) -> AIMessage {
-        var payload = fields
-        payload["ok"] = true
-        payload["function_name"] = functionName
-        payload["mode"] = mode.rawValue
-        return tool(payload, toolCallID)
-    }
-
-    private func readToolResult(
-        functionName: String,
-        mode: ReadMode,
-        toolCallID: String,
-        fields: [String: Any]
-    ) -> [AIMessage] {
-        [readTool(functionName: functionName, mode: mode, toolCallID: toolCallID, fields: fields)]
-    }
-
-    func nativeUserMessage(
-        filename: String,
-        mimeType: String,
-        data: Data,
-        leadText: String
-    ) -> AIMessage {
-        .user(
-            parts: client.attachmentContentParts(
-                filename: filename,
-                mimeType: mimeType,
-                data: data,
-                leadText: leadText))
-    }
-
-    private func nativeAttachmentUserMessage(
-        attachment: KeepTalkingContextAttachment,
-        data: Data
-    ) -> AIMessage {
-        nativeUserMessage(
-            filename: attachment.filename,
-            mimeType: attachment.mimeType,
-            data: data,
-            leadText: AIPromptPresets.attachmentInjectionLeadText(
-                filename: attachment.filename,
-                isImage: attachment.isImage))
-    }
-
-    func readContextResource(
-        handleText: String,
-        mode: ReadMode,
-        maxCharacters: Int,
-        toolCallID: String,
-        functionName: String,
-        context: KeepTalkingContext
-    ) async throws -> [AIMessage] {
-        guard let contextID = context.id,
-            let handle = KTResourceManifest.resolveAgentHandle(handleText)?.id
-        else {
-            return failedToolResult(
-                "invalid_attachment_id",
-                functionName: functionName,
-                toolCallID: toolCallID,
-                fields: ["attachment_id": handleText])
-        }
-
-        guard let attachment = try await client.contextAttachment(handle, in: contextID)
-        else {
-            if let transcriptResult = try await voiceTranscriptReadResult(
-                sessionID: handle,
-                contextID: contextID,
-                mode: mode,
-                maxCharacters: maxCharacters,
-                toolCallID: toolCallID,
-                functionName: functionName
-            ) {
-                return transcriptResult
-            }
-            if let stagedResult = await stagedFileReadResult(
-                handle: handle,
-                mode: mode,
-                maxCharacters: maxCharacters,
-                toolCallID: toolCallID,
-                functionName: functionName
-            ) {
-                return stagedResult
-            }
-            return failedToolResult(
-                "attachment_not_found",
-                functionName: functionName,
-                toolCallID: toolCallID,
-                fields: ["attachment_id": handleText])
-        }
-
-        let blobRecord = try await KeepTalkingBlobRecord.query(on: client.localStore.database)
-            .filter(\.$id, .equal, attachment.blobID)
-            .first()
-        let aliasLookup = try await client.aliasLookup()
-        let attachmentJSON = KTResourceManifest.contextAttachmentJSONObject(
-            attachment,
-            blobRecord: blobRecord,
-            nodeAliasResolver: { aliasLookup.alias(for: .node($0)) }
-        )
-
-        switch mode {
-            case .metadata:
-                if let blobRecord {
-                    blobRecord.lastAccessedAt = Date()
-                    try await blobRecord.save(on: client.localStore.database)
-                }
-                return readToolResult(
-                    functionName: functionName, mode: mode, toolCallID: toolCallID,
-                    fields: [
-                        "attachment": attachmentJSON
-                    ])
-
-            case .previewText:
-                if let blobRecord {
-                    blobRecord.lastAccessedAt = Date()
-                    try await blobRecord.save(on: client.localStore.database)
-                }
-                let preview = KTResourceManifest.attachmentPreviewText(
-                    from: attachment,
-                    maxCharacters: maxCharacters,
-                    clip: clipped)
-                return readToolResult(
-                    functionName: functionName, mode: mode, toolCallID: toolCallID,
-                    fields: [
-                        "attachment": attachmentJSON,
-                        "has_preview": preview != nil,
-                        "max_characters": maxCharacters,
-                        "preview_text": preview ?? "",
-                    ])
-
-            case .native:
-                guard let blobRecord else {
-                    return failedToolResult(
-                        "blob_unavailable",
-                        functionName: functionName,
-                        toolCallID: toolCallID,
-                        fields: [
-                            "mode": mode.rawValue,
-                            "attachment": attachmentJSON,
-                            "error_message": "Attachment bytes are not available locally yet.",
-                        ])
-                }
-                guard blobRecord.availability == .ready else {
-                    return failedToolResult(
-                        "blob_not_ready",
-                        functionName: functionName,
-                        toolCallID: toolCallID,
-                        fields: [
-                            "mode": mode.rawValue,
-                            "attachment": attachmentJSON,
-                            "error_message":
-                                "Attachment bytes exist in metadata but are not ready locally.",
-                        ])
-                }
-                guard attachment.byteCount <= KeepTalkingClient.maxAINativeAttachmentBytes else {
-                    return failedToolResult(
-                        "attachment_too_large",
-                        functionName: functionName,
-                        toolCallID: toolCallID,
-                        fields: [
-                            "mode": mode.rawValue,
-                            "attachment": attachmentJSON,
-                            "error_message": "Attachment exceeds the native AI input budget.",
-                            "max_native_bytes": KeepTalkingClient.maxAINativeAttachmentBytes,
-                        ])
-                }
-
-                let data: Data
-                do {
-                    data = try client.blobStore.read(
-                        relativePath: blobRecord.relativePath,
-                        blobID: attachment.blobID
-                    )
-                } catch {
-                    return failedToolResult(
-                        "blob_read_failed",
-                        functionName: functionName,
-                        toolCallID: toolCallID,
-                        fields: [
-                            "mode": mode.rawValue,
-                            "attachment": attachmentJSON,
-                            "error_message": error.localizedDescription,
-                        ])
-                }
-
-                let now = Date()
-                blobRecord.lastAccessedAt = now
-                blobRecord.aiLastNativeIncludeAt = now
-                try await blobRecord.save(on: client.localStore.database)
-
-                return [
-                    readTool(
-                        functionName: functionName, mode: mode, toolCallID: toolCallID,
-                        fields: [
-                            "attachment": attachmentJSON,
-                            "native_injected": true,
-                        ]),
-                    nativeAttachmentUserMessage(
-                        attachment: attachment,
-                        data: data
-                    ),
-                ]
-        }
-    }
-
-    private func voiceTranscriptReadResult(
-        sessionID: UUID,
-        contextID: UUID,
-        mode: ReadMode,
-        maxCharacters: Int,
-        toolCallID: String,
-        functionName: String
-    ) async throws -> [AIMessage]? {
-        let aliasLookup = try await client.aliasLookup()
-        guard
-            let summary = try await client.voiceTranscriptSessionSummaries(in: contextID)
-                .first(where: { $0.sessionID == sessionID })
-        else { return nil }
-
-        let attachmentJSON = KTResourceManifest.voiceTranscriptVirtualAttachmentJSON(
-            summary, aliasLookup: aliasLookup)
-
-        switch mode {
-            case .metadata:
-                return readToolResult(
-                    functionName: functionName, mode: mode, toolCallID: toolCallID,
-                    fields: [
-                        "attachment": attachmentJSON
-                    ])
-
-            case .previewText:
-                let text =
-                    (try await client.renderVoiceTranscript(
-                        forSession: sessionID,
-                        in: contextID,
-                        aliasLookup: aliasLookup,
-                        maxCharacters: maxCharacters
-                    )) ?? ""
-                return readToolResult(
-                    functionName: functionName, mode: mode, toolCallID: toolCallID,
-                    fields: [
-                        "attachment": attachmentJSON,
-                        "has_preview": !text.isEmpty,
-                        "max_characters": maxCharacters,
-                        "preview_text": text,
-                    ])
-
-            case .native:
-                let full =
-                    (try await client.renderVoiceTranscript(
-                        forSession: sessionID,
-                        in: contextID,
-                        aliasLookup: aliasLookup,
-                        maxCharacters: 24_000
-                    )) ?? ""
-                let lead =
-                    "Voice call transcript you requested (session \(sessionID.uuidString.prefix(8))) — included below. Use it directly."
-                return [
-                    readTool(
-                        functionName: functionName, mode: mode, toolCallID: toolCallID,
-                        fields: [
-                            "attachment": attachmentJSON,
-                            "native_injected": true,
-                        ]),
-                    .user("\(lead)\n\n\(full)"),
-                ]
-        }
     }
 
     struct StagedResource {
@@ -348,8 +53,7 @@ final class KeepTalkingIOManager {
 
     func stagedResource(handle: UUID, filename: String? = nil) async -> StagedResource? {
         guard
-            let staged = await client.stagedFileStore.file(
-                handle: handle, callerNodeID: client.config.node)
+            let staged = await staging.file(handle: handle, callerNodeID: client.config.node)
         else { return nil }
         let displayName = filename ?? staged.filename
         return StagedResource(
@@ -359,57 +63,6 @@ final class KeepTalkingIOManager {
             mimeType: MIMEType.inferredMIMEType(
                 forFileAt: staged.url, filename: displayName),
             byteCount: staged.byteCount)
-    }
-
-    private func stagedFileReadResult(
-        handle: UUID,
-        mode: ReadMode,
-        maxCharacters: Int,
-        toolCallID: String,
-        functionName: String
-    ) async -> [AIMessage]? {
-        guard let staged = await stagedResource(handle: handle) else { return nil }
-
-        switch mode {
-            case .metadata:
-                return readToolResult(
-                    functionName: functionName, mode: mode, toolCallID: toolCallID,
-                    fields: [
-                        "resource": staged.manifestJSON
-                    ])
-            case .previewText:
-                let data = (try? Data(contentsOf: staged.url)) ?? Data()
-                let text =
-                    String(data: data, encoding: .utf8)
-                    .map { clipped($0, maxCharacters: maxCharacters) }
-                    ?? "<binary file, \(staged.byteCount) bytes — use native mode>"
-                return readToolResult(
-                    functionName: functionName, mode: mode, toolCallID: toolCallID,
-                    fields: [
-                        "handle": staged.handleText,
-                        "name": staged.filename,
-                        "content": text,
-                    ])
-            case .native:
-                guard let data = try? Data(contentsOf: staged.url) else { return nil }
-                let leadText = AIPromptPresets.attachmentInjectionLeadText(
-                    filename: staged.filename,
-                    isImage: staged.mimeType.hasPrefix("image/"))
-                return [
-                    nativeUserMessage(
-                        filename: staged.filename,
-                        mimeType: staged.mimeType,
-                        data: data,
-                        leadText: leadText),
-                    readTool(
-                        functionName: functionName, mode: mode, toolCallID: toolCallID,
-                        fields: [
-                            "handle": staged.handleText,
-                            "name": staged.filename,
-                            "note": "file content attached as a user message",
-                        ]),
-                ]
-        }
     }
 
     func deliverProducedOutputFiles(
@@ -433,7 +86,7 @@ final class KeepTalkingIOManager {
                         filename: filename,
                         explicit: input.mimeType)
                     guard
-                        let staged = await client.stagedFileStore.stageLocalFile(
+                        let staged = await staging.stageLocalFile(
                             at: input.sourceURL, filename: filename,
                             callerNodeID: client.config.node)
                     else {
@@ -489,7 +142,7 @@ final class KeepTalkingIOManager {
                     "[io/materialize] FAILED transfer=\(ref.transferID.uuidString.prefix(8))")
                 continue
             }
-            await client.stagedFileStore.register(
+            await staging.register(
                 handle: ref.transferID,
                 url: url,
                 callerNodeID: client.config.node,
@@ -682,8 +335,7 @@ final class KeepTalkingIOManager {
         let workspaceDirectory: URL?
         let outputSlots: [KTCallBinding.BoundObject]
 
-        fileprivate let stagedAttachments: KeepTalkingStagedAttachments?
-        fileprivate let ownedInputDir: URL?
+        fileprivate let stagedInputs: KeepTalkingStagingIOManager.PreparedInputs
         fileprivate let workspaceThreadID: UUID?
         fileprivate let workspaceRunStarted: Bool
     }
@@ -693,26 +345,8 @@ final class KeepTalkingIOManager {
         request: KeepTalkingActionCallRequest,
         grant: KeepTalkingActionScope
     ) async throws -> PreparedSkillRun {
-        let staged = await client.stageContextAttachments(in: request.contextID)
-        var attachmentsDir = staged?.directory
-        var ownedInputDir: URL?
-        var otbInputs: [(handle: UUID, url: URL)] = []
-
-        if action.acceptsFileInput, request.call.inputHandles?.isEmpty == false {
-            let dir: URL
-            if let existing = attachmentsDir {
-                dir = existing
-            } else {
-                dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-                    .appendingPathComponent(
-                        "kt-otb-skillin-\(request.id.uuidString.lowercased())",
-                        isDirectory: true)
-                ownedInputDir = dir
-            }
-            otbInputs = try await client.resolveStagedInputs(
-                request.call, callerNodeID: request.callerNodeID, into: dir)
-            attachmentsDir = dir
-        }
+        let stagedInputs = try await staging.prepareInputs(action: action, request: request)
+        let attachmentsDir = stagedInputs.directory
 
         var workspaceThreadID: UUID?
         var workspaceDir: URL?
@@ -731,13 +365,8 @@ final class KeepTalkingIOManager {
         let binding = prepareCallBinding(
             action: action,
             call: request.call,
-            attachments: (staged?.files ?? []).map {
-                StagedInputResource(
-                    id: $0.id,
-                    path: URL(fileURLWithPath: $0.path),
-                    displayName: $0.filename)
-            },
-            otbInputs: otbInputs,
+            attachments: stagedInputs.attachments,
+            otbInputs: stagedInputs.otbInputs,
             attachmentsDir: attachmentsDir,
             workspaceDir: workspaceDir)
 
@@ -765,8 +394,7 @@ final class KeepTalkingIOManager {
             manifest: manifest,
             workspaceDirectory: workspaceDir,
             outputSlots: outputSlots,
-            stagedAttachments: staged,
-            ownedInputDir: ownedInputDir,
+            stagedInputs: stagedInputs,
             workspaceThreadID: workspaceThreadID,
             workspaceRunStarted: workspaceRunStarted)
     }
@@ -775,13 +403,12 @@ final class KeepTalkingIOManager {
         if run.workspaceRunStarted, let threadID = run.workspaceThreadID {
             Task { [weak client] in await client?.endThreadWorkspaceRun(threadID) }
         }
-        run.stagedAttachments.map { client.cleanupStagedAttachments($0) }
-        run.ownedInputDir.map { try? FileManager.default.removeItem(at: $0) }
+        staging.cleanup(run.stagedInputs)
 
         guard let handles = consumedInputHandles, !handles.isEmpty else { return }
-        Task { [stagedFileStore = client.stagedFileStore] in
+        Task { [store = staging.store, handles] in
             for handle in handles {
-                await stagedFileStore.discardIfConsumable(handle: handle)
+                await store.discardIfConsumable(handle: handle)
             }
         }
     }

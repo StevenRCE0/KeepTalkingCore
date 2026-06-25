@@ -333,7 +333,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// Holds files peers have preflighted (staged) onto this node ahead of a
     /// tool call, keyed by handle. A real call references the handle for its
     /// input file object.
-    let stagedFileStore = KeepTalkingStagedFileStore()
+    let stagedFileStore = KeepTalkingStagingIOStore()
 
     // MARK: Teardown serialization
     // `rtcClient.stop()` synchronously closes WebRTC peer connections, which

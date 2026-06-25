@@ -171,48 +171,6 @@ extension KeepTalkingClient {
             isError: false)
     }
 
-    /// Resolves a call's `inputHandles` (caller-scoped) to their staged paths and
-    /// copies them into `directory` (the action's input staging area). Returns
-    /// the copied file URLs. The resolve+copy happens atomically inside the
-    /// store's actor (no reap/eviction can delete the file mid-copy) and each
-    /// copy lands under a non-colliding name (so two same-named handles, or a
-    /// handle whose name matches an already-staged context attachment, don't
-    /// clobber each other). Unknown/foreign/raced handles degrade to a skipped
-    /// input rather than aborting the whole tool call.
-    func resolveStagedInputs(
-        _ call: KeepTalkingActionCall,
-        callerNodeID: UUID,
-        into directory: URL
-    ) async throws -> [(handle: UUID, url: URL)] {
-        guard let handles = call.inputHandles, !handles.isEmpty else { return [] }
-        try FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true)
-        var resolved: [(handle: UUID, url: URL)] = []
-        for handle in handles {
-            if let dest = try? await stagedFileStore.copyStagedFile(
-                handle: handle, callerNodeID: callerNodeID, into: directory)
-            {
-                resolved.append((handle: handle, url: dest))
-            } else {
-                // Was silent before — a dropped input handle just produced no env
-                // var with no trace. Log the MISS with the precise reason + whether
-                // this is a LOCAL self-call (so absent ⇒ TTL/discarded) or a REMOTE
-                // call (so absent ⇒ the OTB lives on the caller's node and was never
-                // shipped here — the cross-node re-feed gap).
-                let diagnosis = await stagedFileStore.resolutionDiagnosis(
-                    handle: handle, callerNodeID: callerNodeID)
-                let scope =
-                    callerNodeID == config.node
-                    ? "scope=local(self-call ⇒ TTL/discarded)"
-                    : "scope=remote(caller-owns-it ⇒ not shipped to this node)"
-                onLog?(
-                    "[io/staged-input] MISS handle=\(handle.uuidString.prefix(8)) "
-                        + "caller=\(callerNodeID.uuidString.prefix(8)) \(scope) "
-                        + "diagnosis=\(diagnosis); input skipped, no $KT_OTB emitted")
-            }
-        }
-        return resolved
-    }
     #endif
 
     private static func parseStagedHandle(_ content: [Tool.Content]) -> UUID? {

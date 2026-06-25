@@ -7,7 +7,7 @@ import Foundation
 /// the acceptance point, so abandoned stages expire and no single caller can
 /// exhaust the temp disk. (The caller's authorization to stage at all is checked
 /// by the preflight handler before anything reaches this store.)
-actor KeepTalkingStagedFileStore {
+actor KeepTalkingStagingIOStore {
     private struct Entry {
         let url: URL
         let callerNodeID: UUID
@@ -121,8 +121,7 @@ actor KeepTalkingStagedFileStore {
             let (handle, dir) = makeStagingDirectory(
                 expectedBytes: byteCount, callerNodeID: callerNodeID)
         else { return nil }
-        let safe = (filename as NSString).lastPathComponent
-        let name = safe.isEmpty ? "file" : safe
+        let name = safeFileName(filename)
         let dest = dir.appendingPathComponent(name, isDirectory: false)
         do {
             try FileManager.default.copyItem(at: sourceURL, to: dest)
@@ -189,12 +188,14 @@ actor KeepTalkingStagedFileStore {
         for handle in stale { discard(handle: handle) }
     }
 
-    /// A destination name inside `directory` that doesn't collide with an
-    /// existing file (another staged input, or a context attachment already
-    /// staged there), preserving the original name where possible.
-    private func nonCollidingDestination(for filename: String, in directory: URL) -> URL {
+    private func safeFileName(_ filename: String) -> String {
         let safe = (filename as NSString).lastPathComponent
-        let base = safe.isEmpty ? "file" : safe
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return safe.isEmpty || safe == "." || safe == ".." ? "file" : safe
+    }
+
+    private func nonCollidingDestination(for filename: String, in directory: URL) -> URL {
+        let base = safeFileName(filename)
         var candidate = directory.appendingPathComponent(base, isDirectory: false)
         var counter = 1
         while FileManager.default.fileExists(atPath: candidate.path) {
@@ -203,4 +204,5 @@ actor KeepTalkingStagedFileStore {
         }
         return candidate
     }
+
 }

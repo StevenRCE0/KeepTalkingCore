@@ -265,16 +265,8 @@ extension KeepTalkingClient {
         let key = KeepTalkingOneTimeBlobCrypto.key(from: keyData)
         let chunks = try await assembler.orderedCiphertextChunks(transferID: ref.transferID)
 
-        // The filename is wire-controlled, so reduce it to a single safe path
-        // component: `lastPathComponent` strips every directory separator, and we
-        // reject "", ".", ".." and any residual "/". A single sanitized component
-        // appended to `directory` is PROVABLY a direct child — so containment is
-        // guaranteed by construction. We deliberately do NOT compare canonicalised
-        // absolute paths: on iOS the temp dir is reached via the /var→/private/var
-        // symlink, and Foundation resolves the (non-existent) leaf path to
-        // /private/var while leaving the existing directory at /var, which makes
-        // any hasPrefix/standardized comparison report a false escape.
         let safeName = (ref.filename as NSString).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !safeName.isEmpty, safeName != ".", safeName != "..",
             !safeName.contains("/")
         else {

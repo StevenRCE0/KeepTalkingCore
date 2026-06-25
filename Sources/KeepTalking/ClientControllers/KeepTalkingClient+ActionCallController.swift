@@ -698,7 +698,7 @@ extension KeepTalkingClient {
 
         // Cross-node OTB re-feed: a produced/staged input the agent referenced lives
         // in THIS caller's staged store; ship it to a REMOTE executor (preserving the
-        // handle) so the executor can resolve it — otherwise resolveStagedInputs
+        // handle) so the staging manager can resolve it, otherwise the
         // MISSes (the file was never on that node). No-op for a local delivery.
         if deliveryNodeID != config.node {
             await relayLocalStagedInputs(

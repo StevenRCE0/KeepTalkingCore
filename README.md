@@ -38,6 +38,11 @@ Sources/KeepTalking/
 │   │   ├── MainAgent.swift         # Primary conversation agent
 │   │   ├── ACTAgent.swift          # Autonomous tool-calling agent loop
 │   │   └── AudioInterfaceAgent.swift # Voice-mode agent
+│   ├── IO/                         # Runtime action I/O, staging, transcript injection
+│   │   ├── KeepTalkingIOManager.swift # Typed action I/O, manifests, output delivery
+│   │   ├── KeepTalkingIOManager+Transcript.swift # AIMessage/readout presentation
+│   │   ├── KeepTalkingStagingManager.swift # Skill-run resource collection/staging
+│   │   └── KeepTalkingStagedFileStore.swift # OTB/staged-file handle backend
 │   ├── AgentCoordinator.swift      # Cross-context agent run queue + suspension/resume
 │   ├── Executors/                  # Skill & tool execution managers
 │   │   ├── SkillManager.swift      # Skill lifecycle: planning, prompting, tool dispatch
@@ -118,6 +123,17 @@ Built-in connectors:
 | `AnthropicConnector` | `.anthropic`, `.custom(baseURL:)` |
 
 The message IR (`AIMessage`, `AIToolCall`, `AIToolChoice`) supports multimodal content — text + image URLs — and maps cleanly to all vendor formats. `AITurnResult` surfaces optional reasoning (`thinking`) and audio output in addition to the assistant text and tool calls.
+
+## Runtime I/O Model
+
+Action and skill I/O is centralized under `Services/IO`.
+
+- `KeepTalkingIOManager` owns the per-run contract: binding declared action objects to concrete inputs/outputs, building `KTResourceManifest`, granting directories, harvesting outputs, delivering produced resources, and cleaning up after a run.
+- `KeepTalkingStagingManager` is the IO manager's staging runtime. It collects ready context attachments, resolves staged OTB handles into the same run directory, records owned scratch directories, and delegates persistent staged-handle storage to `KeepTalkingStagedFileStore`.
+- `KeepTalkingIOManager+Transcript` owns AI-facing presentation: tool-result messages, native attachment/user-message injection, context-resource readouts, voice transcript readouts, staged-file readouts, and produced-resource transcript injection.
+- `KTResourceManifest` remains the per-run description handed to the skill agent. It describes what the run can read/write; it is not the place to stage files or fetch attachments.
+
+The intended rule is simple: resources are emitted and collected through the IO runtime. Models should receive available run resources through the turn context/presentation path, not discover OTBs by calling extra retrieval tools. If this pipeline exposes a bug, fix the bug in this model rather than adding another client-side staging or attachment shim.
 
 ## Transport
 

@@ -8,10 +8,10 @@ import Testing
 /// consumption so it can be re-fed into a later action (A→B chaining), while an
 /// ephemeral input relay (default register) is destroyed on first consume.
 struct KeepTalkingStagedFileStoreTests {
-    private func makeStore() -> (store: KeepTalkingStagedFileStore, base: URL) {
+    private func makeStore() -> (store: KeepTalkingStagingIOStore, base: URL) {
         let base = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("kt-staged-test-\(UUID().uuidString)", isDirectory: true)
-        return (KeepTalkingStagedFileStore(baseDirectory: base), base)
+        return (KeepTalkingStagingIOStore(baseDirectory: base), base)
     }
 
     private func writeTemp(_ contents: String) throws -> URL {
