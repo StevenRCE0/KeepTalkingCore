@@ -106,12 +106,13 @@ actor KeepTalkingStagedFileStore {
     /// `.otb` output) and returns its handle. Unlike peer preflight, the bytes are
     /// already local — this reserves a quota-checked dir, copies the file in, and
     /// registers it. The result is NEVER an attachment and NEVER synced/broadcast;
-    /// the agent reads it by handle. Returns nil if a quota refuses the stage.
+    /// callers inject it into the next model turn and keep the handle for chaining.
     /// Registered as RE-FEEDABLE (not consume-on-use): a produced `.otb` output is
     /// meant to flow into a later action call (A→B chaining), so consuming it once
     /// must not destroy it — TTL + quota reclaim it instead.
     func stageLocalFile(
-        at sourceURL: URL, filename: String, callerNodeID: UUID
+        at sourceURL: URL, filename: String, callerNodeID: UUID,
+        consumeOnUse: Bool = false
     ) -> (handle: UUID, byteCount: Int)? {
         let byteCount =
             ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path))?[.size]
@@ -131,13 +132,12 @@ actor KeepTalkingStagedFileStore {
         }
         register(
             handle: handle, url: dest, callerNodeID: callerNodeID,
-            filename: name, byteCount: byteCount, consumeOnUse: false)
+            filename: name, byteCount: byteCount, consumeOnUse: consumeOnUse)
         return (handle, byteCount)
     }
 
-    /// Resolves a caller-owned staged handle to its file + metadata so the agent
-    /// can READ a private resource by handle. Caller-scoped: a foreign or unknown
-    /// handle (or one whose bytes vanished) returns nil.
+    /// Resolves a caller-owned staged handle to its file + metadata. Caller-scoped:
+    /// a foreign or unknown handle (or one whose bytes vanished) returns nil.
     func file(
         handle: UUID, callerNodeID: UUID
     ) -> (url: URL, filename: String, byteCount: Int)? {

@@ -174,222 +174,30 @@ extension KeepTalkingClient {
                     )
                 case .skill:
                     #if os(macOS)
-                    // Build the skill's $KT_ATTACHMENTS staging dir from two
-                    // sources: the context's ready attachments, and any OTB file
-                    // inputs the caller relayed to us — gated on the action
-                    // accepting file input (skills only, today). One dir, two
-                    // sources; the skill script sees them all.
-                    let staged = await stageContextAttachments(in: request.contextID)
-                    var attachmentsDir: URL? = staged?.directory
-                    var ownedInputDir: URL? = nil
-                    var otbInputs: [(handle: UUID, url: URL)] = []
-                    var workspaceThreadID: UUID? = nil
-                    var workspaceDir: URL? = nil
-                    // Tracks whether the run-bracket was ACTUALLY taken (beginRun
-                    // called). The thread id can be resolved while the workspace dir
-                    // fails to create, so the defer must key off this, not the id —
-                    // an unbalanced endRun on a thread another concurrent run holds
-                    // would clear its refcount and fire a premature seal.
-                    var workspaceRunStarted = false
-                    // Arm cleanup BEFORE materializing — a throw mid-loop must not
-                    // leave decrypted plaintext at rest in the staging dir.
+                    let actionIO = KeepTalkingIOManager(client: self)
+                    let ioRun = try await actionIO.prepareSkillRun(
+                        action: action, request: request, grant: grant)
                     defer {
-                        // Release the workspace run-bracket so a deferred seal
-                        // (thread archived mid-run) can complete once we drain.
-                        if workspaceRunStarted, let tid = workspaceThreadID {
-                            Task { [weak self] in await self?.endThreadWorkspaceRun(tid) }
-                        }
-                        staged.map { cleanupStagedAttachments($0) }
-                        ownedInputDir.map { try? FileManager.default.removeItem(at: $0) }
-                        // Turn-scoped cleanup of CONSUME-ONCE inputs (peer preflight /
-                        // kt_send_file relays): drop the staged plaintext we consumed
-                        // this call rather than letting it linger to the store TTL.
-                        // `discardIfConsumable` LEAVES re-feedable PRODUCED outputs
-                        // (an action's `.otb` result) intact, so the same handle can
-                        // flow into a later action — chaining an unconditional discard
-                        // silently broke (the produced OTB vanished before re-use, so
-                        // no $KT_OTB env var was ever provisioned).
-                        if let consumed = request.call.inputHandles, !consumed.isEmpty {
-                            Task { [stagedFileStore] in
-                                for handle in consumed {
-                                    await stagedFileStore.discardIfConsumable(handle: handle)
-                                }
-                            }
-                        }
-                    }
-                    // Resolve any preflighted (staged) file inputs the caller
-                    // referenced by handle into the skill's $KT_ATTACHMENTS dir.
-                    if action.acceptsFileInput,
-                        request.call.inputHandles?.isEmpty == false
-                    {
-                        let dir: URL
-                        if let existing = attachmentsDir {
-                            dir = existing
-                        } else {
-                            dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-                                .appendingPathComponent(
-                                    "kt-otb-skillin-\(request.id.uuidString.lowercased())",
-                                    isDirectory: true)
-                            ownedInputDir = dir
-                        }
-                        otbInputs = try await resolveStagedInputs(
-                            request.call, callerNodeID: request.callerNodeID, into: dir)
-                        attachmentsDir = dir
-                    }
-                    // Resolve the thread's isolated execution workspace: the
-                    // read-write scratch/output dir used as the script's cwd, so a
-                    // relative write lands in scratch, not the read-only skill dir.
-                    workspaceThreadID =
-                        (try? await ensureContextMainThread(
-                            for: request.contextID))?.id
-                    if let tid = workspaceThreadID {
-                        workspaceDir = try? await threadWorkspace(for: tid)
-                        if workspaceDir != nil {
-                            await beginThreadWorkspaceRun(tid)
-                            workspaceRunStarted = true
-                        }
-                    }
-                    // Bind declared SVO objects to the resolved resources for this
-                    // run: names relayed inputs by their declared role and allocates
-                    // `.output` write slots under the workspace. With no declared
-                    // objects (every skill today) this is a no-op — inputs stay
-                    // unnamed, no output slots — preserving behavior exactly.
-                    let binding = prepareCallBinding(
-                        action: action,
-                        call: request.call,
-                        attachments: (staged?.files ?? []).map {
-                            StagedInputResource(
-                                id: $0.id,
-                                path: URL(fileURLWithPath: $0.path),
-                                displayName: $0.filename)
-                        },
-                        otbInputs: otbInputs,
-                        attachmentsDir: attachmentsDir,
-                        workspaceDir: workspaceDir)
-                    // Best-effort grant of the staging dir (read-only) + the thread
-                    // workspace (read-write). Injecting dirs only ADDS constraints,
-                    // so the policy can only fail to compile when the plain policy
-                    // ALSO fails (an inherently unsandboxed skill) — fall back rather
-                    // than hard-failing. `attachmentsGranted` records whether staged
-                    // files are reachable so the manifest can fail closed.
-                    var extraDirectories: [String: (url: URL, direction: KeepTalkingResourceDirection)] = [:]
-                    for (label, directory) in binding.grantedDirectories {
-                        extraDirectories[label] = (directory.url, directory.direction)
-                    }
-                    var attachmentsGranted = false
-                    let sandboxPolicy: KTSandboxPolicy?
-                    if !extraDirectories.isEmpty {
-                        if let granted = try? await scopeManager.resolvedPolicy(
-                            for: action,
-                            extraDirectories: extraDirectories,
-                            callerScope: grant
-                        ) {
-                            sandboxPolicy = granted
-                            attachmentsGranted = (attachmentsDir != nil)
-                        } else {
-                            sandboxPolicy = try? await scopeManager.resolvedPolicy(
-                                for: action, callerScope: grant)
-                            // nil policy = inherently unsandboxed (reachable anyway);
-                            // a non-nil fallback lacks the dir grants, so the
-                            // workspace can't be the write cwd — drop it.
-                            attachmentsGranted = (attachmentsDir != nil) && (sandboxPolicy == nil)
-                            if sandboxPolicy != nil { workspaceDir = nil }
-                        }
-                    } else {
-                        sandboxPolicy = try? await scopeManager.resolvedPolicy(
-                            for: action, callerScope: grant)
-                    }
-                    // Resource manifest + harvestable outputs, built ONLY from
-                    // resources whose dirs the sandbox actually granted (fail
-                    // closed). Inputs require the staging dir; output slots require
-                    // the workspace to have survived the policy dance (it's dropped
-                    // on the unsandboxed-fallback path, line above). Single source of
-                    // truth for the env dict AND the agent prompt block.
-                    var manifest: KTResourceManifest? = nil
-                    var activeOutputs: [KTCallBinding.BoundObject] = []
-                    var candidates: [KTResourceManifest.Candidate] = []
-                    if attachmentsGranted {
-                        candidates.append(
-                            contentsOf: binding.inputs.map { $0.manifestCandidate })
-                    }
-                    if workspaceDir != nil {
-                        activeOutputs = binding.outputs
-                        candidates.append(
-                            contentsOf: activeOutputs.map { $0.manifestCandidate })
-                    }
-                    if !candidates.isEmpty {
-                        manifest = KTResourceManifest.build(
-                            grantedCandidates: candidates,
-                            umbrellaAttachmentsDir: attachmentsGranted
-                                ? attachmentsDir : nil)
-                    }
-                    // Clear any stale file at an output slot BEFORE the run, and
-                    // create the slot DIRECTORY for a collection (`multiple`) output
-                    // so the skill can write its files into it. The thread workspace
-                    // is persistent and slot paths are deterministic
-                    // (workspace/<object-name>), so a leftover from a prior run — or a
-                    // prior REMOTE caller — would otherwise satisfy the post-run
-                    // `fileExists` check and be harvested as this run's output (wrong
-                    // output + cross-caller leak). Only a file this run writes survives.
-                    for output in activeOutputs {
-                        try? FileManager.default.removeItem(at: output.path)
-                        if output.isDirectory {
-                            try? FileManager.default.createDirectory(
-                                at: output.path, withIntermediateDirectories: true)
-                        }
-                    }
-                    if !activeOutputs.isEmpty {
-                        onLog?(
-                            "[io/slots] action=\(request.call.action.uuidString.prefix(8)) "
-                                + "prepared=\(activeOutputs.count) "
-                                + "attachment=\(activeOutputs.filter { $0.kind == .attachment }.count) "
-                                + "otb=\(activeOutputs.filter { $0.kind == .otb }.count) "
-                                + "collections=\(activeOutputs.filter { $0.isDirectory }.count)")
+                        actionIO.cleanup(
+                            ioRun, consumedInputHandles: request.call.inputHandles)
                     }
                     callResult = try await skillManager.callAction(
                         action: action,
                         call: request.call,
-                        sandboxPolicy: sandboxPolicy,
+                        sandboxPolicy: ioRun.sandboxPolicy,
                         model: openAIModel ?? "gpt-5-codex",
-                        attachmentsDir: attachmentsDir,
-                        manifest: manifest,
-                        workspaceDirectory: workspaceDir
+                        attachmentsDir: ioRun.attachmentsDir,
+                        manifest: ioRun.manifest,
+                        workspaceDirectory: ioRun.workspaceDirectory
                     )
-                    // Process declared `.output` slots by persistence. On the success
-                    // path ONLY — a thrown or cancelled run never reaches here, so a
-                    // cancelled run ships no partial output (cancellation guarantee).
-                    if !activeOutputs.isEmpty {
-                        // Deliver every declared `.output` slot through the SAME
-                        // per-persistence deliverer the primitive path uses
-                        // (`deliverProducedOutputFiles`): `.attachment` → summon a
-                        // synced context attachment; `.otb` → stage re-feedable for a
-                        // LOCAL caller or ship point-to-point for a REMOTE one. Grouped
-                        // by Kind because the deliverer takes one persistence per batch.
-                        // On the success path ONLY — a thrown/cancelled run never reaches
-                        // here, so it ships no partial output (cancellation guarantee).
-                        let attFiles = producedOutputFiles(
-                            from: activeOutputs.filter { $0.kind == .attachment })
-                        if !attFiles.isEmpty {
-                            let delivered = await deliverProducedOutputFiles(
-                                attFiles, persistence: .attachment,
-                                in: request.contextID, to: request.callerNodeID)
-                            producedResources.append(contentsOf: delivered.resources)
-                        }
-                        let otbFiles = producedOutputFiles(
-                            from: activeOutputs.filter { $0.kind != .attachment })
-                        if !otbFiles.isEmpty {
-                            let delivered = await deliverProducedOutputFiles(
-                                otbFiles, persistence: .otb,
-                                in: request.contextID, to: request.callerNodeID)
-                            producedResources.append(contentsOf: delivered.resources)
-                            if !delivered.transfers.isEmpty {
-                                outputTransfers = (outputTransfers ?? []) + delivered.transfers
-                            }
-                        }
-                        onLog?(
-                            "[io/outputs] action=\(request.call.action.uuidString.prefix(8)) "
-                                + "attachment=\(attFiles.count) otb=\(otbFiles.count) "
-                                + "caller=\(request.callerNodeID.uuidString.prefix(8))")
+                    let delivered = await actionIO.deliverOutputs(
+                        ioRun.outputSlots,
+                        contextID: request.contextID,
+                        callerNodeID: request.callerNodeID,
+                        actionID: request.call.action)
+                    producedResources.append(contentsOf: delivered.resources)
+                    if !delivered.transfers.isEmpty {
+                        outputTransfers = (outputTransfers ?? []) + delivered.transfers
                     }
                     #else
                     callResult = (content: [], isError: true)
@@ -415,11 +223,12 @@ extension KeepTalkingClient {
                         // explicitly via `outputs[].persistence = "attachment"`.
                         let persistence =
                             request.call.outputHandles?.first?.persistence ?? .otb
-                        let delivered = await deliverProducedOutputFiles(
-                            primitiveResult.outputFiles,
-                            persistence: persistence,
-                            in: request.contextID,
-                            to: request.callerNodeID)
+                        let delivered = await KeepTalkingIOManager(client: self)
+                            .deliverProducedOutputFiles(
+                                primitiveResult.outputFiles,
+                                persistence: persistence,
+                                in: request.contextID,
+                                to: request.callerNodeID)
                         producedResources.append(contentsOf: delivered.resources)
                         if !delivered.transfers.isEmpty {
                             outputTransfers = (outputTransfers ?? []) + delivered.transfers
@@ -966,8 +775,8 @@ extension KeepTalkingClient {
             return result
         }
         // Produced `.otb` outputs (chainable) → stage into THIS caller's store under
-        // transferID so the agent can read / auto-inject AND re-feed them (A→B
-        // chaining), mirroring the continuation path. They're identified by an `otb`
+        // transferID so the next turn can inject them and later actions can consume
+        // them (A→B chaining), mirroring the continuation path. They're identified by an `otb`
         // produced_resources entry whose handle == KT_OTB_<transferID>; anything else
         // (a filesystem get-file result, which carries NO produced_resources) falls
         // through to the temp-dir + path-note materialization below. When
@@ -979,7 +788,8 @@ extension KeepTalkingClient {
             })
         let producedOTBTransfers = transfers.filter { producedOTBIDs.contains($0.transferID) }
         if !producedOTBTransfers.isEmpty {
-            await materializeProducedOTBOutputs(producedOTBTransfers, from: deliveryNodeID)
+            await KeepTalkingIOManager(client: self)
+                .materializeProducedOTBOutputs(producedOTBTransfers, from: deliveryNodeID)
         }
         let fsTransfers = transfers.filter { !producedOTBIDs.contains($0.transferID) }
         guard !fsTransfers.isEmpty else {
@@ -1051,10 +861,11 @@ extension KeepTalkingClient {
 
         // Materialize any private output transfers the target shipped (e.g. a
         // remote ask-for-file's picked file) into our staged store, keyed by their
-        // transfer id == the produced_resources handle, so the agent can read /
-        // auto-inject them locally.
+        // transfer id == the produced_resources handle, so the next turn can inject
+        // them locally.
         if let transfers = continuationResult.outputTransfers, !transfers.isEmpty {
-            await materializeProducedOTBOutputs(transfers, from: targetNodeID)
+            await KeepTalkingIOManager(client: self)
+                .materializeProducedOTBOutputs(transfers, from: targetNodeID)
         }
 
         // Carry the produced resources + output transfers the target computed
@@ -1492,22 +1303,22 @@ extension KeepTalkingClient {
             return false
         }
 
-        guard
-            let relationID = try await preferredTrustedRelation(
-                from: ownerNodeID,
-                to: nodeID,
-                allowing: context,
-                allowPending: ownerNodeID != selfNodeID,
-                on: database
-            )?.requireID()
-        else {
+        let relationIDs = try await trustedRelations(
+            from: ownerNodeID,
+            to: nodeID,
+            allowing: context,
+            allowPending: ownerNodeID != selfNodeID,
+            on: database
+        )
+        .compactMap(\.id)
+        guard !relationIDs.isEmpty else {
             return false
         }
 
         let approvals =
             try await KeepTalkingNodeRelationActionRelation
             .query(on: database)
-            .filter(\.$relation.$id == relationID)
+            .filter(\.$relation.$id ~~ relationIDs)
             .filter(\.$action.$id, .equal, actionID)
             .all()
 

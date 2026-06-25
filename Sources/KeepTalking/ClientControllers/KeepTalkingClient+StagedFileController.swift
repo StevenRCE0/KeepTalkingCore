@@ -31,7 +31,12 @@ extension KeepTalkingClient {
         // assembler (it would just time out), so stage the file directly.
         if target == config.node {
             #if os(macOS)
-            return try await stageLocalFile(fileURL: fileURL, filename: filename)
+            guard
+                let staged = await stagedFileStore.stageLocalFile(
+                    at: fileURL, filename: filename, callerNodeID: config.node,
+                    consumeOnUse: true)
+            else { throw KeepTalkingOneTimeBlobError.sourceUnreadable(fileURL.path) }
+            return staged.handle
             #else
             throw KeepTalkingOneTimeBlobError.sourceUnreadable(fileURL.path)
             #endif
@@ -80,9 +85,9 @@ extension KeepTalkingClient {
                 let staged = await stagedFileStore.file(
                     handle: handle, callerNodeID: config.node)
             else { continue }  // not local → already remote, or a context attachment
-            let mime =
-                MIMEType.preferredMIMEType(forExtension: staged.url.pathExtension)
-                ?? "application/octet-stream"
+            let mime = MIMEType.inferredMIMEType(
+                forFileAt: staged.url,
+                filename: staged.filename)
             do {
                 _ = try await sendFile(
                     fileURL: staged.url, filename: staged.filename, mimeType: mime,
@@ -97,33 +102,6 @@ extension KeepTalkingClient {
             }
         }
     }
-
-    #if os(macOS)
-    /// Stages a local file (target == self) straight into the store, skipping
-    /// OTB entirely. The caller is this node, so the entry is self-scoped.
-    private func stageLocalFile(fileURL: URL, filename: String) async throws -> UUID {
-        let byteCount =
-            ((try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.size]
-                as? Int) ?? 0
-        guard
-            let (handle, dir) = await stagedFileStore.makeStagingDirectory(
-                expectedBytes: byteCount, callerNodeID: config.node)
-        else { throw KeepTalkingOneTimeBlobError.sourceUnreadable(fileURL.path) }
-        let safeName = (filename as NSString).lastPathComponent
-        let dest = dir.appendingPathComponent(
-            safeName.isEmpty ? "file" : safeName, isDirectory: false)
-        do {
-            try FileManager.default.copyItem(at: fileURL, to: dest)
-        } catch {
-            try? FileManager.default.removeItem(at: dir)
-            throw error
-        }
-        await stagedFileStore.register(
-            handle: handle, url: dest, callerNodeID: config.node,
-            filename: filename, byteCount: byteCount)
-        return handle
-    }
-    #endif
 
     // MARK: - Executor side (preflight handler + resolution)
 

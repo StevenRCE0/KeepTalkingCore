@@ -6,6 +6,86 @@ import Testing
 @testable import KeepTalkingSDK
 
 struct RemoteActionCallTests {
+    @Test("scoped continuation authorization finds a grant on any applicable relation")
+    func scopedContinuationAuthorizationUsesAllApplicableRelations() async throws {
+        let store = KeepTalkingInMemoryStore()
+        let owner = KeepTalkingNode(id: UUID())
+        let caller = KeepTalkingNode(id: UUID())
+        let context = KeepTalkingContext(id: UUID())
+
+        try await owner.save(on: store.database)
+        try await caller.save(on: store.database)
+        try await context.save(on: store.database)
+
+        let first = try KeepTalkingNodeRelation(
+            from: owner,
+            to: caller,
+            relationship: .trusted([context])
+        )
+        let second = try KeepTalkingNodeRelation(
+            from: owner,
+            to: caller,
+            relationship: .trusted([context])
+        )
+        try await first.save(on: store.database)
+        try await second.save(on: store.database)
+
+        let ownerID = try #require(owner.id)
+        let callerID = try #require(caller.id)
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(
+                contextID: try #require(context.id),
+                node: ownerID
+            ),
+            localStore: store
+        )
+        let preferredRelation = try await KeepTalkingClient.preferredTrustedRelation(
+            from: ownerID,
+            to: callerID,
+            allowing: context,
+            on: store.database
+        )
+        let preferred = try #require(preferredRelation)
+        let granted = try #require(
+            [first, second].first { $0.id != preferred.id }
+        )
+
+        let action = try await KeepTalkingClient.registerAction(
+            payload: .primitive(
+                KeepTalkingPrimitiveBundle(
+                    name: "calendar",
+                    indexDescription: "Read a calendar",
+                    action: .accessCalendar
+                )
+            ),
+            node: owner,
+            on: store.database
+        )
+        let approval = try KeepTalkingNodeRelationActionRelation(
+            relation: granted,
+            action: action,
+            approvingContext: .contexts([context]),
+            permission: .verbs([.named("read")])
+        )
+        try await approval.save(on: store.database)
+
+        let permission = try await client.resolveGrantPermission(
+            node: caller,
+            action: action,
+            context: context
+        )
+        let isGranted = try await KeepTalkingClient.isActionGrantedToNode(
+            node: caller,
+            action: action,
+            context: context,
+            selfNode: owner,
+            on: store.database
+        )
+
+        #expect(permission == .verbs([.named("read")]))
+        #expect(isGranted)
+    }
+
     @Test("incoming node status stores grants on an existing trusted local-to-remote relation")
     func incomingNodeStatusStoresGrantOnExistingTrustedLocalToRemoteRelation()
         async throws
@@ -363,6 +443,156 @@ struct RemoteActionCallTests {
 
         #expect(mergedLink != nil)
         #expect(isGranted)
+    }
+
+    @Test("incoming node status replaces grants only in its context")
+    func incomingNodeStatusReplacesContextGrantSnapshot() async throws {
+        let store = KeepTalkingInMemoryStore()
+        let local = KeepTalkingNode(id: UUID())
+        let remote = KeepTalkingNode(id: UUID())
+        let firstContext = KeepTalkingContext(id: UUID())
+        let secondContext = KeepTalkingContext(id: UUID())
+        let actionID = UUID()
+
+        try await local.save(on: store.database)
+        try await remote.save(on: store.database)
+        try await firstContext.save(on: store.database)
+        try await secondContext.save(on: store.database)
+
+        let relation = try KeepTalkingNodeRelation(
+            from: remote,
+            to: local,
+            relationship: .trusted([firstContext, secondContext])
+        )
+        try await relation.save(on: store.database)
+
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(
+                contextID: try #require(firstContext.id),
+                node: try #require(local.id)
+            ),
+            localStore: store
+        )
+        let advertised: (KeepTalkingActionScope) -> KeepTalkingAdvertisedAction = {
+            scope in
+            KeepTalkingAdvertisedAction(
+                actionID: actionID,
+                ownerNodeID: remote.id,
+                descriptor: nil,
+                payloadSummary: .primitive(
+                    name: "calendar",
+                    indexDescription: "Use a calendar",
+                    action: .accessCalendar
+                ),
+                remoteAuthorisable: false,
+                blockingAuthorisation: false,
+                grantScope: scope,
+                availability: .notApplicable,
+                createdAt: Date()
+            )
+        }
+        let status:
+            (KeepTalkingContext, [KeepTalkingAdvertisedAction]) throws ->
+                KeepTalkingNodeStatus = { context, actions in
+                    KeepTalkingNodeStatus(
+                        node: remote,
+                        contextID: try context.requireID(),
+                        nodeRelations: actions.isEmpty
+                            ? []
+                            : [
+                                KeepTalkingNodeRelationStatus(
+                                    toNodeID: try local.requireID(),
+                                    relationship: .trusted([context]),
+                                    actions: actions
+                                )
+                            ]
+                    )
+                }
+
+        try await client.mergeDiscoveredNodeStatus(
+            try status(firstContext, [advertised(.verbs([.named("read")]))])
+        )
+        try await client.mergeDiscoveredNodeStatus(
+            try status(firstContext, [advertised(.verbs([.named("write")]))])
+        )
+
+        var links = try await KeepTalkingNodeRelationActionRelation.query(
+            on: store.database
+        )
+        .filter(\.$relation.$id, .equal, try #require(relation.id))
+        .filter(\.$action.$id, .equal, actionID)
+        .all()
+        #expect(links.count == 1)
+        #expect(links.first?.permission == .verbs([.named("write")]))
+
+        try await client.mergeDiscoveredNodeStatus(
+            try status(secondContext, [advertised(.verbs([.named("read")]))])
+        )
+        try await client.mergeDiscoveredNodeStatus(
+            try status(firstContext, [])
+        )
+
+        links = try await KeepTalkingNodeRelationActionRelation.query(
+            on: store.database
+        )
+        .filter(\.$relation.$id, .equal, try #require(relation.id))
+        .filter(\.$action.$id, .equal, actionID)
+        .all()
+        #expect(links.count == 1)
+        #expect(links.first?.applicable(in: firstContext) == false)
+        #expect(links.first?.applicable(in: secondContext) == true)
+        #expect(links.first?.permission == .verbs([.named("read")]))
+        #expect(try await KeepTalkingAction.find(actionID, on: store.database) != nil)
+    }
+
+    @Test("node status advertises the effective grant scope")
+    func nodeStatusAdvertisesGrantScope() async throws {
+        let store = KeepTalkingInMemoryStore()
+        let owner = KeepTalkingNode(id: UUID())
+        let recipient = KeepTalkingNode(id: UUID())
+        let context = KeepTalkingContext(id: UUID())
+        try await owner.save(on: store.database)
+        try await recipient.save(on: store.database)
+        try await context.save(on: store.database)
+
+        let relation = try KeepTalkingNodeRelation(
+            from: owner,
+            to: recipient,
+            relationship: .trusted([context])
+        )
+        try await relation.save(on: store.database)
+        let action = try await KeepTalkingClient.registerAction(
+            payload: .primitive(
+                KeepTalkingPrimitiveBundle(
+                    name: "calendar",
+                    indexDescription: "Use a calendar",
+                    action: .accessCalendar
+                )
+            ),
+            node: owner,
+            on: store.database
+        )
+        let grant = try KeepTalkingNodeRelationActionRelation(
+            relation: relation,
+            action: action,
+            approvingContext: .contexts([context]),
+            permission: .verbs([.named("read")])
+        )
+        try await grant.save(on: store.database)
+
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(
+                contextID: try #require(context.id),
+                node: try #require(owner.id)
+            ),
+            localStore: store
+        )
+        let status = try await client.currentNodeStatus(
+            context: context,
+            recipientNodeID: recipient.id
+        )
+
+        #expect(status.nodeRelations.first?.actions.first?.grantScope == .verbs([.named("read")]))
     }
 
     @Test("action authorization is scoped to the relation target node")

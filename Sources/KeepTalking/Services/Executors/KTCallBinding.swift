@@ -30,8 +30,8 @@ public struct KeepTalkingObjectContract: Codable, Sendable {
 /// The result of binding an action's declared objects to CONCRETE resources at
 /// call time, on the PROVIDER, for ONE run — the bridge from the declared SVO
 /// "O" (`KeepTalkingActionObject`) to the resolved `KTResourceManifest`. Built by
-/// `prepareCallBinding(...)` between staging and executor invocation, replacing
-/// the ad-hoc positional candidate loop.
+/// `KeepTalkingIOManager.prepareCallBinding(...)` between staging and executor
+/// invocation, replacing the ad-hoc positional candidate loop.
 ///
 /// Lives ONLY on the provider for the duration of the run and never crosses the
 /// wire — remote callers see `KeepTalkingObjectContract`, never these paths.

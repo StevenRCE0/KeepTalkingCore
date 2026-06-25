@@ -29,16 +29,35 @@ extension KeepTalkingClient {
         allowPending: Bool = false,
         on database: any Database
     ) async throws -> KeepTalkingNodeRelation? {
+        try await trustedRelations(
+            from: fromNodeID,
+            to: toNodeID,
+            allowing: context,
+            allowPending: allowPending,
+            on: database
+        ).first
+    }
+
+    static func trustedRelations(
+        from fromNodeID: UUID,
+        to toNodeID: UUID,
+        allowing context: KeepTalkingContext? = nil,
+        allowPending: Bool = false,
+        on database: any Database
+    ) async throws -> [KeepTalkingNodeRelation] {
         try await KeepTalkingNodeRelation
             .query(on: database)
             .filter(\.$from.$id, .equal, fromNodeID)
             .filter(\.$to.$id, .equal, toNodeID)
             .all()
             .sorted(by: {
-                relationPriority($0.relationship)
-                    > relationPriority($1.relationship)
+                let lhs = relationPriority($0.relationship)
+                let rhs = relationPriority($1.relationship)
+                return lhs == rhs
+                    ? ($0.id?.uuidString ?? "") < ($1.id?.uuidString ?? "")
+                    : lhs > rhs
             })
-            .first(where: { relation in
+            .filter { relation in
                 if relation.relationship.isTrustedOrOwner {
                     return relation.relationship.allows(context: context)
                 } else if allowPending {
@@ -46,7 +65,7 @@ extension KeepTalkingClient {
                 }
 
                 return false
-            })
+            }
     }
 
     private static func normalizedBlockingAuthorisation(_ value: Bool) -> Bool {
@@ -862,22 +881,22 @@ extension KeepTalkingClient {
 
         let selfNode = try await getCurrentNodeInstance()
 
-        guard
-            let relation = try await Self.preferredTrustedRelation(
-                from: ownerNodeID,
-                to: nodeID,
-                allowing: context,
-                allowPending: ownerNodeID != (try? selfNode.requireID()),
-                on: localStore.database
-            )
-        else {
+        let relationIDs = try await Self.trustedRelations(
+            from: ownerNodeID,
+            to: nodeID,
+            allowing: context,
+            allowPending: ownerNodeID != (try? selfNode.requireID()),
+            on: localStore.database
+        )
+        .compactMap(\.id)
+        guard !relationIDs.isEmpty else {
             return nil
         }
 
         let approvals =
             try await KeepTalkingNodeRelationActionRelation
             .query(on: localStore.database)
-            .filter(\.$relation.$id == (try relation.requireID()))
+            .filter(\.$relation.$id ~~ relationIDs)
             .filter(\.$action.$id, .equal, try action.requireID())
             .all()
 
@@ -1024,71 +1043,13 @@ extension KeepTalkingClient {
         )
     }
 
-    /// Reconciles the local persisted action graph with a node-status snapshot.
-    ///
-    /// Definitive sync: every action owned by `broadcasterNodeID` that does
-    /// not appear in `actions` is treated as deleted at the source and torn
-    /// down locally. Actions that do appear are upserted. Actions owned by
-    /// other nodes are untouched — the broadcaster has no authority over them.
-    /// Pass `broadcasterNodeID = nil` to skip pruning (used by call sites that
-    /// can't attribute the snapshot to a single owner).
-    func mergeNodeActions(
-        _ actions: [KeepTalkingAdvertisedAction],
-        broadcasterNodeID: UUID? = nil
-    ) async throws {
+    /// Upserts the action metadata carried by a context-scoped node status.
+    /// Grant replacement is handled separately: absence here means "not granted
+    /// in this context", not "deleted by its owner".
+    func mergeNodeActions(_ actions: [KeepTalkingAdvertisedAction]) async throws {
         let advertisedActions = deduplicatedAndSortedActions(
             actions
         )
-
-        // Stale-action pruning. Actions persisted as owned by the broadcaster
-        // but missing from this snapshot have been disabled/removed at the
-        // source — drop them locally so the catalog stays in sync. Skip self
-        // (we never accept remote authority over our own action rows).
-        if let broadcasterNodeID, broadcasterNodeID != config.node {
-            let advertisedIDs = Set(advertisedActions.map(\.actionID))
-            let staleActions = try await KeepTalkingAction.query(
-                on: localStore.database
-            )
-            .filter(\.$node.$id, .equal, broadcasterNodeID)
-            .all()
-            .filter { action in
-                guard let id = action.id else { return false }
-                return !advertisedIDs.contains(id)
-            }
-            for stale in staleActions {
-                guard let staleID = stale.id else { continue }
-                // Mirror removeMCPAction: drop runtime registrations first so
-                // the catalog doesn't keep referencing a torn-down server, then
-                // delete the persisted row + its grant edges.
-                switch stale.payload {
-                    case .mcpBundle:
-                        await mcpManager.unregisterAction(actionID: staleID)
-                    case .skill:
-                        await skillManager.unregisterAction(actionID: staleID)
-                    case .primitive:
-                        await primitiveActionManager.unregisterAction(
-                            actionID: staleID
-                        )
-                    case .filesystem:
-                        await filesystemActionManager.unregisterAction(
-                            actionID: staleID
-                        )
-                    case .semanticRetrieval:
-                        await semanticRetrievalActionManager.unregisterAction(
-                            actionID: staleID
-                        )
-                    case .acp:
-                        #if os(macOS)
-                        await acpManager.unregisterAction(actionID: staleID)
-                        #endif
-                }
-                try await KeepTalkingNodeRelationActionRelation
-                    .query(on: localStore.database)
-                    .filter(\.$action.$id, .equal, staleID)
-                    .delete()
-                try await stale.delete(on: localStore.database)
-            }
-        }
 
         for incomingAction in advertisedActions {
             let actionID = incomingAction.actionID

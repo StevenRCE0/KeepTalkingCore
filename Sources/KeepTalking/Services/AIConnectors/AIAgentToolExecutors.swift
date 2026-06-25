@@ -387,7 +387,7 @@ extension KeepTalkingClient {
         }
         // Caller-requested outputs the action should produce — round-trip with
         // caller-minted ids so the produced files are summoned/shipped per the
-        // chosen persistence (see prepareCallBinding / harvest / summon).
+        // chosen persistence (see KeepTalkingIOManager binding / harvest / delivery).
         if let outputHandles, !outputHandles.isEmpty {
             actionCall.outputHandles = outputHandles
         }

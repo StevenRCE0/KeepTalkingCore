@@ -70,50 +70,55 @@ struct KeepTalkingPreparedAttachment: Sendable, Equatable {
 public struct KeepTalkingContextAttachmentDTO: Codable, Sendable, Equatable {
     public let id: UUID
     public let contextID: UUID
-    public let parentMessageID: UUID
+    public let parentMessageID: UUID?
+    public let sender: KeepTalkingContextMessage.Sender?
     public let blobID: String
     public let filename: String
     public let mimeType: String
     public let byteCount: Int
+    public let createdAt: Date?
     public let sortIndex: Int
 
     public init(
         id: UUID,
         contextID: UUID,
-        parentMessageID: UUID,
+        parentMessageID: UUID?,
+        sender: KeepTalkingContextMessage.Sender? = nil,
         blobID: String,
         filename: String,
         mimeType: String,
         byteCount: Int,
+        createdAt: Date? = nil,
         sortIndex: Int
     ) {
         self.id = id
         self.contextID = contextID
         self.parentMessageID = parentMessageID
+        self.sender = sender
         self.blobID = blobID
         self.filename = filename
         self.mimeType = mimeType
         self.byteCount = max(byteCount, 0)
+        self.createdAt = createdAt
         self.sortIndex = sortIndex
     }
 
     public init?(_ attachment: KeepTalkingContextAttachment) {
         let contextID = attachment.$context.id
-        guard
-            let id = attachment.id,
-            let parentMessageID = attachment.$parentMessage.id
-        else {
+        guard let id = attachment.id else {
             return nil
         }
 
         self.init(
             id: id,
             contextID: contextID,
-            parentMessageID: parentMessageID,
+            parentMessageID: attachment.$parentMessage.id,
+            sender: attachment.sender,
             blobID: attachment.blobID,
             filename: attachment.filename,
             mimeType: attachment.mimeType,
             byteCount: attachment.byteCount,
+            createdAt: attachment.createdAt,
             sortIndex: attachment.sortIndex
         )
     }
@@ -132,6 +137,22 @@ public struct KeepTalkingContextAttachmentDTO: Codable, Sendable, Equatable {
             mimeType: mimeType,
             byteCount: byteCount,
             createdAt: parentMessage.timestamp,
+            sortIndex: sortIndex
+        )
+    }
+
+    func makeParentlessModel(in context: KeepTalkingContext) -> KeepTalkingContextAttachment? {
+        guard let sender else { return nil }
+        return KeepTalkingContextAttachment(
+            id: id,
+            context: context,
+            parentMessageID: nil,
+            sender: sender,
+            blobID: blobID,
+            filename: filename,
+            mimeType: mimeType,
+            byteCount: byteCount,
+            createdAt: createdAt ?? Date(),
             sortIndex: sortIndex
         )
     }

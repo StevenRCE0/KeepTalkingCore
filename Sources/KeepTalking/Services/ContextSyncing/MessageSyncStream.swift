@@ -27,16 +27,25 @@ public struct KeepTalkingContextSyncSnapshot: Sendable, KeepTalkingContextSyncSt
             grouping: messages,
             by: \.sender
         ).mapValues { $0.sortedForSync() }
+        let messageAttachments = attachments.compactMap {
+            attachment
+                -> (UUID, KeepTalkingContextAttachmentDTO)? in
+            guard
+                let dto = KeepTalkingContextAttachmentDTO(attachment),
+                let parentMessageID = dto.parentMessageID
+            else { return nil }
+            return (parentMessageID, dto)
+        }
         self.attachmentsByMessageID = Dictionary(
-            grouping: attachments.compactMap(KeepTalkingContextAttachmentDTO.init),
-            by: \.parentMessageID
+            grouping: messageAttachments,
+            by: \.0
         ).mapValues {
             $0.sorted { lhs, rhs in
-                if lhs.sortIndex != rhs.sortIndex {
-                    return lhs.sortIndex < rhs.sortIndex
+                if lhs.1.sortIndex != rhs.1.sortIndex {
+                    return lhs.1.sortIndex < rhs.1.sortIndex
                 }
-                return lhs.id.uuidString < rhs.id.uuidString
-            }
+                return lhs.1.id.uuidString < rhs.1.id.uuidString
+            }.map(\.1)
         }
     }
 

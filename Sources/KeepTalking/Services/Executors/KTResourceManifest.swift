@@ -29,10 +29,10 @@ public struct KTResourceManifest: Sendable {
 
     /// Mono-directional data flow for a manifest entry: a resource flows one way.
     /// An in-place (`.inputOutput`) FILE object is decomposed into a read entry +
-    /// a write entry upstream (in `prepareCallBinding`), so it never reaches here;
-    /// a read-write scratch DIRECTORY (the thread workspace / an ACP working root)
-    /// projects to `.write` — it's the agent's own space to write into, read
-    /// implied by the sandbox grant.
+    /// a write entry upstream (in `KeepTalkingIOManager.prepareCallBinding`), so
+    /// it never reaches here; a read-write scratch DIRECTORY (the thread
+    /// workspace / an ACP working root) projects to `.write` — it's the agent's
+    /// own space to write into, read implied by the sandbox grant.
     public enum Direction: Sendable {
         case read
         case write
@@ -275,6 +275,8 @@ public struct KTResourceManifest: Sendable {
             "- `read` items are inputs — do not modify them. `write` items accept changes; "
                 + "place results you want returned at a `write` path and KeepTalking ships "
                 + "them back.",
+            "- For file outputs, write to the exact listed `write` variable. Do not create "
+                + "an unlisted temp path and expect it to be returned.",
             "- Items marked \"access via filesystem operations\" are remote; reach them with "
                 + "the filesystem tools (list/read/get-file/put-file), not a local path.",
             "- Only touch a resource the task actually needs.",
@@ -363,6 +365,46 @@ extension KTResourceManifest {
                 origin: origin)
         }
 
+        static func attachment(
+            _ attachment: KeepTalkingContextAttachment,
+            origin: String = "produced"
+        ) -> Self {
+            Self(
+                kind: .attachment,
+                id: attachment.id ?? UUID(),
+                direction: "read",
+                name: attachment.filename,
+                mimeType: attachment.mimeType,
+                byteCount: attachment.byteCount,
+                summary: attachment.metadata.textPreview ?? attachment.metadata.imageDescription,
+                origin: origin)
+        }
+
+        static func otb(
+            id: UUID,
+            name: String,
+            mimeType: String?,
+            byteCount: Int?,
+            origin: String = "produced"
+        ) -> Self {
+            Self(
+                kind: .otb,
+                id: id,
+                direction: "read",
+                name: name,
+                mimeType: mimeType,
+                byteCount: byteCount,
+                origin: origin)
+        }
+
+        static func otb(_ ref: KeepTalkingOneTimeBlobRef) -> Self {
+            otb(
+                id: ref.transferID,
+                name: ref.filename,
+                mimeType: ref.mimeType,
+                byteCount: ref.byteCount)
+        }
+
         /// The canonical JSON object embedded in agent-facing tool payloads.
         public func jsonObject() -> [String: Any] {
             var obj: [String: Any] = [
@@ -409,6 +451,11 @@ extension KTResourceManifest {
             ]
             if let byteCount { fields.append("\(byteCount) bytes") }
             return "resource(" + fields.joined(separator: ", ") + ")"
+        }
+
+        public var injectedContentLeadText: String {
+            "[\(transcriptDescription())] — produced content is injected below; "
+                + "reference or pass it by handle, but do not call tools to fetch this same resource:"
         }
     }
 }

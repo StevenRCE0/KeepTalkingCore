@@ -38,9 +38,11 @@ extension KeepTalkingClient {
                 concise summary of the result. To feed a file into the action,
                 first stage it on the action's owner node with kt_send_file, then
                 pass the returned handle(s) in `input_handles` here. To capture a
-                file the action PRODUCES, request it in `outputs`; the result's
-                `produced_resources` lists each produced resource with a `handle`
-                you can read (kt_get_context_attachment) or pass to a later action.
+                file the action PRODUCES, request it in `outputs`; the inner
+                skill/action receives an exact `$KT_...` write variable for each
+                requested output. Produced resource content is injected into the
+                following turn automatically; its `handle` is the stable identity
+                to mention or pass to a later action.
                 Identify resources by `handle`, not by name: identical filenames
                 across resources are DISTINCT files, never the same one.
                 """,
@@ -74,7 +76,7 @@ extension KeepTalkingClient {
                                 "name": .object([
                                     "type": .string("string"),
                                     "description": .string(
-                                        "Logical name for this output (e.g. \"result\"); the action writes it to $KT_<NAME>."
+                                        "Logical name for this output (e.g. \"result\"). The executor will expose the concrete write path in the inner action's KeepTalking resources block as an exact `$KT_...` variable; the action must write to that listed variable."
                                     ),
                                 ]),
                                 "persistence": .object([

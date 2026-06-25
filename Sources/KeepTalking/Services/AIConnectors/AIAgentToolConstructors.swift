@@ -400,7 +400,7 @@ extension KeepTalkingClient {
                     "attachment_id": .object([
                         "type": .string("string"),
                         "description": .string(
-                            "The resource `handle` (KT_<KIND>_<HEX> form) from kt_list_context_attachments or a produced_resources entry."
+                            "The attachment `handle` (KT_ATTACHMENT_<HEX> form) from kt_list_context_attachments. Produced OTB resources are injected automatically; pass their handles to actions instead of fetching them here."
                         ),
                     ]),
                     "mode": .object([

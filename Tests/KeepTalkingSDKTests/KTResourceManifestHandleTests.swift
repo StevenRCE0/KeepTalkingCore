@@ -70,4 +70,35 @@ struct KTResourceManifestHandleTests {
         // and the handle still resolves to the original id
         #expect(KTResourceManifest.resolveAgentHandle(back!.handle)?.id == id)
     }
+
+    @Test("write slots are advertised as exact KT env vars")
+    func writeSlotPromptContract() throws {
+        let id = UUID(uuidString: "AAAAAAAA-BBBB-4CCC-9DDD-EEEEEEEEEEEE")!
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kt-manifest-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let output = dir.appendingPathComponent("result.pdf")
+        let manifest = KTResourceManifest.build(
+            grantedCandidates: [
+                .init(
+                    kind: .otb,
+                    id: id,
+                    path: output,
+                    direction: .write,
+                    displayName: "result.pdf",
+                    isDirectory: false,
+                    objectName: "result")
+            ],
+            umbrellaAttachmentsDir: nil)
+
+        let key = KTResourceManifest.agentHandle(kind: .otb, id: id)
+        let path = output.resolvingSymlinksInPath().standardizedFileURL.path
+        #expect(manifest.environmentVariables()[key] == path)
+
+        let prompt = try #require(manifest.promptBlock())
+        #expect(prompt.contains("$\(key)"))
+        #expect(prompt.contains("\"result.pdf\"  write"))
+        #expect(prompt.contains("Do not create an unlisted temp path"))
+    }
 }

@@ -402,13 +402,14 @@ extension KeepTalkingClient {
         }
 
         let parentMessageIDs = Array(
-            Set(newAttachments.map(\.parentMessageID))
+            Set(newAttachments.compactMap(\.parentMessageID))
         )
-        let parentMessages = try await KeepTalkingContextMessage.query(
-            on: localStore.database
-        )
-        .filter(\.$id ~~ parentMessageIDs)
-        .all()
+        let parentMessages =
+            parentMessageIDs.isEmpty
+            ? []
+            : try await KeepTalkingContextMessage.query(on: localStore.database)
+                .filter(\.$id ~~ parentMessageIDs)
+                .all()
 
         var parentMessagesByID: [UUID: KeepTalkingContextMessage] = [:]
         for parentMessage in parentMessages {
@@ -421,45 +422,76 @@ extension KeepTalkingClient {
         var savedAttachments: [KeepTalkingContextAttachment] = []
 
         for attachment in newAttachments {
-            guard let parentMessage = parentMessagesByID[attachment.parentMessageID]
-            else {
-                // Parent message hasn't been persisted yet — the attachment
-                // envelope beat the message envelope. Park it; it's re-driven
-                // by `flushOrphanAttachments` once the parent message saves.
-                bufferOrphanAttachment(attachment)
-                rtcClient.debug(
-                    "buffered orphan attachment dto pending parent message attachment=\(attachment.id.uuidString.lowercased()) parent=\(attachment.parentMessageID.uuidString.lowercased())"
+            if let parentMessageID = attachment.parentMessageID {
+                guard let parentMessage = parentMessagesByID[parentMessageID]
+                else {
+                    // Parent message hasn't been persisted yet — the attachment
+                    // envelope beat the message envelope. Park it; it's re-driven
+                    // by `flushOrphanAttachments` once the parent message saves.
+                    bufferOrphanAttachment(attachment)
+                    rtcClient.debug(
+                        "buffered orphan attachment dto pending parent message attachment=\(attachment.id.uuidString.lowercased()) parent=\(parentMessageID.uuidString.lowercased())"
+                    )
+                    continue
+                }
+                let parentContextID = parentMessage.$context.id
+                guard parentContextID == attachment.contextID else {
+                    rtcClient.debug(
+                        "ignored attachment dto context mismatch attachment=\(attachment.id.uuidString.lowercased()) parent=\(parentMessageID.uuidString.lowercased())"
+                    )
+                    continue
+                }
+
+                let persistedContext: KeepTalkingContext
+                if let existing = contextsByID[parentContextID] {
+                    persistedContext = existing
+                } else {
+                    let context = try await upsertContext(
+                        KeepTalkingContext(
+                            id: parentContextID,
+                            updatedAt: parentMessage.timestamp
+                        )
+                    )
+                    contextsByID[parentContextID] = context
+                    persistedContext = context
+                }
+
+                let model = attachment.makeModel(
+                    in: persistedContext,
+                    parentMessage: parentMessage
                 )
-                continue
-            }
-            let parentContextID = parentMessage.$context.id
-            guard parentContextID == attachment.contextID else {
-                rtcClient.debug(
-                    "ignored attachment dto context mismatch attachment=\(attachment.id.uuidString.lowercased()) parent=\(attachment.parentMessageID.uuidString.lowercased())"
-                )
+                try await model.save(on: localStore.database)
+                try await ensureSenderRelation(for: model.sender)
+                try await ensureBlobRecordPlaceholder(for: model)
+                savedAttachments.append(model)
                 continue
             }
 
+            guard let sender = attachment.sender else {
+                rtcClient.debug(
+                    "ignored parentless attachment dto missing sender attachment=\(attachment.id.uuidString.lowercased())"
+                )
+                continue
+            }
+            let contextTimestamp = attachment.createdAt ?? Date()
             let persistedContext: KeepTalkingContext
-            if let existing = contextsByID[parentContextID] {
+            if let existing = contextsByID[attachment.contextID] {
                 persistedContext = existing
             } else {
                 let context = try await upsertContext(
                     KeepTalkingContext(
-                        id: parentContextID,
-                        updatedAt: parentMessage.timestamp
+                        id: attachment.contextID,
+                        updatedAt: contextTimestamp
                     )
                 )
-                contextsByID[parentContextID] = context
+                contextsByID[attachment.contextID] = context
                 persistedContext = context
             }
-
-            let model = attachment.makeModel(
-                in: persistedContext,
-                parentMessage: parentMessage
-            )
+            guard let model = attachment.makeParentlessModel(in: persistedContext) else {
+                continue
+            }
             try await model.save(on: localStore.database)
-            try await ensureSenderRelation(for: model.sender)
+            try await ensureSenderRelation(for: sender)
             try await ensureBlobRecordPlaceholder(for: model)
             savedAttachments.append(model)
         }
@@ -474,12 +506,13 @@ extension KeepTalkingClient {
     private func bufferOrphanAttachment(
         _ attachment: KeepTalkingContextAttachmentDTO
     ) {
+        guard let parentMessageID = attachment.parentMessageID else { return }
         orphanAttachmentLock.lock()
         defer { orphanAttachmentLock.unlock() }
-        var parked = orphanAttachmentsByParentMessageID[attachment.parentMessageID] ?? []
+        var parked = orphanAttachmentsByParentMessageID[parentMessageID] ?? []
         guard !parked.contains(where: { $0.id == attachment.id }) else { return }
         parked.append(attachment)
-        orphanAttachmentsByParentMessageID[attachment.parentMessageID] = parked
+        orphanAttachmentsByParentMessageID[parentMessageID] = parked
     }
 
     /// Re-drive any attachment DTOs parked for `parentMessageID` now that the
@@ -886,13 +919,10 @@ extension KeepTalkingClient {
             return mimeType
         }
 
-        let pathExtension =
-            resolvedAttachmentPathExtension(
-                attachmentInput,
-                filename: filename
-            ) ?? ""
-        return MIMEType.preferredMIMEType(forExtension: pathExtension)
-            ?? "application/octet-stream"
+        return MIMEType.inferredMIMEType(
+            forFileAt: attachmentInput.sourceURL,
+            filename: filename,
+            explicit: attachmentInput.mimeType)
     }
 
     private func derivedAttachmentMetadata(

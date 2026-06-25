@@ -270,7 +270,7 @@ struct ContextSyncTransportTests {
             ]
         )
         #expect(
-            result.attachments.map(\.parentMessageID) == [
+            result.attachments.compactMap(\.parentMessageID) == [
                 attachmentMessageID
             ])
     }
@@ -417,6 +417,63 @@ struct ContextSyncTransportTests {
         )
         #expect(blobRecord.availability == .missing)
         #expect(blobRecord.byteCount == 1234)
+    }
+
+    @Test("incoming parentless attachment dto creates a context attachment placeholder")
+    func saveIncomingParentlessAttachmentDTOCreatesPlaceholder() async throws {
+        let localStore = try await KeepTalkingInMemoryStore()
+        let config = KeepTalkingConfig(
+            contextID: UUID(uuidString: "82000000-0000-0000-0000-000000000000")!,
+            node: UUID(uuidString: "AAAAAAAA-9999-9999-9999-999999999999")!
+        )
+        let client = KeepTalkingClient(
+            config: config,
+            localStore: localStore
+        )
+
+        let sender = KeepTalkingContextMessage.Sender.node(
+            node: UUID(uuidString: "BBBBBBBB-9999-9999-9999-999999999999")!
+        )
+        let attachmentID = UUID(
+            uuidString: "00000000-0000-0000-0000-000000000512"
+        )!
+
+        let attachments = try await client.saveIncomingAttachments(
+            [
+                KeepTalkingContextAttachmentDTO(
+                    id: attachmentID,
+                    contextID: config.contextID,
+                    parentMessageID: nil,
+                    sender: sender,
+                    blobID: String(repeating: "e", count: 64),
+                    filename: "fulfilled.pdf",
+                    mimeType: "application/pdf",
+                    byteCount: 4321,
+                    sortIndex: 0
+                )
+            ]
+        )
+
+        #expect(attachments.count == 1)
+        #expect(attachments.first?.$parentMessage.id == nil)
+        #expect(attachments.first?.sender == sender)
+        #expect(attachments.first?.$context.id == config.contextID)
+
+        let storedAttachment = try #require(
+            try await KeepTalkingContextAttachment.query(on: localStore.database)
+                .filter(\.$id, .equal, attachmentID)
+                .first()
+        )
+        #expect(storedAttachment.filename == "fulfilled.pdf")
+        #expect(storedAttachment.$parentMessage.id == nil)
+
+        let blobRecord = try #require(
+            try await KeepTalkingBlobRecord.query(on: localStore.database)
+                .filter(\.$id, .equal, attachments[0].blobID)
+                .first()
+        )
+        #expect(blobRecord.availability == .missing)
+        #expect(blobRecord.byteCount == 4321)
     }
 
     @Test("summary wait resolves when the reply arrives immediately during send")

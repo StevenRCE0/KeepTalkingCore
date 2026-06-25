@@ -59,6 +59,56 @@ struct ContextAttachmentAIToolTests {
         #expect(payload["attachment_id"] as? String == fixture.hiddenAttachmentID.uuidString.lowercased())
     }
 
+    @Test("produced otb resources are injected as native user messages")
+    func producedOTBResourcesAreInjected() async throws {
+        let fixture = try await makeFixture()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "kt-produced-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("answer.txt")
+        try Data("needle from produced file".utf8).write(to: fileURL)
+
+        let stagedOutput = await fixture.client.stagedFileStore.stageLocalFile(
+            at: fileURL,
+            filename: "answer.txt",
+            callerNodeID: fixture.client.config.node
+        )
+        let staged = try #require(stagedOutput)
+        let resource = KTResourceManifest.AgentResource.otb(
+            id: staged.handle,
+            name: "answer.txt",
+            mimeType: nil,
+            byteCount: staged.byteCount)
+        let execution = AIOrchestrator.ToolExecution(
+            toolCall: toolCall(name: KeepTalkingClient.runActionToolFunctionName, arguments: "{}"),
+            messages: [
+                .tool(
+                    try jsonPayload([
+                        "ok": true,
+                        "produced_resources": [resource.jsonObject()],
+                    ]),
+                    toolCallID: "tool-call-1"
+                )
+            ]
+        )
+
+        let injected = await KeepTalkingIOManager(client: fixture.client)
+            .transcriptMessagesForProducedResources(
+                from: [execution],
+                context: fixture.visibleContext
+            )
+
+        #expect(injected.count == 1)
+        #expect(injected.first?.role == .user)
+        let text = try #require(injected.first?.content?.text)
+        #expect(text.contains(resource.handle))
+        #expect(text.contains("needle from produced file"))
+        #expect(text.contains("do not call tools"))
+    }
+
     private func makeFixture() async throws -> (
         client: KeepTalkingClient,
         visibleContext: KeepTalkingContext,
@@ -186,6 +236,11 @@ struct ContextAttachmentAIToolTests {
             throw FixtureError.invalidToolPayload
         }
         return payload
+    }
+
+    private func jsonPayload(_ object: [String: Any]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return String(decoding: data, as: UTF8.self)
     }
 
     private enum FixtureError: Error {

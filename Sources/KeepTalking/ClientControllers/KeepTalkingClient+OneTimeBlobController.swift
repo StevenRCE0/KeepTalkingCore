@@ -21,9 +21,9 @@ extension KeepTalkingClient {
         else { return call }
 
         let sourceURL = URL(fileURLWithPath: (source as NSString).expandingTildeInPath)
-        let mimeType =
-            MIMEType.preferredMIMEType(forExtension: sourceURL.pathExtension)
-            ?? "application/octet-stream"
+        let mimeType = MIMEType.inferredMIMEType(
+            forFileAt: sourceURL,
+            filename: sourceURL.lastPathComponent)
         let ref = try await sendOneTimeBlob(
             fileURL: sourceURL,
             filename: sourceURL.lastPathComponent,
@@ -86,7 +86,7 @@ extension KeepTalkingClient {
     /// outputs, put-file input staging, and inbound ciphertext buffers) so a
     /// crash can't leave decrypted plaintext at rest. Safe at startup — no
     /// transfers are in flight yet. (Within a run, the get-file output dir
-    /// outlives its dispatch call so the agent can read it; this is the backstop
+    /// outlives its dispatch call for transcript injection; this is the backstop
     /// until run-scoped cleanup lands.)
     static func pruneStaleOneTimeBlobTempDirs() {
         let fileManager = FileManager.default

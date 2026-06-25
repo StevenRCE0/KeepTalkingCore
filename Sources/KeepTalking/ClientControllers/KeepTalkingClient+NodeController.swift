@@ -588,29 +588,18 @@ extension KeepTalkingClient {
                 }
             }
 
-            let relationActionLinks: [KeepTalkingNodeRelationActionRelation]
-            let wakeHandlesByActionID: [UUID: [KeepTalkingPushWakeHandle]]
+            var wakeHandlesByActionID: [UUID: [KeepTalkingPushWakeHandle]] = [:]
             if let relationID = relation.id {
-                relationActionLinks =
+                let relationActionLinks =
                     try await KeepTalkingNodeRelationActionRelation
                     .query(on: localStore.database)
                     .filter(\.$relation.$id, .equal, relationID)
                     .all()
-                wakeHandlesByActionID = Dictionary(
-                    uniqueKeysWithValues: relationActionLinks.compactMap {
-                        link in
-                        guard
-                            let wakeHandles = link.wakeHandles,
-                            !wakeHandles.isEmpty
-                        else {
-                            return nil
-                        }
-                        return (link.$action.id, wakeHandles)
+                for link in relationActionLinks where link.applicable(in: currentContext) {
+                    if let wakeHandles = link.wakeHandles, !wakeHandles.isEmpty {
+                        wakeHandlesByActionID[link.$action.id] = wakeHandles
                     }
-                )
-            } else {
-                relationActionLinks = []
-                wakeHandlesByActionID = [:]
+                }
             }
             let actionWakeRoutes: [KeepTalkingActionWakeRoute] =
                 outgoingActions.compactMap { action in
@@ -711,37 +700,16 @@ extension KeepTalkingClient {
             status.nodeRelations.flatMap(\.actions)
         )
 
-        try await mergeNodeActions(
-            advertisedActions,
-            broadcasterNodeID: status.node.id
-        )
-        try await mergeIncomingActionAuthorisations(
-            from: status,
-            advertisedActions: advertisedActions
-        )
+        try await mergeNodeActions(advertisedActions)
+        try await mergeIncomingActionAuthorisations(from: status)
         await invalidateActionToolCatalog(
             contextID: status.contextID,
             reason: "merge_discovered_node_status node=\(status.node.id?.uuidString.lowercased() ?? "unknown")"
         )
     }
 
-    private func mergedApprovingContext(
-        existing: KeepTalkingNodeRelationActionRelation.ApprovingContext?,
-        adding context: KeepTalkingContext
-    ) -> KeepTalkingNodeRelationActionRelation.ApprovingContext {
-        switch existing {
-            case .all:
-                return .all
-            case .contexts(let prior):
-                return prior.contains(context) ? .contexts(prior) : .contexts(prior + [context])
-            case nil:
-                return .contexts([context])
-        }
-    }
-
     private func mergeIncomingActionAuthorisations(
-        from status: KeepTalkingNodeStatus,
-        advertisedActions: [KeepTalkingAdvertisedAction]
+        from status: KeepTalkingNodeStatus
     ) async throws {
         guard let remoteNodeID = status.node.id, remoteNodeID != config.node
         else {
@@ -749,61 +717,37 @@ extension KeepTalkingClient {
         }
 
         let statusContext = try await ensure(status.contextID, for: KeepTalkingContext.self)
-        // The grant's effective context is `status.contextID` — that's the
-        // contract on the receiver side. Don't re-gate on the broadcaster's
-        // relationship.allows(statusContext): the broadcaster encodes its
-        // outgoing relationship as a single field, and skew between that
-        // field and the per-grant scope (e.g. the broadcaster having
-        // .trusted([Z]) while broadcasting in Y after a context handover)
-        // would silently drop legitimate grants.
         let grantsForLocal = status.nodeRelations.filter {
             $0.toNodeID == config.node && $0.relationship.isTrustedOrOwner
         }
-        guard !grantsForLocal.isEmpty else {
-            return
-        }
-
-        let advertisedActionIDs = Set(advertisedActions.map(\.actionID))
-        let grantedActionIDs = Set(
-            grantsForLocal.flatMap(\.actions).map(\.actionID)
-        )
-        let wakeRoutesByActionID: [UUID: [KeepTalkingPushWakeHandle]] = Dictionary(
-            uniqueKeysWithValues: grantsForLocal.flatMap { relationStatus in
-                relationStatus.actionWakeRoutes.map { route in
-                    (route.actionID, route.wakeHandles)
-                }
+        var desiredActions: [UUID: KeepTalkingAdvertisedAction] = [:]
+        var wakeRoutes: [UUID: [KeepTalkingPushWakeHandle]] = [:]
+        for relationStatus in grantsForLocal {
+            for action in relationStatus.actions {
+                desiredActions[action.actionID] = action
             }
-        )
-        if grantedActionIDs.isEmpty {
-            return
+            for route in relationStatus.actionWakeRoutes {
+                wakeRoutes[route.actionID] = route.wakeHandles
+            }
         }
 
-        // Find any existing A→B relation without filtering by context coverage.
-        // `preferredTrustedRelation(allowing:)` would exclude .trusted([甲]) when processing
-        // context 乙 (because allows(context:nil) is false for .trusted), causing the guard
-        // to fail and silently skip the auth merge for every context after the first.
-        let existingIncomingRelation =
+        var incomingRelations =
             try await KeepTalkingNodeRelation
             .query(on: localStore.database)
             .filter(\.$from.$id, .equal, remoteNodeID)
             .filter(\.$to.$id, .equal, config.node)
             .all()
-            .sorted(by: {
+            .sorted {
                 Self.relationPriority($0.relationship)
                     > Self.relationPriority($1.relationship)
-            })
-            .first(where: {
-                $0.relationship.isTrustedOrOwner || $0.relationship == .pending
-            })
+            }
 
         let incomingRelation: KeepTalkingNodeRelation
-        if let existingIncomingRelation {
+        if let existingIncomingRelation = incomingRelations.first(where: {
+            $0.relationship.isTrustedOrOwner || $0.relationship == .pending
+        }) {
             incomingRelation = existingIncomingRelation
-        } else {
-            // Grant arrived before the lure/identity-key handshake recorded
-            // the incoming relation row. Materialize it as .pending so the
-            // trust-elevation branch below can promote it to .trusted in
-            // statusContext, instead of silently dropping the grant.
+        } else if !desiredActions.isEmpty {
             let remoteNode = try await ensure(
                 remoteNodeID,
                 for: KeepTalkingNode.self
@@ -816,80 +760,77 @@ extension KeepTalkingClient {
             )
             try await createdRelation.save(on: localStore.database)
             incomingRelation = createdRelation
+            incomingRelations.append(createdRelation)
+        } else {
+            return
         }
-        guard let incomingRelationID = incomingRelation.id else {
+        guard incomingRelation.id != nil else {
             return
         }
 
-        switch incomingRelation.relationship {
-            case .pending:
-                incomingRelation.relationship = .trusted([statusContext])
-                try await incomingRelation.save(on: localStore.database)
-            case .trusted(let existingContexts):
-                if !existingContexts.contains(statusContext) {
-                    incomingRelation.relationship = .trusted(
-                        existingContexts + [statusContext]
-                    )
+        if !grantsForLocal.isEmpty {
+            switch incomingRelation.relationship {
+                case .pending:
+                    incomingRelation.relationship = .trusted([statusContext])
                     try await incomingRelation.save(on: localStore.database)
-                }
-            case .owner, .trustedInAllContext:
-                break
+                case .trusted(let existingContexts):
+                    if !existingContexts.contains(statusContext) {
+                        incomingRelation.relationship = .trusted(
+                            existingContexts + [statusContext]
+                        )
+                        try await incomingRelation.save(on: localStore.database)
+                    }
+                case .owner, .trustedInAllContext:
+                    break
+            }
         }
 
-        let approvingContext =
-            KeepTalkingNodeRelationActionRelation.ApprovingContext.contexts([statusContext])
-
-        for actionID in grantedActionIDs {
-            guard advertisedActionIDs.contains(actionID) else {
-                continue
-            }
-            guard
-                let action = try await KeepTalkingAction.query(
-                    on: localStore.database
-                )
-                .filter(\.$id, .equal, actionID)
-                .first()
-            else {
-                continue
-            }
-
-            guard action.$node.id != nil else {
-                continue
-            }
-
-            if let existingLink =
+        let relationIDs = incomingRelations.compactMap(\.id)
+        let desiredActionSnapshot = desiredActions
+        let wakeRouteSnapshot = wakeRoutes
+        try await localStore.database.transaction { database in
+            let existingLinks =
                 try await KeepTalkingNodeRelationActionRelation
-                .query(on: localStore.database)
-                .filter(\.$relation.$id, .equal, incomingRelationID)
-                .filter(\.$action.$id, .equal, actionID)
-                .first()
-            {
-                // Merge the new context into the existing approving-context set
-                // instead of replacing it, so simultaneous active contexts don't
-                // keep overwriting each other.
-                existingLink.approvingContext = mergedApprovingContext(
-                    existing: existingLink.approvingContext,
-                    adding: statusContext
-                )
-                // Only update wakeHandles when the broadcast actually carried
-                // new routes for this action. A broadcaster without push
-                // routing for a given action sends nothing, and we'd
-                // otherwise nil-out routes that were learned from a prior
-                // broadcast.
-                if let routes = wakeRoutesByActionID[actionID] {
-                    existingLink.wakeHandles = routes
+                .query(on: database)
+                .filter(\.$relation.$id ~~ relationIDs)
+                .all()
+            for link in existingLinks {
+                switch link.approvingContext {
+                    case .contexts(let contexts):
+                        let remaining = contexts.filter { $0 != statusContext }
+                        if remaining.isEmpty {
+                            try await link.delete(on: database)
+                        } else if remaining.count != contexts.count {
+                            link.approvingContext = .contexts(remaining)
+                            try await link.update(on: database)
+                        }
+                    case .all:
+                        // Incoming grants are always context-scoped. Replace any
+                        // legacy all-context mirror with this definitive snapshot.
+                        try await link.delete(on: database)
+                    case nil:
+                        try await link.delete(on: database)
                 }
-                try await existingLink.save(on: localStore.database)
-            } else {
+            }
+
+            for actionID in desiredActionSnapshot.keys.sorted(by: {
+                $0.uuidString < $1.uuidString
+            }) {
+                guard
+                    let advertised = desiredActionSnapshot[actionID],
+                    let action = try await KeepTalkingAction.find(
+                        actionID,
+                        on: database
+                    )
+                else { continue }
                 let link = try KeepTalkingNodeRelationActionRelation(
                     relation: incomingRelation,
                     action: action,
-                    approvingContext: approvingContext
+                    approvingContext: .contexts([statusContext]),
+                    permission: advertised.grantScope
                 )
-                if let routes = wakeRoutesByActionID[actionID] {
-                    link.wakeHandles = routes
-                }
-                try await link.save(on: localStore.database)
+                link.wakeHandles = wakeRouteSnapshot[actionID]
+                try await link.create(on: database)
             }
         }
     }
@@ -1094,6 +1035,19 @@ extension KeepTalkingClient {
             return nil
         }
 
+        let grantScope: KeepTalkingActionScope?
+        if let recipient,
+            let resolved = try? await resolveGrantPermission(
+                node: recipient,
+                action: action,
+                context: context
+            )
+        {
+            grantScope = resolved.isUnrestricted ? nil : resolved
+        } else {
+            grantScope = nil
+        }
+
         let payloadSummary: KeepTalkingAdvertisedAction.PayloadSummary
         switch payload {
             case .mcpBundle(let bundle):
@@ -1147,15 +1101,12 @@ extension KeepTalkingClient {
                             // Filter by the recipient's per-grant tool allowlist
                             // so we never advertise tools they aren't permitted
                             // to call. `nil` allowlist == owner / unrestricted.
-                            if let recipient {
-                                let grant = try? await resolveGrantPermission(
-                                    node: recipient,
-                                    action: action,
-                                    context: context
-                                )
+                            if recipient != nil {
                                 // `.callTool`/`.all`/no-grant → nil allowlist (all
                                 // tools); an explicit `.named` set → filter to it.
-                                if let allowed = grant?.allowedNames(classWildcard: .callTool) {
+                                if let allowed = grantScope?.allowedNames(
+                                    classWildcard: .callTool
+                                ) {
                                     let allowedSet = Set(allowed)
                                     advertisedTools = tools.filter {
                                         allowedSet.contains($0)
@@ -1193,6 +1144,7 @@ extension KeepTalkingClient {
             payloadSummary: payloadSummary,
             remoteAuthorisable: action.remoteAuthorisable ?? true,
             blockingAuthorisation: action.blockingAuthorisation ?? false,
+            grantScope: grantScope,
             availability: availability,
             tools: advertisedTools,
             createdAt: action.createdAt,

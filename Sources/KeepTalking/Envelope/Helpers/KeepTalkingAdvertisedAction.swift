@@ -56,6 +56,9 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
     public let payloadSummary: PayloadSummary
     public let remoteAuthorisable: Bool
     public let blockingAuthorisation: Bool
+    /// Effective permission granted to this status recipient in the status
+    /// context. `nil` is the existing unrestricted-grant representation.
+    public let grantScope: KeepTalkingActionScope?
     /// Live runtime state — connectivity for MCP, `.notApplicable` otherwise.
     /// `.disabled` takes the place of the old boolean `disabled` flag.
     public let availability: KeepTalkingAdvertisedActionAvailability
@@ -73,6 +76,7 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
         payloadSummary: PayloadSummary,
         remoteAuthorisable: Bool,
         blockingAuthorisation: Bool,
+        grantScope: KeepTalkingActionScope? = nil,
         availability: KeepTalkingAdvertisedActionAvailability,
         tools: [String]? = nil,
         createdAt: Date? = nil,
@@ -84,6 +88,7 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
         self.payloadSummary = payloadSummary
         self.remoteAuthorisable = remoteAuthorisable
         self.blockingAuthorisation = blockingAuthorisation
+        self.grantScope = grantScope
         self.availability = availability
         self.tools = tools
         self.createdAt = createdAt

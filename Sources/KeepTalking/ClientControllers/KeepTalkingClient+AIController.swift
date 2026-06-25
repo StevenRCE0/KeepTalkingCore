@@ -448,8 +448,9 @@ extension KeepTalkingClient {
                     // Auto-inject produced resources (attachment/otb) so a file the
                     // agent just requested — e.g. via ask-for-file — is CONSUMED this
                     // turn, not handed back as a handle to optionally pull in later.
-                    await nativeMessagesForProducedResources(
-                        from: executions, context: persistedContext)
+                    await KeepTalkingIOManager(client: self)
+                        .transcriptMessagesForProducedResources(
+                            from: executions, context: persistedContext)
                 },
                 actAgent: actAgent,
                 assistantPublisher: assistantPublisher,
