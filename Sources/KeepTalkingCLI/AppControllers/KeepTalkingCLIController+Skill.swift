@@ -37,7 +37,7 @@ extension KeepTalkingCLIController {
                 }
             }
         } catch {
-            fputs("List skill actions failed: \(error.localizedDescription)\n", stderr)
+            Self.writeStderr("List skill actions failed: \(error.localizedDescription)\n")
         }
     }
 
@@ -51,7 +51,7 @@ extension KeepTalkingCLIController {
             try await client.removeSkillAction(actionID: actionID)
             print("[skill] removed action=\(actionID.uuidString.lowercased())")
         } catch {
-            fputs("Skill remove failed: \(error.localizedDescription)\n", stderr)
+            Self.writeStderr("Skill remove failed: \(error.localizedDescription)\n")
         }
     }
 
@@ -79,7 +79,7 @@ extension KeepTalkingCLIController {
                 description: description
             )
         } catch {
-            fputs("Skill registration failed: \(error.localizedDescription)\n", stderr)
+            Self.writeStderr("Skill registration failed: \(error.localizedDescription)\n")
         }
     }
 

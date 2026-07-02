@@ -50,9 +50,8 @@ extension KeepTalkingCLIController {
                         "[local] invite key (base64): \(secret.base64EncodedString())"
                     )
                 } catch {
-                    fputs(
-                        "Failed to read new context key: \(error.localizedDescription)\n",
-                        stderr
+                    Self.writeStderr(
+                        "Failed to read new context key: \(error.localizedDescription)\n"
                     )
                 }
                 return true
@@ -85,9 +84,8 @@ extension KeepTalkingCLIController {
                             "[local] encryption key saved for context=\(nextContextID.uuidString.lowercased())"
                         )
                     } catch {
-                        fputs(
-                            "Failed to save encryption key: \(error.localizedDescription)\n",
-                            stderr
+                        Self.writeStderr(
+                            "Failed to save encryption key: \(error.localizedDescription)\n"
                         )
                     }
                 } else {
@@ -101,7 +99,7 @@ extension KeepTalkingCLIController {
                     try await client.send(text, in: activeContext)
                     print("[you] \(text)")
                 } catch {
-                    fputs("Send failed: \(error.localizedDescription)\n", stderr)
+                    Self.writeStderr("Send failed: \(error.localizedDescription)\n")
                 }
                 return true
             case .trust(let nodeIDRaw, let scopeRaw):
@@ -168,7 +166,7 @@ extension KeepTalkingCLIController {
                         "[local] cast this lure on peer: /lure \(currentConfig.node.uuidString.lowercased()) \(localPublicKey)"
                     )
                 } catch {
-                    fputs("Trust failed: \(error.localizedDescription)\n", stderr)
+                    Self.writeStderr("Trust failed: \(error.localizedDescription)\n")
                 }
                 return true
             case .lure(let nodeIDRaw, let publicKeyRaw):
@@ -195,7 +193,7 @@ extension KeepTalkingCLIController {
                         "[lure] hooked node=\(sourceNodeID.uuidString.lowercased()) pubkey saved for trusted=\(currentConfig.node.uuidString.lowercased())"
                     )
                 } catch {
-                    fputs("Lure failed: \(error.localizedDescription)\n", stderr)
+                    Self.writeStderr("Lure failed: \(error.localizedDescription)\n")
                 }
                 return true
             case .actionsList:
@@ -282,9 +280,8 @@ extension KeepTalkingCLIController {
             return true
         } catch {
             candidateClient.disconnect()
-            fputs(
-                "Failed to switch context: \(error.localizedDescription)\n",
-                stderr
+            Self.writeStderr(
+                "Failed to switch context: \(error.localizedDescription)\n"
             )
 
             let fallbackClient = KeepTalkingClient(
@@ -303,9 +300,8 @@ extension KeepTalkingCLIController {
                 )
                 return true
             } catch {
-                fputs(
-                    "Failed to restore previous context: \(error.localizedDescription)\n",
-                    stderr
+                Self.writeStderr(
+                    "Failed to restore previous context: \(error.localizedDescription)\n"
                 )
                 return false
             }
@@ -380,9 +376,8 @@ extension KeepTalkingCLIController {
                 }
             }
         } catch {
-            fputs(
-                "List actions failed: \(error.localizedDescription)\n",
-                stderr
+            Self.writeStderr(
+                "List actions failed: \(error.localizedDescription)\n"
             )
         }
     }
@@ -444,9 +439,8 @@ extension KeepTalkingCLIController {
                 "[local] granted action=\(actionID.uuidString.lowercased()) to=\(nodeID.uuidString.lowercased()) scope=\(scopeLabel)"
             )
         } catch {
-            fputs(
-                "Grant action failed: \(error.localizedDescription)\n",
-                stderr
+            Self.writeStderr(
+                "Grant action failed: \(error.localizedDescription)\n"
             )
         }
     }
@@ -464,14 +458,13 @@ extension KeepTalkingCLIController {
         let contextID = activeContext.id ?? currentConfig.contextID
         let context = KeepTalkingContext(id: contextID)
 
-        Task {
+        Task { [client, context, trimmedPrompt] in
             do {
                 try await client.send(trimmedPrompt, in: context)
                 print("[you] \(trimmedPrompt)")
             } catch {
-                fputs(
-                    "Failed to send /ai prompt: \(error.localizedDescription)\n",
-                    stderr
+                KeepTalkingCLIController.writeStderr(
+                    "Failed to send /ai prompt: \(error.localizedDescription)\n"
                 )
             }
 
@@ -491,9 +484,8 @@ extension KeepTalkingCLIController {
                     )
                     return
                 }
-                fputs(
-                    "AI query failed: \(error.localizedDescription)\n",
-                    stderr
+                KeepTalkingCLIController.writeStderr(
+                    "AI query failed: \(error.localizedDescription)\n"
                 )
             }
         }

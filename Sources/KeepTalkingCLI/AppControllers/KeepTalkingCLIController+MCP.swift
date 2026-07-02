@@ -41,7 +41,7 @@ extension KeepTalkingCLIController {
                 }
             }
         } catch {
-            fputs("List MCP actions failed: \(error.localizedDescription)\n", stderr)
+            Self.writeStderr("List MCP actions failed: \(error.localizedDescription)\n")
         }
     }
 
@@ -55,7 +55,7 @@ extension KeepTalkingCLIController {
             try await client.removeMCPAction(actionID: actionID)
             print("[mcp] removed action=\(actionID.uuidString.lowercased())")
         } catch {
-            fputs("MCP remove failed: \(error.localizedDescription)\n", stderr)
+            Self.writeStderr("MCP remove failed: \(error.localizedDescription)\n")
         }
     }
 
@@ -83,7 +83,7 @@ extension KeepTalkingCLIController {
                 headers: headers
             )
         } catch {
-            fputs("MCP registration failed: \(error.localizedDescription)\n", stderr)
+            Self.writeStderr("MCP registration failed: \(error.localizedDescription)\n")
         }
     }
 
@@ -108,7 +108,7 @@ extension KeepTalkingCLIController {
                 environment: environment
             )
         } catch {
-            fputs("MCP stdio registration failed: \(error.localizedDescription)\n", stderr)
+            Self.writeStderr("MCP stdio registration failed: \(error.localizedDescription)\n")
         }
     }
 
@@ -181,7 +181,7 @@ extension KeepTalkingCLIController {
             return .cancelled
         }
         guard let callbackURL = URL(string: trimmed), callbackURL.scheme != nil else {
-            fputs("Invalid callback URL.\n", stderr)
+            Self.writeStderr("Invalid callback URL.\n")
             return .declined
         }
         return .completed(callbackURL: callbackURL)

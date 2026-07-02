@@ -81,7 +81,7 @@ Sources/KeepTalking/
 | `KeepTalkingSFU` (local) | SFU client + protocol for broadcast transport channel |
 | `swift-libjuice` / `SwiftJUICE` | ICE/STUN/TURN for P2P direct channels |
 | `swift-nio` suite | NIO event loops, HTTP/2, TLS — framing the P2P channel |
-| `swift-crypto` | Cross-platform crypto (replaces CryptoKit for portability) |
+| `swift-crypto` | Cross-platform crypto |
 | `swift-certificates` + `swift-asn1` | X.509 / TLS identity |
 | `swift-sdk` (MCP) | MCP server/client for tool integration |
 | `AIProxyMultiPlatform` (local fork) | Chat completions + embeddings client (BYOK) |

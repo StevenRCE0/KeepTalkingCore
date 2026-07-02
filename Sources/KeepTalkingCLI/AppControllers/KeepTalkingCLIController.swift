@@ -22,6 +22,10 @@ final class KeepTalkingCLIController {
         self.activeContext = KeepTalkingContext(id: cliConfig.sdkConfig.contextID)
     }
 
+    static func writeStderr(_ message: String) {
+        FileHandle.standardError.write(Data(message.utf8))
+    }
+
     static func main() async {
         do {
             let cliConfig = try CliConfig.parse()

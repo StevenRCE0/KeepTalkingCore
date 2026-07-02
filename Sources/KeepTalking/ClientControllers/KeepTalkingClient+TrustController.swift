@@ -75,8 +75,8 @@ enum KeepTalkingPendingTrustRole: Sendable {
 }
 
 // @unchecked: swift-crypto's Curve25519.KeyAgreement.PrivateKey isn't marked
-// Sendable on Linux (CryptoKit marks it on Apple). This is a value type holding
-// an immutable key, so it's safe to share; assert it manually.
+// Sendable on Linux. This is a value type holding an immutable key, so it's
+// safe to share; assert it manually.
 struct KeepTalkingPendingTrustSession: @unchecked Sendable {
     let sessionID: UUID
     let role: KeepTalkingPendingTrustRole

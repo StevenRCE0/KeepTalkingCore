@@ -1,4 +1,4 @@
-import CryptoKit
+import Crypto
 import Foundation
 
 /// Reference to a one-time blob (OTB) transfer carried inside an action-call
