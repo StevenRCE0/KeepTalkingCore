@@ -539,31 +539,6 @@ extension KeepTalkingClient {
         )
     }
 
-    func upsertContext(_ context: KeepTalkingContext) async throws
-        -> KeepTalkingContext
-    {
-        guard let contextID = context.id else {
-            try await context.save(on: localStore.database)
-            return context
-        }
-
-        if let existing = try await KeepTalkingContext.query(
-            on: localStore.database
-        )
-        .filter(\.$id, .equal, contextID)
-        .first() {
-            // Forward-only: only advance (and only write) when newer.
-            if context.updatedAt > existing.updatedAt {
-                existing.updatedAt = context.updatedAt
-                try await existing.save(on: localStore.database)
-            }
-            return existing
-        }
-
-        try await context.save(on: localStore.database)
-        return context
-    }
-
     private func filterNewMessages(
         _ messages: [KeepTalkingContextMessage]
     ) async throws -> [KeepTalkingContextMessage] {
