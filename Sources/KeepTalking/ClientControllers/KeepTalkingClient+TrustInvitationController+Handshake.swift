@@ -1,71 +1,5 @@
 import Crypto
-import FluentKit
 import Foundation
-
-// MARK: - Public API surface
-
-public struct KeepTalkingIncomingTrustRequest: Sendable {
-    public let sessionID: UUID
-    public let fromNodeID: UUID
-    public let contextID: UUID
-
-    public init(
-        sessionID: UUID,
-        fromNodeID: UUID,
-        contextID: UUID
-    ) {
-        self.sessionID = sessionID
-        self.fromNodeID = fromNodeID
-        self.contextID = contextID
-    }
-}
-
-/// The responder's verdict on an incoming trust request. Scope is chosen
-/// by the responder at accept time — the request itself is scope-free, so
-/// the responder controls how widely they trust the peer.
-public enum KeepTalkingTrustDecision: Sendable {
-    case accept(scope: KeepTalkingNodeTrustScope)
-    case decline
-}
-
-public enum KeepTalkingTrustOutcome: Sendable {
-    /// Trust handshake completed. Peer's long-term identity public key has
-    /// been persisted into the local trust graph.
-    case established(peerNodeID: UUID, peerPublicKey: String)
-    /// Peer declined the request.
-    case declined
-    /// Pending session timed out (peer didn't respond within TTL).
-    case timedOut
-}
-
-public typealias KeepTalkingIncomingTrustHandler =
-    @Sendable (KeepTalkingIncomingTrustRequest) async -> KeepTalkingTrustDecision
-
-public enum KeepTalkingTrustError: LocalizedError {
-    case contextSecretMissing(UUID)
-    case sessionNotFound(UUID)
-    case unexpectedRole
-    case alreadySettled
-    case identityVerificationFailed
-    case noIncomingHandler
-
-    public var errorDescription: String? {
-        switch self {
-            case .contextSecretMissing(let id):
-                return "Trust handshake: missing group secret for context \(id.uuidString.lowercased())."
-            case .sessionNotFound(let id):
-                return "Trust handshake: no pending session \(id.uuidString.lowercased())."
-            case .unexpectedRole:
-                return "Trust handshake: envelope received in wrong role."
-            case .alreadySettled:
-                return "Trust handshake: session already settled."
-            case .identityVerificationFailed:
-                return "Trust handshake: peer identity payload failed to verify."
-            case .noIncomingHandler:
-                return "Trust handshake: no incoming-request handler registered."
-        }
-    }
-}
 
 // MARK: - Internal pending-session state
 
@@ -98,75 +32,6 @@ struct KeepTalkingPendingTrustSession: @unchecked Sendable {
 }
 
 extension KeepTalkingClient {
-
-    private static let trustSessionTTLSeconds: UInt64 = 60
-
-    // MARK: Public API
-
-    public func setIncomingTrustHandler(
-        _ handler: KeepTalkingIncomingTrustHandler?
-    ) {
-        trustQueue.sync { incomingTrustHandler = handler }
-    }
-
-    /// Initiate a bidirectional trust handshake with `peerNodeID` over the
-    /// shared `contextID`'s signaling channel.
-    ///
-    /// The request itself carries no scope — the responder picks how widely
-    /// to trust the initiator at accept time, and the chosen scope flows
-    /// back in `.trustAccept`. On success, both sides persist each other's
-    /// long-term identity public key under the responder-chosen scope.
-    @discardableResult
-    public func requestTrust(
-        with peerNodeID: UUID,
-        in contextID: UUID
-    ) async throws -> KeepTalkingTrustOutcome {
-        let context = try await ensure(contextID, for: KeepTalkingContext.self)
-        guard try await loadGroupChatSecret(for: contextID) != nil else {
-            throw KeepTalkingTrustError.contextSecretMissing(contextID)
-        }
-
-        let ephemeral = TrustHandshakeCrypto.generateEphemeral()
-        let sessionID = UUID()
-
-        let outcome = try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<KeepTalkingTrustOutcome, Error>) in
-            let session = KeepTalkingPendingTrustSession(
-                sessionID: sessionID,
-                role: .initiator,
-                peerNodeID: peerNodeID,
-                contextID: contextID,
-                scope: nil,
-                scopeWire: nil,
-                localEphemeralPriv: ephemeral.privateKey,
-                localEphemeralPub: ephemeral.publicKeyBytes,
-                peerEphemeralPub: nil,
-                createdAt: Date(),
-                continuation: continuation,
-                timeoutTask: makeTimeoutTask(sessionID: sessionID)
-            )
-            trustQueue.sync { pendingTrustSessions[sessionID] = session }
-
-            let payload = KeepTalkingTrustRequestPayload(
-                sessionID: sessionID,
-                from: config.node,
-                to: peerNodeID,
-                contextID: contextID,
-                initiatorEphemeralPub: ephemeral.publicKeyBytes
-            )
-
-            do {
-                try rtcClient.sendEnvelope(payload)
-            } catch {
-                _ = takePendingSession(sessionID: sessionID)?.timeoutTask?.cancel()
-                trustQueue.sync { pendingTrustSessions[sessionID] = nil }
-                continuation.resume(throwing: error)
-            }
-            _ = context  // silence unused
-        }
-        return outcome
-    }
-
     // MARK: Receive entry point (called from ContextTransport via Client.swift)
 
     func handleIncomingTrustEnvelope(_ envelope: any KeepTalkingEnvelope) async {
@@ -204,7 +69,7 @@ extension KeepTalkingClient {
         guard payload.to == config.node else { return }
         guard payload.from != config.node else { return }
 
-        _ = try await ensure(payload.contextID, for: KeepTalkingContext.self)
+        _ = try await ensureContext(payload.contextID)
         guard let contextSecret = try await loadGroupChatSecret(for: payload.contextID) else {
             throw KeepTalkingTrustError.contextSecretMissing(payload.contextID)
         }
@@ -332,7 +197,7 @@ extension KeepTalkingClient {
         // The responder's chosen scope arrives here. Resolve into the
         // model + cache on the pending session so the rest of the flow
         // (transcript binding, persistence) sees the same value.
-        let context = try await ensure(payload.contextID, for: KeepTalkingContext.self)
+        let context = try await ensureContext(payload.contextID)
         let scope = Self.modelScope(from: payload.scope, context: context)
         session.scope = scope
         session.scopeWire = payload.scope
@@ -476,7 +341,7 @@ extension KeepTalkingClient {
 
     // MARK: Helpers
 
-    private func takePendingSession(sessionID: UUID) -> KeepTalkingPendingTrustSession? {
+    func takePendingSession(sessionID: UUID) -> KeepTalkingPendingTrustSession? {
         trustQueue.sync {
             let session = pendingTrustSessions[sessionID]
             pendingTrustSessions[sessionID] = nil
@@ -490,7 +355,7 @@ extension KeepTalkingClient {
         session.continuation?.resume(returning: outcome)
     }
 
-    private func makeTimeoutTask(sessionID: UUID) -> Task<Void, Never> {
+    func makeTimeoutTask(sessionID: UUID) -> Task<Void, Never> {
         let ttl = Self.trustSessionTTLSeconds
         return Task { [weak self] in
             try? await Task.sleep(nanoseconds: ttl * 1_000_000_000)

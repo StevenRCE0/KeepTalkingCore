@@ -109,6 +109,7 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             CreateKeepTalkingBlobRecordsMigration(),
             CreateSideNotesMigration(),
             CreateKeepTalkingOutboxEntriesMigration(),
+            CreateKeepTalkingTrustInvitationsMigration(),
             CreateKeepTalkingVoiceTranscriptLinesMigration(),
             to: databaseID
         )
