@@ -770,7 +770,7 @@ extension KeepTalkingClient {
 
         if !grantsForLocal.isEmpty {
             switch incomingRelation.relationship {
-                case .pending:
+                case .pending, .preTrusted:
                     incomingRelation.relationship = .trusted([statusContext])
                     try await incomingRelation.save(on: localStore.database)
                 case .trusted(let existingContexts):
@@ -1179,7 +1179,7 @@ extension KeepTalkingClient {
                 switch current {
                     case .owner:
                         return .owner
-                    case .trustedInAllContext, .trusted, .pending:
+                    case .trustedInAllContext, .trusted, .preTrusted, .pending:
                         return .trustedInAllContext
                 }
             case .context(let context):
@@ -1193,7 +1193,7 @@ extension KeepTalkingClient {
                         let mergedArray = Array(merged)
 
                         return .trusted(mergedArray)
-                    case .pending:
+                    case .preTrusted, .pending:
                         return .trusted([context])
                 }
         }

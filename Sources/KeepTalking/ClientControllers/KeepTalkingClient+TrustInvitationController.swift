@@ -167,7 +167,7 @@ extension KeepTalkingClient {
         on database: any Database
     ) async throws -> KeepTalkingTrustInvitation {
         let context = try await ensureContext(contextID, on: database)
-        let now = Date()
+        let now = Date.now
 
         if let existing = try await KeepTalkingTrustInvitation.query(on: database)
             .filter(\.$context.$id, .equal, contextID)
@@ -181,6 +181,14 @@ extension KeepTalkingClient {
             existing.lastError = lastError
             existing.resolvedAt = status.isTerminal ? now : nil
             try await existing.save(on: database)
+            try await applyTrustInvitationRelationSideEffects(
+                context: context,
+                inviterNodeID: inviterNodeID,
+                recipientNodeID: recipientNodeID,
+                direction: direction,
+                status: status,
+                on: database
+            )
             return existing
         }
 
@@ -196,6 +204,14 @@ extension KeepTalkingClient {
             lastError: lastError
         )
         try await invitation.save(on: database)
+        try await applyTrustInvitationRelationSideEffects(
+            context: context,
+            inviterNodeID: inviterNodeID,
+            recipientNodeID: recipientNodeID,
+            direction: direction,
+            status: status,
+            on: database
+        )
         return invitation
     }
 
@@ -215,10 +231,19 @@ extension KeepTalkingClient {
             return nil
         }
         invitation.status = status
-        invitation.updatedAt = Date()
+        invitation.updatedAt = Date.now
         invitation.resolvedAt = status.isTerminal ? invitation.updatedAt : nil
         invitation.lastError = lastError
         try await invitation.save(on: database)
+        let context = try await ensureContext(invitation.$context.id, on: database)
+        try await applyTrustInvitationRelationSideEffects(
+            context: context,
+            inviterNodeID: invitation.inviterNodeID,
+            recipientNodeID: invitation.recipientNodeID,
+            direction: invitation.direction,
+            status: status,
+            on: database
+        )
         return invitation
     }
 
@@ -256,6 +281,165 @@ extension KeepTalkingClient {
         try await Self.ensureContext(contextID, on: localStore.database)
     }
 
+    private static func applyTrustInvitationRelationSideEffects(
+        context: KeepTalkingContext,
+        inviterNodeID: UUID,
+        recipientNodeID: UUID,
+        direction: KeepTalkingTrustInvitationDirection,
+        status: KeepTalkingTrustInvitationStatus,
+        on database: any Database
+    ) async throws {
+        guard direction == .outgoing, inviterNodeID != recipientNodeID else {
+            return
+        }
+
+        switch status {
+            case .pending:
+                try await ensurePreTrustedRelation(
+                    from: inviterNodeID,
+                    to: recipientNodeID,
+                    in: context,
+                    on: database
+                )
+            case .declined, .failed:
+                try await removePreTrustedContext(
+                    from: inviterNodeID,
+                    to: recipientNodeID,
+                    context: context,
+                    on: database
+                )
+            case .accepted, .skipped, .established:
+                break
+        }
+    }
+
+    private static func ensurePreTrustedRelation(
+        from fromNodeID: UUID,
+        to toNodeID: UUID,
+        in context: KeepTalkingContext,
+        on database: any Database
+    ) async throws {
+        let relations = try await relations(
+            from: fromNodeID,
+            to: toNodeID,
+            on: database
+        )
+
+        if relations.contains(where: { $0.relationship.isTrustedOrOwner }) {
+            return
+        }
+
+        if let relation = relations.first(where: {
+            if case .preTrusted = $0.relationship {
+                return true
+            }
+            return false
+        }) {
+            guard case .preTrusted(let contexts) = relation.relationship else {
+                return
+            }
+            relation.relationship = .preTrusted(
+                contexts.merging(context).sortedByID()
+            )
+            try await relation.save(on: database)
+            return
+        }
+
+        if let relation = relations.first(where: { $0.relationship == .pending }) {
+            relation.relationship = .preTrusted([context])
+            try await relation.save(on: database)
+            return
+        }
+
+        let fromNode = try await ensureNode(fromNodeID, on: database)
+        let toNode = try await ensureNode(toNodeID, on: database)
+        let relation = try KeepTalkingNodeRelation(
+            from: fromNode,
+            to: toNode,
+            relationship: .preTrusted([context])
+        )
+        try await relation.save(on: database)
+    }
+
+    private static func removePreTrustedContext(
+        from fromNodeID: UUID,
+        to toNodeID: UUID,
+        context: KeepTalkingContext,
+        on database: any Database
+    ) async throws {
+        let relations = try await relations(
+            from: fromNodeID,
+            to: toNodeID,
+            on: database
+        )
+
+        for relation in relations {
+            guard case .preTrusted(let contexts) = relation.relationship else {
+                continue
+            }
+
+            let remaining = contexts.filter { $0 != context }.sortedByID()
+            if remaining.isEmpty {
+                try await retireEmptyPreTrustedRelation(relation, on: database)
+            } else {
+                relation.relationship = .preTrusted(remaining)
+                try await relation.save(on: database)
+            }
+        }
+    }
+
+    private static func retireEmptyPreTrustedRelation(
+        _ relation: KeepTalkingNodeRelation,
+        on database: any Database
+    ) async throws {
+        let hasActionRelations =
+            try await relation.$actionRelations.query(
+                on: database
+            ).first() != nil
+        let hasIdentityKeys =
+            try await relation.$identityKeys.query(
+                on: database
+            ).first() != nil
+
+        if hasActionRelations || hasIdentityKeys {
+            relation.relationship = .pending
+            try await relation.save(on: database)
+        } else {
+            try await relation.delete(on: database)
+        }
+    }
+
+    private static func relations(
+        from fromNodeID: UUID,
+        to toNodeID: UUID,
+        on database: any Database
+    ) async throws -> [KeepTalkingNodeRelation] {
+        try await KeepTalkingNodeRelation.query(on: database)
+            .filter(\.$from.$id, .equal, fromNodeID)
+            .filter(\.$to.$id, .equal, toNodeID)
+            .all()
+            .sorted {
+                let lhs = relationPriority($0.relationship)
+                let rhs = relationPriority($1.relationship)
+                return lhs == rhs
+                    ? ($0.id?.uuidString ?? "") < ($1.id?.uuidString ?? "")
+                    : lhs > rhs
+            }
+    }
+
+    private static func ensureNode(
+        _ nodeID: UUID,
+        on database: any Database
+    ) async throws -> KeepTalkingNode {
+        if let node = try await KeepTalkingNode.find(nodeID, on: database) {
+            return node
+        }
+
+        let node = KeepTalkingNode(id: nodeID)
+        try await node.save(on: database)
+        return node
+    }
+
     static func ensureContext(
         _ contextID: UUID,
         on database: any Database
@@ -266,6 +450,18 @@ extension KeepTalkingClient {
         let context = KeepTalkingContext(id: contextID)
         try await context.save(on: database)
         return context
+    }
+}
+
+extension Array where Element == KeepTalkingContext {
+    fileprivate func merging(_ context: KeepTalkingContext) -> [KeepTalkingContext] {
+        contains(context) ? self : self + [context]
+    }
+
+    fileprivate func sortedByID() -> [KeepTalkingContext] {
+        sorted { lhs, rhs in
+            (lhs.id?.uuidString ?? "") < (rhs.id?.uuidString ?? "")
+        }
     }
 }
 

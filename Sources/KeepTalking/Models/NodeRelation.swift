@@ -10,6 +10,7 @@ import Foundation
 
 public enum KeepTalkingRelationship: Codable, Sendable, Equatable {
     case pending
+    case preTrusted([KeepTalkingContext])
     case owner
     case trusted([KeepTalkingContext])
     case trustedInAllContext
@@ -18,7 +19,7 @@ public enum KeepTalkingRelationship: Codable, Sendable, Equatable {
         switch self {
             case .owner, .trusted, .trustedInAllContext:
                 return true
-            case .pending:
+            case .pending, .preTrusted:
                 return false
         }
     }
@@ -30,10 +31,27 @@ public enum KeepTalkingRelationship: Codable, Sendable, Equatable {
             case .trusted(let contexts):
                 guard let context else { return false }
                 return contexts.contains(context)
+            case .pending, .preTrusted:
+                return false
+        }
+    }
+
+    public func allowsGrantStaging(context: KeepTalkingContext?) -> Bool {
+        switch self {
+            case .owner, .trustedInAllContext:
+                return true
+            case .trusted(let contexts), .preTrusted(let contexts):
+                guard let context else { return false }
+                return contexts.contains(context)
             case .pending:
                 return false
         }
     }
+}
+
+public enum KeepTalkingRelationEligibility: Sendable {
+    case trustedOnly
+    case grantStaging
 }
 
 public final class KeepTalkingNodeRelation: Model, @unchecked Sendable {

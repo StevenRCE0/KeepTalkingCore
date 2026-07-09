@@ -1298,7 +1298,8 @@ extension KeepTalkingClient {
     ) async throws -> Bool {
         let nodeID = try node.requireID()
         let actionID = try action.requireID()
-        let selfNodeID = try selfNode.requireID()
+        /// Kept here for remote granting future-proof
+        _ = try selfNode.requireID()
         guard let ownerNodeID = action.$node.id else {
             return false
         }
@@ -1307,7 +1308,6 @@ extension KeepTalkingClient {
             from: ownerNodeID,
             to: nodeID,
             allowing: context,
-            allowPending: ownerNodeID != selfNodeID,
             on: database
         )
         .compactMap(\.id)

@@ -868,6 +868,85 @@ struct RemoteActionCallTests {
         #expect(approval?.applicable(in: context) == true)
     }
 
+    @Test("staged action grant on pre-trusted relation activates after trust")
+    func stagedActionGrantOnPreTrustedRelationActivatesAfterTrust() async throws {
+        let store = KeepTalkingInMemoryStore()
+        let ownerNode = KeepTalkingNode(id: UUID())
+        let targetNode = KeepTalkingNode(id: UUID())
+        let context = KeepTalkingContext(id: UUID())
+
+        try await ownerNode.save(on: store.database)
+        try await targetNode.save(on: store.database)
+        try await context.save(on: store.database)
+
+        let action = try await KeepTalkingClient.registerAction(
+            payload: .primitive(
+                KeepTalkingPrimitiveBundle(
+                    name: "open-with-url",
+                    indexDescription: "Open a URL",
+                    action: .openWithURL
+                )
+            ),
+            node: ownerNode,
+            on: store.database
+        )
+
+        let contextID = try #require(context.id)
+        let actionID = try #require(action.id)
+        let ownerNodeID = try #require(ownerNode.id)
+        let targetNodeID = try #require(targetNode.id)
+
+        try await KeepTalkingClient.stageActionPermissionWithTrustInvitation(
+            contextID: contextID,
+            actionID: actionID,
+            toNodeID: targetNodeID,
+            node: ownerNode,
+            on: store.database
+        )
+
+        let relation = try #require(
+            try await KeepTalkingNodeRelation.query(on: store.database)
+                .filter(\.$from.$id, .equal, ownerNodeID)
+                .filter(\.$to.$id, .equal, targetNodeID)
+                .first()
+        )
+        guard case .preTrusted(let contexts) = relation.relationship else {
+            Issue.record("Expected pre-trusted relation")
+            return
+        }
+        #expect(contexts.contains(context))
+
+        let relationID = try #require(relation.id)
+        let approval = try #require(
+            try await KeepTalkingNodeRelationActionRelation.query(on: store.database)
+                .filter(\.$relation.$id, .equal, relationID)
+                .filter(\.$action.$id, .equal, actionID)
+                .first()
+        )
+        #expect(approval.applicable(in: context))
+
+        let authorizedBeforeTrust = try await KeepTalkingClient.isActionGrantedToNode(
+            node: targetNode,
+            action: action,
+            context: context,
+            selfNode: ownerNode,
+            on: store.database
+        )
+        #expect(!authorizedBeforeTrust)
+
+        relation.relationship = .trusted([context])
+        try await relation.save(on: store.database)
+
+        let authorizedAfterTrust = try await KeepTalkingClient.isActionGrantedToNode(
+            node: targetNode,
+            action: action,
+            context: context,
+            selfNode: ownerNode,
+            on: store.database
+        )
+        #expect(authorizedAfterTrust)
+    }
+
     @Test("early remote action result is cached until the caller waits for it")
     func earlyRemoteActionResultIsCached() async throws {
         let requestID = UUID(uuidString: "10000000-0000-0000-0000-000000000000")!

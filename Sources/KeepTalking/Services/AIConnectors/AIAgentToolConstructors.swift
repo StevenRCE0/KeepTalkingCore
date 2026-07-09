@@ -573,10 +573,12 @@ extension KeepTalkingClient {
             source: .primitive,
             description: """
                 Stage a local file onto another node ahead of running a \
-                file-accepting action there (e.g. a skill). Returns a resource \
-                handle (KT_<KIND>_<HEX> form); pass it in the `input_handles` array of a later \
+                file-accepting action there (e.g. a skill). Returns a private \
+                `KT_OTB_<HEX>` resource handle; pass it in the `input_handles` array of a later \
                 kt_run_action whose action is hosted on that SAME node, and the \
-                file is delivered as the action's input. Use this to relay a \
+                file is delivered as the action's input. The returned handle is \
+                an OTB (one-time blob), NOT a context attachment — it is not \
+                listable or readable via attachment tools. Use this to relay a \
                 file you hold locally — for example one you just pulled from \
                 another node — to the node that will process it. The staged file \
                 is private to you, quota-bounded, and expires; stage it shortly \

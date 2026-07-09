@@ -35,14 +35,32 @@ extension KeepTalkingClient {
                 calling this. The ACT agent only receives that selected action,
                 then autonomously discovers its tools, calls the appropriate one
                 with arguments derived from the conversation, and returns a
-                concise summary of the result. To feed a file into the action,
-                first stage it on the action's owner node with kt_send_file, then
-                pass the returned handle(s) in `input_handles` here. To capture a
-                file the action PRODUCES, request it in `outputs`; the inner
-                skill/action receives an exact `$KT_...` write variable for each
-                requested output. Produced resource content is injected into the
-                following turn automatically; its `handle` is the stable identity
-                to mention or pass to a later action.
+                concise summary of the result.
+
+                Resource handles (`KT_<KIND>_<HEX>`) are the single vocabulary for
+                every file. Two kinds exist:
+                - `KT_ATTACHMENT_<HEX>`: durable, shared context attachment.
+                - `KT_OTB_<HEX>`: private, ephemeral one-time blob (from
+                  `kt_send_file` or a prior `produced_resources` entry with
+                  persistence=otb). NOT retrievable via attachment tools.
+
+                To feed a file INTO the action: stage it on the action's owner
+                node with `kt_send_file` (returns a `KT_OTB_<HEX>` handle), then
+                pass that handle in `input_handles` here. The handle resolves
+                only on the node you staged it to.
+
+                To capture a file the action PRODUCES: request it in `outputs`.
+                Each entry needs a `name` and a `persistence`:
+                - `otb` (private): delivered only to you as a `KT_OTB_<HEX>`
+                  handle. Default for intermediate files.
+                - `attachment` (shared): becomes a durable context attachment
+                  (`KT_ATTACHMENT_<HEX>`), visible to all participants.
+                The inner skill/action receives an exact `$KT_...` write
+                variable for each requested output. After the call returns, its
+                result carries a `produced_resources` array listing each produced
+                file by handle, and the bytes are injected into your next turn
+                automatically — do NOT call any tool to fetch them. The handle is
+                the stable identity to mention or pass to a later action.
                 Identify resources by `handle`, not by name: identical filenames
                 across resources are DISTINCT files, never the same one.
                 """,
@@ -65,7 +83,7 @@ extension KeepTalkingClient {
                         "type": .string("array"),
                         "items": .object(["type": .string("string")]),
                         "description": .string(
-                            "Optional resource handles (KT_<KIND>_<HEX> form — from kt_send_file or a prior produced_resources entry) to deliver as the action's file input. Only use handles staged on this action's owner node."
+                            "Optional resource handles (KT_OTB_<HEX> form — from kt_send_file or a prior produced_resources entry) to deliver as the action's file input. Only use handles staged on this action's owner node. KT_ATTACHMENT_<HEX> handles from the context attachment list are also accepted, but prefer kt_send_file for a local file you hold."
                         ),
                     ]),
                     "outputs": .object([
@@ -83,7 +101,7 @@ extension KeepTalkingClient {
                                     "type": .string("string"),
                                     "enum": .array([.string("attachment"), .string("otb")]),
                                     "description": .string(
-                                        "attachment = durable, shared with this context's participants; otb = private, ephemeral, delivered point-to-point to you only."
+                                        "otb = private, ephemeral, delivered only to you as a KT_OTB_<HEX> handle (default; use for intermediate files you'll feed into a later action). attachment = durable, shared context attachment (KT_ATTACHMENT_<HEX>), visible to all participants via attachment tools (use only for a shared, durable artifact)."
                                     ),
                                 ]),
                                 "multiple": .object([
@@ -270,6 +288,24 @@ extension KeepTalkingClient {
             Task: \(task.isEmpty ? "(no specific task provided — use your best judgment)" : task)
             \(resolvedAction.promptContext.isEmpty ? "" : "\nAction metadata:\n\(resolvedAction.promptContext)\n")\(resourceBlock)
             \(typeGuidance)
+
+            Sandbox & resource handles:
+            You execute inside a SANDBOX. The outside world reaches you only through the
+            resource handles provisioned for this run — every `KT_<KIND>_<HEX>` handle is
+            an environment variable whose VALUE is that file's real absolute path on this
+            host. Handles are the ONLY reliable bridge between you and any file the caller
+            staged, any attachment the user provided, and any output slot you must fill.
+            - Prefer handles over every other path form. When a tool or script argument
+              needs a file, pass the handle in its $-form (e.g. `"$KT_ATTACHMENT_<HEX>"`,
+              always quoted) — the shell expands it to the real path for you.
+            - Never hardcode, guess, or fabricate an absolute filesystem path. The sandbox
+              layout is not stable across runs and you cannot discover paths by reasoning.
+            - Never invent a handle that was not provided in the resources block or output
+              slots above. If a file you need is not represented by a handle, you do not
+              have access to it — say so rather than guessing a path.
+            - To RETURN a file to the caller, write it to an output-slot variable
+              (`$KT_<KIND>_<HEX>` from the outputs block), not to an arbitrary path. A
+              file written anywhere else is invisible to the caller and will be lost.
 
             Be factual and direct. Only report what the tool returned. Do not speculate.
             If the tool result shows a non-zero exit code or an error, report that FAILURE honestly — never claim success when the output shows an error.

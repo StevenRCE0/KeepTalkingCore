@@ -784,12 +784,13 @@ extension KeepTalkingClient {
     }
 
     /// Summons NEW immutable context attachment(s) directly from local file(s):
-    /// an action OUTPUT becoming a durable, synced attachment with NO parent
-    /// message (action-produced, not user-authored — replaces the old
-    /// action→attachment-via-a-message path). Stores the bytes content-addressed
-    /// (so the value is immutable), persists a PARENTLESS row, then broadcasts each
-    /// DTO and schedules its blob transfer so participants receive it — exactly like
-    /// a message-attached file, minus the carrier message. Returns the saved rows.
+    /// an action OUTPUT becoming a durable, synced attachment. Stores the bytes
+    /// content-addressed (so the value is immutable), persists a carrier
+    /// `.message` row per attachment (so the output is visible in chat and
+    /// replays to the agent), parents the attachment to that message, then
+    /// broadcasts each message + attachment DTO and schedules the blob transfer
+    /// so participants receive it — exactly like a user-authored file message,
+    /// minus user authorship. Returns the saved rows.
     @discardableResult
     func summonContextAttachments(
         _ inputs: [KeepTalkingLocalAttachmentInput],
@@ -811,18 +812,35 @@ extension KeepTalkingClient {
         let prepared = try await prepareLocalAttachments(inputs)
         let blobRecords = try await blobRecordsByBlobID(prepared.map(\.blobID))
 
+        // Emit ONE carrier `.message` row for the whole batch so the output is
+        // visible in chat and replays to the agent (only `.message` rows are
+        // included in agent context). The message body is a short summary; each
+        // attachment is parented to it so the UI groups them. This replaces the
+        // parentless row — action-produced, but no longer invisible.
+        let summary = prepared.enumerated().map { index, input in
+            "\(index + 1). \(input.filename) (\(input.byteCount) bytes)"
+        }.joined(separator: "\n")
+        let message = KeepTalkingContextMessage(
+            context: context,
+            sender: resolvedSender,
+            content: summary,
+            type: .message
+        )
+        try await message.save(on: localStore.database)
+        let parentMessageID = try message.requireID()
+
         var saved: [KeepTalkingContextAttachment] = []
         saved.reserveCapacity(prepared.count)
         for (index, attachmentInput) in prepared.enumerated() {
             let attachment = KeepTalkingContextAttachment(
                 context: context,
-                parentMessageID: nil,  // PARENTLESS — action-summoned, not authored
+                parentMessageID: parentMessageID,
                 sender: resolvedSender,
                 blobID: attachmentInput.blobID,
                 filename: attachmentInput.filename,
                 mimeType: attachmentInput.mimeType,
                 byteCount: attachmentInput.byteCount,
-                createdAt: Date(),
+                createdAt: message.timestamp,
                 sortIndex: index,
                 metadata: .init()
             )
@@ -841,19 +859,31 @@ extension KeepTalkingClient {
         }
         try await context.refreshSyncMetadata(on: localStore.database)
 
-        // Broadcast each DTO + schedule its blob transfer so participants receive
-        // the summoned attachments (transport failures are non-fatal — the rows are
-        // persisted locally and replicate via normal sync). Summon is for DURABLE,
-        // SHARED outputs only; private (.otb) outputs never become attachments —
-        // they use the staged-file store instead, so they are never broadcast/synced.
-        for attachment in saved {
-            guard let dto = KeepTalkingContextAttachmentDTO(attachment) else { continue }
-            try? rtcClient.sendEnvelope(dto)
+        // Broadcast the carrier message + each attachment DTO and schedule the
+        // blob transfers so participants receive the summoned outputs (transport
+        // failures are non-fatal — the rows are persisted locally and replicate
+        // via normal sync). Summon is for DURABLE, SHARED outputs only; private
+        // (.otb) outputs never become attachments — they use the staged-file
+        // store instead, so they are never broadcast/synced.
+        await enqueueOutboxEntry(contextMessage: message, context: context)
+        do {
+            try rtcClient.sendEnvelope(message)
+            for attachment in saved {
+                if let dto = KeepTalkingContextAttachmentDTO(attachment) {
+                    try rtcClient.sendEnvelope(dto)
+                }
+            }
+            await clearOutboxEntry(contextMessageID: parentMessageID)
+        } catch {
+            await recordOutboxFailure(contextMessageID: parentMessageID, error: error)
+            onLog?(
+                "[io/summon] transport push failed messageID=\(parentMessageID.uuidString.lowercased()) "
+                    + "error=\(error.localizedDescription) — left in outbox")
         }
         scheduleOutgoingBlobTransfers(for: saved)
         onLog?(
             "[io/summon] context=\(contextID.uuidString.prefix(8)) "
-                + "summoned=\(saved.count) parentless attachment(s)")
+                + "summoned=\(saved.count) attachment(s) on carrier message=\(parentMessageID.uuidString.prefix(8))")
         return saved
     }
 

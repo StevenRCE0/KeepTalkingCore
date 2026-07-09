@@ -454,8 +454,9 @@ extension KTResourceManifest {
         }
 
         public var injectedContentLeadText: String {
-            "[\(transcriptDescription())] — produced content is injected below; "
-                + "reference or pass it by handle, but do not call tools to fetch this same resource:"
+            "[\(transcriptDescription())] — produced content is injected below. "
+                + "This is the file's full content; do NOT call any tool (attachment tools, kt_send_file, etc.) to fetch it. "
+                + "Reference it by its handle, or pass the handle in input_handles to a later kt_run_action:"
         }
     }
 }

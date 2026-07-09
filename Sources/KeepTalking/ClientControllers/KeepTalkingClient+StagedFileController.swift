@@ -128,7 +128,7 @@ extension KeepTalkingClient {
         let trusted =
             (try? await Self.preferredTrustedRelation(
                 from: config.node, to: request.callerNodeID,
-                allowPending: false, on: localStore.database)) ?? nil
+                on: localStore.database)) ?? nil
         guard trusted != nil else {
             return failure("Caller is not trusted to stage files.")
         }
