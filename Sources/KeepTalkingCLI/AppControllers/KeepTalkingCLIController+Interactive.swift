@@ -423,11 +423,13 @@ extension KeepTalkingCLIController {
         }
 
         do {
-            try await client.grantActionPermission(
+            var transaction = KeepTalkingGrantTransaction()
+            try transaction.grant(
                 actionID: actionID,
-                toNodeID: nodeID,
+                to: nodeID,
                 scope: scope
             )
+            try await client.grantActionPermission(transaction: transaction)
             let scopeLabel: String =
                 switch scope {
                     case .all:

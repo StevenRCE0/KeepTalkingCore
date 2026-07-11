@@ -837,6 +837,87 @@ extension KeepTalkingClient {
         )
     }
 
+    static public func grantActionPermission(
+        transaction: KeepTalkingGrantTransaction,
+        node: KeepTalkingNode,
+        on database: any Database,
+        callbackForBroadcasting: ((String) async -> Void)? = nil
+    ) async throws {
+        let entries = transaction.entries
+        guard !entries.isEmpty else { return }
+
+        try await database.transaction { database in
+            for entry in entries {
+                switch entry.change {
+                    case .grant(let scope):
+                        if let contextID = entry.key.contextID {
+                            try await stageActionPermissionWithTrustInvitation(
+                                contextID: contextID,
+                                actionID: entry.key.actionID,
+                                toNodeID: entry.key.nodeID,
+                                grantScope: scope,
+                                node: node,
+                                on: database
+                            )
+                        } else {
+                            try await grantActionPermission(
+                                actionID: entry.key.actionID,
+                                toNodeID: entry.key.nodeID,
+                                scope: .all,
+                                grantScope: scope,
+                                node: node,
+                                on: database
+                            )
+                        }
+                    case .revoke:
+                        let context: KeepTalkingContext?
+                        if let contextID = entry.key.contextID {
+                            context = try await ensureContext(contextID, on: database)
+                        } else {
+                            context = nil
+                        }
+                        try await revokeActionPermission(
+                            actionID: entry.key.actionID,
+                            fromNodeID: entry.key.nodeID,
+                            context: context,
+                            eligibility: context == nil ? .trustedOnly : .grantStaging,
+                            node: node,
+                            on: database
+                        )
+                }
+            }
+        }
+
+        await callbackForBroadcasting?(
+            "grant transaction entries=\(entries.count)"
+        )
+    }
+
+    public func grantActionPermission(
+        transaction: KeepTalkingGrantTransaction
+    ) async throws {
+        let selfNode = try await ensure(
+            config.node,
+            for: KeepTalkingNode.self,
+            strict: true
+        )
+
+        try await Self.grantActionPermission(
+            transaction: transaction,
+            node: selfNode,
+            on: localStore.database,
+            callbackForBroadcasting: {
+                await self.broadcastLocalNodeState(reason: $0)
+            }
+        )
+        for contextID in Set(transaction.entries.map(\.key.contextID)) {
+            await invalidateActionToolCatalog(
+                contextID: contextID,
+                reason: "grant_transaction"
+            )
+        }
+    }
+
     static public func stageActionPermissionWithTrustInvitation(
         contextID: UUID,
         actionID: UUID,
