@@ -5,6 +5,28 @@ extension KeepTalkingClient {
 
     // MARK: - Caller-side filesystem transfer plumbing
 
+    func withStagingResources(
+        for request: KeepTalkingActionCallRequest,
+        operation: (KeepTalkingActionCallRequest) async throws -> KeepTalkingActionCallResult
+    ) async throws -> KeepTalkingActionCallResult {
+        await relayLocalStagedInputs(
+            request.call,
+            to: request.targetNodeID,
+            contextID: request.contextID
+        )
+        var stagedRequest = request
+        stagedRequest.call = try await preparingOutgoingFilesystemTransfers(
+            request.call,
+            recipient: request.targetNodeID
+        )
+        let result = try await operation(stagedRequest)
+
+        return try await materializingStagedResources(
+            result,
+            from: request.targetNodeID
+        )
+    }
+
     /// If `call` is a filesystem `put-file` carrying a local `source`, streams
     /// that file to `recipient` as a one-time encrypted blob and returns a copy
     /// of the call with the ref attached as an input transfer. Any other call
@@ -57,6 +79,52 @@ extension KeepTalkingClient {
         }
         augmented.outputTransfers = nil
         return augmented
+    }
+
+    private func materializingStagedResources(
+        _ result: KeepTalkingActionCallResult,
+        from senderNodeID: UUID
+    ) async throws -> KeepTalkingActionCallResult {
+        guard let transfers = result.outputTransfers, !transfers.isEmpty else {
+            return result
+        }
+
+        let producedOTBIDs = Set(
+            (result.producedResources ?? []).compactMap {
+                $0.kind == "otb"
+                    ? KTResourceManifest.parseAgentHandle($0.handle)?.id
+                    : nil
+            }
+        )
+        let producedTransfers = transfers.filter {
+            producedOTBIDs.contains($0.transferID)
+        }
+        if !producedTransfers.isEmpty {
+            await KeepTalkingIOManager(client: self)
+                .materializeProducedOTBOutputs(producedTransfers, from: senderNodeID)
+        }
+
+        let filesystemTransfers = transfers.filter {
+            !producedOTBIDs.contains($0.transferID)
+        }
+        guard !filesystemTransfers.isEmpty else {
+            var staged = result
+            staged.outputTransfers = nil
+            return staged
+        }
+
+        var filesystemResult = result
+        filesystemResult.outputTransfers = filesystemTransfers
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(
+                "kt-otb-recv-\(result.requestID.uuidString.lowercased())",
+                isDirectory: true
+            )
+        return try await materializingIncomingFilesystemTransfers(
+            filesystemResult,
+            from: senderNodeID,
+            into: directory
+        )
     }
 
     /// Extracts the filesystem operation name + its argument dict, mirroring

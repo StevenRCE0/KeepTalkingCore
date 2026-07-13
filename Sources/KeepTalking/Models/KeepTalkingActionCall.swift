@@ -105,6 +105,47 @@ public struct KeepTalkingActionCallRequest: Codable, Sendable {
     }
 }
 
+public struct KeepTalkingActionCallActivity: Sendable, Equatable {
+    public enum Phase: Sendable, Equatable {
+        case began
+        case ended
+    }
+
+    public let requestID: UUID
+    public let contextID: UUID
+    public let actionID: UUID
+    public let callerNodeID: UUID
+    public let targetNodeID: UUID
+    public let phase: Phase
+
+    public init(
+        requestID: UUID,
+        contextID: UUID,
+        actionID: UUID,
+        callerNodeID: UUID,
+        targetNodeID: UUID,
+        phase: Phase
+    ) {
+        self.requestID = requestID
+        self.contextID = contextID
+        self.actionID = actionID
+        self.callerNodeID = callerNodeID
+        self.targetNodeID = targetNodeID
+        self.phase = phase
+    }
+
+    init(request: KeepTalkingActionCallRequest, phase: Phase) {
+        self.init(
+            requestID: request.id,
+            contextID: request.contextID,
+            actionID: request.call.action,
+            callerNodeID: request.callerNodeID,
+            targetNodeID: request.targetNodeID,
+            phase: phase
+        )
+    }
+}
+
 public struct KeepTalkingActionCallResult: Codable, Sendable {
     public var requestID: UUID
     public var contextID: UUID

@@ -172,6 +172,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public var onOutboxChanged: (@Sendable () -> Void)?
     public var onThreadsChanged: (@Sendable () -> Void)?
     public var onMappingsChanged: (@Sendable () -> Void)?
+    public var onActionCallActivity: (@Sendable (KeepTalkingActionCallActivity) async -> Void)?
     public var onAgentRunsChanged: (@Sendable ([KeepTalkingAgentRunSnapshot]) -> Void)? {
         didSet { agentCoordinator.onChanged = onAgentRunsChanged }
     }

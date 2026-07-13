@@ -128,8 +128,25 @@ extension KeepTalkingClient {
             if let onAcknowledgement {
                 await onAcknowledgement(.accepted, "Cancellation received.")
             }
+
             return handleIncomingCancelRequest(request)
         }
+
+        return await withActionCallActivity(for: request) {
+            await performActionCallRequest(
+                request,
+                context: context,
+                onAcknowledgement: onAcknowledgement
+            )
+        }
+    }
+
+    private func performActionCallRequest(
+        _ request: KeepTalkingActionCallRequest,
+        context: KeepTalkingContext?,
+        onAcknowledgement:
+            (@Sendable (KeepTalkingRequestAckState, String?) async -> Void)?
+    ) async -> KeepTalkingActionCallResult {
         let action: KeepTalkingAction
         let grant: KeepTalkingActionScope
         do {
@@ -696,15 +713,6 @@ extension KeepTalkingClient {
             forRemoteOwnerNodeID: actionOwner
         )
 
-        // Cross-node OTB re-feed: a produced/staged input the agent referenced lives
-        // in THIS caller's staged store; ship it to a REMOTE executor (preserving the
-        // handle) so the staging manager can resolve it, otherwise the
-        // MISSes (the file was never on that node). No-op for a local delivery.
-        if deliveryNodeID != config.node {
-            await relayLocalStagedInputs(
-                call, to: deliveryNodeID, contextID: try context.requireID())
-        }
-
         let request = KeepTalkingActionCallRequest(
             contextID: try context.requireID(),
             callerNodeID: config.node,
@@ -724,8 +732,32 @@ extension KeepTalkingClient {
                 call: call,
                 result: result
             )
+
             return result
         }
+
+        return try await withActionCallActivity(for: request) {
+            try await withStagingResources(for: request) { stagedRequest in
+                try await dispatchRemoteActionCall(
+                    actionOwner: actionOwner,
+                    request: stagedRequest,
+                    context: context,
+                    agentTurnID: agentTurnID
+                )
+            }
+        }
+    }
+
+    private func dispatchRemoteActionCall(
+        actionOwner: UUID,
+        request: KeepTalkingActionCallRequest,
+        context: KeepTalkingContext,
+        agentTurnID: UUID?
+    ) async throws -> KeepTalkingActionCallResult {
+        let call = request.call
+        let deliveryNodeID = request.targetNodeID
+        let requestID = request.id.uuidString.lowercased()
+        let actionID = call.action.uuidString.lowercased()
 
         // Remote blocking actions use the continuation model instead of the
         // synchronous action-call channel. The agent turn suspends until the
@@ -733,7 +765,6 @@ extension KeepTalkingClient {
         if await shouldUseWakeAssistedDelivery(for: call.action), let agentTurnID {
             return try await dispatchBlockingActionCallViaContinuation(
                 request: request,
-                call: call,
                 context: context,
                 agentTurnID: agentTurnID
             )
@@ -743,75 +774,45 @@ extension KeepTalkingClient {
             "[action-call/request] dispatching remote request=\(requestID) action=\(actionID) owner=\(actionOwner.uuidString.lowercased()) target=\(deliveryNodeID.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased())"
         )
 
-        // Filesystem put-file: privately stream the caller's local source to the
-        // host as a one-time encrypted blob before dispatch (no-op for any other
-        // call). Result get-files are materialized locally afterward.
-        let effectiveCall = try await preparingOutgoingFilesystemTransfers(
-            call, recipient: deliveryNodeID)
-        let effectiveRequest = KeepTalkingActionCallRequest(
-            id: request.id,
-            contextID: request.contextID,
-            callerNodeID: config.node,
-            targetNodeID: deliveryNodeID,
-            call: effectiveCall
-        )
+        try await sendRemoteActionCallRequest(request, deliveryDescription: "rtc")
 
-        try await sendRemoteActionCallRequest(effectiveRequest, deliveryDescription: "rtc")
-
-        let result = try await withTaskCancellationHandler {
+        return try await withTaskCancellationHandler {
             try await waitForActionCallResult(
-                requestID: effectiveRequest.id,
+                requestID: request.id,
                 targetNodeID: deliveryNodeID
             )
         } onCancel: {
             // The caller's run was cancelled — tell the provider to stop too, so a
             // long remote run isn't orphaned. Local unwind happens via the throw.
             self.sendCancelFireAndForget(
-                requestID: effectiveRequest.id,
+                requestID: request.id,
                 targetNodeID: deliveryNodeID,
                 contextID: request.contextID)
         }
-        guard let transfers = result.outputTransfers, !transfers.isEmpty else {
+    }
+
+    private func withActionCallActivity<Result>(
+        for request: KeepTalkingActionCallRequest,
+        operation: () async throws -> Result
+    ) async rethrows -> Result {
+        await onActionCallActivity?(.init(request: request, phase: .began))
+        do {
+            let result = try await operation()
+            await onActionCallActivity?(.init(request: request, phase: .ended))
+
             return result
+        } catch {
+            await onActionCallActivity?(.init(request: request, phase: .ended))
+            throw error
         }
-        // Produced `.otb` outputs (chainable) → stage into THIS caller's store under
-        // transferID so the next turn can inject them and later actions can consume
-        // them (A→B chaining), mirroring the continuation path. They're identified by an `otb`
-        // produced_resources entry whose handle == KT_OTB_<transferID>; anything else
-        // (a filesystem get-file result, which carries NO produced_resources) falls
-        // through to the temp-dir + path-note materialization below. When
-        // produced_resources is absent (older/other actions) this is a no-op and the
-        // original behavior is preserved.
-        let producedOTBIDs = Set(
-            (result.producedResources ?? []).compactMap {
-                $0.kind == "otb" ? KTResourceManifest.parseAgentHandle($0.handle)?.id : nil
-            })
-        let producedOTBTransfers = transfers.filter { producedOTBIDs.contains($0.transferID) }
-        if !producedOTBTransfers.isEmpty {
-            await KeepTalkingIOManager(client: self)
-                .materializeProducedOTBOutputs(producedOTBTransfers, from: deliveryNodeID)
-        }
-        let fsTransfers = transfers.filter { !producedOTBIDs.contains($0.transferID) }
-        guard !fsTransfers.isEmpty else {
-            var cleaned = result
-            cleaned.outputTransfers = nil
-            return cleaned
-        }
-        var fsResult = result
-        fsResult.outputTransfers = fsTransfers
-        let receiveDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent(
-                "kt-otb-recv-\(request.id.uuidString.lowercased())", isDirectory: true)
-        return try await materializingIncomingFilesystemTransfers(
-            fsResult, from: deliveryNodeID, into: receiveDir)
     }
 
     private func dispatchBlockingActionCallViaContinuation(
         request: KeepTalkingActionCallRequest,
-        call: KeepTalkingActionCall,
         context: KeepTalkingContext,
         agentTurnID: UUID
     ) async throws -> KeepTalkingActionCallResult {
+        let call = request.call
         let actionID = call.action.uuidString.lowercased()
         let targetNodeID = request.targetNodeID
         onLog?(
@@ -859,18 +860,9 @@ extension KeepTalkingClient {
             sender: sender
         )
 
-        // Materialize any private output transfers the target shipped (e.g. a
-        // remote ask-for-file's picked file) into our staged store, keyed by their
-        // transfer id == the produced_resources handle, so the next turn can inject
-        // them locally.
-        if let transfers = continuationResult.outputTransfers, !transfers.isEmpty {
-            await KeepTalkingIOManager(client: self)
-                .materializeProducedOTBOutputs(transfers, from: targetNodeID)
-        }
-
         // Carry the produced resources + output transfers the target computed
         // (e.g. a remote ask-for-file's picked file) all the way back — the
-        // continuation path now delivers everything the direct path does.
+        // staging scaffold handles them the same way as direct delivery.
         return KeepTalkingActionCallResult(
             requestID: request.id,
             contextID: request.contextID,
