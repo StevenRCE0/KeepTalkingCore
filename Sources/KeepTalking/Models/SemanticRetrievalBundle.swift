@@ -3,10 +3,11 @@ import Foundation
 /// Bundle that defines a permission-gated semantic search capability.
 ///
 /// A `semanticRetrieval` action backed by this bundle lets other nodes
-/// query the host's embedded thread memory. The `contextIDs` field
+/// query the host's thread memory. The `contextIDs` field
 /// constrains which contexts are eligible to appear in results —
-/// empty means no restriction. Tag scoping is resolved automatically
-/// from the execution node's own DB at query time.
+/// empty means no restriction. Canonical memory scopes and their thread
+/// filters are resolved from the execution node's own DB at query time;
+/// semantic indexing only enhances the resulting lexical ranking.
 public struct KeepTalkingSemanticRetrievalBundle: KeepTalkingActionBundle {
     public var id: UUID
     public var name: String

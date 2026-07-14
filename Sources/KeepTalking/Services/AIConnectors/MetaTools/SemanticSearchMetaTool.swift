@@ -36,42 +36,42 @@ extension KeepTalkingClient {
         // MARK: - Local search
 
         var localItems: [SemanticSearchItem] = []
-        if let callback = semanticSearchCallback {
-            let contextTagIDs: [UUID] =
-                (try? await KeepTalkingMapping
-                    .query(on: localStore.database)
-                    .filter(\.$context.$id == contextID)
-                    .filter(\.$kind == .tag)
-                    .all()
-                    .compactMap(\.id)) ?? []
+        let localResults: [KeepTalkingSemanticSearchResult]
+        do {
+            let scopes = try await Self.retrievableSemanticMemoryScopes(
+                for: contextID,
+                on: localStore.database
+            )
+            localResults = try await Self.retrieveSemanticMemory(
+                query: query,
+                topK: topK,
+                scopes: scopes,
+                semanticSearch: semanticSearchCallback,
+                on: localStore.database
+            )
+        } catch {
+            localResults = []
+            onLog?("[search-threads] local search failed error=\(error.localizedDescription)")
+        }
 
-            let localResults: [KeepTalkingSemanticSearchResult]
-            do {
-                localResults = try await callback(query, topK, [contextID], contextTagIDs)
-            } catch {
-                localResults = []
-                onLog?("[search-threads] local search failed error=\(error.localizedDescription)")
-            }
+        let aliasLookup = try await aliasLookup()
+        let nodeLabel =
+            aliasLookup.alias(for: .node(config.node))
+            ?? String(config.node.uuidString.prefix(8).lowercased())
+        let nodeID = config.node.uuidString.lowercased()
 
-            let aliasLookup = try await aliasLookup()
-            let nodeLabel =
-                aliasLookup.alias(for: .node(config.node))
-                ?? String(config.node.uuidString.prefix(8).lowercased())
-            let nodeID = config.node.uuidString.lowercased()
-
-            localItems = localResults.map { result in
-                let alias =
-                    aliasLookup.alias(for: .thread(result.threadID))
-                    ?? String(result.threadID.uuidString.prefix(8).lowercased())
-                return SemanticSearchItem(
-                    threadID: result.threadID.uuidString.lowercased(),
-                    label: alias,
-                    score: Double(result.score),
-                    excerpt: String(result.text.prefix(400)),
-                    nodeID: nodeID,
-                    nodeLabel: nodeLabel
-                )
-            }
+        localItems = localResults.map { result in
+            let alias =
+                aliasLookup.alias(for: .thread(result.threadID))
+                ?? String(result.threadID.uuidString.prefix(8).lowercased())
+            return SemanticSearchItem(
+                threadID: result.threadID.uuidString.lowercased(),
+                label: alias,
+                score: Double(result.score),
+                excerpt: String(result.text.prefix(400)),
+                nodeID: nodeID,
+                nodeLabel: nodeLabel
+            )
         }
 
         // MARK: - Remote fan-out

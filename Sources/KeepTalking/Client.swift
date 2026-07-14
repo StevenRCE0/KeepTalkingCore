@@ -146,10 +146,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
         @Sendable (KeepTalkingActionCallRequest, KeepTalkingAction, KeepTalkingContext) async -> Bool
     public typealias PrimitiveActionPostResultHandler =
         @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall) -> Void
-    /// Callback that executes semantic thread search. Injected by the app layer.
-    /// Parameters: query, topK, contextIDs filter, tagIDs filter.
+    /// Optional app-provided semantic ranking signal. Canonical scope
+    /// enforcement and lexical retrieval remain SDK-owned.
     public typealias SemanticSearchCallback =
-        @Sendable (String, Int, [UUID], [UUID]) async throws -> [KeepTalkingSemanticSearchResult]
+        @Sendable (String, Int) async throws -> [KeepTalkingSemanticSearchResult]
     /// Callback that performs a web search. Used when the connector is in chat-completions
     /// mode (e.g. OpenRouter) where web search is a client-side function call rather than
     /// a built-in Responses API tool. Parameter: query string. Returns raw result text.

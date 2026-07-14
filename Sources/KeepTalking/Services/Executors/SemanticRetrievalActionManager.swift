@@ -5,7 +5,6 @@ import MCP
 public enum SemanticRetrievalActionManagerError: LocalizedError {
     case invalidAction
     case missingActionID
-    case missingCallback
     case missingQuery
 
     public var errorDescription: String? {
@@ -14,8 +13,6 @@ public enum SemanticRetrievalActionManagerError: LocalizedError {
                 return "Action payload is not a semantic retrieval bundle."
             case .missingActionID:
                 return "Action must have an ID before registration."
-            case .missingCallback:
-                return "Semantic search callback is not configured for this client."
             case .missingQuery:
                 return "Search query is required."
         }
@@ -25,9 +22,9 @@ public enum SemanticRetrievalActionManagerError: LocalizedError {
 /// Executes incoming `.semanticRetrieval` action calls on the local node.
 ///
 /// Mirrors the structure of `PrimitiveActionManager`: the manager stores
-/// registered bundles by action ID and, when called, resolves the bundle's
-/// `contextIDs`/`tagTitles` constraints before delegating to the
-/// app-injected `SemanticSearchCallback`.
+/// registered bundles by action ID and resolves them into the same canonical
+/// memory scopes used by local discovery before running the SDK retrieval
+/// pipeline. The app callback contributes optional semantic enhancement only.
 ///
 /// The callback is wired up lazily via `setSearchCallback` so it always
 /// reflects the most-recent value set through
@@ -85,12 +82,10 @@ public actor SemanticRetrievalActionManager {
         guard case .semanticRetrieval(let bundle) = action.payload else {
             throw SemanticRetrievalActionManagerError.invalidAction
         }
-        guard let searchCallback else {
-            throw SemanticRetrievalActionManagerError.missingCallback
-        }
         try await registerIfNeeded(action)
 
-        let query = call.arguments["query"]?.stringValue?
+        let query =
+            call.arguments["query"]?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !query.isEmpty else {
             throw SemanticRetrievalActionManagerError.missingQuery
@@ -125,31 +120,26 @@ public actor SemanticRetrievalActionManager {
         // If all contexts were excluded (e.g. remote has no other contexts), return empty.
         guard !effectiveContextIDs.isEmpty else {
             let emptyResults: [[String: Any]] = []
-            let payload = encodedJSON([
-                "ok": true, "query": query, "count": 0, "results": emptyResults,
-            ] as [String: Any])
+            let payload = encodedJSON(
+                [
+                    "ok": true, "query": query, "count": 0, "results": emptyResults,
+                ] as [String: Any])
             return (
                 content: [.text(text: payload, annotations: nil, _meta: nil)],
                 isError: false
             )
         }
 
-        // Resolve tag IDs from this node's DB — tags are node-local and never travel
-        // over the wire. Scope to the effective contexts, mirroring local-mode behavior.
-        let tagIDs: [UUID] =
-            ((try? await KeepTalkingMapping.query(on: database)
-                .filter(\.$kind == .tag)
-                .all()) ?? [])
-            .compactMap { mapping -> UUID? in
-                guard
-                    let ctxID = mapping.$context.id,
-                    effectiveContextIDs.contains(ctxID)
-                else { return nil }
-                return mapping.id
-            }
-
-        let results = try await searchCallback(
-            query, topK, effectiveContextIDs, tagIDs
+        let scopes = try await KeepTalkingClient.retrievableSemanticMemoryScopes(
+            for: effectiveContextIDs,
+            on: database
+        )
+        let results = try await KeepTalkingClient.retrieveSemanticMemory(
+            query: query,
+            topK: topK,
+            scopes: scopes,
+            semanticSearch: searchCallback,
+            on: database
         )
 
         let items: [[String: Any]] = results.map { result in
