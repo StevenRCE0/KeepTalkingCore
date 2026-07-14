@@ -228,6 +228,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// The periodic maintenance heartbeat (ContextMaintenance `.heartbeat`
     /// trigger). Started on `connect()`, cancelled on `disconnect()`.
     var maintenanceTask: Task<Void, Never>?
+    /// Ancillary work that starts after the transport is usable. It must not
+    /// keep `connect()` — and therefore the app's connection UI — pending.
+    var postConnectTask: Task<Void, Never>?
     var activeVoiceSession: KeepTalkingVoiceSession?
     let config: KeepTalkingConfig
     let rtcClient: any KeepTalkingTransportClient
@@ -661,16 +664,18 @@ public final class KeepTalkingClient: @unchecked Sendable {
         try await rtcClient.start()
         try await persistMyNode()
 
-        if kvService != nil {
+        startMaintenanceLoop()
+        postConnectTask?.cancel()
+        postConnectTask = Task { [weak self] in
+            guard let self else { return }
+            await self.dispatchMaintenance(.connected)
+            guard !Task.isCancelled, self.kvService != nil else { return }
             do {
-                try await registerCurrentNodeID()
+                try await self.registerCurrentNodeID()
             } catch {
-                debug("[kv] KV registration failed: \(error)")
+                self.debug("[kv] KV registration failed: \(error)")
             }
         }
-
-        await dispatchMaintenance(.connected)
-        startMaintenanceLoop()
     }
 
     /// Stops transports and fails any pending remote requests.
@@ -683,6 +688,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// in-flight teardown before restarting the transport.
     public func disconnect() {
         stopMaintenanceLoop()
+        postConnectTask?.cancel()
+        postConnectTask = nil
         failAllPendingActionCalls(error: KeepTalkingClientError.clientDisconnected)
         failAllPendingActionCatalogRequests(error: KeepTalkingClientError.clientDisconnected)
         failAllPendingContextSync(error: KeepTalkingClientError.clientDisconnected)

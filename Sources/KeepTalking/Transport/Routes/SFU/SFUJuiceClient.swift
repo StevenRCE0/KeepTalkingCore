@@ -180,7 +180,13 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
 
     func stop() {
         debug("stopping sent=\(sentCount) recv=\(recvCount)")
+        let continuation = stateQueue.sync {
+            let continuation = readyContinuation
+            readyContinuation = nil
+            return continuation
+        }
         client.close()
+        continuation?.resume(throwing: CancellationError())
     }
 
     // MARK: - Transport protocol
@@ -283,7 +289,7 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
                 continuation?.resume(throwing: SFUJuiceError.connectFailed(reason))
                 onTransportDegraded?(reason)
             case .closed:
-                onTransportDegraded?("sfu client closed")
+                break
             case .idle, .connecting, .authenticating:
                 break
         }

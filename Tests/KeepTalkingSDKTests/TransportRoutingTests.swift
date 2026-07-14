@@ -539,6 +539,55 @@ private func makeMessageEnvelope(
     return message
 }
 
+struct SFUJuiceLifecycleTests {
+    @Test("stopping during connection cancels start without degradation")
+    func stopCancelsPendingStart() async {
+        let config = KeepTalkingConfig(
+            contextID: UUID(),
+            node: UUID(),
+            sfuEndpoint: .init(host: "192.0.2.1", port: 9701)
+        )
+        let client = KeepTalkingSFUJuiceClient(
+            config: config,
+            sfuHost: "192.0.2.1",
+            sfuPort: 9701
+        )
+        let degraded = ThreadSafeFlag()
+        let (logs, logContinuation) = AsyncStream.makeStream(of: String.self)
+        client.onLog = { logContinuation.yield($0) }
+        client.onTransportDegraded = { _ in degraded.set() }
+
+        let start = Task { try await client.start() }
+        for await log in logs where log.contains("connecting host=") {
+            break
+        }
+
+        client.stop()
+        logContinuation.finish()
+        await #expect(throws: CancellationError.self) {
+            try await start.value
+        }
+        #expect(!degraded.value)
+    }
+}
+
+private final class ThreadSafeFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = false
+
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func set() {
+        lock.lock()
+        storage = true
+        lock.unlock()
+    }
+}
+
 private func makeActionCallRequestEnvelope(
     contextID: UUID,
     caller: UUID,
