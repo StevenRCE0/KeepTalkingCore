@@ -1,5 +1,33 @@
 import Foundation
 
+/// Durable progress for one queued agent run. `messages` contains only the
+/// model/tool transcript produced after the original prompt, keeping restore
+/// independent from the context and system prompt rebuilt at launch.
+public struct AIAgentCheckpoint: Codable, Sendable, Equatable {
+    public var messages: [AIMessage]
+    public var completedTurnCount: Int
+    public var completedToolCallIndexes: [Int]
+    public var hasActiveToolTurn: Bool
+    public var latestAssistantText: String
+    public var isComplete: Bool
+
+    public init(
+        messages: [AIMessage] = [],
+        completedTurnCount: Int = 0,
+        completedToolCallIndexes: [Int] = [],
+        hasActiveToolTurn: Bool = false,
+        latestAssistantText: String = "",
+        isComplete: Bool = false
+    ) {
+        self.messages = messages
+        self.completedTurnCount = completedTurnCount
+        self.completedToolCallIndexes = completedToolCallIndexes
+        self.hasActiveToolTurn = hasActiveToolTurn
+        self.latestAssistantText = latestAssistantText
+        self.isComplete = isComplete
+    }
+}
+
 public struct AIOrchestrator {
     public typealias ToolCall = AIToolCall
     public typealias Message = AIMessage
@@ -14,7 +42,7 @@ public struct AIOrchestrator {
         ) async throws -> AITurnResult
     public typealias AssistantMessageBuilder =
         (AITurnResult) -> Message?
-    public struct ToolExecution {
+    public struct ToolExecution: Sendable {
         public let toolCall: ToolCall
         public let messages: [Message]
 
@@ -175,12 +203,36 @@ public struct AIOrchestrator {
         tools initialTools: [KeepTalkingActionToolDefinition],
         model: String,
         toolChoice: AIToolChoice = .auto,
-        turnConfiguration: AITurnConfiguration? = nil
+        turnConfiguration: AITurnConfiguration? = nil,
+        checkpoint restoredCheckpoint: AIAgentCheckpoint? = nil,
+        onCheckpoint: ((AIAgentCheckpoint) async throws -> Void)? = nil
     ) async throws -> String {
-        var transcript = messages
-        var latestAssistantText = ""
+        var checkpoint = restoredCheckpoint ?? AIAgentCheckpoint()
+        var transcript = messages + checkpoint.messages
 
-        for _ in 0..<configuration.maxTurns {
+        if checkpoint.isComplete {
+            return checkpoint.latestAssistantText
+        }
+
+        if checkpoint.hasActiveToolTurn,
+            let pendingAssistant = checkpoint.messages.last(where: {
+                $0.role == .assistant && !$0.toolCalls.isEmpty
+            })
+        {
+            try await executePendingToolCalls(
+                pendingAssistant.toolCalls,
+                model: model,
+                transcript: &transcript,
+                checkpoint: &checkpoint,
+                onCheckpoint: onCheckpoint
+            )
+            checkpoint.completedTurnCount += 1
+            checkpoint.completedToolCallIndexes = []
+            checkpoint.hasActiveToolTurn = false
+            try await onCheckpoint?(checkpoint)
+        }
+
+        for _ in checkpoint.completedTurnCount..<configuration.maxTurns {
             try Task.checkCancellation()
 
             let turn = try await dependencies.turnRunner(
@@ -207,19 +259,20 @@ public struct AIOrchestrator {
                 dependencies.assistantMessageBuilder(turn)
             {
                 transcript.append(assistantMessage)
+                checkpoint.messages.append(assistantMessage)
             }
 
             if let assistantText = turn.assistantText,
                 !assistantText.isEmpty
             {
-                latestAssistantText = assistantText
+                checkpoint.latestAssistantText = assistantText
             }
 
             if let assistantText = turn.assistantText?.trimmingCharacters(in: .whitespacesAndNewlines),
                 !assistantText.isEmpty
             {
-                if latestAssistantText.isEmpty {
-                    latestAssistantText = assistantText
+                if checkpoint.latestAssistantText.isEmpty {
+                    checkpoint.latestAssistantText = assistantText
                 }
                 try Task.checkCancellation()
                 try await dependencies.assistantPublisher((assistantText, .message))
@@ -236,26 +289,53 @@ public struct AIOrchestrator {
             }
 
             guard !turn.toolCalls.isEmpty else {
+                checkpoint.completedTurnCount += 1
+                checkpoint.isComplete = true
+                try await onCheckpoint?(checkpoint)
                 break
             }
 
+            checkpoint.completedToolCallIndexes = []
+            checkpoint.hasActiveToolTurn = true
+            try await onCheckpoint?(checkpoint)
+            try await executePendingToolCalls(
+                turn.toolCalls,
+                model: model,
+                transcript: &transcript,
+                checkpoint: &checkpoint,
+                onCheckpoint: onCheckpoint
+            )
+            checkpoint.completedTurnCount += 1
+            checkpoint.completedToolCallIndexes = []
+            checkpoint.hasActiveToolTurn = false
+            try await onCheckpoint?(checkpoint)
+        }
+
+        return checkpoint.latestAssistantText
+    }
+
+    private func executePendingToolCalls(
+        _ toolCalls: [ToolCall],
+        model: String,
+        transcript: inout [Message],
+        checkpoint: inout AIAgentCheckpoint,
+        onCheckpoint: ((AIAgentCheckpoint) async throws -> Void)?
+    ) async throws {
+        let completed = Set(checkpoint.completedToolCallIndexes)
+        for (index, toolCall) in toolCalls.enumerated() where !completed.contains(index) {
             try Task.checkCancellation()
-            let toolExecutions = try await executeWithRetry(
-                toolCalls: turn.toolCalls,
+            let executions = try await executeWithRetry(
+                toolCalls: [toolCall],
                 model: model,
                 maxRetries: configuration.maxToolRetries
             )
-            for execution in toolExecutions {
-                transcript.append(contentsOf: execution.messages)
-            }
-            transcript.append(
-                contentsOf: try await dependencies.toolTranscriptAdapter(
-                    toolExecutions
-                )
-            )
+            let adapted = try await dependencies.toolTranscriptAdapter(executions)
+            let newMessages = executions.flatMap(\.messages) + adapted
+            transcript.append(contentsOf: newMessages)
+            checkpoint.messages.append(contentsOf: newMessages)
+            checkpoint.completedToolCallIndexes.append(index)
+            try await onCheckpoint?(checkpoint)
         }
-
-        return latestAssistantText
     }
 
     private func executeWithRetry(

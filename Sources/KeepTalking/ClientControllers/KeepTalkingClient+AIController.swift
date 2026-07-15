@@ -189,7 +189,9 @@ extension KeepTalkingClient {
         sendPromptMessage: Bool = true,
         promptType: KeepTalkingContextMessage.MessageType = .message,
         agentTurnID: UUID = UUID(),
-        onPromptMessageSent: (() async -> Void)? = nil
+        onPromptMessageSent: (() async -> Void)? = nil,
+        checkpoint: AIAgentCheckpoint? = nil,
+        onCheckpoint: ((AIAgentCheckpoint) async throws -> Void)? = nil
     ) async throws -> String {
         let context = KeepTalkingContext(id: contextID)
         let preparedAttachments = try await prepareLocalAttachments(attachments)
@@ -213,7 +215,9 @@ extension KeepTalkingClient {
             roleName: roleName,
             preparedPromptAttachments: preparedAttachments,
             agentTurnID: agentTurnID,
-            reasoningEffort: reasoningEffort
+            reasoningEffort: reasoningEffort,
+            checkpoint: checkpoint,
+            onCheckpoint: onCheckpoint
         )
         await cancelStaleContinuations(agentTurnID: agentTurnID, in: contextID)
         return result
@@ -250,7 +254,9 @@ extension KeepTalkingClient {
         roleName: String,
         preparedPromptAttachments: [KeepTalkingPreparedAttachment],
         agentTurnID: UUID = UUID(),
-        reasoningEffort: AIReasoning.Effort? = nil
+        reasoningEffort: AIReasoning.Effort? = nil,
+        checkpoint: AIAgentCheckpoint? = nil,
+        onCheckpoint: ((AIAgentCheckpoint) async throws -> Void)? = nil
     ) async throws -> String {
         guard let aiConnector = try await resolveAIConnector() else {
             throw KeepTalkingClientError.aiNotConfigured
@@ -267,11 +273,18 @@ extension KeepTalkingClient {
         // Snapshot the latest message ID now (= user's prompt) before the AI
         // publishes any response messages.  Passed into the tool executors so
         // annotation tools act on the prompt, not the AI's own reply.
-        let promptMessageID: UUID? = try? await KeepTalkingContextMessage
+        let taggedPromptMessageID: UUID? = try? await KeepTalkingContextMessage
+            .query(on: localStore.database)
+            .filter(\.$context.$id == (try persistedContext.requireID()))
+            .filter(\.$agentTurnID, .equal, agentTurnID)
+            .sort(\.$timestamp, .ascending)
+            .first()?.id
+        let latestMessageID: UUID? = try? await KeepTalkingContextMessage
             .query(on: localStore.database)
             .filter(\.$context.$id == (try persistedContext.requireID()))
             .sort(\.$timestamp, .descending)
             .first()?.id
+        let promptMessageID = taggedPromptMessageID ?? latestMessageID
 
         let runtimeCatalog = try await resolveActionRuntimeCatalog(
             in: persistedContext
@@ -321,7 +334,8 @@ extension KeepTalkingClient {
         )
         let contextMessages = try await agentContextMessages(
             persistedContext,
-            excludingMessageID: promptMessageID
+            excludingMessageID: promptMessageID,
+            excludingAgentTurnID: checkpoint == nil ? nil : agentTurnID
         )
         let hasCurrentPromptAttachments = !preparedPromptAttachments.isEmpty
         let allowAutomaticToolUse = Self.shouldAllowAutomaticToolUse(
@@ -495,7 +509,9 @@ extension KeepTalkingClient {
             tools: allTools,
             model: model,
             toolChoice: .auto,
-            turnConfiguration: turnConfiguration
+            turnConfiguration: turnConfiguration,
+            checkpoint: checkpoint,
+            onCheckpoint: onCheckpoint
         )
     }
 

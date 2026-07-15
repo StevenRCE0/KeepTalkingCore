@@ -178,6 +178,85 @@ struct RemoteActionCallTests {
         #expect(isGranted)
     }
 
+    @Test("remote action refreshes from broadcasts and returns after local removal")
+    func remoteActionRefreshesAndReturnsAfterRemoval() async throws {
+        let store = KeepTalkingInMemoryStore()
+        let local = KeepTalkingNode(id: UUID())
+        let remote = KeepTalkingNode(id: UUID())
+        let actionID = UUID()
+        try await local.save(on: store.database)
+        try await remote.save(on: store.database)
+
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(
+                contextID: UUID(),
+                node: try #require(local.id)
+            ),
+            localStore: store
+        )
+        let advertised:
+            (_ name: String, _ description: String, _ kind: KeepTalkingPrimitiveActionKind) ->
+                KeepTalkingAdvertisedAction = { name, description, kind in
+                    KeepTalkingAdvertisedAction(
+                        actionID: actionID,
+                        ownerNodeID: remote.id,
+                        descriptor: name == "updated-action"
+                            ? nil
+                            : KeepTalkingActionDescriptor(
+                                action: KeepTalkingActionWithDescription(
+                                    description: "Descriptor: \(description)"
+                                )
+                            ),
+                        payloadSummary: .primitive(
+                            name: name,
+                            indexDescription: description,
+                            action: kind
+                        ),
+                        remoteAuthorisable: name == "updated-action",
+                        blockingAuthorisation: name == "updated-action",
+                        availability: name == "updated-action" ? .disabled : .notApplicable
+                    )
+                }
+
+        try await client.mergeNodeActions([
+            advertised("original-action", "Original description", .openWithURL)
+        ])
+        try await client.mergeNodeActions([
+            advertised("updated-action", "Updated description", .accessCalendar)
+        ])
+
+        let updatedAction = try #require(
+            try await KeepTalkingAction.find(actionID, on: store.database)
+        )
+        guard case .primitive(let updatedBundle) = updatedAction.payload else {
+            Issue.record("Expected an updated remote primitive")
+            return
+        }
+        #expect(updatedBundle.name == "updated-action")
+        #expect(updatedBundle.indexDescription == "Updated description")
+        #expect(updatedBundle.action == .accessCalendar)
+        #expect(updatedAction.descriptor?.action?.description == "Updated description")
+        #expect(updatedAction.remoteAuthorisable == true)
+        #expect(updatedAction.blockingAuthorisation == true)
+        #expect(updatedAction.disabled == true)
+
+        try await client.forgetRemoteAction(actionID: actionID)
+        #expect(try await KeepTalkingAction.find(actionID, on: store.database) == nil)
+
+        try await client.mergeNodeActions([
+            advertised("updated-action", "Updated description", .accessCalendar)
+        ])
+        let restoredAction = try #require(
+            try await KeepTalkingAction.find(actionID, on: store.database)
+        )
+        guard case .primitive(let restoredBundle) = restoredAction.payload else {
+            Issue.record("Expected the remote primitive to return")
+            return
+        }
+        #expect(restoredBundle.name == "updated-action")
+        #expect(restoredBundle.indexDescription == "Updated description")
+    }
+
     @Test("incoming owner grant is recorded in its advertised context, scoped to it")
     func incomingNodeStatusRecordsOwnerGrantInAdvertisedContext() async throws {
         let localStore = KeepTalkingInMemoryStore()

@@ -152,7 +152,8 @@ extension KeepTalkingClient {
     /// and the current user message in the request messages array.
     func agentContextMessages(
         _ context: KeepTalkingContext,
-        excludingMessageID: UUID? = nil
+        excludingMessageID: UUID? = nil,
+        excludingAgentTurnID: UUID? = nil
     ) async throws -> [AIMessage] {
         guard let contextID = context.id else {
             return []
@@ -163,6 +164,11 @@ extension KeepTalkingClient {
 
         return selected.flatMap(\.messages).compactMap { message -> AIMessage? in
             if let excludeID = excludingMessageID, message.id == excludeID {
+                return nil
+            }
+            if let excludeTurnID = excludingAgentTurnID,
+                message.agentTurnID == excludeTurnID
+            {
                 return nil
             }
             guard case .message = message.type else { return nil }

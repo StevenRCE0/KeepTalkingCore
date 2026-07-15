@@ -8,8 +8,8 @@ import Foundation
 // constructs vendor types at the call site — adding a provider means adding
 // one connector and zero upstream changes.
 
-public struct AIMessage: Sendable, Equatable {
-    public enum Role: String, Sendable, Equatable {
+public struct AIMessage: Codable, Sendable, Equatable {
+    public enum Role: String, Codable, Sendable, Equatable {
         /// System instructions / persona / rules. Connectors targeting providers
         /// without a system role (Anthropic) hoist these into a top-level field.
         case system
@@ -69,7 +69,7 @@ extension AIMessage {
     /// Message body. Plain text is the common case; `parts` is used when a
     /// single message mixes text with images or other modalities (currently
     /// only image URLs are modelled — extend `Part` when audio/files are added).
-    public enum Content: Sendable, Equatable {
+    public enum Content: Codable, Sendable, Equatable {
         case text(String)
         case parts([Part])
 
@@ -88,7 +88,7 @@ extension AIMessage {
         }
     }
 
-    public enum Part: Sendable, Equatable {
+    public enum Part: Codable, Sendable, Equatable {
         case text(String)
         /// An image, expressed as a URL. Data: URLs (base64-encoded image
         /// bytes) are valid here — that's how attachments are typically
@@ -162,7 +162,7 @@ extension AIMessage {
 
 /// One function call emitted by the model. KT-native — each connector translates
 /// to its vendor's tool-call shape on the way out, and back into this on the way in.
-public struct AIToolCall: Sendable, Equatable, Hashable {
+public struct AIToolCall: Codable, Sendable, Equatable, Hashable {
     /// Provider-issued call ID. Echoed back verbatim in the matching tool result.
     public let id: String
 

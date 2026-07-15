@@ -57,9 +57,8 @@ public struct KeepTalkingMCPBundle: KeepTalkingActionBundle, Equatable {
     public var service: KeepTalkingMCPService
     public var oauthRegistration: KeepTalkingMCPOAuthRegistration?
 
-    /// Locally cached MCP tool names for this action.
-    /// Populated when tools are first fetched (registration, edit, or catalog resolution).
-    /// Not synced via node-status or grants — remote tool availability is always requested live.
+    /// Cached MCP tool names for this action. Local actions populate this when
+    /// tools are fetched; remote stubs may carry the latest advertised names.
     public var cachedTools: [String]?
 
     public init(

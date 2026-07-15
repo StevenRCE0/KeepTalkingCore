@@ -577,6 +577,36 @@ extension KeepTalkingClient {
         )
     }
 
+    /// Removes a cached remote action. A later node-status advertisement may
+    /// materialize it again.
+    public func forgetRemoteAction(actionID: UUID) async throws {
+        guard
+            let action = try await KeepTalkingAction.find(
+                actionID,
+                on: localStore.database
+            )
+        else {
+            throw KeepTalkingClientError.missingAction
+        }
+        guard action.$node.id != config.node else {
+            throw KeepTalkingClientError.notAuthorized
+        }
+
+        let relations = try await KeepTalkingNodeRelationActionRelation.query(
+            on: localStore.database
+        )
+        .filter(\.$action.$id, .equal, actionID)
+        .all()
+        for relation in relations {
+            try await relation.delete(on: localStore.database)
+        }
+        try await action.delete(on: localStore.database)
+
+        await invalidateActionToolCatalog(
+            reason: "forget_remote_action action=\(actionID.uuidString.lowercased())"
+        )
+    }
+
     static public func removeMCPAction(
         actionID: UUID,
         node: KeepTalkingNode,
@@ -1251,12 +1281,33 @@ extension KeepTalkingClient {
                 existingPayload = nil
             }
 
+            if let existingOwnerID = persistedAction.$node.id,
+                let advertisedOwnerID = incomingAction.ownerNodeID,
+                existingOwnerID != advertisedOwnerID
+            {
+                continue
+            }
+
+            let isLocallyHosted = persistedAction.$node.id == config.node
+
+            let advertisedIndexDescription: String = {
+                switch incomingAction.payloadSummary {
+                    case .mcpBundle(_, let description),
+                        .skill(_, let description),
+                        .semanticRetrieval(_, let description),
+                        .filesystem(_, let description),
+                        .acp(_, let description),
+                        .primitive(_, let description, _):
+                        return description
+                }
+            }()
             let fallbackDescription =
                 incomingAction.descriptor?.action?.description
-                ?? "Virtual remote action \(actionID.uuidString.lowercased())"
-            let resolvedDescriptor =
+                ?? (advertisedIndexDescription.isEmpty
+                    ? "Virtual remote action \(actionID.uuidString.lowercased())"
+                    : advertisedIndexDescription)
+            let advertisedDescriptor =
                 incomingAction.descriptor
-                ?? existingDescriptor
                 ?? KeepTalkingActionDescriptor(
                     subject: nil,
                     action: KeepTalkingActionWithDescription(
@@ -1264,6 +1315,10 @@ extension KeepTalkingClient {
                     ),
                     object: nil
                 )
+            let resolvedDescriptor =
+                isLocallyHosted
+                ? existingDescriptor ?? advertisedDescriptor
+                : advertisedDescriptor
             let resolvedPayload: KeepTalkingAction.Payload =
                 existingPayload
                 ?? .mcpBundle(
@@ -1290,13 +1345,21 @@ extension KeepTalkingClient {
                 persistedAction.$node.id = advertisedOwnerID
             }
             persistedAction.descriptor = resolvedDescriptor
-            persistedAction.payload = existingPayload ?? materializedPayload ?? resolvedPayload
+            persistedAction.payload =
+                isLocallyHosted
+                ? existingPayload ?? materializedPayload ?? resolvedPayload
+                : materializedPayload ?? existingPayload ?? resolvedPayload
             persistedAction.remoteAuthorisable =
                 incomingAction.remoteAuthorisable
             persistedAction.blockingAuthorisation =
                 incomingAction.blockingAuthorisation
-            persistedAction.createdAt = incomingAction.createdAt
-            persistedAction.lastUsed = incomingAction.lastUsed
+            if !isLocallyHosted {
+                persistedAction.disabled = incomingAction.availability == .disabled
+            }
+            persistedAction.createdAt =
+                incomingAction.createdAt ?? persistedAction.createdAt ?? .now
+            persistedAction.lastUsed =
+                incomingAction.lastUsed ?? persistedAction.lastUsed
 
             try await persistedAction.save(on: localStore.database)
 
@@ -1323,7 +1386,8 @@ extension KeepTalkingClient {
     private func virtualRemoteMCPBundle(
         actionID: UUID,
         name: String,
-        description: String
+        description: String,
+        tools: [String]? = nil
     ) -> KeepTalkingMCPBundle {
         return KeepTalkingMCPBundle(
             id: actionID,
@@ -1335,7 +1399,8 @@ extension KeepTalkingClient {
                     actionID.uuidString.lowercased(),
                 ],
                 environment: [:]
-            )
+            ),
+            cachedTools: tools
         )
     }
 
@@ -1373,7 +1438,8 @@ extension KeepTalkingClient {
                         name: name,
                         description: indexDescription.isEmpty
                             ? fallbackDescription
-                            : indexDescription
+                            : indexDescription,
+                        tools: action.tools
                     )
                 )
             case .skill(let name, let indexDescription):

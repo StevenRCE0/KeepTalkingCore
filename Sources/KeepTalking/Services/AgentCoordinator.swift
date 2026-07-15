@@ -63,10 +63,13 @@ actor AgentCoordinator {
     private var active: [UUID: (item: RunItem, task: Task<Void, Never>)] = [:]
     /// Suspended turns awaiting continuation response, keyed by agentTurnID.
     private var suspended: [UUID: RunItem] = [:]
-    /// Continuations waiting for resume, keyed by agentTurnID.
+    /// Continuations waiting for resume, keyed by their individual persisted
+    /// continuation-message id. One agent run can suspend more than once.
     private var suspensionContinuations:
         [UUID: CheckedContinuation<KeepTalkingAgentTurnContinuationResponse, any Error>] = [:]
-    /// Continuation responses that arrived before the run suspended, keyed by agentTurnID.
+    /// Outer run id for each installed inner continuation.
+    private var continuationTurnIDs: [UUID: UUID] = [:]
+    /// Responses that arrived before the matching inner continuation suspended.
     private var earlyResponses: [UUID: KeepTalkingAgentTurnContinuationResponse] = [:]
     /// Failed runs that the UI is still showing (with retry/dismiss buttons).
     private var failed: [UUID: (item: RunItem, message: String)] = [:]
@@ -292,7 +295,7 @@ actor AgentCoordinator {
     /// Called from within a running agent turn to suspend and wait for a
     /// continuation response from a remote node.  The run slot is freed so
     /// queued runs can proceed.  Returns when `deliverContinuationResponse`
-    /// is called with a matching `agentTurnID`.
+    /// is called with a matching `continuationMessageID`.
     ///
     /// Freeing the slot means a queued run for the same context may start while
     /// this one is parked, and both may briefly overlap once this one resumes.
@@ -301,11 +304,12 @@ actor AgentCoordinator {
     /// queue (the durable dispatcher path) have no slot here, so this is a
     /// no-op for them.
     func awaitContinuation(
+        continuationID: UUID,
         agentTurnID: UUID,
         contextID: UUID
     ) async throws -> KeepTalkingAgentTurnContinuationResponse {
         // Check for early arrival
-        if let early = earlyResponses.removeValue(forKey: agentTurnID) {
+        if let early = earlyResponses.removeValue(forKey: continuationID) {
             return early
         }
 
@@ -320,12 +324,16 @@ actor AgentCoordinator {
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                suspensionContinuations[agentTurnID] = continuation
+                suspensionContinuations[continuationID] = continuation
+                continuationTurnIDs[continuationID] = agentTurnID
                 emit()  // transition active run to .suspended in snapshots
             }
         } onCancel: {
             Task {
-                await cancelSuspended(agentTurnID: agentTurnID)
+                await cancelContinuation(
+                    continuationID: continuationID,
+                    agentTurnID: agentTurnID
+                )
             }
         }
     }
@@ -349,23 +357,39 @@ actor AgentCoordinator {
     func deliverContinuationResponse(
         _ response: KeepTalkingAgentTurnContinuationResponse
     ) {
-        let turnID = response.agentTurnID
-        if let continuation = suspensionContinuations.removeValue(forKey: turnID) {
+        let continuationID = response.continuationMessageID
+        if let continuation = suspensionContinuations.removeValue(forKey: continuationID) {
+            continuationTurnIDs[continuationID] = nil
             emit()  // transition back to .running before resuming
             continuation.resume(returning: response)
         } else {
             // The run hasn't suspended yet — stash for pickup
-            earlyResponses[turnID] = response
+            earlyResponses[continuationID] = response
         }
     }
 
     /// Cancels a suspended run by failing its continuation.
     func cancelSuspended(agentTurnID: UUID) {
         suspended.removeValue(forKey: agentTurnID)
-        if let continuation = suspensionContinuations.removeValue(forKey: agentTurnID) {
+        let continuationIDs = continuationTurnIDs.compactMap { key, value in
+            value == agentTurnID ? key : nil
+        }
+        for continuationID in continuationIDs {
+            continuationTurnIDs[continuationID] = nil
+            if let continuation = suspensionContinuations.removeValue(forKey: continuationID) {
+                continuation.resume(throwing: CancellationError())
+            }
+        }
+        earlyResponses = earlyResponses.filter { $0.value.agentTurnID != agentTurnID }
+    }
+
+    private func cancelContinuation(continuationID: UUID, agentTurnID: UUID) {
+        suspended.removeValue(forKey: agentTurnID)
+        continuationTurnIDs[continuationID] = nil
+        if let continuation = suspensionContinuations.removeValue(forKey: continuationID) {
             continuation.resume(throwing: CancellationError())
         }
-        earlyResponses.removeValue(forKey: agentTurnID)
+        earlyResponses[continuationID] = nil
     }
 
     // MARK: - Private

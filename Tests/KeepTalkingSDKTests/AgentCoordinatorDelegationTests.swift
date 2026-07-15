@@ -126,6 +126,56 @@ struct AgentCoordinatorDelegationTests {
         #expect(box.value == 123)
     }
 
+    @Test("continuations in one agent run resume their matching inner step")
+    func continuationResponsesMatchInnerStep() async throws {
+        let coordinator = AgentCoordinator()
+        let agentTurnID = UUID()
+        let contextID = UUID()
+        let firstID = UUID()
+        let secondID = UUID()
+
+        let first = Task {
+            try await coordinator.awaitContinuation(
+                continuationID: firstID,
+                agentTurnID: agentTurnID,
+                contextID: contextID
+            )
+        }
+        let second = Task {
+            try await coordinator.awaitContinuation(
+                continuationID: secondID,
+                agentTurnID: agentTurnID,
+                contextID: contextID
+            )
+        }
+
+        await coordinator.deliverContinuationResponse(
+            response(id: secondID, agentTurnID: agentTurnID, contextID: contextID)
+        )
+        await coordinator.deliverContinuationResponse(
+            response(id: firstID, agentTurnID: agentTurnID, contextID: contextID)
+        )
+
+        #expect(try await first.value.continuationMessageID == firstID)
+        #expect(try await second.value.continuationMessageID == secondID)
+    }
+
+    private func response(
+        id: UUID,
+        agentTurnID: UUID,
+        contextID: UUID
+    ) -> KeepTalkingAgentTurnContinuationResponse {
+        KeepTalkingAgentTurnContinuationResponse(
+            continuationMessageID: id,
+            agentTurnID: agentTurnID,
+            contextID: contextID,
+            responderNodeID: UUID(),
+            originNodeID: UUID(),
+            state: .fulfilled,
+            encryptedPayload: Data()
+        )
+    }
+
     private final class ResultProbe: @unchecked Sendable {
         private let lock = NSLock()
         private var stored: Int?

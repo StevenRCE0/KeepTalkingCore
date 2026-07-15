@@ -20,6 +20,8 @@ struct KeepTalkingContinuationResult: Codable, Sendable {
 /// answer landing in the conversation as a normal message.
 public struct KeepTalkingAgentTurnSuspension: Sendable {
     public let agentTurnID: UUID
+    /// Identifies this exact inner continuation within the outer agent run.
+    public let agentStepID: UUID
     public let contextID: UUID
     /// The action kind that triggered the suspension (e.g. a primitive action
     /// raw value, "mcp", "skill", or the raw action id).
@@ -27,8 +29,15 @@ public struct KeepTalkingAgentTurnSuspension: Sendable {
     /// The node that must respond before the turn can resume.
     public let targetNodeID: UUID
 
-    public init(agentTurnID: UUID, contextID: UUID, kind: String, targetNodeID: UUID) {
+    public init(
+        agentTurnID: UUID,
+        agentStepID: UUID,
+        contextID: UUID,
+        kind: String,
+        targetNodeID: UUID
+    ) {
         self.agentTurnID = agentTurnID
+        self.agentStepID = agentStepID
         self.contextID = contextID
         self.kind = kind
         self.targetNodeID = targetNodeID
@@ -41,10 +50,12 @@ public struct KeepTalkingAgentTurnSuspension: Sendable {
 /// suspend uses this to flip the run from "waiting" back to "running".
 public struct KeepTalkingAgentTurnResumption: Sendable {
     public let agentTurnID: UUID
+    public let agentStepID: UUID
     public let contextID: UUID
 
-    public init(agentTurnID: UUID, contextID: UUID) {
+    public init(agentTurnID: UUID, agentStepID: UUID, contextID: UUID) {
         self.agentTurnID = agentTurnID
+        self.agentStepID = agentStepID
         self.contextID = contextID
     }
 }
@@ -309,6 +320,7 @@ extension KeepTalkingClient {
             agentTurnID: agentTurnID
         )
         try await continuationMessage.save(on: localStore.database)
+        let continuationID = try continuationMessage.requireID()
         try rtcClient.sendEnvelope(continuationMessage)
 
         onLog?(
@@ -322,6 +334,7 @@ extension KeepTalkingClient {
         onAgentTurnSuspended?(
             KeepTalkingAgentTurnSuspension(
                 agentTurnID: agentTurnID,
+                agentStepID: continuationID,
                 contextID: contextID,
                 kind: kind,
                 targetNodeID: targetNodeID
@@ -329,6 +342,7 @@ extension KeepTalkingClient {
         )
 
         let response = try await agentCoordinator.awaitContinuation(
+            continuationID: continuationID,
             agentTurnID: agentTurnID,
             contextID: contextID
         )
@@ -341,6 +355,7 @@ extension KeepTalkingClient {
         onAgentTurnResumed?(
             KeepTalkingAgentTurnResumption(
                 agentTurnID: agentTurnID,
+                agentStepID: continuationID,
                 contextID: contextID
             )
         )
