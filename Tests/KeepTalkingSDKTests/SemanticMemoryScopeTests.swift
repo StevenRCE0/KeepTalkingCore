@@ -65,6 +65,71 @@ struct SemanticMemoryScopeTests {
         )
     }
 
+    @Test("one shared context tag exposes all resolved threads in that context")
+    func expandsContextsSharingAnyTag() async throws {
+        let store = try await KeepTalkingInMemoryStore()
+        let context = KeepTalkingContext(id: UUID())
+        let sharedContext = KeepTalkingContext(id: UUID())
+        let unrelatedContext = KeepTalkingContext(id: UUID())
+        for context in [context, sharedContext, unrelatedContext] {
+            try await context.save(on: store.database)
+        }
+
+        _ = try await makeThread(
+            context: context,
+            content: "Current context memory",
+            on: store.database
+        )
+        var sharedThreads: [KeepTalkingThread] = []
+        for content in ["First shared memory", "Second shared memory"] {
+            sharedThreads.append(
+                try await makeThread(
+                    context: sharedContext,
+                    content: content,
+                    on: store.database
+                )
+            )
+        }
+        let unrelatedThread = try await makeThread(
+            context: unrelatedContext,
+            content: "Unrelated memory",
+            on: store.database
+        )
+        let contextID = try #require(context.id)
+        let sharedContextID = try #require(sharedContext.id)
+        let unrelatedContextID = try #require(unrelatedContext.id)
+        let unrelatedThreadID = try #require(unrelatedThread.id)
+
+        for (value, namespace, target) in [
+            ("Aurora", "project", KeepTalkingMappingTarget.context(contextID)),
+            ("Mobile", "topic", .context(contextID)),
+            ("aurora", "project", .context(sharedContextID)),
+            ("Backend", "topic", .context(sharedContextID)),
+            ("Elsewhere", "project", .context(unrelatedContextID)),
+        ] {
+            try await KeepTalkingClient.addTag(
+                value,
+                namespace: namespace,
+                to: target,
+                on: store.database
+            )
+        }
+
+        let scopes = try await KeepTalkingClient.retrievableSemanticMemoryScopes(
+            for: contextID,
+            on: store.database
+        )
+
+        let sharedScope = try #require(
+            scopes.first { $0.target == .context(sharedContextID) }
+        )
+        let sharedThreadIDs = try Set(sharedThreads.map { try #require($0.id) })
+        #expect(Set(sharedScope.threadIDs) == sharedThreadIDs)
+        #expect(sharedScope.matchingTags.map(\.title) == ["project:aurora"])
+        #expect(!scopes.contains { $0.target == .context(unrelatedContextID) })
+        #expect(!scopes.contains { $0.threadIDs.contains(unrelatedThreadID) })
+    }
+
     @Test("semantic index enhances lexical retrieval without defining access")
     func semanticIndexEnhancesLexicalRetrieval() async throws {
         let store = try await KeepTalkingInMemoryStore()

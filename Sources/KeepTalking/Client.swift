@@ -172,6 +172,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// (entry added, removed on successful drain, or cancelled by user).
     public var onOutboxChanged: (@Sendable () -> Void)?
     public var onThreadsChanged: (@Sendable () -> Void)?
+    /// Requests reconciliation of the derived semantic index for a context.
+    /// The handler should enqueue best-effort work and return promptly; the
+    /// persisted thread rows remain the source of truth.
+    public var onSemanticIndexNeedsReconciliation: (@Sendable (UUID) async -> Void)?
     public var onMappingsChanged: (@Sendable () -> Void)?
     public var onActionCallActivity: (@Sendable (KeepTalkingActionCallActivity) async -> Void)?
     public var onAgentRunsChanged: (@Sendable ([KeepTalkingAgentRunSnapshot]) -> Void)? {

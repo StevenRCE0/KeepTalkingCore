@@ -29,10 +29,7 @@ extension KeepTalkingClient {
             .filter(\.$kind == .tag)
             .filter(\.$deletedAt == nil)
             .all()
-        let contextTags = mappings.filter { mapping in
-            guard let contextID = mapping.$context.id else { return false }
-            return requestedContextIDs.contains(contextID)
-        }
+        let contextTags = mappings.filter { $0.$context.id != nil }
         let threadTags = mappings.filter { $0.thread != nil }
 
         var scopes: [KeepTalkingSemanticMemoryScope.Target: KeepTalkingSemanticMemoryScope] = [:]
@@ -61,6 +58,34 @@ extension KeepTalkingClient {
 
             let tagKeys = Set(tags.map(SemanticMemoryTagKey.init))
             guard !tagKeys.isEmpty else { continue }
+
+            let matchingContextTags = contextTags.filter {
+                $0.$context.id != contextID
+                    && tagKeys.contains(SemanticMemoryTagKey($0))
+            }
+            var contextTagsByID: [UUID: [KeepTalkingMapping]] = [:]
+            for mapping in matchingContextTags {
+                guard let matchingContextID = mapping.$context.id else { continue }
+                contextTagsByID[matchingContextID, default: []].append(mapping)
+            }
+            for (matchingContextID, matchingTags) in contextTagsByID {
+                let matchingThreadIDs =
+                    threads
+                    .filter { $0.$context.id == matchingContextID }
+                    .compactMap(\.id)
+                    .sorted(by: uuidAscending)
+                guard !matchingThreadIDs.isEmpty else { continue }
+
+                let target = KeepTalkingSemanticMemoryScope.Target.context(matchingContextID)
+                let priorTags = scopes[target]?.matchingTags ?? []
+                scopes[target] = KeepTalkingSemanticMemoryScope(
+                    target: target,
+                    contextID: matchingContextID,
+                    threadIDs: matchingThreadIDs,
+                    matchingTags: (priorTags + matchingTags.map(semanticMemoryTag))
+                        .uniquedAndSorted()
+                )
+            }
 
             let matchingMappings = threadTags.filter {
                 tagKeys.contains(SemanticMemoryTagKey($0))

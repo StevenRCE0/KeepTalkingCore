@@ -44,3 +44,17 @@ struct CreateKeepTalkingThreadsMigration: AsyncMigration {
         try await database.schema(KeepTalkingThread.schema).delete()
     }
 }
+
+struct AddThreadSemanticDocumentDigestMigration: AsyncMigration {
+    func prepare(on database: any Database) async throws {
+        try await database.schema(KeepTalkingThread.schema)
+            .field("semantic_document_digest", .string)
+            .update()
+    }
+
+    func revert(on database: any Database) async throws {
+        try await database.schema(KeepTalkingThread.schema)
+            .deleteField("semantic_document_digest")
+            .update()
+    }
+}

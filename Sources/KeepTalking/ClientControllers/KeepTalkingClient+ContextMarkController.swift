@@ -66,7 +66,8 @@ extension KeepTalkingClient {
             }
         )
 
-        let marks = annotationMarks
+        let marks =
+            annotationMarks
             .filter { msg in
                 guard let id = msg.id else { return false }
                 guard !consumed.contains(id) else { return false }
@@ -122,7 +123,9 @@ extension KeepTalkingClient {
                 }
                 newlyConsumed.append(markID)
             } catch {
-                onLog?("[marks] failed to consume mark=\(markID.uuidString.lowercased()) error=\(error.localizedDescription)")
+                onLog?(
+                    "[marks] failed to consume mark=\(markID.uuidString.lowercased()) error=\(error.localizedDescription)"
+                )
             }
         }
 
@@ -130,6 +133,11 @@ extension KeepTalkingClient {
 
         context.consumedMarks = (context.consumedMarks ?? []) + newlyConsumed
         try await context.save(on: db)
+
+        // Marks mutate persisted thread boundaries and metadata. Semantic
+        // documents are a derived cache, so only enqueue reconciliation after
+        // the durable state is committed; the reconciler reloads that state.
+        await onSemanticIndexNeedsReconciliation?(contextID)
     }
 
     private func markedMessageID(

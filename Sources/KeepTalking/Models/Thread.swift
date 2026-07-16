@@ -39,6 +39,11 @@ public final class KeepTalkingThread: Model, @unchecked Sendable {
     @Field(key: "chitter_chatter")
     public var chitterChatter: [UUID]
 
+    /// Digest of the exact semantic document most recently committed to the
+    /// local index. Nil or a mismatch means this persisted thread needs repair.
+    @OptionalField(key: "semantic_document_digest")
+    public var semanticDocumentDigest: String?
+
     @Timestamp(key: "created_at", on: .create)
     public var createdAt: Date?
 
@@ -58,7 +63,8 @@ public final class KeepTalkingThread: Model, @unchecked Sendable {
         startMessage: KeepTalkingContextMessage?,
         endMessage: KeepTalkingContextMessage?,
         state: KeepTalkingThreadState,
-        chitterChatter: [UUID] = []
+        chitterChatter: [UUID] = [],
+        semanticDocumentDigest: String? = nil
     ) {
         self.id = id
         self.$context.id = context.id!
@@ -66,5 +72,6 @@ public final class KeepTalkingThread: Model, @unchecked Sendable {
         self.$endMessage.id = endMessage?.id
         self.state = state
         self.chitterChatter = chitterChatter
+        self.semanticDocumentDigest = semanticDocumentDigest
     }
 }

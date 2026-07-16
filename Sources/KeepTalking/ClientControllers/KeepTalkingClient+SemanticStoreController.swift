@@ -1,3 +1,4 @@
+import Crypto
 import FluentKit
 import Foundation
 
@@ -10,30 +11,12 @@ extension KeepTalkingClient {
         on database: any Database,
         semanticStore: any KeepTalkingSemanticStore
     ) {
-        Task.detached(priority: .background) {
-            let contextThreads =
-                (try? await KeepTalkingThread.query(on: database)
-                    .filter(\.$context.$id == contextID)
-                    .all()) ?? []
-            let knownIDs = Set(
-                ((try? await KeepTalkingThread.query(on: database).all()) ?? []).compactMap(\.id)
+        Task(priority: .background) {
+            try? await reconcileContextThreads(
+                contextID,
+                on: database,
+                semanticStore: semanticStore
             )
-            let indexed = (try? await semanticStore.allDocuments()) ?? []
-            let indexedIDs = Set(indexed.map(\.id))
-
-            for staleID in indexedIDs.subtracting(knownIDs) {
-                try? await semanticStore.removeThread(id: staleID)
-            }
-            for thread in contextThreads {
-                guard let threadID = thread.id else { continue }
-                let text = (try? await threadDocumentText(for: thread, on: database)) ?? ""
-                guard !text.isEmpty else { continue }
-                if indexedIDs.contains(threadID) {
-                    try? await semanticStore.updateThread(id: threadID, text: text)
-                } else {
-                    try? await semanticStore.indexThread(id: threadID, text: text)
-                }
-            }
         }
     }
 
@@ -42,9 +25,96 @@ extension KeepTalkingClient {
         _ threadID: UUID,
         semanticStore: any KeepTalkingSemanticStore
     ) {
-        Task.detached(priority: .background) {
+        Task(priority: .background) {
             try? await semanticStore.removeThread(id: threadID)
         }
+    }
+
+    /// Reconciles one context from its current persisted thread rows.
+    ///
+    /// Every document is attempted even if another one fails. The first error
+    /// is rethrown after the pass so a caller can retry the whole idempotent
+    /// reconciliation later. A retry always reloads thread state and therefore
+    /// incorporates edits made after the event that requested reconciliation.
+    public static func reconcileContextThreads(
+        _ contextID: UUID,
+        on database: any Database,
+        semanticStore: any KeepTalkingSemanticStore
+    ) async throws {
+        SemanticIndexTrace.info("context reconcile started context=\(contextID)")
+        let contextThreads = try await KeepTalkingThread.query(on: database)
+            .filter(\.$context.$id == contextID)
+            .all()
+        let knownIDs = Set(
+            try await KeepTalkingThread.query(on: database).all().compactMap(\.id)
+        )
+        let indexed = try await semanticStore.allDocuments()
+        let indexedTextByID = Dictionary(
+            indexed.map { ($0.id, $0.text) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        var firstFailure: (any Error)?
+
+        for staleID in Set(indexedTextByID.keys).subtracting(knownIDs) {
+            do {
+                SemanticIndexTrace.info("context reconcile remove stale id=\(staleID)")
+                try await semanticStore.removeThread(id: staleID)
+            } catch {
+                firstFailure = firstFailure ?? error
+                SemanticIndexTrace.error(
+                    "context reconcile remove failed id=\(staleID) error=\(error)"
+                )
+            }
+        }
+
+        for thread in contextThreads {
+            guard let threadID = thread.id else { continue }
+            do {
+                let text = try await threadDocumentText(for: thread, on: database)
+                let digest = semanticDocumentDigest(for: text)
+                let indexedText = indexedTextByID[threadID]
+                if thread.semanticDocumentDigest == digest, indexedText == text {
+                    continue
+                }
+
+                if text.isEmpty {
+                    if indexedText != nil {
+                        SemanticIndexTrace.info("context reconcile remove empty id=\(threadID)")
+                        try await semanticStore.removeThread(id: threadID)
+                    }
+                } else if indexedText == text {
+                    SemanticIndexTrace.info("context reconcile repair marker id=\(threadID)")
+                } else if indexedText != nil {
+                    SemanticIndexTrace.info(
+                        "context reconcile update id=\(threadID) characters=\(text.count)"
+                    )
+                    try await semanticStore.updateThread(id: threadID, text: text)
+                } else {
+                    SemanticIndexTrace.info(
+                        "context reconcile index id=\(threadID) characters=\(text.count)"
+                    )
+                    try await semanticStore.indexThread(id: threadID, text: text)
+                }
+                try await recordSemanticDocumentDigest(
+                    digest,
+                    for: threadID,
+                    on: database
+                )
+            } catch {
+                firstFailure = firstFailure ?? error
+                SemanticIndexTrace.error(
+                    "context reconcile document failed id=\(threadID) error=\(error)"
+                )
+            }
+        }
+
+        if let firstFailure {
+            SemanticIndexTrace.error(
+                "context reconcile incomplete context=\(contextID) error=\(firstFailure)"
+            )
+            throw firstFailure
+        }
+        SemanticIndexTrace.info("context reconcile completed context=\(contextID)")
     }
 
     /// Reconciles the entire semantic index against the thread store across all
@@ -62,14 +132,22 @@ extension KeepTalkingClient {
         on database: any Database,
         semanticStore: any KeepTalkingSemanticStore,
         onProgress: (@Sendable (_ completed: Int, _ total: Int) async -> Void)? = nil
-    ) async {
-        let allThreads = (try? await KeepTalkingThread.query(on: database).all()) ?? []
+    ) async throws {
+        SemanticIndexTrace.info("manual reindex database read started")
+        let allThreads = try await KeepTalkingThread.query(on: database).all()
         let knownIDs = Set(allThreads.compactMap(\.id))
-        let indexed = (try? await semanticStore.allDocuments()) ?? []
-        let indexedIDs = Set(indexed.map(\.id))
+        SemanticIndexTrace.info("manual reindex database read completed threads=\(allThreads.count)")
 
-        for staleID in indexedIDs.subtracting(knownIDs) {
-            try? await semanticStore.removeThread(id: staleID)
+        let indexed = try await semanticStore.allDocuments()
+        let indexedIDs = Set(indexed.map(\.id))
+        let staleIDs = indexedIDs.subtracting(knownIDs)
+        SemanticIndexTrace.info(
+            "manual reindex index read completed indexed=\(indexed.count) stale=\(staleIDs.count)"
+        )
+
+        for staleID in staleIDs {
+            SemanticIndexTrace.info("manual reindex remove id=\(staleID)")
+            try await semanticStore.removeThread(id: staleID)
         }
 
         // Sequential on purpose: embedding is GPU-bound, so parallelism would
@@ -80,18 +158,36 @@ extension KeepTalkingClient {
         for thread in allThreads {
             completed += 1
             if let threadID = thread.id {
-                let text = (try? await threadDocumentText(for: thread, on: database)) ?? ""
+                let text = try await threadDocumentText(for: thread, on: database)
+                let digest = semanticDocumentDigest(for: text)
                 if !text.isEmpty {
+                    let action = indexedIDs.contains(threadID) ? "update" : "index"
+                    SemanticIndexTrace.info(
+                        "manual reindex \(action) id=\(threadID) characters=\(text.count) progress=\(completed)/\(total)"
+                    )
                     if indexedIDs.contains(threadID) {
-                        try? await semanticStore.updateThread(id: threadID, text: text)
+                        try await semanticStore.updateThread(id: threadID, text: text)
                     } else {
-                        try? await semanticStore.indexThread(id: threadID, text: text)
+                        try await semanticStore.indexThread(id: threadID, text: text)
+                    }
+                } else {
+                    SemanticIndexTrace.info(
+                        "manual reindex skipped empty id=\(threadID) progress=\(completed)/\(total)"
+                    )
+                    if indexedIDs.contains(threadID) {
+                        try await semanticStore.removeThread(id: threadID)
                     }
                 }
+                try await recordSemanticDocumentDigest(
+                    digest,
+                    for: threadID,
+                    on: database
+                )
             }
             await Task.yield()
             await onProgress?(completed, total)
         }
+        SemanticIndexTrace.info("manual reindex completed total=\(total)")
     }
 
     /// Builds the indexable text content for a thread.
@@ -172,6 +268,21 @@ extension KeepTalkingClient {
             return nil
         }
         return summary
+    }
+
+    private static func semanticDocumentDigest(for text: String) -> String {
+        Data(SHA256.hash(data: Data(text.utf8))).base64EncodedString()
+    }
+
+    private static func recordSemanticDocumentDigest(
+        _ digest: String,
+        for threadID: UUID,
+        on database: any Database
+    ) async throws {
+        try await KeepTalkingThread.query(on: database)
+            .filter(\.$id == threadID)
+            .set(\.$semanticDocumentDigest, to: digest)
+            .update()
     }
 
     private static func attachmentMetadataLine(
