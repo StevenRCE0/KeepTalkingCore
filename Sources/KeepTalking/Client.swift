@@ -164,6 +164,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     public var onEnvelope: EnvelopeHandler?
     public var onRawMessage: RawMessageHandler?
+    /// Fires when a blob changes availability or crosses a visible receive-progress step.
     public var onBlobAvailabilityChange: BlobAvailabilityHandler?
     public var onPeerConnect: PeerConnectHandler?
     public var onContextSync: ContextSyncHandler?

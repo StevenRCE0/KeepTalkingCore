@@ -90,7 +90,7 @@ extension KeepTalkingClient {
         with peerNodeID: UUID,
         in contextID: UUID
     ) async throws -> KeepTalkingTrustOutcome {
-        _ = try await ensureContext(contextID)
+        try await ensureContext(contextID)
         guard try await loadGroupChatSecret(for: contextID) != nil else {
             throw KeepTalkingTrustError.contextSecretMissing(contextID)
         }
@@ -277,6 +277,7 @@ extension KeepTalkingClient {
         ) != nil
     }
 
+    @discardableResult
     func ensureContext(_ contextID: UUID) async throws -> KeepTalkingContext {
         try await Self.ensureContext(contextID, on: localStore.database)
     }

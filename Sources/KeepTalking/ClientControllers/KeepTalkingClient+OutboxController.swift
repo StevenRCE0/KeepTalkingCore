@@ -1,16 +1,17 @@
 import FluentKit
 import Foundation
 
-/// Low-level outbound delivery queue. Every successful local `save` of an
-/// outgoing message also writes a `KeepTalkingOutboxEntry` row; the row
-/// is removed once `rtcClient.sendEnvelope` accepts the envelope.
+/// Low-level delivery ledger for messages that already exist locally.
+/// `KeepTalkingClient.persistAndBroadcastMessage` creates an entry after
+/// persisting the outgoing message and its attachments; the entry is removed
+/// once `rtcClient.sendEnvelope` accepts the envelopes.
 ///
-/// The send pipeline ALWAYS attempts an immediate push — the row is only
+/// The send pipeline attempts an immediate push after enqueueing — the row is only
 /// observable to the app for the brief moment while channels are not
 /// open, or indefinitely if delivery keeps failing. Either way the
-/// message itself is already persisted, so context-sync will eventually
-/// replicate it to peers; the outbox just decides whether we actively
-/// push.
+/// message itself remains the source of truth, so context sync can still
+/// replicate it to peers; the outbox only records whether active push remains
+/// pending.
 ///
 /// `KeepTalkingOutboxEntry` is a child of both `KeepTalkingContext` and
 /// `KeepTalkingContextMessage` (via Fluent `@Parent`), so most queries
@@ -25,9 +26,9 @@ extension KeepTalkingClient {
 
     // MARK: - Enqueue / remove
 
-    /// Inserts an outbox row for the given message. Called by the
-    /// messaging controller right after the message itself is saved,
-    /// before the first transport attempt. Idempotent — the unique
+    /// Inserts an outbox row for the given message. Called by the messaging
+    /// controller after local persistence and delivery prerequisites complete,
+    /// but before the first transport attempt. Idempotent — the unique
     /// constraint on `context_message` plus the upfront query guard
     /// keep the row count at exactly one per message.
     func enqueueOutboxEntry(

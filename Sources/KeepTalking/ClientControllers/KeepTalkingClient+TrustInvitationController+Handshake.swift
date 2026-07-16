@@ -69,7 +69,7 @@ extension KeepTalkingClient {
         guard payload.to == config.node else { return }
         guard payload.from != config.node else { return }
 
-        _ = try await ensureContext(payload.contextID)
+        try await ensureContext(payload.contextID)
         guard let contextSecret = try await loadGroupChatSecret(for: payload.contextID) else {
             throw KeepTalkingTrustError.contextSecretMissing(payload.contextID)
         }

@@ -97,7 +97,7 @@ extension KeepTalkingClient {
             // Tag the user's prompt message with this run's `agentTurnID` so
             // the UI can identify it as an AI prompt and apply the purple
             // stroke + shadow treatment — no in-band "@AI " text marker.
-            try await send(
+            try await persistAndBroadcastMessage(
                 prompt,
                 preparedAttachments: preparedAttachments,
                 in: context,
@@ -197,7 +197,7 @@ extension KeepTalkingClient {
         let preparedAttachments = try await prepareLocalAttachments(attachments)
         try Task.checkCancellation()
         if sendPromptMessage {
-            try await send(
+            try await persistAndBroadcastMessage(
                 prompt,
                 preparedAttachments: preparedAttachments,
                 in: context,

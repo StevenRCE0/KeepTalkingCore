@@ -446,6 +446,17 @@ extension KeepTalkingClient {
             byteCount: byteCount,
             receivedBytes: receivedBytes
         )
+        let progressStep = max(Self.blobChunkSize, byteCount / 100)
+        let previousReceivedBytes = max(receivedBytes - frame.payload.count, 0)
+        if receivedBytes == frame.payload.count
+            || receivedBytes == byteCount
+            || receivedBytes / progressStep != previousReceivedBytes / progressStep
+        {
+            notifyBlobAvailabilityChange(
+                contextID: config.contextID,
+                blobID: header.blobID
+            )
+        }
     }
 
     private func handleIncomingBlobComplete(
@@ -524,6 +535,10 @@ extension KeepTalkingClient {
                 mimeType: mimeType,
                 byteCount: byteCount,
                 receivedBytes: 0
+            )
+            notifyBlobAvailabilityChange(
+                contextID: config.contextID,
+                blobID: header.blobID
             )
             await blobFrameProcessor.finish(
                 blobID: header.blobID,

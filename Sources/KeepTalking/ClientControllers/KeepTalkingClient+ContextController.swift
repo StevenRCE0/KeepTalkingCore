@@ -30,7 +30,8 @@ extension KeepTalkingClient {
             named: name,
             on: localStore.database
         )
-        _ = try await ensureGroupChatSecret(for: config.contextID)
+        try await ensureGroupChatSecret(for: config.contextID)
+
         return context
     }
 

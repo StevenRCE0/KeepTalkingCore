@@ -482,7 +482,7 @@ extension KeepTalkingClient {
             return
         }
         do {
-            try await send(
+            try await persistAndBroadcastMessage(
                 summary,
                 preparedAttachments: [],
                 in: KeepTalkingContext(id: sealed.contextID),
