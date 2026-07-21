@@ -23,13 +23,3 @@ extension KeepTalkingEnvelopeAsyncHandlers {
         register(KeepTalkingP2PSignalPayload.self, handler)
     }
 }
-
-extension KeepTalkingEnvelopeHandlers {
-    mutating func registerP2PSignalHandler(
-        for transport: KeepTalkingContextTransport
-    ) {
-        onP2PSignal { signal in
-            transport.consumeP2PSignal(signal)
-        }
-    }
-}

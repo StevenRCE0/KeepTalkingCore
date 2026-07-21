@@ -1,3 +1,4 @@
+import Dispatch
 import FluentKit
 import Foundation
 
@@ -73,7 +74,12 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     private var heartbeatTask: Task<Void, Never>?
     private var discoveredPeers = Set<UUID>()
     private var peerMissedWaves: [UUID: Int] = [:]
+    private var lifecycleGeneration: UInt64 = 0
+    private var activeStartGeneration: UInt64?
+    private var isStarted = false
+    private var isStopping = false
     private let stateQueue = DispatchQueue(label: "kt.context-transport.state")
+    private let lifecycleOperationLock = NSLock()
 
     /// Strategy instances keyed by policy. Each owns its own state
     /// (e.g. conservative tracks per-peer promotion internally).
@@ -120,42 +126,99 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
 
     // MARK: - Lifecycle
 
-    func start() async throws {
-        stateQueue.sync {
-            discoveredPeers.removeAll()
-            peerMissedWaves = [:]
+    func start() throws -> Task<Void, Error> {
+        guard
+            let generation = stateQueue.sync(execute: { () -> UInt64? in
+                guard activeStartGeneration == nil, !isStarted, !isStopping else { return nil }
+                lifecycleGeneration &+= 1
+                activeStartGeneration = lifecycleGeneration
+                discoveredPeers.removeAll()
+                peerMissedWaves = [:]
+                return lifecycleGeneration
+            })
+        else {
+            throw KeepTalkingTransportError.allChannelsUnavailable
         }
-        livenessState.reset()
-        dedup.reset()
-        // NB: do NOT reset `sendSequence` here. It must stay monotonic across
-        // restarts so peers don't dedup our re-announces against sequences
-        // they already saw (see the property's doc comment). Our *own* dedup
-        // is reset above so we re-accept peers' re-announces after a bounce.
 
-        bindBroadcastCallbacks()
-        try await broadcast.start()
+        return Task { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.start(generation: generation)
+        }
+    }
 
-        rememberPeer(config.node)
-        sendPresence()
-        startHeartbeatLoop()
+    private func start(generation: UInt64) async throws {
+        do {
+            let startTask = try prepareBroadcastStart(generation: generation)
+            try await startTask.waitPropagatingCancellation()
+            try Task.checkCancellation()
+            guard startHeartbeatLoop(generation: generation) else {
+                throw CancellationError()
+            }
+        } catch {
+            cancelStart(generation: generation)
+            throw error
+        }
         debug("broadcast channel ready")
     }
 
+    private func prepareBroadcastStart(generation: UInt64) throws -> Task<Void, Error> {
+        lifecycleOperationLock.lock()
+        defer { lifecycleOperationLock.unlock() }
+        guard isLifecycleActive(generation) else { throw CancellationError() }
+
+        livenessState.reset()
+        dedup.reset()
+        // Never reset `sendSequence`: peers may still remember this node's
+        // prior sequence after a transport bounce.
+        rememberPeer(config.node)
+        bindBroadcastCallbacks(generation: generation)
+        return try broadcast.start()
+    }
+
+    private func cancelStart(generation: UInt64) {
+        lifecycleOperationLock.lock()
+        let shouldStop = stateQueue.sync {
+            guard lifecycleGeneration == generation else { return false }
+            activeStartGeneration = nil
+            isStopping = true
+            return true
+        }
+        lifecycleOperationLock.unlock()
+        guard shouldStop else { return }
+        broadcast.stop()
+        stateQueue.sync {
+            if lifecycleGeneration == generation { isStopping = false }
+        }
+    }
+
     func stop() {
-        heartbeatTask?.cancel()
-        heartbeatTask = nil
+        lifecycleOperationLock.lock()
+        let stopped = stateQueue.sync {
+            lifecycleGeneration &+= 1
+            let generation = lifecycleGeneration
+            activeStartGeneration = nil
+            isStarted = false
+            isStopping = true
+            let result = (heartbeatTask, Array(directChannels.values))
+            heartbeatTask = nil
+            directChannels.removeAll()
+            discoveredPeers.removeAll()
+            peerMissedWaves = [:]
+            return (result.0, result.1, generation)
+        }
+        lifecycleOperationLock.unlock()
+        stopped.0?.cancel()
         livenessState.reset()
 
-        for (_, direct) in directChannels {
+        for direct in stopped.1 {
             direct.teardown()
-        }
-        stateQueue.sync {
-            directChannels.removeAll()
-            peerMissedWaves = [:]
         }
         for (_, strategy) in strategies { strategy.reset() }
 
         broadcast.stop()
+        stateQueue.sync {
+            if lifecycleGeneration == stopped.2 { isStopping = false }
+        }
     }
 
     // MARK: - Send (strategy-based dispatch)
@@ -228,10 +291,8 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     }
 
     func sendLivenessProbe() {
-        // Reuse the heartbeat presence wave. A reply (presence echo or SFU
-        // roster response) lands on the counted inbound path, which
-        // `probeTransport()` watches via `runtimeStats().received`.
         sendPresence()
+        broadcast.sendLivenessProbe()
     }
 
     func requestP2PTrial() {
@@ -274,54 +335,82 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
 
     // MARK: - Broadcast callback binding
 
-    private func bindBroadcastCallbacks() {
+    private func bindBroadcastCallbacks(generation: UInt64) {
         broadcast.onReceive = { [weak self] sequenced in
-            self?.handleIncoming(sequenced)
+            guard self?.isLifecycleActive(generation) == true else { return }
+            self?.handleIncoming(sequenced, generation: generation)
         }
         broadcast.onStateChange = { [weak self] in
-            if self?.broadcast.isReady ?? false {
-                self?.bindBroadcastBlobCallback()
-                self?.onBroadcastReady?()
-            }
-            self?.debug("broadcast state changed to \(self?.broadcast.state.description ?? "?")")
+            self?.handleBroadcastStateChange(generation: generation)
+        }
+        broadcast.onPeerJoined = { [weak self] in
+            guard self?.isLifecycleActive(generation) == true else { return }
+            self?.sendPresence()
         }
         broadcast.onLog = onLog
         broadcast.contextSecretProvider = contextSecretProvider
     }
 
-    private func bindBroadcastBlobCallback() {
+    private func handleBroadcastStateChange(generation: UInt64) {
+        guard isLifecycleActive(generation) else { return }
+        if broadcast.isReady {
+            bindBroadcastBlobCallback(generation: generation)
+            sendPresence()
+            onBroadcastReady?()
+        }
+        debug("broadcast state changed to \(broadcast.state.description)")
+    }
+
+    private func bindBroadcastBlobCallback(generation: UInt64) {
         broadcast.onBlobData = { [weak self] data in
+            guard self?.isLifecycleActive(generation) == true else { return }
             self?.onBlobData?(data)
         }
         broadcast.onRealtimeData = { [weak self] data in
+            guard self?.isLifecycleActive(generation) == true else { return }
             self?.onRealtimeData?(data)
         }
     }
 
     // MARK: - Receive (dedup + type dispatch)
 
-    private func handleIncoming(_ sequenced: KeepTalkingSequencedEnvelope) {
+    private func handleIncoming(
+        _ sequenced: KeepTalkingSequencedEnvelope,
+        generation: UInt64
+    ) {
+        lifecycleOperationLock.lock()
+        guard isLifecycleActive(generation) else {
+            lifecycleOperationLock.unlock()
+            return
+        }
         // Dedup across both channels
         if sequenced.sequence != 0 {
             guard !dedup.checkAndRecord(sender: sequenced.senderNode, sequence: sequenced.sequence) else {
+                lifecycleOperationLock.unlock()
                 return
             }
         }
+        lifecycleOperationLock.unlock()
 
         let envelope = sequenced.envelope
 
         // P2P signaling consumed internally — never reaches app
         switch envelope.envelopeType {
             case .p2pSignaling:
-                handleP2PSignaling(envelope)
+                handleP2PSignaling(envelope, generation: generation)
             case .chat, .service:
+                guard isLifecycleActive(generation) else { return }
                 onEnvelope?(envelope)
         }
     }
 
     // MARK: - P2P signaling (consumed internally)
 
-    private func handleP2PSignaling(_ envelope: any KeepTalkingEnvelope) {
+    private func handleP2PSignaling(
+        _ envelope: any KeepTalkingEnvelope,
+        generation: UInt64
+    ) {
+        guard isLifecycleActive(generation) else { return }
         switch envelope.kind {
             case .trustRequest, .trustAccept, .trustComplete, .trustReject:
                 onTrustEnvelope?(envelope)
@@ -334,43 +423,53 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         }
 
         var handlers = KeepTalkingEnvelopeHandlers()
-        handlers.registerP2PSignalHandler(for: self)
-        handlers.registerP2PPresenceHandler(for: self)
+        handlers.onP2PSignal { [weak self] signal in
+            self?.handleP2PSignal(signal, generation: generation)
+        }
+        handlers.onP2PPresence { [weak self] presence in
+            self?.handlePresence(presence, generation: generation)
+        }
         handlers.handle(envelope)
     }
 
-    func consumeP2PPresence(
-        _ presence: KeepTalkingP2PPresencePayload
+    private func handleP2PSignal(
+        _ signal: KeepTalkingP2PSignalPayload,
+        generation: UInt64
     ) {
-        handlePresence(presence)
-    }
-
-    func consumeP2PSignal(
-        _ signal: KeepTalkingP2PSignalPayload
-    ) {
-        rememberPeer(signal.from)
-        let direct = stateQueue.sync { directChannels[signal.from] }
+        guard rememberPeer(signal.from, generation: generation) else { return }
+        let direct: KeepTalkingPeerTransportChannel? = stateQueue.sync {
+            guard lifecycleGeneration == generation else { return nil }
+            return directChannels[signal.from]
+        }
         if direct == nil {
-            handleParticipantJoined(signal.from)
+            handleParticipantJoined(signal.from, generation: generation)
         }
-        stateQueue.sync { directChannels[signal.from] }?.receiveSignal(signal)
+        lifecycleOperationLock.lock()
+        guard isLifecycleActive(generation),
+            let current = stateQueue.sync(execute: { directChannels[signal.from] })
+        else {
+            lifecycleOperationLock.unlock()
+            return
+        }
+        current.receiveSignal(signal)
+        lifecycleOperationLock.unlock()
     }
 
-    private func handlePresence(_ presence: KeepTalkingP2PPresencePayload) {
+    private func handlePresence(
+        _ presence: KeepTalkingP2PPresencePayload,
+        generation: UInt64
+    ) {
         let node = presence.node
-        rememberPeer(node)
+        guard
+            let observation = observePeerAlive(
+                node,
+                source: "presence",
+                generation: generation
+            )
+        else { return }
 
-        let observation = livenessState.observePresence(
-            from: node,
-            echoCooldown: Self.presenceEchoCooldownSeconds
-        )
-
-        if observation.shouldEcho {
+        if observation.shouldEcho, isLifecycleActive(generation) {
             sendPresence()
-        }
-
-        if observation.isNewConnection {
-            reportPeerConnected(node, source: "presence")
         }
 
         // A direct upgrade kicks off a fresh ICE candidate gather, so drive it
@@ -380,17 +479,18 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         // requestRetrial, reset the channel's backoff and failure budget every
         // beat — defeating both the exponential backoff and the maxFailures
         // circuit breaker. This is the same wave→edge lesson the liveness state
-        // already applies to reportPeerConnected and presence-echo; keep them
+        // already applies to peer notification and presence echo; keep them
         // aligned. The `!hasChannel` backstop only fires until the channel
         // object exists, so it can't itself storm.
         if node != config.node {
             let hasChannel = stateQueue.sync { directChannels[node] != nil }
             if observation.isNewConnection || !hasChannel {
-                handleParticipantJoined(node)
+                handleParticipantJoined(node, generation: generation)
             }
         }
 
         // Forward presence to the app for higher-level handling
+        guard isLifecycleActive(generation) else { return }
         onEnvelope?(presence)
     }
 
@@ -398,25 +498,65 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
 
     private func handleParticipantJoined(_ nodeID: UUID) {
         guard nodeID != config.node else { return }
+        guard let generation = activeLifecycleGeneration() else { return }
+        handleParticipantJoined(nodeID, generation: generation)
+    }
+
+    private func handleParticipantJoined(_ nodeID: UUID, generation: UInt64) {
+        guard nodeID != config.node else { return }
         if let existing = stateQueue.sync(execute: { directChannels[nodeID] }) {
+            lifecycleOperationLock.lock()
+            guard isLifecycleActive(generation) else {
+                lifecycleOperationLock.unlock()
+                return
+            }
+            guard stateQueue.sync(execute: { directChannels[nodeID] === existing }) else {
+                lifecycleOperationLock.unlock()
+                return
+            }
             let s = existing.state
-            guard s != .ready, s != .negotiating else { return }
+            guard s != .ready, s != .negotiating else {
+                lifecycleOperationLock.unlock()
+                return
+            }
             existing.requestRetrial()
             existing.attemptUpgrade()
+            lifecycleOperationLock.unlock()
             debug("participant retrying direct node=\(nodeID.uuidString.prefix(8))")
             return
         }
 
         let direct = directChannelFactory(nodeID)
+        let directID = ObjectIdentifier(direct)
         direct.onReceive = { [weak self] sequenced in
-            self?.handleIncoming(sequenced)
+            guard
+                self?.isCurrentDirectChannel(
+                    directID,
+                    nodeID: nodeID,
+                    generation: generation
+                ) == true
+            else { return }
+            self?.handleIncoming(sequenced, generation: generation)
         }
         direct.onBlobData = { [weak self] data in
+            guard
+                self?.isCurrentDirectChannel(
+                    directID,
+                    nodeID: nodeID,
+                    generation: generation
+                ) == true
+            else { return }
             self?.onBlobData?(data)
         }
         direct.onRealtimeData = nil
         direct.onSignalOutput = { [weak self] signal in
-            guard let self else { return }
+            guard let self,
+                self.isCurrentDirectChannel(
+                    directID,
+                    nodeID: nodeID,
+                    generation: generation
+                )
+            else { return }
             do {
                 try self.broadcast.sendRawEnvelope(signal)
             } catch {
@@ -424,58 +564,123 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
             }
         }
         direct.onPeerAlive = { [weak self] nodeID in
-            self?.handlePeerAlive(nodeID)
+            guard
+                self?.isCurrentDirectChannel(
+                    directID,
+                    nodeID: nodeID,
+                    generation: generation
+                ) == true
+            else { return }
+            self?.handlePeerAlive(nodeID, generation: generation)
         }
         direct.onStateChange = { [weak self] in
+            guard let self,
+                self.isCurrentDirectChannel(
+                    directID,
+                    nodeID: nodeID,
+                    generation: generation
+                )
+            else { return }
             // Log for now
-            if let direct = self?.stateQueue.sync(execute: { self?.directChannels[nodeID] }) {
-                self?.debug("direct[\(nodeID.uuidString.prefix(8))] state changed isReady=\(direct.isReady)")
+            if let direct = self.stateQueue.sync(execute: { self.directChannels[nodeID] }) {
+                self.debug("direct[\(nodeID.uuidString.prefix(8))] state changed isReady=\(direct.isReady)")
             }
         }
         direct.onLog = onLog
         direct.contextSecretProvider = contextSecretProvider
 
+        lifecycleOperationLock.lock()
+        guard isLifecycleActive(generation) else {
+            lifecycleOperationLock.unlock()
+            direct.teardown()
+            return
+        }
+        guard stateQueue.sync(execute: { directChannels[nodeID] == nil }) else {
+            lifecycleOperationLock.unlock()
+            direct.teardown()
+            return
+        }
         stateQueue.sync { directChannels[nodeID] = direct }
         direct.attemptUpgrade()
+        lifecycleOperationLock.unlock()
         onParticipantChange?(.joined(nodeID: nodeID))
         debug("participant joined node=\(nodeID.uuidString.prefix(8))")
     }
 
     private func handleParticipantLeft(_ nodeID: UUID) {
-        let direct = stateQueue.sync {
-            directChannels.removeValue(forKey: nodeID)
+        guard let generation = activeLifecycleGeneration() else { return }
+        handleParticipantLeft(nodeID, generation: generation, expectedChannel: nil)
+    }
+
+    private func handleParticipantLeft(
+        _ nodeID: UUID,
+        generation: UInt64,
+        expectedChannel: (any KeepTalkingPeerTransportChannel)?
+    ) {
+        lifecycleOperationLock.lock()
+        guard isLifecycleActive(generation) else {
+            lifecycleOperationLock.unlock()
+            return
         }
-        direct?.teardown()
+        let direct = stateQueue.sync { () -> (any KeepTalkingPeerTransportChannel)? in
+            guard let current = directChannels[nodeID] else { return nil }
+            if let expectedChannel, current !== expectedChannel { return nil }
+            return directChannels.removeValue(forKey: nodeID)
+        }
+        lifecycleOperationLock.unlock()
+        guard let direct else { return }
+        direct.teardown()
         onParticipantChange?(.left(nodeID: nodeID))
         debug("participant left node=\(nodeID.uuidString.prefix(8))")
     }
 
     // MARK: - Dual-source liveness
 
-    private func handlePeerAlive(_ nodeID: UUID) {
-        // ICE connected on DirectChannel — confirm peer alive independently of SFU presence
-        let observation = livenessState.observePresence(
-            from: nodeID,
-            echoCooldown: Self.presenceEchoCooldownSeconds
-        )
-        if observation.isNewConnection {
-            reportPeerConnected(nodeID, source: "p2p")
-        }
+    private func handlePeerAlive(_ nodeID: UUID, generation: UInt64) {
+        _ = observePeerAlive(nodeID, source: "p2p", generation: generation)
     }
 
     // MARK: - Heartbeat & liveness
 
-    private func startHeartbeatLoop() {
-        heartbeatTask?.cancel()
-        heartbeatTask = Task { [weak self] in
+    private func startHeartbeatLoop(generation: UInt64) -> Bool {
+        if withUnsafeCurrentTask(body: { $0?.isCancelled ?? false }) { return false }
+        let task = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.heartbeatIntervalSeconds))
-                if Task.isCancelled { break }
+                guard !Task.isCancelled, self.isLifecycleActive(generation) else { break }
                 self.sendPresence()
-                self.checkPeerLiveness()
-                self.tickStrategies()
+                self.checkPeerLiveness(generation: generation)
+                self.tickStrategies(generation: generation)
             }
+        }
+        let retained = stateQueue.sync {
+            guard lifecycleGeneration == generation,
+                activeStartGeneration == generation
+            else { return false }
+            heartbeatTask?.cancel()
+            heartbeatTask = task
+            activeStartGeneration = nil
+            isStarted = true
+            return true
+        }
+        if !retained { task.cancel() }
+        return retained
+    }
+
+    private func isLifecycleActive(_ generation: UInt64) -> Bool {
+        stateQueue.sync {
+            lifecycleGeneration == generation
+                && (activeStartGeneration == generation || isStarted)
+        }
+    }
+
+    private func activeLifecycleGeneration() -> UInt64? {
+        stateQueue.sync {
+            guard !isStopping,
+                activeStartGeneration == lifecycleGeneration || isStarted
+            else { return nil }
+            return lifecycleGeneration
         }
     }
 
@@ -494,7 +699,8 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     /// - ICE connection state (via DirectChannel onPeerAlive)
     ///
     /// A peer is offline only if BOTH sources report no activity.
-    private func checkPeerLiveness() {
+    private func checkPeerLiveness(generation: UInt64) {
+        guard isLifecycleActive(generation) else { return }
         let onlineNodes = livenessState.onlineNodeIDs()
         let remotePeersOnline = onlineNodes.subtracting([config.node])
 
@@ -504,17 +710,30 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
             let isOnlineViaDirect = direct.isReady
 
             if !isOnlineViaPresence && !isOnlineViaDirect {
-                let missed = stateQueue.sync { () -> Int in
+                let missed = stateQueue.sync { () -> Int? in
+                    guard lifecycleGeneration == generation else { return nil }
                     peerMissedWaves[nodeID, default: 0] += 1
                     return peerMissedWaves[nodeID]!
                 }
-                if missed >= Self.peerOfflineWavesThreshold {
+                if let missed, missed >= Self.peerOfflineWavesThreshold {
                     debug("peer offline node=\(nodeID.uuidString.prefix(8)) missedWaves=\(missed)")
-                    handleParticipantLeft(nodeID)
-                    _ = stateQueue.sync { peerMissedWaves.removeValue(forKey: nodeID) }
+                    handleParticipantLeft(
+                        nodeID,
+                        generation: generation,
+                        expectedChannel: direct
+                    )
+                    stateQueue.sync {
+                        if lifecycleGeneration == generation {
+                            peerMissedWaves.removeValue(forKey: nodeID)
+                        }
+                    }
                 }
             } else {
-                _ = stateQueue.sync { peerMissedWaves.removeValue(forKey: nodeID) }
+                stateQueue.sync {
+                    if lifecycleGeneration == generation {
+                        peerMissedWaves.removeValue(forKey: nodeID)
+                    }
+                }
             }
         }
     }
@@ -524,7 +743,10 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     /// Tick every strategy with each peer's current channel readiness.
     /// Stateless strategies no-op; the conservative strategy uses this
     /// to track promotion.
-    private func tickStrategies() {
+    private func tickStrategies(generation: UInt64) {
+        lifecycleOperationLock.lock()
+        defer { lifecycleOperationLock.unlock() }
+        guard isLifecycleActive(generation) else { return }
         let channels = stateQueue.sync { directChannels }
         for (_, strategy) in strategies {
             for (nodeID, direct) in channels {
@@ -539,12 +761,32 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         stateQueue.sync { _ = discoveredPeers.insert(node) }
     }
 
-    private func directChannel(for targetPeerNodeID: UUID?) -> (any KeepTalkingPeerTransportChannel)? {
+    private func rememberPeer(_ node: UUID, generation: UInt64) -> Bool {
         stateQueue.sync {
-            if let targetPeerNodeID {
-                return directChannels[targetPeerNodeID]
-            }
-            return directChannels.first(where: { $0.value.isReady })?.value
+            guard lifecycleGeneration == generation,
+                activeStartGeneration == generation || isStarted
+            else { return false }
+            _ = discoveredPeers.insert(node)
+            return true
+        }
+    }
+
+    private func directChannel(for targetPeerNodeID: UUID?) -> (any KeepTalkingPeerTransportChannel)? {
+        guard let targetPeerNodeID else { return nil }
+        return stateQueue.sync { directChannels[targetPeerNodeID] }
+    }
+
+    private func isCurrentDirectChannel(
+        _ channelID: ObjectIdentifier,
+        nodeID: UUID,
+        generation: UInt64
+    ) -> Bool {
+        stateQueue.sync {
+            guard lifecycleGeneration == generation,
+                activeStartGeneration == generation || isStarted,
+                let current = directChannels[nodeID]
+            else { return false }
+            return ObjectIdentifier(current) == channelID
         }
     }
 
@@ -588,14 +830,29 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         }
     }
 
-    /// Called only on a connect edge (callers gate on `observation.isNewConnection`),
-    /// so this just notifies — the per-source/per-wave dedup the old liveness state
-    /// did is no longer needed (the edge itself, shared across sources, is the dedup).
-    private func reportPeerConnected(_ nodeID: UUID, source: String) {
-        guard nodeID != config.node else { return }
-        rememberPeer(nodeID)
-        debug("peer reachable source=\(source) node=\(nodeID.uuidString.prefix(8))")
-        onPeerConnect?(nodeID)
+    private func observePeerAlive(
+        _ nodeID: UUID,
+        source: String,
+        generation: UInt64
+    ) -> KeepTalkingContextLivenessState.PresenceObservation? {
+        lifecycleOperationLock.lock()
+        guard isLifecycleActive(generation) else {
+            lifecycleOperationLock.unlock()
+            return nil
+        }
+        stateQueue.sync { _ = discoveredPeers.insert(nodeID) }
+        let observation = livenessState.observePresence(
+            from: nodeID,
+            echoCooldown: Self.presenceEchoCooldownSeconds
+        )
+        if observation.isNewConnection, nodeID != config.node {
+            onPeerConnect?(nodeID)
+        }
+        lifecycleOperationLock.unlock()
+        if observation.isNewConnection, nodeID != config.node {
+            debug("peer reachable source=\(source) node=\(nodeID.uuidString.prefix(8))")
+        }
+        return observation
     }
 }
 

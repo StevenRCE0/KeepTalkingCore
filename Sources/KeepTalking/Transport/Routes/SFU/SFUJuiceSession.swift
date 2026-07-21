@@ -122,7 +122,12 @@ public final class KeepTalkingSFUJuiceSession: @unchecked Sendable {
     }
 
     public func start() async throws {
-        try await inner.start()
+        do {
+            try await inner.start().waitPropagatingCancellation()
+        } catch {
+            inner.stop()
+            throw error
+        }
     }
 
     public func stop() {

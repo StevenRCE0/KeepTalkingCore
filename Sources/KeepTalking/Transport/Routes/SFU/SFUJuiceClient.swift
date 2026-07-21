@@ -34,6 +34,8 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
     private let sfuPort: UInt16
     private let signingKey: Curve25519.Signing.PrivateKey
     private let client: SFUClient
+    private let contextJoinTimeout: Duration
+    private let stopBeforeStartIsTerminal: Bool
 
     /// 32-byte Ed25519 public key registered with the SFU; surfaced so
     /// the public `KeepTalkingSFUJuiceSession` wrapper can expose it.
@@ -108,18 +110,31 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
     private var sentCount = 0
     private var recvCount = 0
     private var readyContinuation: CheckedContinuation<Void, Error>?
-    private var didReportBroadcastReady = false
+    private var contextJoinTimeoutTask: Task<Void, Never>?
+    private var startAttempt: UInt64 = 0
+    private var activeStartAttempt: UInt64?
+    private var readyStartAttempt: UInt64?
+    private var clientOperationAttempt: UInt64?
+    private var closeAfterClientOperation = false
+    private var isContextReady = false
+    private var isStopped = true
+    private var hasStartedAttempt = false
+    private var cancelledBeforeFirstStart = false
 
     init(
         config: KeepTalkingConfig,
         sfuHost: String,
         sfuPort: UInt16,
-        signingKey: Curve25519.Signing.PrivateKey = .init()
+        signingKey: Curve25519.Signing.PrivateKey = .init(),
+        contextJoinTimeout: Duration = .seconds(10),
+        stopBeforeStartIsTerminal: Bool = false
     ) {
         self.config = config
         self.sfuHost = sfuHost
         self.sfuPort = sfuPort
         self.signingKey = signingKey
+        self.contextJoinTimeout = contextJoinTimeout
+        self.stopBeforeStartIsTerminal = stopBeforeStartIsTerminal
         self.client = SFUClient(
             configuration: .init(host: sfuHost, port: Int(sfuPort)),
             signingKey: signingKey
@@ -133,7 +148,51 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
 
     // MARK: - Lifecycle
 
-    func start() async throws {
+    func start() throws -> Task<Void, Error> {
+        let attempt = try reserveStartAttempt()
+        return Task { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await self.start(reservedAttempt: attempt)
+                try Task.checkCancellation()
+            } onCancel: {
+                self.failStart(
+                    CancellationError(),
+                    attempt: attempt,
+                    closeConnection: true
+                )
+            }
+        }
+    }
+
+    func reserveStartAttempt() throws -> UInt64 {
+        if withUnsafeCurrentTask(body: { $0?.isCancelled ?? false }) {
+            throw CancellationError()
+        }
+        return try stateQueue.sync {
+            if cancelledBeforeFirstStart { throw CancellationError() }
+            guard activeStartAttempt == nil,
+                clientOperationAttempt == nil,
+                !isContextReady
+            else {
+                throw SFUJuiceError.startInProgress
+            }
+            hasStartedAttempt = true
+            startAttempt &+= 1
+            activeStartAttempt = startAttempt
+            readyStartAttempt = nil
+            closeAfterClientOperation = false
+            isContextReady = false
+            isStopped = false
+            return startAttempt
+        }
+    }
+
+    func start(reservedAttempt attempt: UInt64) async throws {
+        guard stateQueue.sync(execute: { activeStartAttempt == attempt && !isStopped }) else {
+            throw CancellationError()
+        }
         debug("starting host=\(sfuHost):\(sfuPort) context=\(config.contextID.uuidString.lowercased())")
 
         client.onLog = { [weak self] msg in self?.debug(msg) }
@@ -156,37 +215,87 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
         client.onRelayClose = { [weak self] relayID, reason in
             self?.onRelayClose?(relayID, reason)
         }
-        client.onPresence = { [weak self] presence in
-            guard let self else { return }
-            let mapped: PresenceEvent
-            switch presence {
-                case .snapshot(let cid, let peers):
-                    mapped = .snapshot(context: cid, peers: peers)
-                case .joined(let cid, let pubkey):
-                    mapped = .joined(context: cid, pubkey: pubkey)
-                case .left(let cid, let pubkey):
-                    mapped = .left(context: cid, pubkey: pubkey)
-            }
-            self.presenceForwarder?(mapped)
-        }
+        client.onPresence = { [weak self] presence in self?.handlePresence(presence) }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            stateQueue.sync {
+            let shouldStart = stateQueue.sync {
+                guard activeStartAttempt == attempt,
+                    readyContinuation == nil,
+                    clientOperationAttempt == nil,
+                    !isStopped
+                else { return false }
                 readyContinuation = cont
+                clientOperationAttempt = attempt
+                return true
             }
-            client.connect()
-            client.join(context: config.contextID)
+            if shouldStart {
+                scheduleContextJoinTimeout(attempt: attempt)
+                client.connect()
+                let shouldJoin = stateQueue.sync {
+                    activeStartAttempt == attempt
+                        && clientOperationAttempt == attempt
+                        && !isStopped
+                }
+                if shouldJoin { client.join(context: config.contextID) }
+                let shouldClose = stateQueue.sync {
+                    guard clientOperationAttempt == attempt else { return false }
+                    clientOperationAttempt = nil
+                    let shouldClose =
+                        closeAfterClientOperation
+                        || isStopped
+                        || (activeStartAttempt != attempt
+                            && readyStartAttempt != attempt)
+                    closeAfterClientOperation = false
+                    return shouldClose
+                }
+                if shouldClose { client.close() }
+            } else {
+                cont.resume(throwing: CancellationError())
+            }
         }
     }
 
     func stop() {
-        debug("stopping sent=\(sentCount) recv=\(recvCount)")
-        let continuation = stateQueue.sync {
+        let result = stateQueue.sync {
+            () -> (
+                continuation: CheckedContinuation<Void, Error>?,
+                timeout: Task<Void, Never>?,
+                counts: (Int, Int),
+                shouldClose: Bool,
+                didTransition: Bool
+            ) in
+            if stopBeforeStartIsTerminal, !hasStartedAttempt {
+                cancelledBeforeFirstStart = true
+            }
+            let didTransition =
+                !isStopped
+                || activeStartAttempt != nil
+                || readyContinuation != nil
+                || clientOperationAttempt != nil
+                || isContextReady
             let continuation = readyContinuation
             readyContinuation = nil
-            return continuation
+            let timeout = contextJoinTimeoutTask
+            contextJoinTimeoutTask = nil
+            activeStartAttempt = nil
+            readyStartAttempt = nil
+            isContextReady = false
+            let shouldClose = !isStopped && clientOperationAttempt == nil
+            if clientOperationAttempt != nil { closeAfterClientOperation = true }
+            isStopped = true
+            return (
+                continuation,
+                timeout,
+                (sentCount, recvCount),
+                shouldClose,
+                didTransition
+            )
         }
-        client.close()
-        continuation?.resume(throwing: CancellationError())
+        result.timeout?.cancel()
+        if result.didTransition {
+            debug("stopping sent=\(result.counts.0) recv=\(result.counts.1)")
+        }
+        if result.shouldClose { client.close() }
+        result.continuation?.resume(throwing: CancellationError())
     }
 
     // MARK: - Transport protocol
@@ -199,7 +308,11 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
                 localNodeID: config.node,
                 contextSecretProvider: contextSecretProvider
             )
-        client.broadcast(envelope: payload, context: config.contextID)
+        client.broadcast(
+            envelope: payload,
+            context: config.contextID,
+            channel: envelope.channel.sfuChannel
+        )
         stateQueue.sync { sentCount += 1 }
     }
 
@@ -219,9 +332,10 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
     func currentRoute() -> KeepTalkingTransportRoute { .sfu }
 
     func runtimeStats() -> KeepTalkingRuntimeStats {
-        KeepTalkingRuntimeStats(
-            sent: sentCount,
-            received: recvCount,
+        let counts = stateQueue.sync { (sentCount, recvCount) }
+        return KeepTalkingRuntimeStats(
+            sent: counts.0,
+            received: counts.1,
             outboundLabel: "sfu-juice/broadcast",
             outboundState: clientStateForStats(),
             inboundLabel: "sfu-juice/broadcast",
@@ -233,7 +347,8 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
 
     func broadcastState() -> BroadcastChannelState {
         switch client.state {
-            case .ready: return .ready
+            case .ready:
+                return stateQueue.sync { isContextReady } ? .ready : .connecting
             case .connecting, .authenticating, .idle: return .connecting
             case .closed, .failed: return .failed
         }
@@ -259,7 +374,7 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
 
     private func clientStateForStats() -> Int {
         switch client.state {
-            case .ready: return 1
+            case .ready: return stateQueue.sync { isContextReady } ? 1 : 0
             case .connecting, .authenticating, .idle: return 0
             case .closed, .failed: return -1
         }
@@ -269,30 +384,193 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
         debug("client state=\(state)")
         switch state {
             case .ready:
-                // Flush the ready continuation exactly once.
-                var continuation: CheckedContinuation<Void, Error>?
-                stateQueue.sync {
-                    continuation = readyContinuation
-                    readyContinuation = nil
-                }
-                continuation?.resume()
-                if !didReportBroadcastReady {
-                    didReportBroadcastReady = true
-                    onBroadcastReady?()
-                }
+                debug("authenticated; awaiting context membership")
             case .failed(let reason):
-                var continuation: CheckedContinuation<Void, Error>?
-                stateQueue.sync {
-                    continuation = readyContinuation
-                    readyContinuation = nil
-                }
-                continuation?.resume(throwing: SFUJuiceError.connectFailed(reason))
+                failStart(
+                    SFUJuiceError.connectFailed(reason),
+                    closeConnection: true
+                )
                 onTransportDegraded?(reason)
             case .closed:
-                break
+                let closed = stateQueue.sync {
+                    () -> (
+                        continuation: CheckedContinuation<Void, Error>?,
+                        timeout: Task<Void, Never>?,
+                        wasReady: Bool
+                    ) in
+                    let result = (
+                        continuation: readyContinuation,
+                        timeout: contextJoinTimeoutTask,
+                        wasReady: isContextReady
+                    )
+                    readyContinuation = nil
+                    contextJoinTimeoutTask = nil
+                    activeStartAttempt = nil
+                    readyStartAttempt = nil
+                    isContextReady = false
+                    isStopped = true
+                    return result
+                }
+                closed.timeout?.cancel()
+                closed.continuation?.resume(
+                    throwing: SFUJuiceError.connectFailed("connection closed")
+                )
+                if closed.wasReady {
+                    onTransportDegraded?("SFU connection closed")
+                }
             case .idle, .connecting, .authenticating:
                 break
         }
+    }
+
+    private func handlePresence(_ presence: SFUClient.PresenceEvent) {
+        stateQueue.sync { recvCount += 1 }
+
+        let mapped: PresenceEvent
+        switch presence {
+            case .snapshot(let context, let peers):
+                mapped = .snapshot(context: context, peers: peers)
+            case .joined(let context, let pubkey):
+                mapped = .joined(context: context, pubkey: pubkey)
+            case .left(let context, let pubkey):
+                mapped = .left(context: context, pubkey: pubkey)
+        }
+        if Self.confirmsContextMembership(
+            mapped,
+            contextID: config.contextID,
+            publicKey: signingPublicKey
+        ) {
+            completeContextJoin()
+        } else if Self.rejectsContextMembership(
+            mapped,
+            contextID: config.contextID,
+            publicKey: signingPublicKey
+        ) {
+            let membershipWasReady = stateQueue.sync {
+                defer {
+                    isContextReady = false
+                    readyStartAttempt = nil
+                }
+                return isContextReady
+            }
+            if membershipWasReady {
+                onTransportDegraded?("SFU roster no longer contains this peer")
+            }
+        }
+        presenceForwarder?(mapped)
+    }
+
+    static func confirmsContextMembership(
+        _ presence: PresenceEvent,
+        contextID: UUID,
+        publicKey: Data
+    ) -> Bool {
+        guard case .snapshot(let context, let peers) = presence else { return false }
+        return context == contextID && peers.contains(publicKey)
+    }
+
+    static func rejectsContextMembership(
+        _ presence: PresenceEvent,
+        contextID: UUID,
+        publicKey: Data
+    ) -> Bool {
+        guard case .snapshot(let context, let peers) = presence else { return false }
+        return context == contextID && !peers.contains(publicKey)
+    }
+
+    private func completeContextJoin() {
+        let completion = stateQueue.sync {
+            () -> (CheckedContinuation<Void, Error>, Task<Void, Never>?)? in
+            guard activeStartAttempt != nil,
+                let continuation = readyContinuation,
+                !isStopped
+            else {
+                return nil
+            }
+            let attempt = activeStartAttempt
+            readyContinuation = nil
+            activeStartAttempt = nil
+            readyStartAttempt = attempt
+            isContextReady = true
+            let timeout = contextJoinTimeoutTask
+            contextJoinTimeoutTask = nil
+            return (continuation, timeout)
+        }
+        guard let completion else { return }
+        completion.1?.cancel()
+        completion.0.resume()
+        onBroadcastReady?()
+    }
+
+    @discardableResult
+    private func failStart(
+        _ error: Error,
+        attempt: UInt64? = nil,
+        closeConnection: Bool = false
+    ) -> Bool {
+        let completion = stateQueue.sync {
+            () -> (
+                continuation: CheckedContinuation<Void, Error>?,
+                timeout: Task<Void, Never>?,
+                shouldClose: Bool
+            )? in
+            if let attempt,
+                activeStartAttempt != attempt,
+                readyStartAttempt != attempt
+            {
+                return nil
+            }
+            guard
+                activeStartAttempt != nil
+                    || readyStartAttempt != nil
+                    || readyContinuation != nil
+            else {
+                isContextReady = false
+                return nil
+            }
+            let continuation = readyContinuation
+            let timeout = contextJoinTimeoutTask
+            readyContinuation = nil
+            contextJoinTimeoutTask = nil
+            activeStartAttempt = nil
+            readyStartAttempt = nil
+            isContextReady = false
+            var shouldClose = false
+            if closeConnection {
+                shouldClose = !isStopped && clientOperationAttempt == nil
+                if clientOperationAttempt != nil { closeAfterClientOperation = true }
+                isStopped = true
+            }
+            return (continuation, timeout, shouldClose)
+        }
+        guard let completion else { return false }
+        completion.timeout?.cancel()
+        if completion.shouldClose { client.close() }
+        completion.continuation?.resume(throwing: error)
+        return true
+    }
+
+    private func scheduleContextJoinTimeout(attempt: UInt64) {
+        let timeout = contextJoinTimeout
+        let task = Task { [weak self] in
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.failStart(
+                SFUJuiceError.contextJoinTimedOut,
+                attempt: attempt,
+                closeConnection: true
+            )
+        }
+        let retained = stateQueue.sync {
+            guard activeStartAttempt == attempt else { return false }
+            contextJoinTimeoutTask = task
+            return true
+        }
+        if !retained { task.cancel() }
     }
 
     private func handleInboundEnvelope(_ inbound: SFUClient.InboundEnvelope) {
@@ -323,11 +601,28 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
 
 enum SFUJuiceError: LocalizedError {
     case connectFailed(String)
+    case contextJoinTimedOut
+    case startInProgress
 
     var errorDescription: String? {
         switch self {
             case .connectFailed(let reason):
                 return "KeepTalkingSFU connect failed: \(reason)"
+            case .contextJoinTimedOut:
+                return "KeepTalkingSFU context join timed out."
+            case .startInProgress:
+                return "KeepTalkingSFU is already starting."
+        }
+    }
+}
+
+extension KeepTalkingEnvelopeChannel {
+    fileprivate var sfuChannel: SFUChannel {
+        switch self {
+            case .chat: return .chat
+            case .blob: return .blob
+            case .actionCall: return .actionCall
+            case .signaling: return .signaling
         }
     }
 }

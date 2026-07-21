@@ -23,23 +23,18 @@ extension KeepTalkingClient {
 
     // MARK: - Loop lifecycle
 
-    /// Start the periodic `.heartbeat` maintenance loop. Idempotent.
-    func startMaintenanceLoop() {
-        maintenanceTask?.cancel()
-        maintenanceTask = Task { [weak self] in
+    func makeMaintenanceTask(generation: UInt64) -> Task<Void, Never> {
+        Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(
                     for: .seconds(Self.maintenanceHeartbeatSeconds)
                 )
-                if Task.isCancelled { break }
+                guard !Task.isCancelled,
+                    self?.isConnectionActive(generation) == true
+                else { break }
                 await self?.dispatchMaintenance(.heartbeat)
             }
         }
-    }
-
-    func stopMaintenanceLoop() {
-        maintenanceTask?.cancel()
-        maintenanceTask = nil
     }
 
     // MARK: - Dispatch

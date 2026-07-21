@@ -350,8 +350,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
     // it on a detached task so MainActor callers don't freeze the UI, and
     // gate `connect()` on any in-flight teardown so a tight disconnect→connect
     // sequence still serializes correctly.
-    private let teardownLock = NSLock()
+    private let lifecycleLock = NSLock()
     private var pendingTeardown: Task<Void, Never>?
+    private var lifecycleGeneration: UInt64 = 0
+    private var activeConnectGeneration: UInt64?
+    private var isConnected = false
+    private var isDisconnecting = false
 
     /// Inbound attachment DTOs whose parent message hasn't been persisted yet.
     /// Message and attachment arrive as *separate* envelopes, each handled in
@@ -363,18 +367,138 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let orphanAttachmentLock = NSLock()
     var orphanAttachmentsByParentMessageID: [UUID: [KeepTalkingContextAttachmentDTO]] = [:]
 
-    private func takePendingTeardown() -> Task<Void, Never>? {
-        teardownLock.lock()
-        defer { teardownLock.unlock() }
-        let task = pendingTeardown
-        pendingTeardown = nil
-        return task
+    private func pendingTeardownSnapshot() -> Task<Void, Never>? {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return pendingTeardown
     }
 
-    private func setPendingTeardown(_ task: Task<Void, Never>) {
-        teardownLock.lock()
-        pendingTeardown = task
-        teardownLock.unlock()
+    private func beginConnect() -> UInt64? {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard activeConnectGeneration == nil, !isConnected, !isDisconnecting else {
+            return nil
+        }
+        lifecycleGeneration &+= 1
+        activeConnectGeneration = lifecycleGeneration
+        return lifecycleGeneration
+    }
+
+    private func ensureCurrentConnect(_ generation: UInt64) throws {
+        try Task.checkCancellation()
+        lifecycleLock.lock()
+        let isCurrent =
+            lifecycleGeneration == generation
+            && activeConnectGeneration == generation
+        lifecycleLock.unlock()
+        if !isCurrent { throw CancellationError() }
+    }
+
+    private func prepareTransportStart(_ generation: UInt64) throws -> Task<Void, Error> {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard lifecycleGeneration == generation,
+            activeConnectGeneration == generation
+        else { throw CancellationError() }
+        return try rtcClient.start()
+    }
+
+    private func cancelConnect(_ generation: UInt64) {
+        lifecycleLock.lock()
+        if lifecycleGeneration == generation,
+            activeConnectGeneration == generation
+        {
+            activeConnectGeneration = nil
+        }
+        lifecycleLock.unlock()
+    }
+
+    func isConnectionActive(_ generation: UInt64) -> Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return lifecycleGeneration == generation && isConnected
+    }
+
+    private func connectionLifecycleSnapshot() -> UInt64? {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard !isDisconnecting,
+            activeConnectGeneration == lifecycleGeneration || isConnected
+        else { return nil }
+        return lifecycleGeneration
+    }
+
+    private func isConnectionLifecycleActive(_ generation: UInt64) -> Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return lifecycleGeneration == generation
+            && !isDisconnecting
+            && (activeConnectGeneration == generation || isConnected)
+    }
+
+    private func commitConnect(_ generation: UInt64) -> Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard lifecycleGeneration == generation,
+            activeConnectGeneration == generation
+        else { return false }
+
+        activeConnectGeneration = nil
+        isConnected = true
+        maintenanceTask?.cancel()
+        maintenanceTask = makeMaintenanceTask(generation: generation)
+        postConnectTask?.cancel()
+        postConnectTask = Task { [weak self] in
+            guard let self, self.isConnectionActive(generation) else { return }
+            await self.dispatchMaintenance(.connected)
+            guard !Task.isCancelled,
+                self.isConnectionActive(generation),
+                self.kvService != nil
+            else { return }
+            do {
+                try await self.registerCurrentNodeID()
+            } catch {
+                self.debug("[kv] KV registration failed: \(error)")
+            }
+        }
+        return true
+    }
+
+    private func beginDisconnect(ifConnecting expectedGeneration: UInt64? = nil) -> (
+        Task<Void, Never>?, Task<Void, Never>?, Task<Void, Never>, UInt64
+    )? {
+        lifecycleLock.lock()
+        if let expectedGeneration,
+            lifecycleGeneration != expectedGeneration
+                || activeConnectGeneration != expectedGeneration
+        {
+            lifecycleLock.unlock()
+            return nil
+        }
+        lifecycleGeneration &+= 1
+        let generation = lifecycleGeneration
+        activeConnectGeneration = nil
+        isConnected = false
+        isDisconnecting = true
+        let tasks = (maintenanceTask, postConnectTask)
+        maintenanceTask = nil
+        postConnectTask = nil
+
+        let previous = pendingTeardown
+        let rtc = rtcClient
+        let teardown = Task.detached(priority: .userInitiated) {
+            if let previous { await previous.value }
+            rtc.stop()
+        }
+        pendingTeardown = teardown
+        lifecycleLock.unlock()
+        return (tasks.0, tasks.1, teardown, generation)
+    }
+
+    private func finishDisconnect(_ generation: UInt64) {
+        lifecycleLock.lock()
+        if lifecycleGeneration == generation { isDisconnecting = false }
+        lifecycleLock.unlock()
     }
 
     /// Creates a client with its transport, storage, and optional AI integrations.
@@ -543,15 +667,18 @@ public final class KeepTalkingClient: @unchecked Sendable {
             try await self?.loadGroupChatSecret(for: contextID)
         }
         rtcClient.onRawMessage = { [weak self] raw in
-            self?.onRawMessage?(raw)
+            guard let self, let generation = self.connectionLifecycleSnapshot(),
+                self.isConnectionLifecycleActive(generation)
+            else { return }
+            self.onRawMessage?(raw)
         }
         rtcClient.onBlobData = { [weak self] data in
-            guard let self else {
-                return
-            }
+            guard let self, let generation = self.connectionLifecycleSnapshot() else { return }
             Task {
+                guard self.isConnectionLifecycleActive(generation) else { return }
                 do {
                     try await self.blobFrameProcessor.process {
+                        guard self.isConnectionLifecycleActive(generation) else { return }
                         try await self.handleIncomingBlobFrameData(data)
                     }
                 } catch {
@@ -562,34 +689,46 @@ public final class KeepTalkingClient: @unchecked Sendable {
             }
         }
         rtcClient.onRealtimeData = { [weak self] data in
-            _ = self?.activeVoiceSession?.receiveRelayedFrame(data)
+            guard let self, let generation = self.connectionLifecycleSnapshot(),
+                self.isConnectionLifecycleActive(generation)
+            else { return }
+            _ = self.activeVoiceSession?.receiveRelayedFrame(data)
         }
         rtcClient.onEnvelope = { [weak self] envelope in
+            guard let self, let generation = self.connectionLifecycleSnapshot() else { return }
             Task {
+                guard self.isConnectionLifecycleActive(generation) else { return }
                 do {
-                    try await self?.handleIncomingEnvelope(envelope)
+                    try await self.handleIncomingEnvelope(envelope)
                 } catch {
-                    self?.onLog?(
+                    self.onLog?(
                         "[client] failed handling envelope error=\(error.localizedDescription)"
                     )
                 }
             }
         }
         rtcClient.onTrustEnvelope = { [weak self] envelope in
+            guard let self, let generation = self.connectionLifecycleSnapshot() else { return }
             Task {
-                await self?.handleIncomingTrustEnvelope(envelope)
+                guard self.isConnectionLifecycleActive(generation) else { return }
+                await self.handleIncomingTrustEnvelope(envelope)
             }
         }
         rtcClient.onPeerConnect = { [weak self] nodeID in
+            guard let self, let generation = self.connectionLifecycleSnapshot() else { return }
             Task {
-                await self?.handlePeerConnect(nodeID: nodeID)
+                guard self.isConnectionLifecycleActive(generation) else { return }
+                await self.handlePeerConnect(nodeID: nodeID)
             }
         }
         rtcClient.onBroadcastReady = { [weak self] in
-            // Broadcast just opened — drain anything queued on the outbox
-            // even before any peer is observed, since SFU forwarding can
-            // deliver to peers who joined the room while we were offline.
-            Task { await self?.drainOutbox() }
+            guard let self, let generation = self.connectionLifecycleSnapshot() else { return }
+            Task {
+                guard self.isConnectionLifecycleActive(generation) else { return }
+                await self.drainOutbox()
+                guard self.isConnectionLifecycleActive(generation) else { return }
+                await self.dispatchMaintenance(.heartbeat)
+            }
         }
     }
 
@@ -657,29 +796,42 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// `registerLocalActionsInExecutors()` explicitly (the App and CLI do, off
     /// the connection path); the daemon opts out.
     public func connect() async throws {
-        // Ensure any in-flight teardown from a previous disconnect() completes
-        // before bringing the transport back up.
-        if let teardown = takePendingTeardown() {
-            await teardown.value
+        try Task.checkCancellation()
+        guard let generation = beginConnect() else {
+            throw KeepTalkingTransportError.allChannelsUnavailable
         }
 
-        await mcpManager.setHTTPAuthURLHandler(mcpHTTPAuthURLHandler)
-        _ = try await ensure(config.contextID, for: KeepTalkingContext.self)
-
-        try await rtcClient.start()
-        try await persistMyNode()
-
-        startMaintenanceLoop()
-        postConnectTask?.cancel()
-        postConnectTask = Task { [weak self] in
-            guard let self else { return }
-            await self.dispatchMaintenance(.connected)
-            guard !Task.isCancelled, self.kvService != nil else { return }
-            do {
-                try await self.registerCurrentNodeID()
-            } catch {
-                self.debug("[kv] KV registration failed: \(error)")
+        var transportStarted = false
+        do {
+            // Ensure any in-flight teardown from a previous disconnect() completes
+            // before bringing the transport back up.
+            if let teardown = pendingTeardownSnapshot() {
+                await teardown.value
             }
+            try ensureCurrentConnect(generation)
+
+            await mcpManager.setHTTPAuthURLHandler(mcpHTTPAuthURLHandler)
+            try ensureCurrentConnect(generation)
+            _ = try await ensure(config.contextID, for: KeepTalkingContext.self)
+            try ensureCurrentConnect(generation)
+
+            let startTask = try prepareTransportStart(generation)
+            transportStarted = true
+            try await startTask.waitPropagatingCancellation()
+            try ensureCurrentConnect(generation)
+            try await persistMyNode()
+            try ensureCurrentConnect(generation)
+
+            guard commitConnect(generation) else { throw CancellationError() }
+        } catch {
+            if transportStarted,
+                let teardown = scheduleDisconnect(ifConnecting: generation)
+            {
+                await teardown.value
+            } else {
+                cancelConnect(generation)
+            }
+            throw error
         }
     }
 
@@ -692,32 +844,27 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// hundreds of milliseconds. A subsequent `connect()` will await the
     /// in-flight teardown before restarting the transport.
     public func disconnect() {
-        stopMaintenanceLoop()
-        postConnectTask?.cancel()
-        postConnectTask = nil
+        _ = scheduleDisconnect()
+    }
+
+    private func scheduleDisconnect(
+        ifConnecting generation: UInt64? = nil
+    ) -> Task<Void, Never>? {
+        guard let tasks = beginDisconnect(ifConnecting: generation) else { return nil }
+        defer { finishDisconnect(tasks.3) }
+        tasks.0?.cancel()
+        tasks.1?.cancel()
         failAllPendingActionCalls(error: KeepTalkingClientError.clientDisconnected)
         failAllPendingActionCatalogRequests(error: KeepTalkingClientError.clientDisconnected)
         failAllPendingContextSync(error: KeepTalkingClientError.clientDisconnected)
-
-        let rtc = rtcClient
-        let previous = takePendingTeardown()
-        let teardown = Task.detached(priority: .userInitiated) {
-            if let previous {
-                await previous.value
-            }
-            rtc.stop()
-        }
-        setPendingTeardown(teardown)
+        return tasks.2
     }
 
     /// Awaitable variant of `disconnect()` that returns once the WebRTC
     /// transport has fully torn down. Prefer this when the caller needs to
     /// observe a fully-stopped state (e.g. tests, or a controlled shutdown).
     public func disconnectAndWait() async {
-        disconnect()
-        if let teardown = takePendingTeardown() {
-            await teardown.value
-        }
+        if let teardown = scheduleDisconnect() { await teardown.value }
     }
 
     /// Installs a callback for HTTP-based MCP authorization flows.
@@ -805,9 +952,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// Actively confirms a `.healthy` backbone is really carrying bytes, not
     /// wedged open (e.g. the keepalive task starved across a long suspend).
     ///
-    /// Sends one presence wave and watches the transport's inbound counter
-    /// for progress within `timeout`. Any inbound byte — a presence echo, an
-    /// SFU roster reply, a peer's traffic — counts. Returns `true` if inbound
+    /// Sends one presence wave plus a native SFU roster request, then watches
+    /// the transport's inbound counter for progress within `timeout`. Any
+    /// inbound byte — a presence echo, roster reply, or peer's traffic —
+    /// counts. Returns `true` if inbound
     /// advanced (live), `false` on timeout (wedged → caller should
     /// re-establish).
     ///

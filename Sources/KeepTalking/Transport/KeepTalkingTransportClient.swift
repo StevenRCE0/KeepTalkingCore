@@ -4,7 +4,7 @@ typealias KeepTalkingTransportContextSecretProvider = @Sendable (UUID) async thr
 typealias KeepTalkingTransportBlobDataHandler = @Sendable (Data) -> Void
 typealias KeepTalkingTransportRealtimeDataHandler = @Sendable (Data) -> Void
 
-protocol KeepTalkingTransportClient: AnyObject {
+protocol KeepTalkingTransportClient: AnyObject, Sendable {
     var onEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)? { get set }
     var onTrustEnvelope: (@Sendable (any KeepTalkingEnvelope) -> Void)? { get set }
     var onBlobData: KeepTalkingTransportBlobDataHandler? { get set }
@@ -18,7 +18,10 @@ protocol KeepTalkingTransportClient: AnyObject {
     var onLog: (@Sendable (String) -> Void)? { get set }
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider? { get set }
 
-    func start() async throws
+    /// Synchronously reserves a lifecycle, then returns the asynchronous
+    /// connection work. Callers can therefore serialize start against stop
+    /// without an executor hop reopening the transport after teardown.
+    func start() throws -> Task<Void, Error>
     func stop()
     func sendEnvelope(_ envelope: any KeepTalkingEnvelope) throws
     func sendBlobData(
@@ -35,7 +38,7 @@ protocol KeepTalkingTransportClient: AnyObject {
     /// Current state of the always-on broadcast (SFU) backbone. Pure read of
     /// the carrier's self-reported state machine — no probe.
     func broadcastState() -> BroadcastChannelState
-    /// Emit a single liveness probe on the backbone (a presence wave). Used by
+    /// Emit a single liveness probe on the backbone. Used by
     /// `KeepTalkingClient.probeTransport()` to confirm a stale-open channel is
     /// really carrying bytes; inbound progress is observed via `runtimeStats`.
     func sendLivenessProbe()
@@ -66,5 +69,16 @@ extension KeepTalkingTransportClient {
                 .missingCryptor(envelope.kind)
         }
         try sendEnvelope(try await cryptor.encrypt(envelope))
+    }
+}
+
+extension Task where Success == Void, Failure == any Error {
+    func waitPropagatingCancellation() async throws {
+        try await withTaskCancellationHandler {
+            try await value
+            try Task<Never, Never>.checkCancellation()
+        } onCancel: {
+            cancel()
+        }
     }
 }

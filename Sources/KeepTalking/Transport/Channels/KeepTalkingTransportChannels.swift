@@ -62,11 +62,13 @@ protocol KeepTalkingTransportChannelProtocol: AnyObject, Sendable {
 protocol KeepTalkingBroadcastTransportChannel: KeepTalkingTransportChannelProtocol {
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider? { get set }
     var state: BroadcastChannelState { get }
+    var onPeerJoined: (@Sendable () -> Void)? { get set }
 
-    func start() async throws
+    func start() throws -> Task<Void, Error>
     func stop()
     func sendRawEnvelope(_ envelope: any KeepTalkingEnvelope) throws
     func sendRealtimeData(_ data: Data) throws
+    func sendLivenessProbe()
     func runtimeStats() -> KeepTalkingRuntimeStats
 }
 

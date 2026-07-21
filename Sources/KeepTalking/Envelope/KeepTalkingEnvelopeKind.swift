@@ -94,6 +94,10 @@ extension KeepTalkingEnvelopeKind {
                 .voiceCallEnded,
                 .voiceCallSignal:
                 return .sfuOnly
+            // Context reconciliation has no direct-path delivery ack, so a
+            // stale P2P channel could accept and silently lose it.
+            case .contextSync:
+                return .sfuOnly
             // Service envelopes — catalog, node state, agent continuations.
             // Reliability matters more than latency; SFU is the safe path.
             case .node,
@@ -105,9 +109,8 @@ extension KeepTalkingEnvelopeKind {
                 .encryptedActionCatalogResult,
                 .encryptedAgentTurnContinuationResponse:
                 return .sfuOnly
-            // User-visible payload — chat, sync, action calls. Latency wins.
-            case .contextSync,
-                .message,
+            // User-visible payload — chat and action calls. Latency wins.
+            case .message,
                 .attachment,
                 .context,
                 .voiceCallTranscriptLine,

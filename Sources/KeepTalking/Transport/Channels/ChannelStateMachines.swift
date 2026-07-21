@@ -49,6 +49,10 @@ public struct BroadcastChannelStateMachine: Sendable {
                 state = .reconnecting(attempt: 1)
                 return .startReconnect(attempt: 1)
 
+            case (.connecting, .transportDegraded):
+                state = .failed
+                return .none
+
             case (.reconnecting(let n), .reconnectFailed):
                 let next = n + 1
                 state = .reconnecting(attempt: next)

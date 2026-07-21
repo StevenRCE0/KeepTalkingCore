@@ -23,13 +23,3 @@ extension KeepTalkingEnvelopeAsyncHandlers {
         register(KeepTalkingP2PPresencePayload.self, handler)
     }
 }
-
-extension KeepTalkingEnvelopeHandlers {
-    mutating func registerP2PPresenceHandler(
-        for transport: KeepTalkingContextTransport
-    ) {
-        onP2PPresence { presence in
-            transport.consumeP2PPresence(presence)
-        }
-    }
-}

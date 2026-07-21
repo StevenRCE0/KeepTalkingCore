@@ -1,6 +1,41 @@
 import Foundation
 
 extension KeepTalkingContextSyncEnvelope {
+    public var targetPeerNodeID: UUID? {
+        switch self {
+            case .summaryRequest(let request):
+                return request.recipient
+            case .summaryResult(let result):
+                return result.requester
+            case .tailRequest(let request):
+                return request.recipient
+            case .chunkRequest(let request):
+                return request.recipient
+            case .messagesResult(let result):
+                return result.requester
+            case .attachmentRequest:
+                return nil
+            case .attachmentRecordsRequest(let request):
+                return request.recipient
+            case .attachmentRecordsResult(let result):
+                return result.requester
+            case .sideNotesRequest(let request):
+                return request.recipient
+            case .sideNotesResult(let result):
+                return result.requester
+            case .transcriptSummaryRequest(let request):
+                return request.recipient
+            case .transcriptSummaryResult(let result):
+                return result.requester
+            case .transcriptTailRequest(let request):
+                return request.recipient
+            case .transcriptChunkRequest(let request):
+                return request.recipient
+            case .transcriptLinesResult(let result):
+                return result.requester
+        }
+    }
+
     public var participantNodeIDs: [UUID] {
         switch self {
             case .summaryRequest(let request):

@@ -4,7 +4,7 @@ import Foundation
 /// Wraps the underlying SFU client with explicit state machine management.
 ///
 /// State transitions:
-///   connecting → ready            (channels opened)
+///   connecting → ready            (roster confirms context membership)
 ///   ready → reconnecting(1)       (transport degraded)
 ///   reconnecting(n) → ready       (reconnect succeeded)
 ///   reconnecting(n) → reconnecting(n+1)  (retry — never gives up)
@@ -17,6 +17,7 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
 
     var onReceive: (@Sendable (KeepTalkingSequencedEnvelope) -> Void)?
     var onStateChange: (@Sendable () -> Void)?
+    var onPeerJoined: (@Sendable () -> Void)?
     var onLog: (@Sendable (String) -> Void)?
     /// Surfaced when a remote peer opens an SFU-mediated relay to us.
     /// The carrier is already wired to inbound `RELAY_DATA` deliveries;
@@ -28,6 +29,9 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
     private var sfuClient: (any KeepTalkingTransportClient)?
     private let config: KeepTalkingConfig
     private var stateMachine = BroadcastChannelStateMachine()
+    private var lifecycleGeneration: UInt64 = 0
+    private var activeStartGeneration: UInt64?
+    private let lifecycleOperationLock = NSLock()
     private let stateQueue = DispatchQueue(label: "kt.broadcast.state")
     private var reconnectTask: Task<Void, Never>?
     private var contextSecretProviderStorage: KeepTalkingTransportContextSecretProvider?
@@ -39,11 +43,14 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
     private var relayCarriers: [Data: KeepTalkingSFURelayCarrier] = [:]
 
     var state: BroadcastChannelState {
-        stateQueue.sync { stateMachine.state }
+        let snapshot = stateQueue.sync { (stateMachine.state, sfuClient) }
+        guard snapshot.0 == .ready else { return snapshot.0 }
+        guard let client = snapshot.1 else { return .failed }
+        return client.broadcastState() == .ready ? .ready : .reconnecting(attempt: 1)
     }
 
     var isReady: Bool {
-        state == .ready && sfuClient != nil
+        state == .ready
     }
 
     // MARK: - Init
@@ -54,49 +61,129 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
 
     // MARK: - Lifecycle
 
-    func start() async throws {
-        sfuClient = try await makeTransportClient()
-        bindSFUCallbacks()
-        try await sfuClient?.start()
-        applyEvent(.channelsOpened)
+    func start() throws -> Task<Void, Error> {
+        guard
+            let generation = stateQueue.sync(execute: { () -> UInt64? in
+                guard sfuClient == nil, activeStartGeneration == nil else { return nil }
+                lifecycleGeneration &+= 1
+                activeStartGeneration = lifecycleGeneration
+                return lifecycleGeneration
+            })
+        else {
+            throw KeepTalkingTransportError.allChannelsUnavailable
+        }
+
+        return Task { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.start(generation: generation)
+        }
+    }
+
+    private func start(generation: UInt64) async throws {
+        var startedClient: (any KeepTalkingTransportClient)?
+        do {
+            let client = try await makeTransportClient()
+            startedClient = client
+            let installed = stateQueue.sync {
+                guard lifecycleGeneration == generation,
+                    activeStartGeneration == generation,
+                    sfuClient == nil
+                else { return false }
+                activeStartGeneration = nil
+                sfuClient = client
+                return true
+            }
+            guard installed else {
+                client.stop()
+                throw CancellationError()
+            }
+
+            bindSFUCallbacks(to: client, generation: generation)
+            let startTask = try prepareStart(for: client, generation: generation)
+            try await startTask.waitPropagatingCancellation()
+            try Task.checkCancellation()
+            guard isCurrent(client, generation: generation) else {
+                throw CancellationError()
+            }
+            guard client.broadcastState() == .ready else {
+                throw KeepTalkingTransportError.allChannelsUnavailable
+            }
+            guard applyEvent(.channelsOpened, for: client, generation: generation) else {
+                throw CancellationError()
+            }
+            guard isCurrent(client, generation: generation) else {
+                throw CancellationError()
+            }
+            guard client.broadcastState() == .ready else {
+                throw KeepTalkingTransportError.allChannelsUnavailable
+            }
+        } catch {
+            if let client = startedClient {
+                if isCurrent(client, generation: generation) {
+                    _ = applyEvent(.transportDegraded, for: client, generation: generation)
+                    removeCurrentClient(client, generation: generation)
+                    _ = applyEvent(.stopped, generation: generation)
+                }
+                client.stop()
+            } else {
+                clearStartReservation(generation: generation)
+                _ = applyEvent(.transportDegraded, generation: generation)
+            }
+            throw error
+        }
     }
 
     func stop() {
-        reconnectTask?.cancel()
-        reconnectTask = nil
-        sfuClient?.stop()
-        sfuClient = nil
-        applyEvent(.stopped)
+        lifecycleOperationLock.lock()
+        let stopped = stateQueue.sync {
+            lifecycleGeneration &+= 1
+            let result = (sfuClient, reconnectTask)
+            activeStartGeneration = nil
+            sfuClient = nil
+            reconnectTask = nil
+            _ = stateMachine.handle(.stopped)
+            return result
+        }
+        lifecycleOperationLock.unlock()
+        stopped.1?.cancel()
+        stopped.0?.stop()
+        onStateChange?()
     }
 
     // MARK: - Send
 
     func send(_ sequenced: KeepTalkingSequencedEnvelope) throws {
+        guard let client = readyTransportClient() else {
+            throw KeepTalkingTransportError.allChannelsUnavailable
+        }
         do {
-            guard let sfuClient else { throw KeepTalkingTransportError.allChannelsUnavailable }
-            try sfuClient.sendEnvelope(sequenced.envelope)
+            try client.sendEnvelope(sequenced.envelope)
         } catch {
-            handleSendFailure(error, operation: "sequenced send")
+            handleSendFailure(error, operation: "sequenced send", client: client)
             throw error
         }
     }
 
     func sendBlobData(_ data: Data) throws {
+        guard let client = readyTransportClient() else {
+            throw KeepTalkingTransportError.allChannelsUnavailable
+        }
         do {
-            guard let sfuClient else { throw KeepTalkingTransportError.allChannelsUnavailable }
-            try sfuClient.sendBlobData(data, targetPeerNodeID: nil)
+            try client.sendBlobData(data, targetPeerNodeID: nil)
         } catch {
-            handleSendFailure(error, operation: "blob send")
+            handleSendFailure(error, operation: "blob send", client: client)
             throw error
         }
     }
 
     func sendRealtimeData(_ data: Data) throws {
+        guard let client = readyTransportClient() else {
+            throw KeepTalkingTransportError.allChannelsUnavailable
+        }
         do {
-            guard let sfuClient else { throw KeepTalkingTransportError.allChannelsUnavailable }
-            try sfuClient.sendRealtimeDataViaBroadcast(data)
+            try client.sendRealtimeDataViaBroadcast(data)
         } catch {
-            handleSendFailure(error, operation: "realtime send")
+            handleSendFailure(error, operation: "realtime send", client: client)
             throw error
         }
     }
@@ -105,8 +192,14 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
     /// Failures here are not treated as transport degraded: presence is best-effort
     /// and the authoritative degraded signal comes from channel/ICE state callbacks.
     func sendRawEnvelope(_ envelope: any KeepTalkingEnvelope) throws {
-        guard let sfuClient else { throw KeepTalkingTransportError.allChannelsUnavailable }
-        try sfuClient.sendEnvelope(envelope)
+        guard let client = readyTransportClient() else {
+            throw KeepTalkingTransportError.allChannelsUnavailable
+        }
+        try client.sendEnvelope(envelope)
+    }
+
+    func sendLivenessProbe() {
+        currentTransportClient()?.sendLivenessProbe()
     }
 
     // MARK: - SFU relay
@@ -116,7 +209,7 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
     /// `RELAY_DATA` frames; the caller wires `onMessage` / `onState`
     /// and calls `markReady()` when its side is initialized.
     func openRelay(toPeerPubkey peer: Data) -> KeepTalkingSFURelayCarrier? {
-        guard let sfuJuice = sfuClient as? KeepTalkingSFUJuiceClient else {
+        guard let sfuJuice = readyTransportClient() as? KeepTalkingSFUJuiceClient else {
             return nil
         }
         let relayID = sfuJuice.openRelay(to: peer)
@@ -146,7 +239,7 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
 
     // MARK: - SFU callback binding
 
-    private func makeTransportClient() async throws -> any KeepTalkingTransportClient {
+    private func makeTransportClient() async throws -> KeepTalkingSFUJuiceClient {
         guard let endpoint = config.sfuEndpoint else {
             throw KeepTalkingTransportError.sfuEndpointMissing
         }
@@ -155,26 +248,52 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
             config: config,
             sfuHost: endpoint.host,
             sfuPort: endpoint.port,
-            signingKey: signingKey
+            signingKey: signingKey,
+            stopBeforeStartIsTerminal: true
         )
     }
 
-    private func bindSFUCallbacks() {
-        guard let sfuClient else { return }
+    private func bindSFUCallbacks(
+        to sfuClient: any KeepTalkingTransportClient,
+        generation: UInt64
+    ) {
+        let clientID = ObjectIdentifier(sfuClient)
         sfuClient.onEnvelope = { [weak self] envelope in
+            guard self?.isCurrent(clientID, generation: generation) == true else { return }
             self?.handleSFUEnvelope(envelope)
         }
-        sfuClient.onBlobData = nil
-        sfuClient.onRealtimeData = nil
+        sfuClient.onBlobData = { [weak self] data in
+            guard let self, self.isCurrent(clientID, generation: generation) else { return }
+            let handler = self.stateQueue.sync { self.blobDataHandlerStorage }
+            handler?(data)
+        }
+        sfuClient.onRealtimeData = { [weak self] data in
+            guard let self, self.isCurrent(clientID, generation: generation) else { return }
+            let handler = self.stateQueue.sync { self.realtimeDataHandlerStorage }
+            handler?(data)
+        }
         sfuClient.onRawMessage = nil
         sfuClient.onPeerConnect = nil
         if let sfuJuice = sfuClient as? KeepTalkingSFUJuiceClient {
-            sfuJuice.onTransportDegraded = { [weak self] reason in
+            sfuJuice.presenceForwarder = { [weak self] event in
+                guard let self,
+                    self.isCurrent(clientID, generation: generation),
+                    case .joined(let context, _) = event,
+                    context == self.config.contextID
+                else { return }
+                self.onPeerJoined?()
+            }
+            sfuJuice.onTransportDegraded = { [weak self, weak sfuJuice] reason in
+                guard let sfuJuice else { return }
                 self?.debug("sfu transport degraded reason=\(reason)")
-                self?.applyEvent(.transportDegraded)
+                self?.applyEvent(
+                    .transportDegraded,
+                    for: sfuJuice,
+                    generation: generation
+                )
             }
             sfuJuice.onRelayOpen = { [weak self] relayID, peer, _ in
-                guard let self else { return }
+                guard let self, self.isCurrent(clientID, generation: generation) else { return }
                 let carrier = self.makeCarrier(
                     sfuJuice: sfuJuice,
                     relayID: relayID,
@@ -183,12 +302,12 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
                 self.onRelayOpen?(carrier)
             }
             sfuJuice.onRelayData = { [weak self] relayID, payload in
-                guard let self else { return }
+                guard let self, self.isCurrent(clientID, generation: generation) else { return }
                 let carrier = self.stateQueue.sync { self.relayCarriers[relayID] }
                 carrier?.deliverInbound(payload)
             }
             sfuJuice.onRelayClose = { [weak self] relayID, reason in
-                guard let self else { return }
+                guard let self, self.isCurrent(clientID, generation: generation) else { return }
                 let carrier = self.stateQueue.sync { () -> KeepTalkingSFURelayCarrier? in
                     let c = self.relayCarriers[relayID]
                     self.relayCarriers.removeValue(forKey: relayID)
@@ -198,9 +317,7 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
             }
         }
         sfuClient.onLog = onLog
-        sfuClient.contextSecretProvider = contextSecretProviderStorage
-        sfuClient.onBlobData = blobDataHandlerStorage
-        sfuClient.onRealtimeData = realtimeDataHandlerStorage
+        sfuClient.contextSecretProvider = stateQueue.sync { contextSecretProviderStorage }
     }
 
     private func handleSFUEnvelope(_ envelope: any KeepTalkingEnvelope) {
@@ -216,71 +333,215 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
 
     // MARK: - State machine
 
-    private func applyEvent(_ event: BroadcastChannelEvent) {
-        let effect = stateQueue.sync { stateMachine.handle(event) }
+    @discardableResult
+    private func applyEvent(
+        _ event: BroadcastChannelEvent,
+        for expectedClient: (any KeepTalkingTransportClient)? = nil,
+        generation expectedGeneration: UInt64? = nil
+    ) -> Bool {
+        let transition = stateQueue.sync {
+            () -> (BroadcastChannelEffect, (any KeepTalkingTransportClient)?, UInt64)? in
+            if let expectedGeneration, lifecycleGeneration != expectedGeneration { return nil }
+            if let expectedClient {
+                guard let current = sfuClient, current === expectedClient else { return nil }
+            }
+            let effect = stateMachine.handle(event)
+            return (effect, sfuClient, lifecycleGeneration)
+        }
+        guard let transition else { return false }
         onStateChange?()
-        switch effect {
+        switch transition.0 {
             case .startReconnect(let attempt):
-                scheduleReconnect(attempt: attempt)
+                if let client = transition.1 {
+                    scheduleReconnect(
+                        attempt: attempt,
+                        client: client,
+                        generation: transition.2
+                    )
+                }
             case .none:
                 break
         }
+        return true
     }
 
-    private func scheduleReconnect(attempt: Int) {
-        reconnectTask?.cancel()
+    private func scheduleReconnect(
+        attempt: Int,
+        client: any KeepTalkingTransportClient,
+        generation: UInt64
+    ) {
         let delay = min(pow(2.0, Double(attempt - 1)), 8.0)
         debug("scheduling sfu reconnect attempt=\(attempt) delay=\(delay)s")
 
-        reconnectTask = Task { [weak self] in
+        let task = Task { [weak self] in
             guard let self else { return }
             try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.isCurrent(client, generation: generation) else {
+                return
+            }
 
-            self.sfuClient?.stop()
+            client.stop()
             try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.isCurrent(client, generation: generation) else {
+                return
+            }
 
             do {
-                self.bindSFUCallbacks()
-                try await self.sfuClient?.start()
+                self.bindSFUCallbacks(to: client, generation: generation)
+                let startTask = try self.prepareStart(
+                    for: client,
+                    generation: generation
+                )
+                try await startTask.waitPropagatingCancellation()
+                guard !Task.isCancelled,
+                    self.isCurrent(client, generation: generation)
+                else {
+                    client.stop()
+                    return
+                }
+                guard client.broadcastState() == .ready else {
+                    client.stop()
+                    self.applyEvent(.reconnectFailed, for: client, generation: generation)
+                    return
+                }
                 self.debug("sfu reconnected successfully attempt=\(attempt)")
-                self.applyEvent(.reconnectSucceeded)
+                guard
+                    self.applyEvent(
+                        .reconnectSucceeded,
+                        for: client,
+                        generation: generation
+                    )
+                else {
+                    client.stop()
+                    return
+                }
+                guard self.isCurrent(client, generation: generation) else {
+                    client.stop()
+                    return
+                }
+                guard client.broadcastState() == .ready else {
+                    client.stop()
+                    _ = self.applyEvent(
+                        .transportDegraded,
+                        for: client,
+                        generation: generation
+                    )
+                    return
+                }
             } catch {
+                guard !Task.isCancelled, self.isCurrent(client, generation: generation) else {
+                    client.stop()
+                    return
+                }
                 self.debug("sfu reconnect failed attempt=\(attempt) error=\(error.localizedDescription)")
-                self.applyEvent(.reconnectFailed)
+                self.applyEvent(.reconnectFailed, for: client, generation: generation)
             }
         }
+        let previous = stateQueue.sync {
+            () -> (retained: Bool, previous: Task<Void, Never>?) in
+            guard lifecycleGeneration == generation,
+                let current = sfuClient,
+                current === client,
+                stateMachine.state == .reconnecting(attempt: attempt)
+            else { return (false, nil) }
+            let previous = reconnectTask
+            reconnectTask = task
+            return (true, previous)
+        }
+        previous.previous?.cancel()
+        if !previous.retained { task.cancel() }
+    }
+
+    private func prepareStart(
+        for client: any KeepTalkingTransportClient,
+        generation: UInt64
+    ) throws -> Task<Void, Error> {
+        lifecycleOperationLock.lock()
+        defer { lifecycleOperationLock.unlock() }
+        guard !Task.isCancelled,
+            isCurrent(client, generation: generation)
+        else { throw CancellationError() }
+        return try client.start()
+    }
+
+    private func clearStartReservation(generation: UInt64) {
+        stateQueue.sync {
+            guard lifecycleGeneration == generation,
+                activeStartGeneration == generation
+            else { return }
+            activeStartGeneration = nil
+        }
+    }
+
+    private func isCurrent(
+        _ client: any KeepTalkingTransportClient,
+        generation: UInt64? = nil
+    ) -> Bool {
+        stateQueue.sync {
+            if let generation, lifecycleGeneration != generation { return false }
+            guard let current = sfuClient else { return false }
+            return current === client
+        }
+    }
+
+    private func isCurrent(_ clientID: ObjectIdentifier, generation: UInt64) -> Bool {
+        stateQueue.sync {
+            guard lifecycleGeneration == generation, let current = sfuClient else { return false }
+            return ObjectIdentifier(current) == clientID
+        }
+    }
+
+    private func removeCurrentClient(
+        _ client: any KeepTalkingTransportClient,
+        generation: UInt64
+    ) {
+        let reconnect = stateQueue.sync {
+            guard lifecycleGeneration == generation,
+                let current = sfuClient,
+                current === client
+            else { return nil as Task<Void, Never>? }
+            let reconnect = reconnectTask
+            reconnectTask = nil
+            sfuClient = nil
+            return reconnect
+        }
+        reconnect?.cancel()
+    }
+
+    private func currentTransportClient() -> (any KeepTalkingTransportClient)? {
+        stateQueue.sync { sfuClient }
+    }
+
+    private func readyTransportClient() -> (any KeepTalkingTransportClient)? {
+        let client = stateQueue.sync {
+            stateMachine.state == .ready ? sfuClient : nil
+        }
+        guard let client, client.broadcastState() == .ready else { return nil }
+        return client
     }
 
     // MARK: - Passthrough accessors
 
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider? {
-        get { contextSecretProviderStorage }
+        get { stateQueue.sync { contextSecretProviderStorage } }
         set {
-            contextSecretProviderStorage = newValue
-            sfuClient?.contextSecretProvider = newValue
+            stateQueue.sync { contextSecretProviderStorage = newValue }
+            currentTransportClient()?.contextSecretProvider = newValue
         }
     }
 
     var onBlobData: KeepTalkingTransportBlobDataHandler? {
-        get { blobDataHandlerStorage }
-        set {
-            blobDataHandlerStorage = newValue
-            sfuClient?.onBlobData = newValue
-        }
+        get { stateQueue.sync { blobDataHandlerStorage } }
+        set { stateQueue.sync { blobDataHandlerStorage = newValue } }
     }
 
     var onRealtimeData: KeepTalkingTransportRealtimeDataHandler? {
-        get { realtimeDataHandlerStorage }
-        set {
-            realtimeDataHandlerStorage = newValue
-            sfuClient?.onRealtimeData = newValue
-        }
+        get { stateQueue.sync { realtimeDataHandlerStorage } }
+        set { stateQueue.sync { realtimeDataHandlerStorage = newValue } }
     }
 
     func runtimeStats() -> KeepTalkingRuntimeStats {
-        sfuClient?.runtimeStats()
+        currentTransportClient()?.runtimeStats()
             ?? KeepTalkingRuntimeStats(
                 sent: 0,
                 received: 0,
@@ -293,9 +554,13 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
             )
     }
 
-    private func handleSendFailure(_ error: Error, operation: String) {
+    private func handleSendFailure(
+        _ error: Error,
+        operation: String,
+        client: any KeepTalkingTransportClient
+    ) {
         debug("\(operation) failed error=\(error.localizedDescription)")
-        applyEvent(.transportDegraded)
+        applyEvent(.transportDegraded, for: client)
     }
 
     private func debug(_ message: String) {

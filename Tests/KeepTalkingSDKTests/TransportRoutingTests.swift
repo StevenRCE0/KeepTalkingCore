@@ -4,10 +4,10 @@ import Testing
 @testable import KeepTalkingSDK
 
 struct TransportRoutingTests {
-    @Test("message envelopes route through a ready direct channel")
-    func messageEnvelopeRoutesThroughDirect() async throws {
+    @Test("untargeted message envelopes fan out through broadcast")
+    func untargetedMessageUsesBroadcast() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "41000000-0000-0000-0000-000000000000")!
@@ -19,31 +19,66 @@ struct TransportRoutingTests {
 
         try harness.transport.sendEnvelope(envelope)
 
-        #expect(direct.sentSequenced.count == 1)
-        let sentEnvelope = try #require(direct.sentSequenced.first?.envelope)
+        #expect(direct.sentSequenced.isEmpty)
+        #expect(harness.broadcast.sentSequenced.count == 1)
+        let sentEnvelope = try #require(harness.broadcast.sentSequenced.first?.envelope)
         guard let message = sentEnvelope.message else {
-            Issue.record("expected chat message on direct channel")
+            Issue.record("expected chat message on broadcast channel")
             return
         }
-        #expect(message.content == "hello over direct")
-        #expect(harness.broadcast.sentSequenced.isEmpty)
+        #expect(message.content == "hello over broadcast")
     }
 
-    @Test("context sync envelopes use preferDirect policy")
-    func contextSyncPrefersDirectBeforeBroadcast() {
+    @Test("context sync envelopes use the membership-gated SFU")
+    func contextSyncUsesSFUOnly() {
         let envelope = makeContextSyncEnvelope(
             contextID: UUID(uuidString: "10000000-0000-0000-0000-000000000000")!,
             requester: UUID(uuidString: "20000000-0000-0000-0000-000000000000")!,
             recipient: UUID(uuidString: "30000000-0000-0000-0000-000000000000")!
         )
 
-        #expect(envelope.routingPolicy == .preferDirect)
+        #expect(envelope.routingPolicy == .sfuOnly)
+    }
+
+    @Test("context sync metadata identifies its directed peer")
+    func contextSyncTargetsRecipientAndRequester() {
+        let context = UUID()
+        let requester = UUID()
+        let recipient = UUID()
+        let request = KeepTalkingContextSyncSummaryRequest(
+            context: context,
+            requester: requester,
+            recipient: recipient
+        )
+        let result = KeepTalkingContextSyncSummaryResult(
+            request: request.request,
+            context: context,
+            requester: requester,
+            responder: recipient,
+            summary: KeepTalkingContextSyncMetadata(
+                messageCount: 0,
+                senders: [],
+                chunks: []
+            )
+        )
+
+        #expect(KeepTalkingContextSyncEnvelope.summaryRequest(request).targetPeerNodeID == recipient)
+        #expect(KeepTalkingContextSyncEnvelope.summaryResult(result).targetPeerNodeID == requester)
+        #expect(
+            KeepTalkingContextSyncEnvelope.attachmentRequest(
+                KeepTalkingContextSyncAttachmentRequest(
+                    context: context,
+                    requester: requester,
+                    hashes: []
+                )
+            ).targetPeerNodeID == nil
+        )
     }
 
     @Test("presence upgrades direct channel without trust gating")
     func presenceCreatesDirectChannelAndAttemptsUpgrade() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "40000000-0000-0000-0000-000000000000")!
@@ -62,7 +97,7 @@ struct TransportRoutingTests {
     @Test("repeated presence does not re-upgrade an established direct channel")
     func repeatedPresenceDoesNotRestormUpgrade() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "41500000-0000-0000-0000-000000000000")!
@@ -82,10 +117,10 @@ struct TransportRoutingTests {
         #expect(direct.retrialCount == 0)
     }
 
-    @Test("service envelopes route through a ready direct channel")
-    func serviceEnvelopeRoutesThroughDirect() async throws {
+    @Test("context sync stays on SFU when a direct channel is ready")
+    func contextSyncUsesSFUWhenDirectIsReady() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "50000000-0000-0000-0000-000000000000")!
@@ -98,29 +133,101 @@ struct TransportRoutingTests {
 
         try harness.transport.sendEnvelope(envelope)
 
-        #expect(direct.sentSequenced.count == 1)
-        let sentEnvelope = try #require(direct.sentSequenced.first?.envelope)
+        #expect(direct.sentSequenced.isEmpty)
+        let sentEnvelope = try #require(harness.broadcast.sentSequenced.first?.envelope)
         guard case .summaryRequest(let request) = sentEnvelope.contextSync else {
-            Issue.record("expected context sync summary request on direct channel")
+            Issue.record("expected context sync summary request on broadcast channel")
             return
         }
         #expect(request.recipient == remote)
-        #expect(harness.broadcast.sentSequenced.isEmpty)
+        #expect(harness.broadcast.sentSequenced.count == 1)
     }
 
-    @Test("service envelopes fall back to broadcast when direct send fails")
-    func serviceEnvelopeFallsBackToBroadcast() async throws {
+    @Test("directed context sync never uses direct channels")
+    func contextSyncSkipsDirectChannels() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
+        defer { harness.transport.stop() }
+
+        let recipient = UUID(uuidString: "51000000-0000-0000-0000-000000000000")!
+        let unrelated = UUID(uuidString: "52000000-0000-0000-0000-000000000000")!
+        let recipientChannel = harness.registerPeer(recipient, isReady: false)
+        let unrelatedChannel = harness.registerPeer(unrelated, isReady: true)
+
+        try harness.transport.sendEnvelope(
+            makeContextSyncEnvelope(
+                contextID: harness.config.contextID,
+                requester: harness.config.node,
+                recipient: recipient
+            )
+        )
+
+        #expect(recipientChannel.sentSequenced.isEmpty)
+        #expect(unrelatedChannel.sentSequenced.isEmpty)
+        #expect(harness.broadcast.sentSequenced.count == 1)
+    }
+
+    @Test("presence reannounces on SFU peer join and reconnect")
+    func presenceReannouncesOnMembershipEvents() async throws {
+        let harness = makeHarness()
+        try await harness.transport.start().value
+        defer { harness.transport.stop() }
+
+        #expect(harness.broadcast.sentPresenceCount == 1)
+
+        harness.broadcast.simulatePeerJoin()
+        #expect(harness.broadcast.sentPresenceCount == 2)
+
+        harness.broadcast.simulateState(.reconnecting(attempt: 1))
+        harness.broadcast.simulateState(.ready)
+        #expect(harness.broadcast.sentPresenceCount == 3)
+    }
+
+    @Test("liveness probe uses an acknowledged SFU probe")
+    func livenessProbeDelegatesToBroadcast() async throws {
+        let harness = makeHarness()
+        try await harness.transport.start().value
+        defer { harness.transport.stop() }
+
+        harness.transport.sendLivenessProbe()
+
+        #expect(harness.broadcast.livenessProbeCount == 1)
+        #expect(harness.broadcast.sentPresenceCount == 2)
+    }
+
+    @Test("a stopped transport cannot finish an older start")
+    func stopInvalidatesPendingStart() async {
+        let harness = makeHarness()
+        let gate = TestStartGate()
+        let readyCount = ThreadSafeCounter()
+        harness.broadcast.startGate = gate
+        harness.transport.onBroadcastReady = { readyCount.increment() }
+
+        let start = Task { try await harness.transport.start().value }
+        await gate.waitUntilBlocked()
+        harness.transport.stop()
+        await gate.open()
+
+        await #expect(throws: CancellationError.self) {
+            try await start.value
+        }
+        #expect(readyCount.value == 0)
+        #expect(harness.broadcast.sentPresenceCount == 0)
+    }
+
+    @Test("prefer-direct envelopes fall back to broadcast when direct send fails")
+    func preferDirectEnvelopeFallsBackToBroadcast() async throws {
+        let harness = makeHarness()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "60000000-0000-0000-0000-000000000000")!
         let direct = harness.registerPeer(remote, isReady: true)
         direct.sendError = KeepTalkingTransportError.allChannelsUnavailable
-        let envelope = makeContextSyncEnvelope(
+        let envelope = makeActionCallRequestEnvelope(
             contextID: harness.config.contextID,
-            requester: harness.config.node,
-            recipient: remote
+            caller: harness.config.node,
+            target: remote
         )
 
         try harness.transport.sendEnvelope(envelope)
@@ -128,17 +235,17 @@ struct TransportRoutingTests {
         #expect(direct.sentSequenced.count == 1)
         #expect(harness.broadcast.sentSequenced.count == 1)
         let sentEnvelope = try #require(harness.broadcast.sentSequenced.first?.envelope)
-        guard case .summaryRequest(let request) = sentEnvelope.contextSync else {
-            Issue.record("expected context sync summary request on broadcast channel")
+        guard let request = sentEnvelope.actionCallRequest else {
+            Issue.record("expected action call request on broadcast channel")
             return
         }
-        #expect(request.recipient == remote)
+        #expect(request.targetNodeID == remote)
     }
 
     @Test("action call requests route through a ready direct channel")
     func actionCallRequestRoutesThroughDirect() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "65000000-0000-0000-0000-000000000000")!
@@ -164,7 +271,7 @@ struct TransportRoutingTests {
     @Test("trusted envelopes are encrypted before transport routing")
     func trustedEnvelopeEncryptsBeforeRouting() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "65500000-0000-0000-0000-000000000000")!
@@ -211,7 +318,7 @@ struct TransportRoutingTests {
     @Test("blob bytes use direct when the target peer is ready")
     func blobDataRoutesThroughDirectWhenAvailable() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "70000000-0000-0000-0000-000000000000")!
@@ -227,7 +334,7 @@ struct TransportRoutingTests {
     @Test("blob bytes fall back to broadcast when direct is unavailable")
     func blobDataFallsBackToBroadcast() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "80000000-0000-0000-0000-000000000000")!
@@ -242,7 +349,7 @@ struct TransportRoutingTests {
     @Test("blob bytes fall back to broadcast when direct send fails")
     func blobDataFallsBackToBroadcastAfterDirectFailure() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "81000000-0000-0000-0000-000000000000")!
@@ -259,7 +366,7 @@ struct TransportRoutingTests {
     @Test("broadcast blob send bypasses ready direct channels")
     func broadcastBlobBypassesReadyDirect() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "81200000-0000-0000-0000-000000000000")!
@@ -275,7 +382,7 @@ struct TransportRoutingTests {
     @Test("realtime bytes stay on the SFU realtime channel")
     func realtimeBytesUseBroadcastOnly() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "81300000-0000-0000-0000-000000000000")!
@@ -293,7 +400,7 @@ struct TransportRoutingTests {
     func broadcastSendFailureDoesNotLeakDataChannelErrors() async throws {
         let harness = makeHarness()
         harness.broadcast.sendError = KeepTalkingTransportError.allChannelsUnavailable
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "81500000-0000-0000-0000-000000000000")!
@@ -323,7 +430,7 @@ struct TransportRoutingTests {
     @Test("incoming p2p signals create a direct channel and forward the signal")
     func p2pSignalCreatesChannelAndForwardsSignal() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "82000000-0000-0000-0000-000000000000")!
@@ -360,7 +467,7 @@ struct TransportRoutingTests {
     @Test("request p2p trial retries an existing unavailable direct channel")
     func requestP2PTrialRetriesExistingUnavailableDirectChannel() async throws {
         let harness = makeHarness()
-        try await harness.transport.start()
+        try await harness.transport.start().value
         defer { harness.transport.stop() }
 
         let remote = UUID(uuidString: "83000000-0000-0000-0000-000000000000")!
@@ -386,6 +493,14 @@ struct ChannelStateMachineTests {
         #expect(machine.state == .reconnecting(attempt: 2))
         #expect(machine.handle(.reconnectSucceeded) == .none)
         #expect(machine.state == .ready)
+    }
+
+    @Test("initial degradation does not remain falsely recovering")
+    func broadcastInitialDegradationFails() {
+        var machine = BroadcastChannelStateMachine()
+
+        #expect(machine.handle(.transportDegraded) == .none)
+        #expect(machine.state == .failed)
     }
 
     @Test("broadcast state machine can recover after being stopped")
@@ -534,12 +649,61 @@ private func makeMessageEnvelope(
     let message = KeepTalkingContextMessage(
         context: context,
         sender: .node(node: senderNodeID),
-        content: "hello over direct"
+        content: "hello over broadcast"
     )
     return message
 }
 
 struct SFUJuiceLifecycleTests {
+    @Test("only a matching roster snapshot confirms context membership")
+    func matchingRosterConfirmsMembership() {
+        let context = UUID()
+        let localKey = Data(repeating: 1, count: 32)
+
+        #expect(
+            !KeepTalkingSFUJuiceClient.confirmsContextMembership(
+                .joined(context: context, pubkey: localKey),
+                contextID: context,
+                publicKey: localKey
+            )
+        )
+        #expect(
+            !KeepTalkingSFUJuiceClient.confirmsContextMembership(
+                .snapshot(context: UUID(), peers: [localKey]),
+                contextID: context,
+                publicKey: localKey
+            )
+        )
+        #expect(
+            !KeepTalkingSFUJuiceClient.confirmsContextMembership(
+                .snapshot(context: context, peers: []),
+                contextID: context,
+                publicKey: localKey
+            )
+        )
+        #expect(
+            KeepTalkingSFUJuiceClient.confirmsContextMembership(
+                .snapshot(context: context, peers: [localKey]),
+                contextID: context,
+                publicKey: localKey
+            )
+        )
+        #expect(
+            KeepTalkingSFUJuiceClient.rejectsContextMembership(
+                .snapshot(context: context, peers: []),
+                contextID: context,
+                publicKey: localKey
+            )
+        )
+        #expect(
+            !KeepTalkingSFUJuiceClient.rejectsContextMembership(
+                .snapshot(context: context, peers: [localKey]),
+                contextID: context,
+                publicKey: localKey
+            )
+        )
+    }
+
     @Test("stopping during connection cancels start without degradation")
     func stopCancelsPendingStart() async {
         let config = KeepTalkingConfig(
@@ -557,7 +721,7 @@ struct SFUJuiceLifecycleTests {
         client.onLog = { logContinuation.yield($0) }
         client.onTransportDegraded = { _ in degraded.set() }
 
-        let start = Task { try await client.start() }
+        let start = Task { try await client.start().value }
         for await log in logs where log.contains("connecting host=") {
             break
         }
@@ -585,6 +749,42 @@ private final class ThreadSafeFlag: @unchecked Sendable {
         lock.lock()
         storage = true
         lock.unlock()
+    }
+}
+
+private final class ThreadSafeCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func increment() {
+        lock.lock()
+        storage += 1
+        lock.unlock()
+    }
+}
+
+private actor TestStartGate {
+    private var isWaiting = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        isWaiting = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilBlocked() async {
+        while !isWaiting { await Task.yield() }
+    }
+
+    func open() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 
@@ -676,6 +876,7 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
     var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRealtimeData: KeepTalkingTransportRealtimeDataHandler?
     var onStateChange: (@Sendable () -> Void)?
+    var onPeerJoined: (@Sendable () -> Void)?
     var onLog: (@Sendable (String) -> Void)?
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider?
     var state: BroadcastChannelState = .ready
@@ -688,9 +889,19 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
     var rawSendError: Error?
     var blobSendError: Error?
     var realtimeSendError: Error?
+    var livenessProbeCount = 0
+    var startGate: TestStartGate?
 
-    func start() async throws {
-        state = .ready
+    var sentPresenceCount: Int {
+        sentRaw.filter { $0.kind == .p2pPresence }.count
+    }
+
+    func start() throws -> Task<Void, Error> {
+        Task {
+            if let startGate { await startGate.wait() }
+            state = .ready
+            onStateChange?()
+        }
     }
 
     func stop() {
@@ -729,6 +940,10 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
         }
     }
 
+    func sendLivenessProbe() {
+        livenessProbeCount += 1
+    }
+
     func runtimeStats() -> KeepTalkingRuntimeStats {
         KeepTalkingRuntimeStats(
             sent: sentSequenced.count + sentBlob.count + sentRealtime.count,
@@ -744,6 +959,15 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
 
     func simulateReceive(_ sequenced: KeepTalkingSequencedEnvelope) {
         onReceive?(sequenced)
+    }
+
+    func simulatePeerJoin() {
+        onPeerJoined?()
+    }
+
+    func simulateState(_ newState: BroadcastChannelState) {
+        state = newState
+        onStateChange?()
     }
 }
 
