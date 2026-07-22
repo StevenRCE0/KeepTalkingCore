@@ -72,6 +72,13 @@ public final class KeepTalkingNodeRelation: Model, @unchecked Sendable {
     @Children(for: \.$relation)
     public var actionRelations: [KeepTalkingNodeRelationActionRelation]
 
+    @Siblings(
+        through: KeepTalkingNodeRelationAliasRelation.self,
+        from: \.$relation,
+        to: \.$alias
+    )
+    public var aliases: [KeepTalkingMapping]
+
     @Children(for: \.$relation)
     public var identityKeys: [KeepTalkingNodeIdentityKey]
 

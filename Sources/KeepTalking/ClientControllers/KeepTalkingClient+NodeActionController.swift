@@ -119,7 +119,7 @@ extension KeepTalkingClient {
         }
     }
 
-    private static func resolveGrantHostNode(
+    static func resolveGrantHostNode(
         for action: KeepTalkingAction,
         authorizingNode: KeepTalkingNode,
         on database: any Database
@@ -153,10 +153,10 @@ extension KeepTalkingClient {
         return hostNode
     }
 
-    private static func mergedApprovingContext(
-        current: KeepTalkingNodeRelationActionRelation.ApprovingContext?,
+    static func mergedApprovingContext(
+        current: KeepTalkingNodeRelationApprovingContext?,
         requestedScope: KeepTalkingActionPermissionScope
-    ) -> KeepTalkingNodeRelationActionRelation.ApprovingContext {
+    ) -> KeepTalkingNodeRelationApprovingContext {
         switch requestedScope {
             case .all:
                 return .all

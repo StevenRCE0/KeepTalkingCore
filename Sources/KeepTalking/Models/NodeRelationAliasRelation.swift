@@ -1,17 +1,11 @@
-//
-//  NodeRelationActionRelation.swift
-//  KeepTalking
-//
-//  Created by 砚渤 on 23/02/2026.
-//
-
 import FluentKit
 import Foundation
 
-public final class KeepTalkingNodeRelationActionRelation: Model,
+/// The grant policy joining a node relation to an alias mapping.
+public final class KeepTalkingNodeRelationAliasRelation: Model,
     @unchecked Sendable
 {
-    public static let schema = "kt_node_relation_action_relation"
+    public static let schema = "kt_node_relation_alias_relation"
 
     public typealias ApprovingContext =
         KeepTalkingNodeRelationApprovingContext
@@ -22,8 +16,8 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
     @Parent(key: "relation")
     public var relation: KeepTalkingNodeRelation
 
-    @Parent(key: "action")
-    public var action: KeepTalkingAction
+    @Parent(key: "alias")
+    public var alias: KeepTalkingMapping
 
     @OptionalField(key: "approving_context")
     public var approvingContext: ApprovingContext?
@@ -31,16 +25,9 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
     @OptionalField(key: "wake_handles")
     public var wakeHandles: [KeepTalkingPushWakeHandle]?
 
-    /// Per-grant scope — the unified `.all | .verbs(Set<KeepTalkingActionVerb>)`
-    /// grant. `nil` means no restriction (full access). Stored in the `permission`
-    /// JSON column (name retained; the DB is recreated fresh on cutover).
     @OptionalField(key: "permission")
     public var permission: KeepTalkingActionScope?
 
-    /// WS3 (cross-device authorization): B's per-peer opt-in that this grantee's
-    /// blocking calls may be confirmed off-device by the owner (macOS broadcast to
-    /// co-owned devices). `nil`/`false` = not opted in. Column added ahead of WS3
-    /// so the behavior can land without another DB recreation; no logic uses it yet.
     @OptionalField(key: "allow_remote_confirmation")
     public var allowRemoteConfirmation: Bool?
 
@@ -49,14 +36,14 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
     init(
         id: UUID = UUID.v7(),
         relation: KeepTalkingNodeRelation,
-        action: KeepTalkingAction,
+        alias: KeepTalkingMapping,
         approvingContext: ApprovingContext,
         permission: KeepTalkingActionScope? = nil,
         allowRemoteConfirmation: Bool? = nil
     ) throws {
         self.id = id
         self.$relation.id = try relation.requireID()
-        self.$action.id = try action.requireID()
+        self.$alias.id = try alias.requireID()
         self.approvingContext = approvingContext
         self.wakeHandles = nil
         self.permission = permission
@@ -66,5 +53,4 @@ public final class KeepTalkingNodeRelationActionRelation: Model,
     public func applicable(in context: KeepTalkingContext?) -> Bool {
         approvingContext?.applicable(in: context) ?? false
     }
-
 }

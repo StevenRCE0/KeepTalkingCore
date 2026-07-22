@@ -397,12 +397,16 @@ extension KeepTalkingClient {
             try await relation.$actionRelations.query(
                 on: database
             ).first() != nil
+        let hasAliasRelations =
+            try await relation.$aliases.$pivots.query(
+                on: database
+            ).first() != nil
         let hasIdentityKeys =
             try await relation.$identityKeys.query(
                 on: database
             ).first() != nil
 
-        if hasActionRelations || hasIdentityKeys {
+        if hasActionRelations || hasAliasRelations || hasIdentityKeys {
             relation.relationship = .pending
             try await relation.save(on: database)
         } else {

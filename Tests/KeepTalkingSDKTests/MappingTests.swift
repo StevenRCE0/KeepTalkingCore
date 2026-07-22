@@ -109,6 +109,39 @@ struct MappingTests {
         #expect(contextColor.hasPrefix("#"))
         #expect(contextColor.count == 7)
     }
+
+    @Test("actions use the existing mapping tag model")
+    func actionTagRoundTrip() async throws {
+        let localStore = KeepTalkingInMemoryStore()
+        let owner = KeepTalkingNode(id: UUID())
+        try await owner.save(on: localStore.database)
+        let action = try await KeepTalkingClient.registerAction(
+            payload: .primitive(
+                KeepTalkingPrimitiveBundle(
+                    name: "test",
+                    indexDescription: "Test action",
+                    action: .accessCalendar
+                )
+            ),
+            node: owner,
+            on: localStore.database
+        )
+
+        let target = KeepTalkingMappingTarget.action(try action.requireID())
+        try await KeepTalkingClient.addTag(
+            "Utilities",
+            to: target,
+            on: localStore.database
+        )
+
+        let tag = try #require(
+            try await KeepTalkingClient.tags(
+                for: target,
+                on: localStore.database
+            ).first
+        )
+        #expect(tag.target == target)
+    }
 }
 
 @Test("static mapping helpers behave like instance wrappers")

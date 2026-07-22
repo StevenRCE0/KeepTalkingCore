@@ -34,3 +34,22 @@ struct CreateKeepTalkingMappingsMigration: AsyncMigration {
         try await database.schema(KeepTalkingMapping.schema).delete()
     }
 }
+
+struct AddKeepTalkingMappingActionMigration: AsyncMigration {
+    func prepare(on database: any Database) async throws {
+        try await database.schema(KeepTalkingMapping.schema)
+            .field(
+                "action",
+                .uuid,
+                .references(KeepTalkingAction.schema, "id", onDelete: .cascade)
+            )
+            .update()
+    }
+
+    func revert(on database: any Database) async throws {
+        try await database
+            .schema(KeepTalkingMapping.schema)
+            .deleteField("action")
+            .update()
+    }
+}

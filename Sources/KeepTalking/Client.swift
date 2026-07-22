@@ -6,6 +6,7 @@ public enum KeepTalkingClientError: LocalizedError {
     case kvServiceNotConfigured
     case missingNode
     case missingAction
+    case missingMapping(UUID)
     case aiNotConfigured
     case unknownTool(String)
     case invalidToolArguments(String)
@@ -60,6 +61,8 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "KeepTalkingConfig.node is required for KV node registration."
             case .missingAction:
                 return "Action is not found required for the operation."
+            case .missingMapping(let mappingID):
+                return "Mapping is not found: \(mappingID)"
             case .aiNotConfigured:
                 return "OpenAI is not configured. Set OPENAI_API_KEY to enable AI tool planning."
             case .unknownTool(let functionName):

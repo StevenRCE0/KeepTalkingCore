@@ -232,15 +232,26 @@ extension KeepTalkingClient {
                     query
                         .filter(\.$node.$id == node)
                         .filter(\.$context.$id == nil)
+                        .filter(\.$thread == nil)
+                        .filter(\.$action.$id == nil)
                 case .context(let context):
                     query
                         .filter(\.$context.$id == context)
                         .filter(\.$node.$id == nil)
+                        .filter(\.$thread == nil)
+                        .filter(\.$action.$id == nil)
                 case .thread(let thread):
                     query
                         .filter(\.$thread == thread)
                         .filter(\.$node.$id == nil)
                         .filter(\.$context.$id == nil)
+                        .filter(\.$action.$id == nil)
+                case .action(let action):
+                    query
+                        .filter(\.$action.$id == action)
+                        .filter(\.$node.$id == nil)
+                        .filter(\.$context.$id == nil)
+                        .filter(\.$thread == nil)
             }
 
         guard !includeDeleted else {
