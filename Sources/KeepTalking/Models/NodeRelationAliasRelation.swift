@@ -22,9 +22,6 @@ public final class KeepTalkingNodeRelationAliasRelation: Model,
     @OptionalField(key: "approving_context")
     public var approvingContext: ApprovingContext?
 
-    @OptionalField(key: "wake_handles")
-    public var wakeHandles: [KeepTalkingPushWakeHandle]?
-
     @OptionalField(key: "permission")
     public var permission: KeepTalkingActionScope?
 
@@ -45,7 +42,6 @@ public final class KeepTalkingNodeRelationAliasRelation: Model,
         self.$relation.id = try relation.requireID()
         self.$alias.id = try alias.requireID()
         self.approvingContext = approvingContext
-        self.wakeHandles = nil
         self.permission = permission
         self.allowRemoteConfirmation = allowRemoteConfirmation
     }

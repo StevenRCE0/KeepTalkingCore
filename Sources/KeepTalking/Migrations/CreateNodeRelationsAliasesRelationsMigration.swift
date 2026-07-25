@@ -26,7 +26,6 @@ struct CreateNodeRelationsAliasesRelationsMigration: AsyncMigration {
                 )
             )
             .field("approving_context", .json)
-            .field("wake_handles", .json)
             .field("permission", .json)
             .field("allow_remote_confirmation", .bool)
             .create()
