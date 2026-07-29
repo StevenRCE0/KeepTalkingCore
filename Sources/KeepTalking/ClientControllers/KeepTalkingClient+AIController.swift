@@ -365,7 +365,7 @@ extension KeepTalkingClient {
                 .query(on: localStore.database)
                 .filter(\.$isArchived == false)
                 .all()
-                .compactMap { KeepTalkingSideNoteDTO($0) }) ?? []
+                .map(KeepTalkingSideNoteDTO.init)) ?? []
 
         let systemPrompt = OpenAIConnector.keepTalkingSystemPrompt(
             ktRunActionToolFunctionName: Self.runActionToolFunctionName,

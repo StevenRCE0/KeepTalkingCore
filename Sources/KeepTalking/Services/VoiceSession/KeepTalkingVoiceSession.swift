@@ -111,6 +111,12 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
         var ice: KeepTalkingJuiceP2PSession?
         var iceLocalSDPSent: Bool = false
         var iceDidConnect: Bool = false
+        /// The last remote SDP applied to `ice`. Re-applying an identical SDP
+        /// to a live agent forces it back to `.negotiating`, and if libjuice
+        /// rejects the repeat the agent goes `.failed` — tearing down a working
+        /// call leg. The direct-channel path has always guarded this; the voice
+        /// path did not, and fan-out makes redelivery routine.
+        var lastRemoteSDP: String?
         /// Ticks since the last `voice.started` from this peer. Reset to
         /// 0 on every inbound `started`; incremented each heartbeat tick.
         var ticksSinceLastSeen: Int = 0
@@ -468,6 +474,7 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
                 entry.ice = nil
                 entry.iceDidConnect = false
                 entry.iceLocalSDPSent = false
+                entry.lastRemoteSDP = nil
                 entry.state = .discovering
                 return nil
             }
@@ -480,6 +487,13 @@ public final class KeepTalkingVoiceSession: @unchecked Sendable {
             staleICE.close()
             emitPeersChanged()
         }
+        let isDuplicate = lock.withLock { peerEntries[nodeID]?.lastRemoteSDP == sdp }
+        if isDuplicate {
+            emitLog("← voice.signal from=\(nodeID.uuidString.prefix(8)) duplicate sdp ignored")
+            return
+        }
+        lock.withLock { peerEntries[nodeID]?.lastRemoteSDP = sdp }
+
         if existingICE == nil {
             // First SDP from this peer = offer. We're the answerer.
             startICE(for: nodeID, applyingRemoteFirst: sdp)

@@ -36,11 +36,6 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
                     try cast(KeepTalkingContextAttachmentDTO.self),
                     forKey: .payload
                 )
-            case .context:
-                try container.encode(
-                    try cast(KeepTalkingContext.self),
-                    forKey: .payload
-                )
             case .node:
                 try container.encode(
                     try cast(KeepTalkingNode.self),
@@ -197,11 +192,6 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
             case .attachment:
                 return try container.decode(
                     KeepTalkingContextAttachmentDTO.self,
-                    forKey: .payload
-                )
-            case .context:
-                return try container.decode(
-                    KeepTalkingContext.self,
                     forKey: .payload
                 )
             case .node:

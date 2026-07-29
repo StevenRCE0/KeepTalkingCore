@@ -88,6 +88,34 @@ extension KeepTalkingClient {
             throw KeepTalkingTrustError.noIncomingHandler
         }
 
+        // Claim the session id before the human-latency await below. A
+        // redelivered trust request would otherwise raise a SECOND approval
+        // prompt for the same session, and accepting it mints a fresh ephemeral
+        // keypair that overwrites the pending session — the initiator then binds
+        // one transcript while we hold another, and the handshake strands.
+        //
+        // The claim outlives the decision: a redelivery arriving after we
+        // accepted does exactly the same damage as one arriving during. It is
+        // released only if this request failed before settling, so a genuine
+        // retry after a transient error can still be handled.
+        let claimed = trustQueue.sync { () -> Bool in
+            handledTrustRequestSessionIDs.insert(payload.sessionID).inserted
+        }
+        guard claimed else {
+            rtcClient.debug(
+                "duplicate trust request ignored session=\(payload.sessionID.uuidString.prefix(8))"
+            )
+            return
+        }
+        var settled = false
+        defer {
+            if !settled {
+                trustQueue.sync {
+                    _ = handledTrustRequestSessionIDs.remove(payload.sessionID)
+                }
+            }
+        }
+
         let request = KeepTalkingIncomingTrustRequest(
             sessionID: payload.sessionID,
             fromNodeID: payload.from,
@@ -106,12 +134,14 @@ extension KeepTalkingClient {
                         contextID: payload.contextID
                     )
                 )
+                settled = true
             case .accept(let scope):
                 try await acceptTrustRequest(
                     payload: payload,
                     contextSecret: contextSecret,
                     scope: scope
                 )
+                settled = true
         }
     }
 

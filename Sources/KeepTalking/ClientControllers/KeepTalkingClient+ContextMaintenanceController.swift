@@ -21,6 +21,10 @@ enum ContextMaintenanceTrigger: Sendable {
 extension KeepTalkingClient {
     private static let maintenanceHeartbeatSeconds: TimeInterval = 30
 
+    private func maintenanceIsActive(_ generation: UInt64) -> Bool {
+        !Task.isCancelled && isConnectionLifecycleActive(generation)
+    }
+
     // MARK: - Loop lifecycle
 
     func makeMaintenanceTask(generation: UInt64) -> Task<Void, Never> {
@@ -32,7 +36,10 @@ extension KeepTalkingClient {
                 guard !Task.isCancelled,
                     self?.isConnectionActive(generation) == true
                 else { break }
-                await self?.dispatchMaintenance(.heartbeat)
+                await self?.dispatchMaintenance(
+                    .heartbeat,
+                    generation: generation
+                )
             }
         }
     }
@@ -41,10 +48,16 @@ extension KeepTalkingClient {
 
     /// Run the task set for `trigger`. The one place that decides what upkeep
     /// happens, and when.
-    func dispatchMaintenance(_ trigger: ContextMaintenanceTrigger) async {
+    func dispatchMaintenance(
+        _ trigger: ContextMaintenanceTrigger,
+        generation: UInt64
+    ) async {
+        guard maintenanceIsActive(generation) else { return }
+
         switch trigger {
             case .connected:
                 await broadcastLocalNodeState(reason: "connect")
+                guard maintenanceIsActive(generation) else { return }
                 await reconcileStaleContinuations()
 
             case .nodeOnline(let node):
@@ -54,17 +67,27 @@ extension KeepTalkingClient {
                 await broadcastLocalNodeState(
                     reason: "peer-connect node=\(node.uuidString.lowercased())"
                 )
+                guard maintenanceIsActive(generation) else { return }
                 reassertActiveVoiceCall()
                 // contextSyncing, then (if a call is live) transcriptSyncing, then
                 // attachment recovery — then a fresh channel is the headline cue to
                 // drain the outbox.
-                await syncCurrentContext(with: node)
-                await syncOngoingTranscripts(with: node)
+                await syncCurrentContext(
+                    with: node,
+                    generation: generation
+                )
+                guard maintenanceIsActive(generation) else { return }
+                await syncOngoingTranscripts(
+                    with: node,
+                    generation: generation
+                )
+                guard maintenanceIsActive(generation) else { return }
                 await drainOutbox()
+                guard maintenanceIsActive(generation) else { return }
                 recoverAttachmentsInBackground(with: node)
 
             case .heartbeat:
-                await runHeartbeatMaintenance()
+                await runHeartbeatMaintenance(generation: generation)
         }
     }
 
@@ -73,13 +96,23 @@ extension KeepTalkingClient {
     /// Periodic upkeep: re-reconcile with every online peer (contextSyncing +
     /// gated transcriptSyncing + attachment recovery), then sweep stale voice
     /// calls (the passive seal backstop).
-    private func runHeartbeatMaintenance() async {
+    private func runHeartbeatMaintenance(generation: UInt64) async {
         let peers = onlineNodeIDs().filter { $0 != config.node }
         for peer in peers {
-            await syncCurrentContext(with: peer)
-            await syncOngoingTranscripts(with: peer)
+            guard maintenanceIsActive(generation) else { return }
+            await syncCurrentContext(
+                with: peer,
+                generation: generation
+            )
+            guard maintenanceIsActive(generation) else { return }
+            await syncOngoingTranscripts(
+                with: peer,
+                generation: generation
+            )
+            guard maintenanceIsActive(generation) else { return }
             recoverAttachmentsInBackground(with: peer)
         }
+        guard maintenanceIsActive(generation) else { return }
         await sweepStaleVoiceCalls()
     }
 
@@ -107,14 +140,19 @@ extension KeepTalkingClient {
     /// transcriptSyncing, gated: only when a voice session is ongoing in this
     /// context (hybrid detection). No call ⇒ nothing happens — the "no passive
     /// heartbeat for transcripts" rule.
-    private func syncOngoingTranscripts(with node: UUID) async {
+    private func syncOngoingTranscripts(
+        with node: UUID,
+        generation: UInt64
+    ) async {
         let sessions = ongoingVoiceSessionIDs(in: config.contextID)
         guard !sessions.isEmpty else { return }
         for session in sessions {
+            guard maintenanceIsActive(generation) else { return }
             await syncTranscriptLines(
                 session: session,
                 contextID: config.contextID,
-                with: node
+                with: node,
+                generation: generation
             )
         }
     }

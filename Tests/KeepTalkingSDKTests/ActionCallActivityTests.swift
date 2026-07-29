@@ -22,10 +22,84 @@ actor ActionCallActivityRecorder {
     }
 }
 
+actor ActionExecutionCounter {
+    private(set) var count = 0
+
+    func record() {
+        count += 1
+    }
+}
+
 struct ActionCallActivityTests {
+    @Test("an inbound call claiming this node's own identity is refused")
+    func inboundSelfImpersonationIsRefused() async throws {
+        let store = try await KeepTalkingInMemoryStore.make()
+        let node = KeepTalkingNode(id: UUID())
+        let context = KeepTalkingContext(id: UUID())
+        try await node.save(on: store.database)
+        try await context.save(on: store.database)
+        let nodeID = try #require(node.id)
+        let contextID = try #require(context.id)
+
+        let executions = ActionExecutionCounter()
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(contextID: contextID, node: nodeID),
+            primitiveRegistry: KeepTalkingPrimitiveRegistry(
+                toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
+                callAction: { _, _, _ in
+                    await executions.record()
+                    return KeepTalkingPrimitiveActionResponse(text: "done")
+                }
+            ),
+            localStore: store
+        )
+        let action = try await KeepTalkingClient.registerAction(
+            payload: .primitive(
+                KeepTalkingPrimitiveBundle(
+                    name: "open-with-url",
+                    indexDescription: "Open a URL",
+                    action: .openWithURL
+                )
+            ),
+            node: node,
+            on: store.database
+        )
+        let actionID = try #require(action.id)
+
+        // Grant the action to this node, so authorization would ALLOW the call.
+        // The point of the test is that identity, not permission, is what stops
+        // it: these are exactly the self-grants a spoofer would be inheriting.
+        let identityRelation = try KeepTalkingNodeRelation(
+            from: node,
+            to: node,
+            relationship: .owner
+        )
+        try await identityRelation.save(on: store.database)
+        var grant = KeepTalkingGrantTransaction()
+        grant.grant(in: contextID, actionID: actionID, to: nodeID)
+        try await KeepTalkingClient.grantActionPermission(
+            transaction: grant,
+            node: node,
+            on: store.database
+        )
+
+        // Arrives over the wire claiming to be us — impossible for a genuine
+        // local call, which never leaves the node.
+        try await client.handleIncomingActionCallRequest(
+            KeepTalkingActionCallRequest(
+                contextID: contextID,
+                callerNodeID: nodeID,
+                targetNodeID: nodeID,
+                call: KeepTalkingActionCall(action: actionID)
+            )
+        )
+
+        #expect(await executions.count == 0)
+    }
+
     @Test("local action activity is ordered once and ends after cancellation")
     func localActionActivityLifecycle() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let node = KeepTalkingNode(id: UUID())
         let context = KeepTalkingContext(id: UUID())
         try await node.save(on: store.database)
@@ -62,6 +136,27 @@ struct ActionCallActivityTests {
         client.onActionCallActivity = { await recorder.record($0) }
         let actionID = try #require(action.id)
         let nodeID = try #require(node.id)
+        let contextID = try #require(context.id)
+
+        // The execution gate consults grants for (caller, context) with no
+        // special case for the action's own host, so a self-hosted call needs
+        // the same relation-plus-grant a remote caller does. Build both through
+        // the production paths: the owner identity relation this node keeps to
+        // itself, then a grant over it.
+        let identityRelation = try KeepTalkingNodeRelation(
+            from: node,
+            to: node,
+            relationship: .owner
+        )
+        try await identityRelation.save(on: store.database)
+
+        var grant = KeepTalkingGrantTransaction()
+        grant.grant(in: contextID, actionID: actionID, to: nodeID)
+        try await KeepTalkingClient.grantActionPermission(
+            transaction: grant,
+            node: node,
+            on: store.database
+        )
 
         let firstResult = try await client.dispatchActionCall(
             actionOwner: nodeID,
@@ -101,7 +196,7 @@ struct ActionCallActivityTests {
                 contextID: try #require(context.id),
                 node: selfNodeID
             ),
-            localStore: KeepTalkingInMemoryStore()
+            localStore: try await KeepTalkingInMemoryStore.make()
         )
         let recorder = ActionCallActivityRecorder()
         client.onActionCallActivity = { await recorder.record($0) }
@@ -128,7 +223,7 @@ struct ActionCallActivityTests {
         let contextID = UUID()
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(contextID: contextID, node: nodeID),
-            localStore: KeepTalkingInMemoryStore()
+            localStore: try await KeepTalkingInMemoryStore.make()
         )
         let recorder = ActionCallActivityRecorder()
         client.onActionCallActivity = { await recorder.record($0) }

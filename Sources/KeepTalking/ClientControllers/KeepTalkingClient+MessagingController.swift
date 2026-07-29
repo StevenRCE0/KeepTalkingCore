@@ -163,6 +163,18 @@ extension KeepTalkingClient {
         id: UUID? = nil,
         emitLocalEnvelope: Bool = false
     ) async throws {
+        // Refuse before the row exists. Past the envelope ceiling a message can
+        // neither be sent nor replicated, so persisting it would leave an
+        // outbox row that retries forever and a sync stream that cannot serve
+        // the page containing it.
+        let contentByteCount = text.utf8.count
+        guard contentByteCount <= KeepTalkingMessageLimits.maximumContentBytes else {
+            throw KeepTalkingClientError.messageTooLarge(
+                bytes: contentByteCount,
+                limit: KeepTalkingMessageLimits.maximumContentBytes
+            )
+        }
+
         let node = try await getCurrentNodeInstance()
         let persistedContext = try await upsertContext(context)
         let sender = try sender ?? .node(node: node.requireID())
@@ -184,7 +196,6 @@ extension KeepTalkingClient {
             parentMessage: message,
             sender: sender
         )
-        try await persistedContext.refreshSyncMetadata(on: localStore.database)
         if emitLocalEnvelope {
             onEnvelope?(message)
             for attachment in savedAttachments {
@@ -199,8 +210,8 @@ extension KeepTalkingClient {
         // From here on, transport failures don't throw — the message is
         // already persisted locally, so we enqueue it on the outbox and
         // let it drain later when channels open. Context sync will also
-        // eventually replicate it through normal sync if the outbox row
-        // is dismissed by the user. See `KeepTalkingClient+OutboxController`.
+        // eventually replicate it through normal sync.
+        // See `KeepTalkingClient+OutboxController`.
         let messageID = try message.requireID()
         await enqueueOutboxEntry(
             contextMessage: message,
@@ -217,7 +228,6 @@ extension KeepTalkingClient {
             scheduleOutgoingBlobTransfers(for: savedAttachments)
             await clearOutboxEntry(contextMessageID: messageID)
         } catch {
-            await recordOutboxFailure(contextMessageID: messageID, error: error)
             onLog?(
                 "[client/send] initial transport push failed messageID=\(messageID.uuidString.lowercased()) error=\(error.localizedDescription) — left in outbox"
             )
@@ -260,75 +270,48 @@ extension KeepTalkingClient {
         }
     }
 
-    /// Shares the full conversation context with connected peers.
-    public func sendConversationContext(
-        _ context: KeepTalkingConversationContext
-    ) async throws {
-        try await saveContext(context)
-        try rtcClient.sendEnvelope(context)
-    }
-
-    func mergeContext(_ context: KeepTalkingContext) {
-        Task {
-            try? await self.saveContext(context)
-        }
-    }
-
+    @discardableResult
     func handleIncomingMessage(_ message: KeepTalkingContextMessage)
-        async throws
+        async throws -> Bool
     {
-        try await saveIncomingMessages([message], in: message.$context.id)
+        let applied = try await saveIncomingMessages(
+            [message], in: message.$context.id)
         // A message may have arrived after attachment DTOs that referenced it
         // (separate envelopes, separate Tasks). Re-drive any that were parked
         // waiting for this parent.
         if let messageID = message.id {
             try await flushOrphanAttachments(forParentMessageID: messageID)
         }
+        return applied
     }
 
+    @discardableResult
     func handleIncomingAttachment(_ attachment: KeepTalkingContextAttachmentDTO)
-        async throws
+        async throws -> Bool
     {
         let savedAttachments = try await saveIncomingAttachments(
             [attachment]
         )
         guard !savedAttachments.isEmpty else {
-            return
+            return false
         }
         try await requestAttachmentBlobsIfNeeded(
             for: savedAttachments,
             in: attachment.contextID
         )
+        return true
     }
 
-    func saveContext(_ context: KeepTalkingContext) async throws {
-        let persistedContext = try await upsertContext(context)
-        let newMessages = try await filterNewMessages(context.messages)
-        let newAttachments = try await filterNewAttachments(context.attachments)
-
-        // updatedAt is advanced by the touch middleware on each child save below.
-        for message in newMessages {
-            message.$context.id = try persistedContext.requireID()
-            message.$context.value = persistedContext
-            try await message.save(on: localStore.database)
-        }
-
-        for attachment in newAttachments {
-            attachment.$context.id = try persistedContext.requireID()
-            attachment.$context.value = persistedContext
-            try await attachment.save(on: localStore.database)
-            try await ensureSenderRelation(for: attachment.sender)
-            try await ensureBlobRecordPlaceholder(for: attachment)
-        }
-        try await persistedContext.refreshSyncMetadata(on: localStore.database)
-    }
-
+    /// Returns whether anything was newly persisted. `false` means every
+    /// message in the batch was already present — a routine outcome now that
+    /// fan-out can deliver the same envelope over two routes.
+    @discardableResult
     func saveIncomingMessages(
         _ messages: [KeepTalkingContextMessage],
         in contextID: UUID
-    ) async throws {
+    ) async throws -> Bool {
         guard !messages.isEmpty else {
-            return
+            return false
         }
 
         // Continuation messages use replacing sync: if a non-pending state arrives
@@ -338,7 +321,7 @@ extension KeepTalkingClient {
 
         let newMessages = try await filterNewMessages(messages)
         guard !newMessages.isEmpty else {
-            return
+            return false
         }
 
         let latestTimestamp = newMessages.map(\.timestamp).max() ?? Date()
@@ -358,17 +341,29 @@ extension KeepTalkingClient {
             try await ensureSenderRelation(for: sender)
         }
 
-        // One transaction for the whole batch: `Collection.create(on:)` is a bulk
-        // insert (one round-trip, one commit) instead of N autocommitting saves.
+        // Per-row inside one transaction, not a bulk `create`. `filterNewMessages`
+        // is a check-then-act SELECT, so a concurrent fan-out delivery can insert
+        // the same id between the check and the write. A bulk insert turns that
+        // one collision into a rollback of the entire page; per-row lets the
+        // loser skip and keep the rest.
         try await localStore.database.transaction { db in
             for message in newMessages {
                 message.$context.id = resolvedContextID
                 message.$context.value = persistedContext
+                do {
+                    try await message.create(on: db)
+                } catch {
+                    let id = message.id
+                    let exists =
+                        try await KeepTalkingContextMessage.query(on: db)
+                        .filter(\.$id == (id ?? UUID()))
+                        .count() > 0
+                    guard exists else { throw error }
+                }
             }
-            try await newMessages.create(on: db)
         }
 
-        try await persistedContext.refreshSyncMetadata(on: localStore.database)
+        return true
     }
 
     func saveIncomingAttachments(
@@ -442,7 +437,9 @@ extension KeepTalkingClient {
                     in: persistedContext,
                     parentMessage: parentMessage
                 )
-                try await model.save(on: localStore.database)
+                guard try await createAttachmentToleratingDuplicate(model) else {
+                    continue
+                }
                 try await ensureSenderRelation(for: model.sender)
                 try await ensureBlobRecordPlaceholder(for: model)
                 savedAttachments.append(model)
@@ -472,12 +469,40 @@ extension KeepTalkingClient {
             guard let model = attachment.makeParentlessModel(in: persistedContext) else {
                 continue
             }
-            try await model.save(on: localStore.database)
+            guard try await createAttachmentToleratingDuplicate(model) else {
+                continue
+            }
             try await ensureSenderRelation(for: sender)
             try await ensureBlobRecordPlaceholder(for: model)
             savedAttachments.append(model)
         }
         return savedAttachments
+    }
+
+    /// Creates an attachment row, tolerating a concurrent insert of the same id.
+    ///
+    /// `filterNewAttachmentDTOs` is a check-then-act SELECT, and `.attachment`
+    /// is fan-out eligible — the direct and SFU copies arrive on two
+    /// independent Tasks, so both can pass the filter before either writes.
+    /// Returns false when the row already exists: the other delivery owns it,
+    /// and this one must skip the rest of its per-row work rather than repeat
+    /// it. The message path was hardened this way; this is its sibling.
+    private func createAttachmentToleratingDuplicate(
+        _ model: KeepTalkingContextAttachment
+    ) async throws -> Bool {
+        do {
+            try await model.create(on: localStore.database)
+            return true
+        } catch {
+            let exists =
+                try await KeepTalkingContextAttachment.query(
+                    on: localStore.database
+                )
+                .filter(\.$id == (model.id ?? UUID()))
+                .count() > 0
+            guard exists else { throw error }
+            return false
+        }
     }
 
     // MARK: - Orphan attachment buffering
@@ -556,44 +581,6 @@ extension KeepTalkingClient {
                 return true
             }
             return !existingIDs.contains(messageID)
-        }
-    }
-
-    private func filterNewAttachments(
-        _ attachments: [KeepTalkingContextAttachment]
-    ) async throws -> [KeepTalkingContextAttachment] {
-        var seen = Set<UUID>()
-        var uniqueAttachments: [KeepTalkingContextAttachment] = []
-        var identifiedAttachments: [UUID] = []
-
-        for attachment in attachments {
-            guard let attachmentID = attachment.id else {
-                uniqueAttachments.append(attachment)
-                continue
-            }
-            guard seen.insert(attachmentID).inserted else {
-                continue
-            }
-            uniqueAttachments.append(attachment)
-            identifiedAttachments.append(attachmentID)
-        }
-
-        guard !identifiedAttachments.isEmpty else {
-            return uniqueAttachments
-        }
-
-        let existingIDs = Set(
-            try await KeepTalkingContextAttachment.query(on: localStore.database)
-                .filter(\.$id ~~ identifiedAttachments)
-                .all()
-                .compactMap(\.id)
-        )
-
-        return uniqueAttachments.filter { attachment in
-            guard let attachmentID = attachment.id else {
-                return true
-            }
-            return !existingIDs.contains(attachmentID)
         }
     }
 
@@ -839,7 +826,6 @@ extension KeepTalkingClient {
             try await attachment.save(on: localStore.database)
             saved.append(attachment)
         }
-        try await context.refreshSyncMetadata(on: localStore.database)
 
         // Broadcast the carrier message + each attachment DTO and schedule the
         // blob transfers so participants receive the summoned outputs (transport
@@ -857,7 +843,6 @@ extension KeepTalkingClient {
             }
             await clearOutboxEntry(contextMessageID: parentMessageID)
         } catch {
-            await recordOutboxFailure(contextMessageID: parentMessageID, error: error)
             onLog?(
                 "[io/summon] transport push failed messageID=\(parentMessageID.uuidString.lowercased()) "
                     + "error=\(error.localizedDescription) — left in outbox")

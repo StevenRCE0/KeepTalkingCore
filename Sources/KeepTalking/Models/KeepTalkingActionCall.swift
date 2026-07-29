@@ -195,7 +195,6 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
 /// (or rejects) a suspended agent turn continuation.
 public struct KeepTalkingAgentTurnContinuationResponse: Codable, Sendable, KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .encryptedAgentTurnContinuationResponse }
-    public var participantNodeIDs: [UUID] { [responderNodeID, originNodeID] }
     public var targetPeerNodeID: UUID? { originNodeID }
     public var transportContextID: UUID? { contextID }
     public var continuationMessageID: UUID

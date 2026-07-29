@@ -49,11 +49,6 @@ public final class KeepTalkingContextMessage: Model, Hashable, @unchecked Sendab
     @Children(for: \.$parentMessage)
     public var attachments: [KeepTalkingContextAttachment]
 
-    /// At most one — uniqueness enforced at the table level. Present iff
-    /// the message is still queued for active transport push.
-    @Children(for: \.$contextMessage)
-    public var outboxEntries: [KeepTalkingOutboxEntry]
-
     public init() {}
 
     public init(
@@ -196,4 +191,21 @@ extension KeepTalkingContextMessage {
         /// The continuation expired or was cancelled.
         case cancelled
     }
+}
+
+/// Size bounds on a single message.
+public enum KeepTalkingMessageLimits {
+    /// Ceiling on a message's content, enforced when the message is created.
+    ///
+    /// Transport no longer fragments envelopes, so an envelope that exceeds
+    /// `PacketTransportCrypto.maxOutboundPayloadBytes` (1 MiB) simply cannot be
+    /// sent — and, because a sync page carries whole items, cannot be
+    /// replicated either. Refusing at creation is what keeps that from becoming
+    /// a permanent condition: the alternative is a persisted row that retries
+    /// forever in the outbox and stalls its own sync stream.
+    ///
+    /// Set to half the envelope ceiling because the check is on plaintext while
+    /// the ceiling applies after sealing and base64/JSON framing, which inflate
+    /// by roughly a third. The headroom also covers the rest of the envelope.
+    public static let maximumContentBytes = 512 * 1024
 }

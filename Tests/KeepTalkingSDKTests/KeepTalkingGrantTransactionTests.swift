@@ -32,7 +32,7 @@ struct KeepTalkingGrantTransactionTests {
 
     @Test("grant transaction applies grants and revokes")
     func apply() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let owner = KeepTalkingNode(id: UUID())
         let recipient = KeepTalkingNode(id: UUID())
         let context = KeepTalkingContext(id: UUID())

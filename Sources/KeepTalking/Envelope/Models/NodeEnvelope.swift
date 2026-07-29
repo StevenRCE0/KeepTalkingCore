@@ -2,10 +2,6 @@ import Foundation
 
 extension KeepTalkingNode: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .node }
-
-    public var participantNodeIDs: [UUID] {
-        id.map { [$0] } ?? []
-    }
 }
 
 extension KeepTalkingEnvelopeHandlers {

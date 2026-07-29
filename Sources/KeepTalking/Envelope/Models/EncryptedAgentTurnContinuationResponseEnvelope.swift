@@ -9,10 +9,6 @@ public struct KeepTalkingEncryptedAgentTurnContinuationResponseEnvelope: KeepTal
         self.payload = payload
     }
 
-    public var participantNodeIDs: [UUID] {
-        [payload.senderNodeID, payload.recipientNodeID]
-    }
-
     public var targetPeerNodeID: UUID? {
         payload.recipientNodeID
     }

@@ -33,7 +33,7 @@ struct PrimitiveActionSchemaTests {
                 toolParameters: { _ in askForFileParameters },
                 callAction: { _, _, _ in KeepTalkingPrimitiveActionResponse(text: "") }
             ),
-            localStore: KeepTalkingInMemoryStore()
+            localStore: try await KeepTalkingInMemoryStore.make()
         )
         let definition = client.makePrimitiveActionProxyDefinition(
             actionID: UUID(),

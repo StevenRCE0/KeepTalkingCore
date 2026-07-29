@@ -478,9 +478,9 @@ extension KeepTalkingClient {
                 .filter(\.$isArchived == false)
                 .sort(\.$updatedAt, .descending)
                 .all()
-                .compactMap { KeepTalkingSideNoteDTO($0) }) ?? []
+                .map(KeepTalkingSideNoteDTO.init)) ?? []
         if !activeSideNotes.isEmpty {
-            let body = activeSideNotes.map { "[\($0.key)] \($0.value)" }.joined(separator: "\n")
+            let body = activeSideNotes.map { "[\($0.key)] \($0.value ?? "")" }.joined(separator: "\n")
             sections.append(
                 """
                 Side notes:

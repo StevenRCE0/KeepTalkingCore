@@ -19,6 +19,11 @@ public enum KeepTalkingClientError: LocalizedError {
     case actionCallTargetOffline(requestID: UUID, targetNodeID: UUID)
     case actionCatalogTimeout(UUID)
     case contextSyncTimeout(UUID)
+    case contextSyncRemoteFailure(
+        requestID: UUID,
+        responder: UUID,
+        message: String
+    )
     case localExecutorRegistrationTimedOut(
         actionID: UUID,
         source: String,
@@ -52,6 +57,12 @@ public enum KeepTalkingClientError: LocalizedError {
     /// `makeVoiceSession` was called but the client has no SFU endpoint
     /// configured. Voice requires SFU presence + signaling.
     case noSFUEndpointConfigured
+    case invalidSideNote(String)
+    /// Message content exceeds what a single envelope can carry. Refused at
+    /// creation: transport no longer fragments, so a message this large could
+    /// never be delivered *or* replicated, and persisting it would leave an
+    /// undeliverable outbox row and a sync page that cannot be served.
+    case messageTooLarge(bytes: Int, limit: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -73,6 +84,9 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Action is not hosted by this node: \(actionID)"
             case .relationNotTrustedOrOwned(let nodeID):
                 return "No trusted/owned relation exists to node: \(nodeID)"
+            case .messageTooLarge(let bytes, let limit):
+                return
+                    "Message content is \(bytes) bytes, above the \(limit)-byte limit a single envelope can carry."
             case .actionCallNotAuthorized(let actionID, let caller, let context):
                 return "Action call is not authorized. action=\(actionID) caller=\(caller) context=\(context)"
             case .actionCallTimeout(let requestID):
@@ -84,6 +98,13 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Timed out waiting for remote action catalog result: \(requestID)"
             case .contextSyncTimeout(let requestID):
                 return "Timed out waiting for remote context sync result: \(requestID)"
+            case .contextSyncRemoteFailure(
+                let requestID,
+                let responder,
+                let message
+            ):
+                return
+                    "Peer \(responder.uuidString.lowercased()) failed context sync request \(requestID.uuidString.lowercased()): \(message)"
             case .localExecutorRegistrationTimedOut(
                 let actionID,
                 let source,
@@ -135,6 +156,8 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Client is disconnecting; in-flight operation cancelled."
             case .noSFUEndpointConfigured:
                 return "No SFU endpoint is configured for this client; voice requires SFU presence + signaling."
+            case .invalidSideNote(let detail):
+                return "Side note is invalid: \(detail)"
         }
     }
 }
@@ -162,7 +185,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public typealias RawMessageHandler = @Sendable (String) -> Void
     public typealias BlobAvailabilityHandler = @Sendable (UUID, String) -> Void
     public typealias PeerConnectHandler = @Sendable (UUID) -> Void
-    public typealias ContextSyncHandler = @Sendable (UUID) -> Void
+    public typealias ContextSyncHandler =
+        @Sendable (KeepTalkingContextSyncEvent) async -> Void
     public typealias LogHandler = @Sendable (String) -> Void
 
     public var onEnvelope: EnvelopeHandler?
@@ -171,9 +195,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public var onBlobAvailabilityChange: BlobAvailabilityHandler?
     public var onPeerConnect: PeerConnectHandler?
     public var onContextSync: ContextSyncHandler?
-    /// Notifies the app when the outbox set of pending message IDs changes
-    /// (entry added, removed on successful drain, or cancelled by user).
-    public var onOutboxChanged: (@Sendable () -> Void)?
+    /// Fires when a context's side notes changed — locally or by merge. The
+    /// app uses it to refresh the notes UI and reload the widget timeline.
+    public var onSideNotesChanged: (@Sendable (UUID) async -> Void)?
     public var onThreadsChanged: (@Sendable () -> Void)?
     /// Requests reconciliation of the derived semantic index for a context.
     /// The handler should enqueue best-effort work and return promptly; the
@@ -322,9 +346,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     // contextSyncing and transcriptSyncing dispatch through these.
     let syncSummaries = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncSummaryResult>()
     let syncMessages = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncMessagesResult>()
-    let syncSideNotes = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncSideNotesResult>()
     let syncTranscriptSummaries = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncTranscriptSummaryResult>()
     let syncTranscriptLines = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncTranscriptLinesResult>()
+    let contextSyncSingleFlight = KeepTalkingContextSyncSingleFlight()
 
     // MARK: Trust handshake properties
     let trustQueue = DispatchQueue(
@@ -332,6 +356,21 @@ public final class KeepTalkingClient: @unchecked Sendable {
     )
     var pendingTrustSessions: [UUID: KeepTalkingPendingTrustSession] = [:]
     var incomingTrustHandler: KeepTalkingIncomingTrustHandler?
+    /// Trust-request session ids this node has taken responsibility for.
+    /// Guarded by `trustQueue`.
+    ///
+    /// Claimed before the human-latency await so a redelivery cannot raise a
+    /// second prompt, and — unlike a purely in-flight claim — kept after the
+    /// decision settles. A trust request redelivered *after* acceptance is the
+    /// same hazard as one redelivered during it: re-accepting mints a fresh
+    /// ephemeral keypair and overwrites the pending session, so the initiator
+    /// binds one transcript while this node holds another and the handshake
+    /// strands. The claim is released only when the request failed before
+    /// settling, so a genuine retry after a transient error still works.
+    ///
+    /// Growth is bounded in practice: entries are one per human-initiated trust
+    /// request, for the lifetime of the client.
+    var handledTrustRequestSessionIDs: Set<UUID> = []
 
     // MARK: Blob request/response properties
     let blobTransportQueue = KeepTalkingBlobTransportQueue()
@@ -431,7 +470,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         return lifecycleGeneration
     }
 
-    private func isConnectionLifecycleActive(_ generation: UInt64) -> Bool {
+    func isConnectionLifecycleActive(_ generation: UInt64) -> Bool {
         lifecycleLock.lock()
         defer { lifecycleLock.unlock() }
         return lifecycleGeneration == generation
@@ -453,7 +492,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
         postConnectTask?.cancel()
         postConnectTask = Task { [weak self] in
             guard let self, self.isConnectionActive(generation) else { return }
-            await self.dispatchMaintenance(.connected)
+            await self.dispatchMaintenance(
+                .connected,
+                generation: generation
+            )
             guard !Task.isCancelled,
                 self.isConnectionActive(generation),
                 self.kvService != nil
@@ -547,8 +589,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
             DefaultSkillScriptExecutor.current,
         primitiveRegistry: KeepTalkingPrimitiveRegistry? = nil,
         logon: UUID = UUID(),
-        localStore: any KeepTalkingLocalStore =
-            KeepTalkingClient.makeDefaultLocalStore(),
+        // No default: constructing a store is now async, and a default argument
+        // cannot await. Callers build the store first and inject it.
+        localStore: any KeepTalkingLocalStore,
         keychain: any KeepTalkingKeychainStore = KeepTalkingInMemoryKeychainStore()
     ) {
         self.config = config
@@ -721,7 +764,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
             guard let self, let generation = self.connectionLifecycleSnapshot() else { return }
             Task {
                 guard self.isConnectionLifecycleActive(generation) else { return }
-                await self.handlePeerConnect(nodeID: nodeID)
+                await self.handlePeerConnect(
+                    nodeID: nodeID,
+                    generation: generation
+                )
             }
         }
         rtcClient.onBroadcastReady = { [weak self] in
@@ -730,7 +776,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
                 guard self.isConnectionLifecycleActive(generation) else { return }
                 await self.drainOutbox()
                 guard self.isConnectionLifecycleActive(generation) else { return }
-                await self.dispatchMaintenance(.heartbeat)
+                await self.dispatchMaintenance(
+                    .heartbeat,
+                    generation: generation
+                )
             }
         }
     }
@@ -773,8 +822,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
         jsRuntime = runtime
     }
 
-    func notifyContextDidSync(_ context: UUID) {
-        onContextSync?(context)
+    func notifyContextSync(_ event: KeepTalkingContextSyncEvent) async {
+        await onContextSync?(event)
     }
 
     func notifyBlobAvailabilityChange(contextID: UUID, blobID: String) {
@@ -782,11 +831,13 @@ public final class KeepTalkingClient: @unchecked Sendable {
     }
 
     /// Creates the default local store, preferring SQLite and falling back to memory.
-    public static func makeDefaultLocalStore() -> any KeepTalkingLocalStore {
+    public static func makeDefaultLocalStore() async throws
+        -> any KeepTalkingLocalStore
+    {
         do {
-            return try KeepTalkingModelStore()
+            return try await KeepTalkingModelStore.make()
         } catch {
-            return KeepTalkingInMemoryStore()
+            return try await KeepTalkingInMemoryStore.make()
         }
     }
 
@@ -818,6 +869,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
             _ = try await ensure(config.contextID, for: KeepTalkingContext.self)
             try ensureCurrentConnect(generation)
 
+            openContextSyncRequests(generation: generation)
             let startTask = try prepareTransportStart(generation)
             transportStarted = true
             try await startTask.waitPropagatingCancellation()
@@ -832,6 +884,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
             {
                 await teardown.value
             } else {
+                failAllPendingContextSync(
+                    error: KeepTalkingClientError.clientDisconnected
+                )
                 cancelConnect(generation)
             }
             throw error

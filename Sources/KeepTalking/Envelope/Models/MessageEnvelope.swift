@@ -3,13 +3,6 @@ import Foundation
 extension KeepTalkingContextMessage: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .message }
 
-    public var participantNodeIDs: [UUID] {
-        if case .node(let nodeID) = sender {
-            return [nodeID]
-        }
-        return []
-    }
-
     public var transportContextID: UUID? {
         $context.id
     }
@@ -28,5 +21,12 @@ extension KeepTalkingEnvelopeAsyncHandlers {
         _ handler: @escaping @Sendable (KeepTalkingContextMessage) async throws -> Void
     ) {
         register(KeepTalkingContextMessage.self, handler)
+    }
+
+    /// Variant whose handler reports whether the message was newly applied.
+    public mutating func onMessage(
+        _ handler: @escaping @Sendable (KeepTalkingContextMessage) async throws -> Bool
+    ) {
+        registerReportingApplied(KeepTalkingContextMessage.self, handler)
     }
 }

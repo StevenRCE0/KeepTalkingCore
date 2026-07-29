@@ -168,12 +168,18 @@ extension KeepTalkingClient {
     /// Persist a transcript line received from a peer. Idempotent — a line we
     /// already hold (by id) is dropped. Ensures the local call record exists and
     /// records the author as a participant, then fires `onVoiceTranscriptLine`.
+    ///
+    /// Returns whether anything was actually applied. `.voiceCallTranscriptLine`
+    /// is fan-out eligible, so the same line arrives over both the direct
+    /// channel and the SFU; reporting `false` for the copy that changed nothing
+    /// suppresses the second outward publish, matching messages and attachments.
+    @discardableResult
     func handleIncomingVoiceTranscriptLine(
         _ payload: KeepTalkingVoiceCallTranscriptLinePayload
-    ) async throws {
+    ) async throws -> Bool {
         // Our own broadcast echoed back — already persisted on append.
         if payload.from == config.node {
-            return
+            return false
         }
         // Mutating sync (like continuation-bubble messages): if we already hold
         // this line, revise it in place when the text changed — the author upserts
@@ -182,7 +188,7 @@ extension KeepTalkingClient {
         if let existing = try await KeepTalkingVoiceTranscriptLine.find(payload.lineID, on: voiceDB) {
             guard existing.text != payload.text else {
                 onLog?("[voice-transcript] dup incoming line=\(payload.lineID.uuidString.prefix(8)) — unchanged")
-                return
+                return false
             }
             existing.text = payload.text
             existing.sender = payload.sender
@@ -191,7 +197,7 @@ extension KeepTalkingClient {
                 "[voice-transcript] ←~ revise line=\(payload.lineID.uuidString.prefix(8)) from=\(payload.from.uuidString.prefix(8)): \"\(payload.text.prefix(60))\""
             )
             onVoiceTranscriptLine?(payload)
-            return
+            return true
         }
         ensureVoiceCall(
             sessionID: payload.sessionID,
@@ -208,11 +214,30 @@ extension KeepTalkingClient {
             timestamp: Date(timeIntervalSince1970: Double(payload.timestampMs) / 1000),
             sequence: payload.sequence
         )
-        try await line.create(on: voiceDB)
+        do {
+            try await line.create(on: voiceDB)
+        } catch {
+            // `.voiceCallTranscriptLine` is fan-out eligible, so the direct and
+            // SFU copies arrive on two independent Tasks and both can pass the
+            // `find` above before either writes. The loser drops its copy
+            // rather than failing: the two carry the same payload, and a
+            // genuine later revision arrives as its own delivery. Publishing is
+            // skipped too, so a duplicate never re-notifies.
+            let exists =
+                try await KeepTalkingVoiceTranscriptLine.query(on: voiceDB)
+                .filter(\.$id == payload.lineID)
+                .count() > 0
+            guard exists else { throw error }
+            onLog?(
+                "[voice-transcript] dup incoming line=\(payload.lineID.uuidString.prefix(8)) — concurrent delivery"
+            )
+            return false
+        }
         onLog?(
             "[voice-transcript] ← line session=\(payload.sessionID.uuidString.prefix(8)) from=\(payload.from.uuidString.prefix(8)) seq=\(payload.sequence): \"\(payload.text.prefix(60))\""
         )
         onVoiceTranscriptLine?(payload)
+        return true
     }
 
     // MARK: - Query

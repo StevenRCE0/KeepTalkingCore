@@ -26,7 +26,7 @@ extension KeepTalkingClient {
 
         for relation in relations where relation.relationship.allows(context: context) {
             let nodeID = relation.$to.id
-            guard nodeID != config.node, !isNodeOnline(nodeID) else {
+            guard nodeID != config.node else {
                 continue
             }
             guard

@@ -6,7 +6,7 @@ import Testing
 struct MappingTests {
     @Test("alias upsert keeps one live alias and clears cleanly")
     func aliasRoundTrip() async throws {
-        let localStore = try await KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let node = KeepTalkingNode(id: UUID())
         try await node.save(on: localStore.database)
 
@@ -41,7 +41,7 @@ struct MappingTests {
 
     @Test("tag add and remove deduplicates on normalized value")
     func tagRoundTrip() async throws {
-        let localStore = try await KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let context = KeepTalkingContext(id: UUID())
         try await context.save(on: localStore.database)
 
@@ -76,7 +76,7 @@ struct MappingTests {
 
     @Test("tag color is generated once and reused across targets")
     func tagColorReuse() async throws {
-        let localStore = try await KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let context = KeepTalkingContext(id: UUID())
         let node = KeepTalkingNode(id: UUID())
         try await context.save(on: localStore.database)
@@ -112,7 +112,7 @@ struct MappingTests {
 
     @Test("actions use the existing mapping tag model")
     func actionTagRoundTrip() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let owner = KeepTalkingNode(id: UUID())
         try await owner.save(on: localStore.database)
         let action = try await KeepTalkingClient.registerAction(
@@ -146,7 +146,7 @@ struct MappingTests {
 
 @Test("static mapping helpers behave like instance wrappers")
 func staticMappingHelpersWork() async throws {
-    let localStore = try await KeepTalkingInMemoryStore()
+    let localStore = try await KeepTalkingInMemoryStore.make()
     let node = KeepTalkingNode(id: UUID())
     try await node.save(on: localStore.database)
 

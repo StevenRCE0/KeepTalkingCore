@@ -1061,49 +1061,60 @@ extension KeepTalkingClient {
         }
     }
 
-    /// Resolves the effective grant scope a node has for `action` in `context`.
+    /// Returns the effective permission allowed for `node` on `action`.
     ///
-    /// Returns `KeepTalkingActionScope` — `.all` (unrestricted) or `.verbs(set)`
-    /// (the union of applicable grant scopes, where a grant row with no recorded
-    /// scope is treated as `.all`). Returns `nil` when the caller has no
-    /// applicable grant (i.e. denied). The owner of the action always receives
-    /// `.unrestricted`.
-    func resolveGrantPermission(
+    /// Direct action grants and grants inherited from active action tags are
+    /// additive. This is the sole grant gate used by execution, advertisement,
+    /// and UI availability.
+    public static func allowedActionScope(
+        node: KeepTalkingNode,
+        action: KeepTalkingAction,
+        context: KeepTalkingContext?,
+        on database: any Database
+    ) async throws -> KeepTalkingActionScope? {
+        let nodeID = try node.requireID()
+        let actionID = try action.requireID()
+        guard let ownerNodeID = action.$node.id else { return nil }
+
+        let relationIDs = try await trustedRelations(
+            from: ownerNodeID,
+            to: nodeID,
+            allowing: context,
+            on: database
+        )
+        .compactMap(\.id)
+        guard !relationIDs.isEmpty else { return nil }
+
+        let directPermissions =
+            try await KeepTalkingNodeRelationActionRelation
+            .query(on: database)
+            .filter(\.$relation.$id ~~ relationIDs)
+            .filter(\.$action.$id, .equal, actionID)
+            .all()
+            .filter { $0.applicable(in: context) }
+            .map { $0.permission ?? .all }
+        let aliasPermissions = try await aliasGrantPermissions(
+            forActionID: actionID,
+            relationIDs: relationIDs,
+            context: context,
+            on: database
+        )
+        let permissions = directPermissions + aliasPermissions
+        guard !permissions.isEmpty else { return nil }
+        return KeepTalkingActionScope.union(permissions)
+    }
+
+    public func allowedActionScope(
         node: KeepTalkingNode,
         action: KeepTalkingAction,
         context: KeepTalkingContext?
     ) async throws -> KeepTalkingActionScope? {
-        let nodeID = try node.requireID()
-        guard let ownerNodeID = action.$node.id else { return nil }
-
-        // Owner always has unrestricted access to their own actions.
-        if nodeID == ownerNodeID {
-            return .unrestricted
-        }
-
-        let relationIDs = try await Self.trustedRelations(
-            from: ownerNodeID,
-            to: nodeID,
-            allowing: context,
+        try await Self.allowedActionScope(
+            node: node,
+            action: action,
+            context: context,
             on: localStore.database
         )
-        .compactMap(\.id)
-        guard !relationIDs.isEmpty else {
-            return nil
-        }
-
-        let approvals =
-            try await KeepTalkingNodeRelationActionRelation
-            .query(on: localStore.database)
-            .filter(\.$relation.$id ~~ relationIDs)
-            .filter(\.$action.$id, .equal, try action.requireID())
-            .all()
-
-        let applicable = approvals.filter { $0.applicable(in: context) }
-        guard !applicable.isEmpty else { return nil }
-
-        // A grant row with no recorded scope means "no narrowing" → `.all`.
-        return KeepTalkingActionScope.union(applicable.map { $0.permission ?? .all })
     }
 
     /// Lists the tool names currently exposed by a locally-hosted MCP action.

@@ -9,10 +9,6 @@ extension KeepTalkingEnvelope {
         self as? KeepTalkingContextAttachmentDTO
     }
 
-    public var context: KeepTalkingContext? {
-        self as? KeepTalkingContext
-    }
-
     public var node: KeepTalkingNode? {
         self as? KeepTalkingNode
     }

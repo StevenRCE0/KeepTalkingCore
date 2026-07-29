@@ -112,38 +112,23 @@ extension KeepTalkingContext {
         )
     }
 
-    public func refreshSyncMetadata(
-        on database: any Database,
-        chunkSize: Int = KeepTalkingContextSyncMetadata.defaultChunkSize
-    ) async throws {
-        let context = try requireID()
-        let messages = try await KeepTalkingContextMessage.query(on: database)
-            .filter(\.$context.$id, .equal, context)
-            .all()
-        let metadata = Self.buildSyncMetadata(
-            from: messages,
-            chunkSize: chunkSize
-        )
-        guard syncMetadata != metadata else {
-            return
-        }
-        // Targeted update of ONLY sync_metadata — a full `save()` would write back
-        // this instance's (possibly stale) `updatedAt` and clobber the value the
-        // touch middleware set via its own UPDATE. See ContextTouchMiddleware.
-        try await KeepTalkingContext.query(on: database)
-            .filter(\.$id == context)
-            .set(\.$syncMetadata, to: metadata)
-            .update()
-        syncMetadata = metadata
-    }
 }
 
 private struct KeepTalkingContextSyncDigestPayload: Codable {
     let id: UUID
     let sender: KeepTalkingContextMessage.Sender
     let content: String
+    /// Whole milliseconds since the epoch, NOT the raw `Double` bit pattern.
+    /// A `Date` does not survive the Fluent/SQLite round-trip bit-exactly —
+    /// measured at 176/200 with sub-millisecond timestamps — so hashing the
+    /// bit pattern makes the same message digest differently depending on
+    /// whether it came from memory or from disk. Two peers then compute
+    /// different chunk digests for identical content, chunk repair chases a
+    /// divergence that does not exist, and it never converges. Rounding to a
+    /// millisecond absorbs the drift. See `messageDigestSurvivesRoundTrips`.
     let timestamp: Int64
     let type: KeepTalkingContextMessage.MessageType
+    let agentTurnID: UUID?
 }
 
 func senderSortKey(_ sender: KeepTalkingContextMessage.Sender) -> String {
@@ -171,10 +156,9 @@ func messageDigest(for message: KeepTalkingContextMessage) -> Data {
         id: requireMessageID(message),
         sender: message.sender,
         content: message.content,
-        timestamp: Int64(
-            (message.timestamp.timeIntervalSince1970 * 1_000).rounded()
-        ),
-        type: message.type
+        timestamp: Int64((message.timestamp.timeIntervalSince1970 * 1_000).rounded()),
+        type: message.type,
+        agentTurnID: message.agentTurnID
     )
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]

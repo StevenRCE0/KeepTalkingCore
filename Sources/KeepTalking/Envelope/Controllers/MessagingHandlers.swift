@@ -9,15 +9,14 @@ import Foundation
 
 extension KeepTalkingEnvelopeAsyncHandlers {
     mutating func registerMessagingHandlers(for client: KeepTalkingClient) {
-        onMessage { message in
-            try await client.handleIncomingMessage(message)
+        onMessage { (message: KeepTalkingContextMessage) async throws -> Bool in
+            let applied = try await client.handleIncomingMessage(message)
             client.rtcClient.debug("Message cast to envelope")
+            return applied
         }
-        onAttachment { attachment in
+        onAttachment {
+            (attachment: KeepTalkingContextAttachmentDTO) async throws -> Bool in
             try await client.handleIncomingAttachment(attachment)
-        }
-        onContext { context in
-            client.mergeContext(context)
         }
     }
 }

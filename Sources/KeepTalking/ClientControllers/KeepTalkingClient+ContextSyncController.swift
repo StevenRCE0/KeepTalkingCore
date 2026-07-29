@@ -4,68 +4,137 @@ import Foundation
 extension KeepTalkingClient {
     private static let contextSyncResultTimeoutSeconds: TimeInterval = 15
 
-    func syncCurrentContext(with node: UUID) async {
-        guard node != config.node else { return }
+    func syncCurrentContext(with node: UUID, generation: UInt64) async {
+        guard
+            node != config.node,
+            isConnectionLifecycleActive(generation)
+        else { return }
+        await contextSyncSingleFlight.run(
+            for: node,
+            generation: generation
+        ) { [weak self] in
+            guard self?.isConnectionLifecycleActive(generation) == true else {
+                return
+            }
+            await self?.performContextSync(
+                with: node,
+                generation: generation
+            )
+        }
+    }
 
+    private func performContextSync(
+        with node: UUID,
+        generation: UInt64
+    ) async {
+        let syncID = UUID()
+        let contextID = config.contextID
+        await notifyContextSync(
+            KeepTalkingContextSyncEvent(
+                syncID: syncID,
+                contextID: contextID,
+                peerID: node,
+                phase: .started
+            )
+        )
         do {
             let context = try await ensure(
-                config.contextID,
+                contextID,
                 for: KeepTalkingContext.self,
                 strict: true
             )
-            let contextID = try context.requireID()
+            let persistedContextID = try context.requireID()
 
             // Messages: the shared summary→tail→chunk reconcile (see runSyncReconcile).
             try await runSyncReconcile(
                 KeepTalkingSyncReconcile(
                     localSummary: {
-                        try await self.contextSyncSnapshot(for: contextID).summary
+                        try await self.contextSyncSnapshot(for: persistedContextID).summary
                     },
                     remoteSummary: {
-                        try await self.dispatchContextSyncSummaryRequest(
-                            to: node, in: context
-                        ).summary
+                        let result = try await self.dispatchContextSyncSummaryRequest(
+                            to: node,
+                            in: context,
+                            generation: generation
+                        )
+                        if let notes = result.sideNotes,
+                            try await self.mergeSideNotes(
+                                notes, contextID: persistedContextID)
+                        {
+                            await self.notifySideNotesChanged(persistedContextID)
+                        }
+                        return result.summary
                     },
                     makeTail: { local, remote in
                         KeepTalkingContextSyncTailRequest(
-                            context: contextID, requester: self.config.node,
-                            recipient: node, local: local, remote: remote
+                            context: persistedContextID, requester: self.config.node,
+                            recipient: node, local: local,
+                            remote: remote
                         )
                     },
-                    dispatchTail: { try await self.dispatchContextSyncTailRequest($0) },
+                    dispatchTail: {
+                        try await self.dispatchContextSyncTailRequest(
+                            $0,
+                            generation: generation
+                        )
+                    },
                     makeChunk: { local, remote in
                         KeepTalkingContextSyncChunkRequest(
-                            context: contextID, requester: self.config.node,
-                            recipient: node, local: local, remote: remote
+                            context: persistedContextID, requester: self.config.node,
+                            recipient: node, local: local,
+                            remote: remote
                         )
                     },
-                    dispatchChunk: { try await self.dispatchContextSyncChunkRequest($0) },
-                    persist: { try await self.persistContextSyncMessagesResult($0) }
+                    dispatchChunk: {
+                        try await self.dispatchContextSyncChunkRequest(
+                            $0,
+                            generation: generation
+                        )
+                    },
+                    persist: { result in
+                        try await self.persistContextSyncMessagesResult(result)
+                        let messageIDs = result.messages.compactMap(\.id)
+                        guard !messageIDs.isEmpty else { return }
+                        await self.notifyContextSync(
+                            KeepTalkingContextSyncEvent(
+                                syncID: syncID,
+                                contextID: persistedContextID,
+                                peerID: node,
+                                phase: .messagesApplied(messageIDs)
+                            )
+                        )
+                    }
                 )
-            )
-
-            // Side notes use full-sync semantics: pull the entire set from the
-            // peer and merge by `(key, updatedAt)`. Transparently chunked at the
-            // transport layer, so there's no chunking decision to make here.
-            let sideNotesResult = try await dispatchContextSyncSideNotesRequest(
-                to: node,
-                contextID: contextID
-            )
-            try await mergeSideNotes(
-                sideNotesResult.sideNotes,
-                contextID: contextID
             )
 
             // Attachment recovery is no longer nested here — it's a first-class
             // ContextMaintenance task (`recoverAttachments`).
 
+            guard isConnectionLifecycleActive(generation) else {
+                throw KeepTalkingClientError.clientDisconnected
+            }
             rtcClient.debug(
-                "context sync complete peer=\(node.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"
+                "context sync complete peer=\(node.uuidString.lowercased()) context=\(persistedContextID.uuidString.lowercased())"
             )
-            notifyContextDidSync(contextID)
+            await notifyContextSync(
+                KeepTalkingContextSyncEvent(
+                    syncID: syncID,
+                    contextID: persistedContextID,
+                    peerID: node,
+                    phase: .completed
+                )
+            )
         } catch {
             rtcClient.debug(
                 "context sync failed peer=\(node.uuidString.lowercased()) error=\(error.localizedDescription)"
+            )
+            await notifyContextSync(
+                KeepTalkingContextSyncEvent(
+                    syncID: syncID,
+                    contextID: contextID,
+                    peerID: node,
+                    phase: .failed(error.localizedDescription)
+                )
             )
         }
     }
@@ -74,45 +143,49 @@ extension KeepTalkingClient {
         _ envelope: KeepTalkingContextSyncEnvelope
     ) async throws {
         switch envelope {
+            // Side-note push: broadcast, so ignore our own echo.
+            case .sideNotesPush(let push):
+                guard push.origin != config.node else { return }
+                if try await mergeSideNotes(
+                    push.sideNotes, contextID: push.context)
+                {
+                    await notifySideNotesChanged(push.context)
+                }
+
             // Requests: respond if addressed to us (execute + send wrapped result).
             case .summaryRequest(let request):
                 try await respond(
-                    to: request, recipient: request.recipient,
+                    to: request,
                     execute: executeContextSyncSummaryRequest,
                     wrap: { .summaryResult($0) })
             case .tailRequest(let request):
                 try await respond(
-                    to: request, recipient: request.recipient,
+                    to: request,
                     execute: executeContextSyncTailRequest,
                     wrap: { .messagesResult($0) })
             case .chunkRequest(let request):
                 try await respond(
-                    to: request, recipient: request.recipient,
+                    to: request,
                     execute: executeContextSyncChunkRequest,
                     wrap: { .messagesResult($0) })
             case .attachmentRecordsRequest(let request):
                 try await respond(
-                    to: request, recipient: request.recipient,
+                    to: request,
                     execute: executeContextSyncAttachmentRecordsRequest,
                     wrap: { .attachmentRecordsResult($0) })
-            case .sideNotesRequest(let request):
-                try await respond(
-                    to: request, recipient: request.recipient,
-                    execute: executeContextSyncSideNotesRequest,
-                    wrap: { .sideNotesResult($0) })
             case .transcriptSummaryRequest(let request):
                 try await respond(
-                    to: request, recipient: request.recipient,
+                    to: request,
                     execute: executeContextSyncTranscriptSummaryRequest,
                     wrap: { .transcriptSummaryResult($0) })
             case .transcriptTailRequest(let request):
                 try await respond(
-                    to: request, recipient: request.recipient,
+                    to: request,
                     execute: executeContextSyncTranscriptTailRequest,
                     wrap: { .transcriptLinesResult($0) })
             case .transcriptChunkRequest(let request):
                 try await respond(
-                    to: request, recipient: request.recipient,
+                    to: request,
                     execute: executeContextSyncTranscriptChunkRequest,
                     wrap: { .transcriptLinesResult($0) })
 
@@ -123,15 +196,29 @@ extension KeepTalkingClient {
             case .messagesResult(let result):
                 guard result.requester == config.node else { return }
                 syncMessages.resolve(result.request, with: result)
-            case .sideNotesResult(let result):
-                guard result.requester == config.node else { return }
-                syncSideNotes.resolve(result.request, with: result)
             case .transcriptSummaryResult(let result):
                 guard result.requester == config.node else { return }
                 syncTranscriptSummaries.resolve(result.request, with: result)
             case .transcriptLinesResult(let result):
                 guard result.requester == config.node else { return }
                 syncTranscriptLines.resolve(result.request, with: result)
+            case .failureResult(let result):
+                guard result.requester == config.node else { return }
+                let error = KeepTalkingClientError.contextSyncRemoteFailure(
+                    requestID: result.request,
+                    responder: result.responder,
+                    message: result.message
+                )
+                let handled = [
+                    syncSummaries.fail(result.request, error: error),
+                    syncMessages.fail(result.request, error: error),
+                    syncTranscriptSummaries.fail(result.request, error: error),
+                    syncTranscriptLines.fail(result.request, error: error),
+                ].contains(true)
+                guard !handled else { return }
+                rtcClient.debug(
+                    "unmatched context sync failure request=\(result.request.uuidString.lowercased()) peer=\(result.responder.uuidString.lowercased()) error=\(result.message)"
+                )
 
             // Attachments don't follow the request→result-waiter shape: blob
             // requests are answered out-of-band, records results persist on arrival.
@@ -146,33 +233,55 @@ extension KeepTalkingClient {
 
     /// Responder boilerplate shared by every request arm: ignore requests not
     /// addressed to us, otherwise execute and send back the wrapped result.
-    private func respond<Request, Result>(
+    private func respond<Request: KeepTalkingContextSyncDirectedRequest, Result>(
         to request: Request,
-        recipient: UUID,
         execute: (Request) async throws -> Result,
         wrap: (Result) -> KeepTalkingContextSyncEnvelope
     ) async throws {
-        guard recipient == config.node else { return }
-        try rtcClient.sendEnvelope(wrap(try await execute(request)))
+        guard request.recipient == config.node else { return }
+        do {
+            try rtcClient.sendEnvelope(wrap(try await execute(request)))
+        } catch {
+            try rtcClient.sendEnvelope(
+                KeepTalkingContextSyncEnvelope.failureResult(
+                    KeepTalkingContextSyncFailureResult(
+                        request: request.request,
+                        context: request.context,
+                        requester: request.requester,
+                        responder: config.node,
+                        message: error.localizedDescription
+                    )
+                )
+            )
+        }
     }
 
     func dispatchContextSyncSummaryRequest(
         to node: UUID,
-        in context: KeepTalkingContext
+        in context: KeepTalkingContext,
+        generation: UInt64? = nil
     ) async throws -> KeepTalkingContextSyncSummaryResult {
+        let contextID = try context.requireID()
         let request = KeepTalkingContextSyncSummaryRequest(
-            context: try context.requireID(),
+            context: contextID,
             requester: config.node,
-            recipient: node
+            recipient: node,
+            // Computed here rather than by the caller so no dispatch site can
+            // forget it and silently disable side-note sync.
+            sideNoteDigest: try await sideNoteDigest(in: contextID)
         )
 
         if node == config.node {
             return try await executeContextSyncSummaryRequest(request)
         }
+        guard let generation else {
+            throw KeepTalkingClientError.clientDisconnected
+        }
 
         return try await syncSummaries.response(
             for: request.request,
             timeout: Self.contextSyncResultTimeoutSeconds,
+            generation: generation,
             send: { [weak self] in
                 try self?.rtcClient.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.summaryRequest(request)
@@ -182,15 +291,20 @@ extension KeepTalkingClient {
     }
 
     func dispatchContextSyncTailRequest(
-        _ request: KeepTalkingContextSyncTailRequest
+        _ request: KeepTalkingContextSyncTailRequest,
+        generation: UInt64? = nil
     ) async throws -> KeepTalkingContextSyncMessagesResult {
         if request.recipient == config.node {
             return try await executeContextSyncTailRequest(request)
+        }
+        guard let generation else {
+            throw KeepTalkingClientError.clientDisconnected
         }
 
         return try await syncMessages.response(
             for: request.request,
             timeout: Self.contextSyncResultTimeoutSeconds,
+            generation: generation,
             send: { [weak self] in
                 try self?.rtcClient.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.tailRequest(request)
@@ -199,39 +313,21 @@ extension KeepTalkingClient {
         )
     }
 
-    func dispatchContextSyncSideNotesRequest(
-        to node: UUID,
-        contextID: UUID
-    ) async throws -> KeepTalkingContextSyncSideNotesResult {
-        let request = KeepTalkingContextSyncSideNotesRequest(
-            context: contextID,
-            requester: config.node,
-            recipient: node
-        )
-        if node == config.node {
-            return try await executeContextSyncSideNotesRequest(request)
-        }
-        return try await syncSideNotes.response(
-            for: request.request,
-            timeout: Self.contextSyncResultTimeoutSeconds,
-            send: { [weak self] in
-                try self?.rtcClient.sendEnvelope(
-                    KeepTalkingContextSyncEnvelope.sideNotesRequest(request)
-                )
-            }
-        )
-    }
-
     func dispatchContextSyncChunkRequest(
-        _ request: KeepTalkingContextSyncChunkRequest
+        _ request: KeepTalkingContextSyncChunkRequest,
+        generation: UInt64? = nil
     ) async throws -> KeepTalkingContextSyncMessagesResult {
         if request.recipient == config.node {
             return try await executeContextSyncChunkRequest(request)
+        }
+        guard let generation else {
+            throw KeepTalkingClientError.clientDisconnected
         }
 
         return try await syncMessages.response(
             for: request.request,
             timeout: Self.contextSyncResultTimeoutSeconds,
+            generation: generation,
             send: { [weak self] in
                 try self?.rtcClient.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.chunkRequest(request)
@@ -240,25 +336,61 @@ extension KeepTalkingClient {
         )
     }
 
-    /// Fail every in-flight sync request across all resources — on disconnect.
+    func openContextSyncRequests(generation: UInt64) {
+        syncSummaries.open(generation: generation)
+        syncMessages.open(generation: generation)
+        syncTranscriptSummaries.open(generation: generation)
+        syncTranscriptLines.open(generation: generation)
+        contextSyncSingleFlight.open(generation: generation)
+    }
+
+    /// Close registration and fail every in-flight request — on disconnect.
     func failAllPendingContextSync(error: Error) {
-        syncSummaries.failAll(error: error)
-        syncMessages.failAll(error: error)
-        syncSideNotes.failAll(error: error)
-        syncTranscriptSummaries.failAll(error: error)
-        syncTranscriptLines.failAll(error: error)
+        contextSyncSingleFlight.cancelAll()
+        syncSummaries.close(error: error)
+        syncMessages.close(error: error)
+        syncTranscriptSummaries.close(error: error)
+        syncTranscriptLines.close(error: error)
     }
 
     private func executeContextSyncSummaryRequest(
         _ request: KeepTalkingContextSyncSummaryRequest
     ) async throws -> KeepTalkingContextSyncSummaryResult {
         let snapshot = try await contextSyncSnapshot(for: request.context)
+        // Side notes ride the summary exchange: attach our whole set only when
+        // the requester's digest disagrees with ours. Matching digests cost
+        // nothing beyond the 32 bytes already in the request.
+        var sideNotes: [KeepTalkingSideNoteDTO]?
+        let localDigest = try await sideNoteDigest(in: request.context)
+        if request.sideNoteDigest != localDigest {
+            let notes = try await allSideNoteDTOs(in: request.context)
+            let encoded = (try? JSONEncoder().encode(notes))?.count ?? 0
+            if encoded <= KeepTalkingSideNoteLimits.maximumEncodedBytes {
+                sideNotes = notes
+            } else {
+                // Locally-originated writes cannot get here — they are bounded
+                // by value, key and live count, with tombstones pruned to fit.
+                // A peer on different limits can still push us over, though, so
+                // this is a real branch rather than an impossible one, and it
+                // must not assert on what is ultimately external input.
+                //
+                // Refusing still beats pushing the summary result past the
+                // transport limit and breaking MESSAGE sync for this peer too.
+                // But it is worth shouting about: the requester cannot tell "no
+                // notes because we agree" from "no notes because I refused", so
+                // side notes simply stop converging with no other signal.
+                onLog?(
+                    "[sync] BUG: side-note set is \(encoded)B, over the \(KeepTalkingSideNoteLimits.maximumEncodedBytes)B budget; not attaching — side notes will not converge for this peer"
+                )
+            }
+        }
         return KeepTalkingContextSyncSummaryResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
-            summary: snapshot.summary
+            summary: snapshot.summary,
+            sideNotes: sideNotes
         )
     }
 
@@ -266,14 +398,18 @@ extension KeepTalkingClient {
         _ request: KeepTalkingContextSyncTailRequest
     ) async throws -> KeepTalkingContextSyncMessagesResult {
         let snapshot = try await contextSyncSnapshot(for: request.context)
-        let messages = snapshot.items(after: request.senders)
+        let page = snapshot.items(
+            after: request.senders,
+            before: request.before
+        )
         return KeepTalkingContextSyncMessagesResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
-            messages: messages,
-            attachments: snapshot.attachments(for: messages)
+            messages: page.items,
+            attachments: snapshot.attachments(for: page.items),
+            nextBefore: page.nextBefore
         )
     }
 
@@ -281,14 +417,18 @@ extension KeepTalkingClient {
         _ request: KeepTalkingContextSyncChunkRequest
     ) async throws -> KeepTalkingContextSyncMessagesResult {
         let snapshot = try await contextSyncSnapshot(for: request.context)
-        let messages = snapshot.items(in: request.chunks)
+        let page = snapshot.items(
+            in: request.chunks,
+            before: request.before
+        )
         return KeepTalkingContextSyncMessagesResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
-            messages: messages,
-            attachments: snapshot.attachments(for: messages)
+            messages: page.items,
+            attachments: snapshot.attachments(for: page.items),
+            nextBefore: page.nextBefore
         )
     }
 
@@ -332,56 +472,6 @@ extension KeepTalkingClient {
                 for: savedAttachments,
                 in: result.context
             )
-        }
-    }
-
-    private func executeContextSyncSideNotesRequest(
-        _ request: KeepTalkingContextSyncSideNotesRequest
-    ) async throws -> KeepTalkingContextSyncSideNotesResult {
-        let sideNotes = try await allSideNoteDTOs(for: request.context)
-        return KeepTalkingContextSyncSideNotesResult(
-            request: request.request,
-            context: request.context,
-            requester: request.requester,
-            responder: config.node,
-            sideNotes: sideNotes
-        )
-    }
-
-    private func allSideNoteDTOs(for contextID: UUID) async throws -> [KeepTalkingSideNoteDTO] {
-        let context = try await ensure(contextID, for: KeepTalkingContext.self)
-        return try await context.$sideNotes
-            .query(on: localStore.database)
-            .all()
-            .compactMap { KeepTalkingSideNoteDTO($0) }
-    }
-
-    func mergeSideNotes(
-        _ incoming: [KeepTalkingSideNoteDTO],
-        contextID: UUID
-    ) async throws {
-        for dto in incoming {
-            if let existing = try await KeepTalkingSideNote.query(on: localStore.database)
-                .filter(\.$context.$id == contextID)
-                .filter(\.$key == dto.key)
-                .first()
-            {
-                let localUpdatedAt = existing.updatedAt ?? .distantPast
-                let remoteUpdatedAt = dto.updatedAt ?? .distantPast
-                guard remoteUpdatedAt > localUpdatedAt else { continue }
-                existing.value = dto.value
-                existing.isArchived = dto.isArchived
-                try await existing.save(on: localStore.database)
-            } else {
-                let note = KeepTalkingSideNote(
-                    id: dto.id,
-                    contextID: contextID,
-                    key: dto.key,
-                    value: dto.value,
-                    isArchived: dto.isArchived
-                )
-                try await note.save(on: localStore.database)
-            }
         }
     }
 

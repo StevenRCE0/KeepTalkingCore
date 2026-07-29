@@ -47,13 +47,28 @@ enum KeepTalkingPacketTransportCryptoError: LocalizedError {
 }
 
 enum KeepTalkingPacketTransportCrypto {
+    /// Ceiling on a single encoded envelope.
+    ///
+    /// This is a POLICY number, not a protocol one. `SFUFrame.encode` length-
+    /// prefixes with a `UInt32`, so the wire could carry ~4 GB — a limit that
+    /// would catch nothing. Transport no longer fragments envelopes, so the
+    /// contract is that a publisher produces envelopes that fit; this is the
+    /// check that proves it did. 1 MB sits far above legitimate traffic (the
+    /// sync layer pages its results at 64 KB, and a node-status snapshot is a
+    /// few KB) and far below the point where buffering one envelope hurts.
+    /// Blob bytes never pass through here — they have their own chunking.
+    static let maxOutboundPayloadBytes = 1 << 20
+
     static func outboundPayload(
         for envelope: any KeepTalkingEnvelope,
         localNodeID: UUID,
         contextSecretProvider: KeepTalkingTransportContextSecretProvider?
     ) throws -> Data {
         guard let contextID = encryptedContextID(for: envelope) else {
-            return try JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope))
+            return try assertFits(
+                JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope)),
+                kind: envelope.kind
+            )
         }
         guard
             let secret = try loadContextSecret(
@@ -85,7 +100,27 @@ enum KeepTalkingPacketTransportCrypto {
                 iv: encrypted.iv,
                 ciphertext: encrypted.ciphertext
             )
-        return try JSONEncoder().encode(transportEnvelope)
+        return try assertFits(
+            JSONEncoder().encode(transportEnvelope),
+            kind: envelope.kind
+        )
+    }
+
+    /// Checked on the encoded bytes, after sealing — the ciphertext plus its
+    /// base64 JSON framing is what actually goes on the wire, and it is larger
+    /// than the plaintext.
+    private static func assertFits(
+        _ payload: Data,
+        kind: KeepTalkingEnvelopeKind
+    ) throws -> Data {
+        guard payload.count <= maxOutboundPayloadBytes else {
+            throw KeepTalkingTransportError.envelopeTooLarge(
+                kind: kind,
+                bytes: payload.count,
+                limit: maxOutboundPayloadBytes
+            )
+        }
+        return payload
     }
 
     static func inboundEnvelope(

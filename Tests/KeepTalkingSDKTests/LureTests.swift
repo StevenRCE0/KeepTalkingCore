@@ -7,7 +7,7 @@ import Testing
 struct LureTests {
     @Test("static lure creates pending relation and stores remote public key")
     func staticLureCreatesPendingRelation() async throws {
-        let localStore = try await KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let localNodeID = UUID()
         let remoteNodeID = UUID()
 
@@ -39,7 +39,7 @@ struct LureTests {
 
     @Test("static lure does not duplicate pending identity keys")
     func staticLureIsIdempotent() async throws {
-        let localStore = try await KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let localNodeID = UUID()
         let remoteNodeID = UUID()
 
@@ -74,7 +74,7 @@ struct LureTests {
 
     @Test("static lure overwrite replaces stale identity key")
     func staticLureOverwriteReplacesStaleKey() async throws {
-        let localStore = try await KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let localNodeID = UUID()
         let remoteNodeID = UUID()
 
@@ -112,7 +112,7 @@ struct LureTests {
 
     @Test("static lure rejects invalid public key")
     func staticLureRejectsInvalidKey() async throws {
-        let localStore = try await KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let localNodeID = UUID()
 
         try await KeepTalkingNode(id: localNodeID).save(on: localStore.database)
@@ -139,7 +139,7 @@ struct LureTests {
 
     @Test("instance lure wrapper delegates to static implementation")
     func instanceLureWrapperWorks() async throws {
-        let localStore = try await KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let localNodeID = UUID()
         let remoteNodeID = UUID()
 

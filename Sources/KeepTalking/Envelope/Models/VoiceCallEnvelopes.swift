@@ -33,7 +33,6 @@ public struct KeepTalkingVoiceCallStartedPayload: Codable, Sendable {
 
 extension KeepTalkingVoiceCallStartedPayload: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .voiceCallStarted }
-    public var participantNodeIDs: [UUID] { [from] }
     public var transportContextID: UUID? { contextID }
 }
 
@@ -56,7 +55,6 @@ public struct KeepTalkingVoiceCallEndedPayload: Codable, Sendable {
 
 extension KeepTalkingVoiceCallEndedPayload: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .voiceCallEnded }
-    public var participantNodeIDs: [UUID] { [from] }
     public var transportContextID: UUID? { contextID }
 }
 
@@ -87,7 +85,6 @@ public struct KeepTalkingVoiceCallSignalPayload: Codable, Sendable {
 
 extension KeepTalkingVoiceCallSignalPayload: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .voiceCallSignal }
-    public var participantNodeIDs: [UUID] { [from] }
     public var targetPeerNodeID: UUID? { to }
     public var transportContextID: UUID? { contextID }
 }
@@ -135,7 +132,6 @@ public struct KeepTalkingVoiceCallTranscriptLinePayload: Codable, Sendable {
 
 extension KeepTalkingVoiceCallTranscriptLinePayload: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .voiceCallTranscriptLine }
-    public var participantNodeIDs: [UUID] { [from] }
     public var transportContextID: UUID? { contextID }
 }
 
@@ -192,6 +188,20 @@ extension KeepTalkingEnvelopeAsyncHandlers {
         register(KeepTalkingVoiceCallTranscriptLinePayload.self, handler)
     }
 
+    /// Variant whose handler reports whether the line was newly applied.
+    ///
+    /// `.voiceCallTranscriptLine` is the third fan-out-eligible kind, so like
+    /// messages and attachments it can be delivered twice and must not
+    /// re-notify on the copy that changed nothing.
+    public mutating func onVoiceCallTranscriptLine(
+        _ handler: @escaping @Sendable (KeepTalkingVoiceCallTranscriptLinePayload) async throws -> Bool
+    ) {
+        registerReportingApplied(
+            KeepTalkingVoiceCallTranscriptLinePayload.self,
+            handler
+        )
+    }
+
     /// Wires the started/ended pair into the client's bystander presence
     /// registry. Signals are intentionally NOT routed here — those are
     /// addressed to the local voice session, not to chat-level
@@ -214,8 +224,10 @@ extension KeepTalkingEnvelopeAsyncHandlers {
             // clears `activeVoiceSession` on stop — a left node won't re-assert.)
             client?.handleVoiceCallEndedProbe(ended)
         }
-        onVoiceCallTranscriptLine { [weak client] line in
-            try await client?.handleIncomingVoiceTranscriptLine(line)
+        onVoiceCallTranscriptLine { [weak client] line -> Bool in
+            // No client left to apply it to — fall back to the unhandled-kind
+            // default and publish.
+            try await client?.handleIncomingVoiceTranscriptLine(line) ?? true
         }
     }
 }

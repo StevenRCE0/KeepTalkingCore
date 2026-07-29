@@ -4,9 +4,60 @@ import Testing
 @testable import KeepTalkingSDK
 
 struct ContextSyncMetadataTests {
+    /// Settles whether the raw-bit-pattern timestamp in `messageDigest` is a
+    /// reachable regression or only a theoretical one. The digest feeds chunk
+    /// comparison, so if a `Date` does not survive the SQLite round-trip
+    /// bit-exactly, two peers holding the *same* message compute different
+    /// chunk digests and that chunk can never reconcile.
+    @Test("message digest survives a persistence round-trip")
+    func messageDigestSurvivesRoundTrips() async throws {
+        let localStore = try await KeepTalkingInMemoryStore.make()
+        let context = KeepTalkingContext(
+            id: UUID(uuidString: "40000000-0000-0000-0000-000000000000")!
+        )
+        try await context.save(on: localStore.database)
+        let sender = KeepTalkingContextMessage.Sender.node(
+            node: UUID(uuidString: "EEEEEEEE-EEEE-EEEE-EEEE-EEEEEEEEEEEE")!
+        )
+
+        // Timestamps with sub-millisecond fractions are the interesting case:
+        // a whole-second value would round-trip trivially.
+        var mismatches: [(index: Int, timestamp: Date)] = []
+        for index in 0..<200 {
+            let timestamp = Date(
+                timeIntervalSince1970: 1_700_000_000
+                    + Double(index) * 0.000_137_913
+            )
+            let message = KeepTalkingContextMessage(
+                id: UUID.v7(),
+                context: context,
+                sender: sender,
+                content: "round-trip \(index)",
+                timestamp: timestamp
+            )
+            let inMemory = messageDigest(for: message)
+            try await message.save(on: localStore.database)
+
+            let persisted = try #require(
+                try await KeepTalkingContextMessage.find(
+                    message.requireID(),
+                    on: localStore.database
+                )
+            )
+            if messageDigest(for: persisted) != inMemory {
+                mismatches.append((index, timestamp))
+            }
+        }
+
+        #expect(
+            mismatches.isEmpty,
+            "\(mismatches.count)/200 message digests changed across the SQLite round-trip; first at index \(mismatches.first?.index ?? -1)"
+        )
+    }
+
     @Test("context refresh stores local sender and chunk summaries")
     func refreshStoresChunkedMetadata() async throws {
-        let localStore = try await KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let context = KeepTalkingContext(
             id: UUID(uuidString: "10000000-0000-0000-0000-000000000000")!
         )
@@ -53,18 +104,18 @@ struct ContextSyncMetadataTests {
         try await third.save(on: localStore.database)
         try await fourth.save(on: localStore.database)
 
-        try await context.refreshSyncMetadata(
-            on: localStore.database,
+        // Built on demand from the table — the summary is no longer cached on
+        // the context row, so this is the same path a sync request takes.
+        let contextID = try #require(context.id)
+        let stored = try await KeepTalkingContextMessage.query(
+            on: localStore.database
+        )
+        .filter(\.$context.$id, .equal, contextID)
+        .all()
+        let metadata = KeepTalkingContext.buildSyncMetadata(
+            from: stored,
             chunkSize: 2
         )
-
-        let contextID = try #require(context.id)
-        let storedContext = try #require(
-            try await KeepTalkingContext.query(on: localStore.database)
-                .filter(\.$id, .equal, contextID)
-                .first()
-        )
-        let metadata = try #require(storedContext.syncMetadata)
         let firstID = try #require(first.id)
         let secondID = try #require(second.id)
         let thirdID = try #require(third.id)
@@ -91,33 +142,12 @@ struct ContextSyncMetadataTests {
         #expect(metadata.chunks[0].digest != metadata.chunks[1].digest)
     }
 
-    @Test("context encoding keeps local sync metadata out of shared payloads")
-    func encodingOmitsSyncMetadata() throws {
-        let sender = KeepTalkingContextMessage.Sender.node(
-            node: UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!
-        )
-        let message = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!
+    @Test("context encoding carries no cached sync state")
+    func encodingCarriesNoCachedSyncState() throws {
         let context = KeepTalkingContext(
             id: UUID(uuidString: "20000000-0000-0000-0000-000000000000")!
         )
         context.$messages.value = []
-        context.syncMetadata = KeepTalkingContextSyncMetadata(
-            chunkSize: 2,
-            messageCount: 1,
-            senders: [
-                .init(sender: sender, messageCount: 1)
-            ],
-            chunks: [
-                .init(
-                    sender: sender,
-                    index: 0,
-                    firstMessage: message,
-                    lastMessage: message,
-                    messageCount: 1,
-                    digest: Data("digest".utf8)
-                )
-            ]
-        )
 
         let data = try JSONEncoder().encode(context)
         let payload = try #require(
@@ -126,60 +156,10 @@ struct ContextSyncMetadataTests {
 
         let messages = try #require(payload["messages"] as? [Any])
         #expect(messages.isEmpty)
+        // The summary is derived per request now, so there is no cached copy to
+        // leak into a shared payload — this guards against reintroducing one.
         #expect(payload["syncMetadata"] == nil)
         #expect(payload["sync_metadata"] == nil)
-    }
-
-    @Test("saving a context refreshes local sync metadata automatically")
-    func saveContextRefreshesSyncMetadata() async throws {
-        let localStore = try await KeepTalkingInMemoryStore()
-        let context = KeepTalkingContext(
-            id: UUID(uuidString: "30000000-0000-0000-0000-000000000000")!
-        )
-        let sender = KeepTalkingContextMessage.Sender.node(
-            node: UUID(uuidString: "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD")!
-        )
-        let first = message(
-            id: UUID(uuidString: "00000000-0000-0000-0000-000000000011")!,
-            context: context,
-            sender: sender,
-            content: "alpha",
-            second: 1
-        )
-        let second = message(
-            id: UUID(uuidString: "00000000-0000-0000-0000-000000000012")!,
-            context: context,
-            sender: sender,
-            content: "beta",
-            second: 2
-        )
-        context.$messages.value = [first, second]
-
-        let client = KeepTalkingClient(
-            config: KeepTalkingConfig(
-                contextID: UUID(),
-                node: UUID()
-            ),
-            localStore: localStore
-        )
-
-        try await client.saveContext(context)
-
-        let contextID = try #require(context.id)
-        let storedContext = try #require(
-            try await KeepTalkingContext.query(on: localStore.database)
-                .filter(\.$id, .equal, contextID)
-                .first()
-        )
-        let metadata = try #require(storedContext.syncMetadata)
-        let firstID = try #require(first.id)
-        let secondID = try #require(second.id)
-
-        #expect(metadata.messageCount == 2)
-        #expect(metadata.senders == [.init(sender: sender, messageCount: 2)])
-        #expect(metadata.chunks.count == 1)
-        #expect(metadata.chunks[0].firstMessage == firstID)
-        #expect(metadata.chunks[0].lastMessage == secondID)
     }
 
     private func message(

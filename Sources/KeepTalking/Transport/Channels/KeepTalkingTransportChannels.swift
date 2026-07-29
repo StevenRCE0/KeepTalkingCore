@@ -32,14 +32,14 @@ protocol KeepTalkingTransportChannelProtocol: AnyObject, Sendable {
     /// The transport route this channel represents.
     var route: KeepTalkingTransportRoute { get }
 
-    /// Send a sequenced envelope through this channel.
-    func send(_ sequenced: KeepTalkingSequencedEnvelope) throws
+    /// Send an envelope through this channel.
+    func send(_ envelope: any KeepTalkingEnvelope) throws
 
     /// Send raw blob bytes through this channel.
     func sendBlobData(_ data: Data) throws
 
-    /// Called when the channel receives an inbound sequenced envelope.
-    var onReceive: (@Sendable (KeepTalkingSequencedEnvelope) -> Void)? { get set }
+    /// Called when the channel receives an inbound envelope.
+    var onReceive: (@Sendable (any KeepTalkingEnvelope) -> Void)? { get set }
 
     /// Called when the channel receives inbound blob bytes.
     var onBlobData: KeepTalkingTransportBlobDataHandler? { get set }
@@ -109,6 +109,11 @@ protocol KeepTalkingPeerTransportChannel: KeepTalkingTransportChannelProtocol {
 enum KeepTalkingTransportError: LocalizedError {
     case allChannelsUnavailable
     case sfuEndpointMissing
+    /// The encoded envelope exceeds what a single frame can carry. Transport
+    /// does not split envelopes — the publisher is responsible for producing
+    /// one that fits (that is what the sync layer's paging is for), and this
+    /// error is how transport proves the publisher got it wrong.
+    case envelopeTooLarge(kind: KeepTalkingEnvelopeKind, bytes: Int, limit: Int)
 
     var errorDescription: String? {
         switch self {
@@ -116,6 +121,9 @@ enum KeepTalkingTransportError: LocalizedError {
                 return "All transport channels are unavailable."
             case .sfuEndpointMissing:
                 return "KeepTalkingSFU endpoint is not configured."
+            case .envelopeTooLarge(let kind, let bytes, let limit):
+                return
+                    "A \(kind.rawValue) envelope encoded to \(bytes) bytes, over the \(limit)-byte frame limit. Page or split it before sending."
         }
     }
 }

@@ -1157,20 +1157,17 @@ extension KeepTalkingClient {
             return "Error: missing or invalid arguments. Expected {\"key\": string, \"value\": string}."
         }
 
-        let contextID = try context.requireID()
-        if let existing = try await context.$sideNotes
-            .query(on: localStore.database)
-            .filter(\.$key == key)
-            .first()
-        {
-            existing.value = value
-            existing.isArchived = false
-            try await existing.save(on: localStore.database)
-        } else {
-            let note = KeepTalkingSideNote(contextID: contextID, key: key, value: value)
-            try await note.save(on: localStore.database)
+        // Routed through the client API so the version pair is allocated and
+        // the change is pushed — a raw `save()` here would skip both.
+        do {
+            _ = try await upsertSideNote(
+                key: key,
+                value: value,
+                in: try context.requireID()
+            )
+        } catch {
+            return "Error: could not update side note '\(key)': \(error.localizedDescription)"
         }
-
         return "Side note '\(key)' updated."
     }
 
@@ -1188,17 +1185,16 @@ extension KeepTalkingClient {
             return "Error: missing or invalid arguments. Expected {\"key\": string}."
         }
 
-        guard
-            let note = try await context.$sideNotes
-                .query(on: localStore.database)
-                .filter(\.$key == key)
-                .first()
-        else {
-            return "Side note '\(key)' not found."
+        do {
+            guard
+                try await archiveSideNote(key: key, in: try context.requireID())
+                    != nil
+            else {
+                return "Side note '\(key)' not found."
+            }
+        } catch {
+            return "Error: could not archive side note '\(key)': \(error.localizedDescription)"
         }
-
-        note.isArchived = true
-        try await note.save(on: localStore.database)
         return "Side note '\(key)' archived."
     }
 }

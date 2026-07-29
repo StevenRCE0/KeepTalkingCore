@@ -15,7 +15,7 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
 
     // MARK: - Protocol callbacks
 
-    var onReceive: (@Sendable (KeepTalkingSequencedEnvelope) -> Void)?
+    var onReceive: (@Sendable (any KeepTalkingEnvelope) -> Void)?
     var onStateChange: (@Sendable () -> Void)?
     var onPeerJoined: (@Sendable () -> Void)?
     var onLog: (@Sendable (String) -> Void)?
@@ -152,14 +152,14 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
 
     // MARK: - Send
 
-    func send(_ sequenced: KeepTalkingSequencedEnvelope) throws {
+    func send(_ envelope: any KeepTalkingEnvelope) throws {
         guard let client = readyTransportClient() else {
             throw KeepTalkingTransportError.allChannelsUnavailable
         }
         do {
-            try client.sendEnvelope(sequenced.envelope)
+            try client.sendEnvelope(envelope)
         } catch {
-            handleSendFailure(error, operation: "sequenced send", client: client)
+            handleSendFailure(error, operation: "envelope send", client: client)
             throw error
         }
     }
@@ -260,7 +260,7 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
         let clientID = ObjectIdentifier(sfuClient)
         sfuClient.onEnvelope = { [weak self] envelope in
             guard self?.isCurrent(clientID, generation: generation) == true else { return }
-            self?.handleSFUEnvelope(envelope)
+            self?.onReceive?(envelope)
         }
         sfuClient.onBlobData = { [weak self] data in
             guard let self, self.isCurrent(clientID, generation: generation) else { return }
@@ -318,17 +318,6 @@ final class KeepTalkingBroadcastChannel: KeepTalkingBroadcastTransportChannel, @
         }
         sfuClient.onLog = onLog
         sfuClient.contextSecretProvider = stateQueue.sync { contextSecretProviderStorage }
-    }
-
-    private func handleSFUEnvelope(_ envelope: any KeepTalkingEnvelope) {
-        // TODO: Decode sequenced wrapper once wire format includes sequence numbers.
-        // For now, wrap with a synthetic sequence so the receive path works.
-        let sequenced = KeepTalkingSequencedEnvelope(
-            senderNode: UUID(),
-            sequence: 0,
-            envelope: envelope
-        )
-        onReceive?(sequenced)
     }
 
     // MARK: - State machine

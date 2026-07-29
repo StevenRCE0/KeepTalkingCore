@@ -106,7 +106,7 @@ struct ContextAttachmentAIToolTests {
         let text = try #require(injected.first?.content?.text)
         #expect(text.contains(resource.handle))
         #expect(text.contains("needle from produced file"))
-        #expect(text.contains("do not call tools"))
+        #expect(text.contains("do NOT call any tool"))
     }
 
     private func makeFixture() async throws -> (
@@ -115,7 +115,7 @@ struct ContextAttachmentAIToolTests {
         visibleAttachmentID: UUID,
         hiddenAttachmentID: UUID
     ) {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let visibleContext = KeepTalkingContext(
             id: UUID(uuidString: "A0000000-0000-0000-0000-000000000001")!
         )

@@ -57,9 +57,6 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     @Field(key: "updated_at")
     public var updatedAt: Date
 
-    @OptionalField(key: "sync_metadata")
-    public var syncMetadata: KeepTalkingContextSyncMetadata?
-
     /// IDs of mark messages (type markTurningPoint / markChitterChatter) that
     /// this node has already consumed. Local-only — not propagated by sync.
     @OptionalField(key: "consumed_marks")
@@ -77,9 +74,6 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     @Children(for: \.$context)
     public var sideNotes: [KeepTalkingSideNote]
 
-    @Children(for: \.$context)
-    public var outboxEntries: [KeepTalkingOutboxEntry]
-
     public init() {
         updatedAt = .now
     }
@@ -92,7 +86,6 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     ) {
         self.id = id
         self.updatedAt = updatedAt
-        self.syncMetadata = nil
         self.$messages.value = messages
         self.$attachments.value = attachments
     }
@@ -143,5 +136,3 @@ extension KeepTalkingContext: Codable {
         try container.encode($attachments.value ?? [], forKey: .attachments)
     }
 }
-
-public typealias KeepTalkingConversationContext = KeepTalkingContext

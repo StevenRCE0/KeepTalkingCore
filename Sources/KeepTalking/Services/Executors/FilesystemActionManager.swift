@@ -228,8 +228,16 @@ public actor FilesystemActionManager {
             case .sed:
                 let resolved = try resolvedPath(
                     try requiredStringArg("path", from: arguments), root: rootPath)
-                let expression = try requiredStringArg("expression", from: arguments)
-                return (try applySed(expression: expression, at: resolved), [])
+                return (
+                    try applySed(
+                        pattern: try requiredStringArg("pattern", from: arguments),
+                        replacement: try requiredStringArg(
+                            "replacement", from: arguments),
+                        flags: arguments["flags"]?.stringValue ?? "",
+                        at: resolved
+                    ),
+                    []
+                )
 
             case .writeFile:
                 let content = try requiredStringArg("content", from: arguments)
@@ -293,29 +301,22 @@ public actor FilesystemActionManager {
         }
     }
 
-    /// Applies a single `s/pattern/replacement/flags` substitution to a file in
-    /// place. Supports flags `g` (global) and `i` (case-insensitive), and sed
-    /// backreferences (`\1` → regex template `$1`).
-    private func applySed(expression: String, at path: String) throws -> String {
-        let expr = expression.trimmingCharacters(in: .whitespaces)
-        guard expr.count > 3, expr.hasPrefix("s") else {
+    /// Applies a regular-expression substitution to an entire UTF-8 file.
+    private func applySed(
+        pattern: String,
+        replacement: String,
+        flags: String,
+        at path: String
+    ) throws -> String {
+        let unsupportedFlags = Set(flags).subtracting("gims")
+        guard unsupportedFlags.isEmpty else {
             throw FilesystemActionManagerError.invalidArguments(
-                "Only s/pattern/replacement/flags substitutions are supported.")
+                "Unsupported sed flag(s): \(String(unsupportedFlags.sorted())).")
         }
-        let delimiter = expr[expr.index(expr.startIndex, offsetBy: 1)]
-        let parts = String(expr.dropFirst(2)).split(
-            separator: delimiter, omittingEmptySubsequences: false
-        ).map(String.init)
-        guard parts.count >= 2 else {
-            throw FilesystemActionManagerError.invalidArguments(
-                "Malformed sed expression '\(expression)'.")
-        }
-        let pattern = parts[0]
-        let replacement = parts[1]
-        let flags = parts.count >= 3 ? parts[2] : ""
-
         var options: NSRegularExpression.Options = []
         if flags.contains("i") { options.insert(.caseInsensitive) }
+        if flags.contains("m") { options.insert(.anchorsMatchLines) }
+        if flags.contains("s") { options.insert(.dotMatchesLineSeparators) }
         let regex = try NSRegularExpression(pattern: pattern, options: options)
 
         guard let data = FileManager.default.contents(atPath: path),

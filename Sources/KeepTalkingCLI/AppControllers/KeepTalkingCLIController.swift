@@ -33,7 +33,8 @@ final class KeepTalkingCLIController {
                 await SFUJuiceCommand.run(cliConfig: cliConfig, endpoint: sfuJuice)
                 return  // SFUJuiceCommand exits the process; unreachable
             }
-            let localStore = try makeLocalStore(databaseURL: cliConfig.databaseURL)
+            let localStore = try await makeLocalStore(
+                databaseURL: cliConfig.databaseURL)
             let controller = KeepTalkingCLIController(
                 cliConfig: cliConfig,
                 localStore: localStore
@@ -49,11 +50,13 @@ final class KeepTalkingCLIController {
         }
     }
 
-    private static func makeLocalStore(databaseURL: URL?) throws -> any KeepTalkingLocalStore {
+    private static func makeLocalStore(
+        databaseURL: URL?
+    ) async throws -> any KeepTalkingLocalStore {
         if let databaseURL {
-            return try KeepTalkingModelStore(databaseURL: databaseURL)
+            return try await KeepTalkingModelStore.make(databaseURL: databaseURL)
         }
-        return KeepTalkingClient.makeDefaultLocalStore()
+        return try await KeepTalkingClient.makeDefaultLocalStore()
     }
 
     private func run() async throws {
@@ -118,15 +121,6 @@ final class KeepTalkingCLIController {
         targetClient.onEnvelope = { (envelope: KeepTalkingEnvelope) in
             if let message = envelope.message {
                 print(renderMessage(message))
-                return
-            }
-
-            if let context = envelope.context {
-                if let latestMessage = context.messages.max(by: {
-                    $0.timestamp < $1.timestamp
-                }) {
-                    print(renderMessage(latestMessage))
-                }
             }
         }
         targetClient.onRawMessage = { (raw: String) in

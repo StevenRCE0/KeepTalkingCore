@@ -9,7 +9,7 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
     let route: KeepTalkingTransportRoute = .p2p
     let peerNodeID: UUID
 
-    var onReceive: (@Sendable (KeepTalkingSequencedEnvelope) -> Void)?
+    var onReceive: (@Sendable (any KeepTalkingEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRealtimeData: KeepTalkingTransportRealtimeDataHandler?
     var onStateChange: (@Sendable () -> Void)?
@@ -56,12 +56,12 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
         _ = peersSnapshot
     }
 
-    func send(_ sequenced: KeepTalkingSequencedEnvelope) throws {
+    func send(_ envelope: any KeepTalkingEnvelope) throws {
         guard isReady, let dataChannel else {
             throw KeepTalkingTransportError.allChannelsUnavailable
         }
         let payload = try KeepTalkingPacketTransportCrypto.outboundPayload(
-            for: sequenced.envelope,
+            for: envelope,
             localNodeID: localNodeID,
             contextSecretProvider: contextSecretProvider
         )
@@ -365,13 +365,7 @@ final class KeepTalkingDirectChannel: KeepTalkingPeerTransportChannel, @unchecke
                 from: data,
                 contextSecretProvider: contextSecretProvider
             ) {
-                onReceive?(
-                    KeepTalkingSequencedEnvelope(
-                        senderNode: peerNodeID,
-                        sequence: 0,
-                        envelope: envelope
-                    )
-                )
+                onReceive?(envelope)
                 return
             }
         } catch {

@@ -7,7 +7,7 @@ import Testing
 struct ContextMarkSemanticIndexTests {
     @Test("consuming an incoming turning-point mark queues semantic reconciliation")
     func incomingTurningPointQueuesReconciliation() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let contextID = UUID()
         let context = KeepTalkingContext(id: contextID)
         try await context.save(on: store.database)
@@ -81,7 +81,7 @@ struct ContextMarkSemanticIndexTests {
 
     @Test("semantic retry reloads newer persisted thread state after a partial failure")
     func retryReloadsPersistedThreads() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let contextID = UUID()
         let context = KeepTalkingContext(id: contextID)
         try await context.save(on: store.database)

@@ -22,4 +22,11 @@ extension KeepTalkingEnvelopeAsyncHandlers {
     ) {
         register(KeepTalkingContextAttachmentDTO.self, handler)
     }
+
+    /// Variant whose handler reports whether the attachment was newly applied.
+    public mutating func onAttachment(
+        _ handler: @escaping @Sendable (KeepTalkingContextAttachmentDTO) async throws -> Bool
+    ) {
+        registerReportingApplied(KeepTalkingContextAttachmentDTO.self, handler)
+    }
 }

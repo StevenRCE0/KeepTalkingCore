@@ -34,7 +34,6 @@ public struct KeepTalkingTrustRequestPayload: Codable, Sendable {
 extension KeepTalkingTrustRequestPayload: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .trustRequest }
 
-    public var participantNodeIDs: [UUID] { [from] }
     public var targetPeerNodeID: UUID? { to }
     public var transportContextID: UUID? { contextID }
 }
@@ -74,7 +73,6 @@ public struct KeepTalkingTrustAcceptPayload: Codable, Sendable {
 extension KeepTalkingTrustAcceptPayload: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .trustAccept }
 
-    public var participantNodeIDs: [UUID] { [from] }
     public var targetPeerNodeID: UUID? { to }
     public var transportContextID: UUID? { contextID }
 }
@@ -104,7 +102,6 @@ public struct KeepTalkingTrustCompletePayload: Codable, Sendable {
 extension KeepTalkingTrustCompletePayload: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .trustComplete }
 
-    public var participantNodeIDs: [UUID] { [from] }
     public var targetPeerNodeID: UUID? { to }
     public var transportContextID: UUID? { contextID }
 }
@@ -126,7 +123,6 @@ public struct KeepTalkingTrustRejectPayload: Codable, Sendable {
 extension KeepTalkingTrustRejectPayload: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .trustReject }
 
-    public var participantNodeIDs: [UUID] { [from] }
     public var targetPeerNodeID: UUID? { to }
     public var transportContextID: UUID? { contextID }
 }

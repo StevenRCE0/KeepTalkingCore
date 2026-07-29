@@ -8,7 +8,7 @@ import Testing
 struct RemoteActionCallTests {
     @Test("scoped continuation authorization finds a grant on any applicable relation")
     func scopedContinuationAuthorizationUsesAllApplicableRelations() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let owner = KeepTalkingNode(id: UUID())
         let caller = KeepTalkingNode(id: UUID())
         let context = KeepTalkingContext(id: UUID())
@@ -69,7 +69,7 @@ struct RemoteActionCallTests {
         )
         try await approval.save(on: store.database)
 
-        let permission = try await client.resolveGrantPermission(
+        let permission = try await client.allowedActionScope(
             node: caller,
             action: action,
             context: context
@@ -90,7 +90,7 @@ struct RemoteActionCallTests {
     func incomingNodeStatusStoresGrantOnExistingTrustedLocalToRemoteRelation()
         async throws
     {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let localNodeID = UUID(uuidString: "AAAAAAA1-0000-0000-0000-000000000001")!
         let remoteNodeID = UUID(uuidString: "BBBBBBB2-0000-0000-0000-000000000002")!
         let contextID = UUID(uuidString: "CCCCCCC3-0000-0000-0000-000000000003")!
@@ -180,7 +180,7 @@ struct RemoteActionCallTests {
 
     @Test("remote action refreshes from broadcasts and returns after local removal")
     func remoteActionRefreshesAndReturnsAfterRemoval() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let local = KeepTalkingNode(id: UUID())
         let remote = KeepTalkingNode(id: UUID())
         let actionID = UUID()
@@ -259,7 +259,7 @@ struct RemoteActionCallTests {
 
     @Test("incoming owner grant is recorded in its advertised context, scoped to it")
     func incomingNodeStatusRecordsOwnerGrantInAdvertisedContext() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let localNodeID = UUID(uuidString: "AAAAAAA1-9999-9999-9999-999999999999")!
         let remoteNodeID = UUID(uuidString: "BBBBBBB2-8888-8888-8888-888888888888")!
         let grantedContextID = UUID(uuidString: "CCCCCCC3-7777-7777-7777-777777777777")!
@@ -363,7 +363,7 @@ struct RemoteActionCallTests {
 
     @Test("grant action permission supports actions hosted on owned nodes")
     func grantActionPermissionSupportsOwnedHostNodes() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let ownerNodeID = UUID(uuidString: "AAAA1111-0000-0000-0000-000000000001")!
         let ownedHostNodeID = UUID(uuidString: "BBBB2222-0000-0000-0000-000000000002")!
         let targetNodeID = UUID(uuidString: "CCCC3333-0000-0000-0000-000000000003")!
@@ -434,7 +434,7 @@ struct RemoteActionCallTests {
     func incomingNodeStatusStoresGrantOnAdvertisedActionOwnerRelation()
         async throws
     {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let localNodeID = UUID(uuidString: "AAAAAAA1-1111-1111-1111-111111111111")!
         let remoteNodeID = UUID(uuidString: "BBBBBBB2-2222-2222-2222-222222222222")!
         let ownedHostNodeID = remoteNodeID
@@ -526,7 +526,7 @@ struct RemoteActionCallTests {
 
     @Test("incoming node status replaces grants only in its context")
     func incomingNodeStatusReplacesContextGrantSnapshot() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let local = KeepTalkingNode(id: UUID())
         let remote = KeepTalkingNode(id: UUID())
         let firstContext = KeepTalkingContext(id: UUID())
@@ -626,7 +626,7 @@ struct RemoteActionCallTests {
 
     @Test("node status advertises the effective grant scope")
     func nodeStatusAdvertisesGrantScope() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let owner = KeepTalkingNode(id: UUID())
         let recipient = KeepTalkingNode(id: UUID())
         let context = KeepTalkingContext(id: UUID())
@@ -676,7 +676,7 @@ struct RemoteActionCallTests {
 
     @Test("action authorization is scoped to the relation target node")
     func actionAuthorizationIsScopedToRelationTargetNode() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let ownerNode = KeepTalkingNode(
             id: UUID(uuidString: "11111111-0000-0000-0000-000000000001")!
         )
@@ -753,7 +753,7 @@ struct RemoteActionCallTests {
     func actionAuthorizationPrefersTrustedRelationOverPendingRelation()
         async throws
     {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let ownerNode = KeepTalkingNode(
             id: UUID(uuidString: "55555555-0000-0000-0000-000000000001")!
         )
@@ -816,7 +816,7 @@ struct RemoteActionCallTests {
     func grantActionPermissionPrefersTrustedRelationOverPendingRelation()
         async throws
     {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let ownerNodeID = UUID(uuidString: "88888888-0000-0000-0000-000000000001")!
         let targetNodeID = UUID(uuidString: "99999999-0000-0000-0000-000000000002")!
         let contextID = UUID(uuidString: "AAAAAAA0-0000-0000-0000-000000000003")!
@@ -890,7 +890,7 @@ struct RemoteActionCallTests {
     func grantActionPermissionAcceptsContextScopedTrustForContextGrants()
         async throws
     {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let ownerNodeID = UUID(uuidString: "BBBBBBB0-0000-0000-0000-000000000001")!
         let targetNodeID = UUID(uuidString: "BBBBBBB0-0000-0000-0000-000000000002")!
         let contextID = UUID(uuidString: "BBBBBBB0-0000-0000-0000-000000000003")!
@@ -949,7 +949,7 @@ struct RemoteActionCallTests {
 
     @Test("staged action grant on pre-trusted relation activates after trust")
     func stagedActionGrantOnPreTrustedRelationActivatesAfterTrust() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let ownerNode = KeepTalkingNode(id: UUID())
         let targetNode = KeepTalkingNode(id: UUID())
         let context = KeepTalkingContext(id: UUID())
@@ -1038,7 +1038,7 @@ struct RemoteActionCallTests {
                 contextID: contextID,
                 node: callerNodeID
             ),
-            localStore: KeepTalkingInMemoryStore()
+            localStore: try await KeepTalkingInMemoryStore.make()
         )
         let result = KeepTalkingActionCallResult(
             requestID: requestID,
@@ -1078,7 +1078,7 @@ struct RemoteActionCallTests {
                 contextID: contextID,
                 node: callerNodeID
             ),
-            localStore: KeepTalkingInMemoryStore()
+            localStore: try await KeepTalkingInMemoryStore.make()
         )
         let acknowledgement = KeepTalkingRequestAck(
             requestID: requestID,
@@ -1105,7 +1105,7 @@ struct RemoteActionCallTests {
 
     @Test("incoming remote action call creates a placeholder context when missing")
     func incomingRemoteActionCallCreatesPlaceholderContext() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let selfNodeID = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!
         let callerNodeID = UUID(uuidString: "BBBBBBBB-0000-0000-0000-000000000002")!
         let contextID = UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000003")!

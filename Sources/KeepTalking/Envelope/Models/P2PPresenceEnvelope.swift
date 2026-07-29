@@ -2,10 +2,6 @@ import Foundation
 
 extension KeepTalkingP2PPresencePayload: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .p2pPresence }
-
-    public var participantNodeIDs: [UUID] {
-        [node]
-    }
 }
 
 extension KeepTalkingEnvelopeHandlers {

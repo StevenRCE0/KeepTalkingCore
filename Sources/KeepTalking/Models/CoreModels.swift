@@ -30,14 +30,34 @@ public struct KeepTalkingConfig: Sendable {
         node: UUID = UUID(),
         p2pAttemptTimeoutSeconds: TimeInterval = 5,
         sfuEndpoint: SFUEndpoint? = nil,
-        recentAttachmentSyncLookback: TimeInterval = 14 * 24 * 60 * 60
+        recentAttachmentSyncLookback: TimeInterval = 14 * 24 * 60 * 60,
+        maxDirectMeshSize: Int = 4,
+        contextSyncChunkSize: Int = KeepTalkingContextSyncMetadata.defaultChunkSize
     ) {
         self.contextID = contextID
         self.node = node
         self.p2pAttemptTimeoutSeconds = p2pAttemptTimeoutSeconds
         self.sfuEndpoint = sfuEndpoint
         self.recentAttachmentSyncLookback = max(0, recentAttachmentSyncLookback)
+        self.maxDirectMeshSize = max(1, maxDirectMeshSize)
+        self.contextSyncChunkSize = max(1, contextSyncChunkSize)
     }
+
+    /// Messages per chunk in a context-sync summary. Chunks are the unit of
+    /// divergence detection: a smaller size localizes a mismatch more precisely
+    /// at the cost of a larger summary.
+    ///
+    /// A node-local tuning knob, not a per-context one. It used to be persisted
+    /// on the context row alongside a cached summary, which meant a full-table
+    /// read and re-digest on every batch that saved a message — all to carry
+    /// this single number, which no production caller ever changed.
+    public let contextSyncChunkSize: Int
+
+    /// Peer count above which this node stops maintaining direct channels and
+    /// stays on the SFU. A mesh costs one ICE agent plus one HTTP/2 channel per
+    /// peer per node, so it stops paying off quickly. Defaults to 4, matching
+    /// `KeepTalkingVoiceSession.maxP2PMeshSize`.
+    public let maxDirectMeshSize: Int
 
     public var chatChannelLabel: String {
         "\(Self.chatChannelPrefix).\(scopedSessionID)"
@@ -85,6 +105,9 @@ public protocol KeepTalkingKVService: Sendable {
 
 public protocol KeepTalkingLocalStore: Sendable {
     var database: any Database { get }
+    /// Applies outstanding migrations. Construction does not do this, so a
+    /// store must be migrated before it is queried.
+    func migrate() async throws
     func reset() async throws
 }
 

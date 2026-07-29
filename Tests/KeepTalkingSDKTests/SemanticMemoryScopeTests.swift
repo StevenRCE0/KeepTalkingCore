@@ -7,7 +7,7 @@ import Testing
 struct SemanticMemoryScopeTests {
     @Test("context and tagged thread scopes share canonical discovery")
     func discoversContextAndTaggedThreadScopes() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let contextA = KeepTalkingContext(id: UUID())
         let contextB = KeepTalkingContext(id: UUID())
         try await contextA.save(on: store.database)
@@ -67,7 +67,7 @@ struct SemanticMemoryScopeTests {
 
     @Test("one shared context tag exposes all resolved threads in that context")
     func expandsContextsSharingAnyTag() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let context = KeepTalkingContext(id: UUID())
         let sharedContext = KeepTalkingContext(id: UUID())
         let unrelatedContext = KeepTalkingContext(id: UUID())
@@ -132,7 +132,7 @@ struct SemanticMemoryScopeTests {
 
     @Test("semantic index enhances lexical retrieval without defining access")
     func semanticIndexEnhancesLexicalRetrieval() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let context = KeepTalkingContext(id: UUID())
         let otherContext = KeepTalkingContext(id: UUID())
         try await context.save(on: store.database)

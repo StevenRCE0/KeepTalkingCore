@@ -3,27 +3,61 @@ import Foundation
 
 public struct KeepTalkingContextSyncTailCursor: Codable, Sendable, Equatable {
     public let sender: KeepTalkingContextMessage.Sender
-    public let messageCount: Int
+    /// Inclusive index in the responder's per-sender canonical stream.
+    public let startIndex: Int
+    /// Exclusive index captured from the responder's summary.
+    ///
+    /// Nothing proves the responder's stream has not shifted underneath this
+    /// index — the snapshot-strictness check that would have was deliberately
+    /// dropped. A stale index therefore serves the wrong slice rather than
+    /// failing; the digest comparison on the next summary is what catches it.
+    public let endIndex: Int
 
     public init(
         sender: KeepTalkingContextMessage.Sender,
-        messageCount: Int
+        startIndex: Int,
+        endIndex: Int
     ) {
         self.sender = sender
-        self.messageCount = messageCount
+        self.startIndex = max(0, startIndex)
+        self.endIndex = max(self.startIndex, endIndex)
     }
 }
 
 public struct KeepTalkingContextSyncChunkCursor: Codable, Sendable, Equatable {
     public let sender: KeepTalkingContextMessage.Sender
     public let index: Int
+    /// Exclusive responder index captured with the summary used to plan repair.
+    public let endIndex: Int
 
     public init(
         sender: KeepTalkingContextMessage.Sender,
-        index: Int
+        index: Int,
+        endIndex: Int
     ) {
         self.sender = sender
-        self.index = index
+        self.index = max(0, index)
+        self.endIndex = max(0, endIndex)
+    }
+}
+
+public struct KeepTalkingContextSyncPageKey: Codable, Sendable, Equatable,
+    Comparable
+{
+    public let timestamp: Date
+    public let id: UUID
+
+    public init(timestamp: Date, id: UUID) {
+        self.timestamp = timestamp
+        self.id = id
+    }
+
+    public static func < (lhs: Self, rhs: Self) -> Bool {
+        if lhs.timestamp != rhs.timestamp {
+            return lhs.timestamp < rhs.timestamp
+        }
+        return lhs.id.uuidString.lowercased()
+            < rhs.id.uuidString.lowercased()
     }
 }
 
@@ -34,17 +68,23 @@ public struct KeepTalkingContextSyncSummaryRequest: Codable, Sendable,
     public let context: UUID
     public let requester: UUID
     public let recipient: UUID
+    /// Our side-note digest. The responder compares it against its own and
+    /// attaches its whole set only when they differ — so the steady state costs
+    /// 32 bytes up and nothing back, instead of re-pulling every note.
+    public let sideNoteDigest: Data?
 
     public init(
         request: UUID = UUID(),
         context: UUID,
         requester: UUID,
-        recipient: UUID
+        recipient: UUID,
+        sideNoteDigest: Data? = nil
     ) {
         self.request = request
         self.context = context
         self.requester = requester
         self.recipient = recipient
+        self.sideNoteDigest = sideNoteDigest
     }
 }
 
@@ -56,19 +96,44 @@ public struct KeepTalkingContextSyncSummaryResult: Codable, Sendable,
     public let requester: UUID
     public let responder: UUID
     public let summary: KeepTalkingContextSyncMetadata
+    /// Present only when the requester's side-note digest disagreed with ours.
+    public let sideNotes: [KeepTalkingSideNoteDTO]?
 
     public init(
         request: UUID,
         context: UUID,
         requester: UUID,
         responder: UUID,
-        summary: KeepTalkingContextSyncMetadata
+        summary: KeepTalkingContextSyncMetadata,
+        sideNotes: [KeepTalkingSideNoteDTO]? = nil
     ) {
         self.request = request
         self.context = context
         self.requester = requester
         self.responder = responder
         self.summary = summary
+        self.sideNotes = sideNotes
+    }
+}
+
+/// A fire-and-forget push of side notes that just changed locally.
+///
+/// Broadcast, not directed: every peer in the context wants it, and the digest
+/// compare on the next summary exchange is the catch-up for anyone who missed
+/// it. `origin` lets a node ignore the echo of its own push.
+public struct KeepTalkingContextSyncSideNotesPush: Codable, Sendable, Equatable {
+    public let context: UUID
+    public let origin: UUID
+    public let sideNotes: [KeepTalkingSideNoteDTO]
+
+    public init(
+        context: UUID,
+        origin: UUID,
+        sideNotes: [KeepTalkingSideNoteDTO]
+    ) {
+        self.context = context
+        self.origin = origin
+        self.sideNotes = sideNotes
     }
 }
 
@@ -80,18 +145,21 @@ public struct KeepTalkingContextSyncTailRequest: Codable, Sendable,
     public let requester: UUID
     public let recipient: UUID
     public let senders: [KeepTalkingContextSyncTailCursor]
+    public let before: KeepTalkingContextSyncPageKey?
 
     public init(
         request: UUID = UUID(),
         context: UUID,
         requester: UUID,
         recipient: UUID,
-        senders: [KeepTalkingContextSyncTailCursor]
+        senders: [KeepTalkingContextSyncTailCursor],
+        before: KeepTalkingContextSyncPageKey? = nil
     ) {
         self.request = request
         self.context = context
         self.requester = requester
         self.recipient = recipient
+        self.before = before
         self.senders = senders.sorted {
             senderSortKey($0.sender) < senderSortKey($1.sender)
         }
@@ -103,7 +171,7 @@ public struct KeepTalkingContextSyncTailRequest: Codable, Sendable,
         requester: UUID,
         recipient: UUID,
         local: KeepTalkingContextSyncMetadata,
-        remote: KeepTalkingContextSyncMetadata
+        remote: KeepTalkingContextSyncMetadata,
     ) {
         let senders = contextSyncTailCursors(local: local, remote: remote)
         guard !senders.isEmpty else {
@@ -114,7 +182,17 @@ public struct KeepTalkingContextSyncTailRequest: Codable, Sendable,
             context: context,
             requester: requester,
             recipient: recipient,
-            senders: senders
+            senders: senders,
+        )
+    }
+
+    func continuing(before: KeepTalkingContextSyncPageKey) -> Self {
+        Self(
+            context: context,
+            requester: requester,
+            recipient: recipient,
+            senders: senders,
+            before: before
         )
     }
 }
@@ -127,18 +205,21 @@ public struct KeepTalkingContextSyncChunkRequest: Codable, Sendable,
     public let requester: UUID
     public let recipient: UUID
     public let chunks: [KeepTalkingContextSyncChunkCursor]
+    public let before: KeepTalkingContextSyncPageKey?
 
     public init(
         request: UUID = UUID(),
         context: UUID,
         requester: UUID,
         recipient: UUID,
-        chunks: [KeepTalkingContextSyncChunkCursor]
+        chunks: [KeepTalkingContextSyncChunkCursor],
+        before: KeepTalkingContextSyncPageKey? = nil
     ) {
         self.request = request
         self.context = context
         self.requester = requester
         self.recipient = recipient
+        self.before = before
         self.chunks = chunks.sorted {
             let lhsKey = senderSortKey($0.sender)
             let rhsKey = senderSortKey($1.sender)
@@ -155,7 +236,7 @@ public struct KeepTalkingContextSyncChunkRequest: Codable, Sendable,
         requester: UUID,
         recipient: UUID,
         local: KeepTalkingContextSyncMetadata,
-        remote: KeepTalkingContextSyncMetadata
+        remote: KeepTalkingContextSyncMetadata,
     ) {
         let chunks = contextSyncChunkCursors(local: local, remote: remote)
         guard !chunks.isEmpty else {
@@ -166,16 +247,26 @@ public struct KeepTalkingContextSyncChunkRequest: Codable, Sendable,
             context: context,
             requester: requester,
             recipient: recipient,
-            chunks: chunks
+            chunks: chunks,
+        )
+    }
+
+    func continuing(before: KeepTalkingContextSyncPageKey) -> Self {
+        Self(
+            context: context,
+            requester: requester,
+            recipient: recipient,
+            chunks: chunks,
+            before: before
         )
     }
 }
 
 // MARK: - Shared reconcile math (message sync + transcript sync)
 
-/// Tail cursors for an append-only pull: for each remote sender whose count
-/// exceeds ours, request starting from our current count. Shared by both the
-/// message sync and the transcript-line sync — same reconcile, different table.
+/// Snapshot-bound append-only ranges: for each remote sender whose count exceeds
+/// ours, capture `[localCount, remoteCount)`. The responder rejects the request
+/// if those indices no longer address the summary snapshot.
 func contextSyncTailCursors(
     local: KeepTalkingContextSyncMetadata,
     remote: KeepTalkingContextSyncMetadata
@@ -188,7 +279,8 @@ func contextSyncTailCursors(
         guard remoteSender.messageCount > localCount else { return nil }
         return KeepTalkingContextSyncTailCursor(
             sender: remoteSender.sender,
-            messageCount: localCount
+            startIndex: localCount,
+            endIndex: remoteSender.messageCount
         )
     }
 }
@@ -235,7 +327,8 @@ func contextSyncChunkCursors(
 
         return KeepTalkingContextSyncChunkCursor(
             sender: remoteSender.sender,
-            index: mismatch.index
+            index: mismatch.index,
+            endIndex: remoteSender.messageCount
         )
     }
 }
@@ -247,6 +340,7 @@ public struct KeepTalkingContextSyncMessagesResult: Codable, Sendable {
     public let responder: UUID
     public let messages: [KeepTalkingContextMessage]
     public let attachments: [KeepTalkingContextAttachmentDTO]
+    public let nextBefore: KeepTalkingContextSyncPageKey?
 
     public init(
         request: UUID,
@@ -254,7 +348,8 @@ public struct KeepTalkingContextSyncMessagesResult: Codable, Sendable {
         requester: UUID,
         responder: UUID,
         messages: [KeepTalkingContextMessage],
-        attachments: [KeepTalkingContextAttachmentDTO] = []
+        attachments: [KeepTalkingContextAttachmentDTO] = [],
+        nextBefore: KeepTalkingContextSyncPageKey? = nil
     ) {
         self.request = request
         self.context = context
@@ -262,51 +357,9 @@ public struct KeepTalkingContextSyncMessagesResult: Codable, Sendable {
         self.responder = responder
         self.messages = messages
         self.attachments = attachments
+        self.nextBefore = nextBefore
     }
-}
 
-/// Pull request for the responder's side-note set. Side notes use full-sync
-/// semantics — the responder always returns every side note it knows about
-/// for the context, and the requester merges by `(key, updatedAt)`.
-public struct KeepTalkingContextSyncSideNotesRequest: Codable, Sendable, Equatable {
-    public let request: UUID
-    public let context: UUID
-    public let requester: UUID
-    public let recipient: UUID
-
-    public init(
-        request: UUID = UUID(),
-        context: UUID,
-        requester: UUID,
-        recipient: UUID
-    ) {
-        self.request = request
-        self.context = context
-        self.requester = requester
-        self.recipient = recipient
-    }
-}
-
-public struct KeepTalkingContextSyncSideNotesResult: Codable, Sendable {
-    public let request: UUID
-    public let context: UUID
-    public let requester: UUID
-    public let responder: UUID
-    public let sideNotes: [KeepTalkingSideNoteDTO]
-
-    public init(
-        request: UUID,
-        context: UUID,
-        requester: UUID,
-        responder: UUID,
-        sideNotes: [KeepTalkingSideNoteDTO]
-    ) {
-        self.request = request
-        self.context = context
-        self.requester = requester
-        self.responder = responder
-        self.sideNotes = sideNotes
-    }
 }
 
 public struct KeepTalkingContextSyncAttachmentRequest: Codable, Sendable,
@@ -451,7 +504,7 @@ public struct KeepTalkingContextSyncTranscriptSummaryResult: Codable, Sendable, 
         requester: UUID,
         responder: UUID,
         session: UUID,
-        summary: KeepTalkingContextSyncMetadata
+        summary: KeepTalkingContextSyncMetadata,
     ) {
         self.request = request
         self.context = context
@@ -470,6 +523,7 @@ public struct KeepTalkingContextSyncTranscriptTailRequest: Codable, Sendable, Eq
     public let recipient: UUID
     public let session: UUID
     public let senders: [KeepTalkingContextSyncTailCursor]
+    public let before: KeepTalkingContextSyncPageKey?
 
     public init(
         request: UUID = UUID(),
@@ -477,13 +531,15 @@ public struct KeepTalkingContextSyncTranscriptTailRequest: Codable, Sendable, Eq
         requester: UUID,
         recipient: UUID,
         session: UUID,
-        senders: [KeepTalkingContextSyncTailCursor]
+        senders: [KeepTalkingContextSyncTailCursor],
+        before: KeepTalkingContextSyncPageKey? = nil
     ) {
         self.request = request
         self.context = context
         self.requester = requester
         self.recipient = recipient
         self.session = session
+        self.before = before
         self.senders = senders.sorted {
             senderSortKey($0.sender) < senderSortKey($1.sender)
         }
@@ -497,7 +553,7 @@ public struct KeepTalkingContextSyncTranscriptTailRequest: Codable, Sendable, Eq
         recipient: UUID,
         session: UUID,
         local: KeepTalkingContextSyncMetadata,
-        remote: KeepTalkingContextSyncMetadata
+        remote: KeepTalkingContextSyncMetadata,
     ) {
         let senders = contextSyncTailCursors(local: local, remote: remote)
         guard !senders.isEmpty else { return nil }
@@ -507,7 +563,18 @@ public struct KeepTalkingContextSyncTranscriptTailRequest: Codable, Sendable, Eq
             requester: requester,
             recipient: recipient,
             session: session,
-            senders: senders
+            senders: senders,
+        )
+    }
+
+    func continuing(before: KeepTalkingContextSyncPageKey) -> Self {
+        Self(
+            context: context,
+            requester: requester,
+            recipient: recipient,
+            session: session,
+            senders: senders,
+            before: before
         )
     }
 }
@@ -520,6 +587,7 @@ public struct KeepTalkingContextSyncTranscriptChunkRequest: Codable, Sendable, E
     public let recipient: UUID
     public let session: UUID
     public let chunks: [KeepTalkingContextSyncChunkCursor]
+    public let before: KeepTalkingContextSyncPageKey?
 
     public init(
         request: UUID = UUID(),
@@ -527,13 +595,15 @@ public struct KeepTalkingContextSyncTranscriptChunkRequest: Codable, Sendable, E
         requester: UUID,
         recipient: UUID,
         session: UUID,
-        chunks: [KeepTalkingContextSyncChunkCursor]
+        chunks: [KeepTalkingContextSyncChunkCursor],
+        before: KeepTalkingContextSyncPageKey? = nil
     ) {
         self.request = request
         self.context = context
         self.requester = requester
         self.recipient = recipient
         self.session = session
+        self.before = before
         self.chunks = chunks.sorted {
             let lhsKey = senderSortKey($0.sender)
             let rhsKey = senderSortKey($1.sender)
@@ -550,7 +620,7 @@ public struct KeepTalkingContextSyncTranscriptChunkRequest: Codable, Sendable, E
         recipient: UUID,
         session: UUID,
         local: KeepTalkingContextSyncMetadata,
-        remote: KeepTalkingContextSyncMetadata
+        remote: KeepTalkingContextSyncMetadata,
     ) {
         let chunks = contextSyncChunkCursors(local: local, remote: remote)
         guard !chunks.isEmpty else { return nil }
@@ -560,7 +630,18 @@ public struct KeepTalkingContextSyncTranscriptChunkRequest: Codable, Sendable, E
             requester: requester,
             recipient: recipient,
             session: session,
-            chunks: chunks
+            chunks: chunks,
+        )
+    }
+
+    func continuing(before: KeepTalkingContextSyncPageKey) -> Self {
+        Self(
+            context: context,
+            requester: requester,
+            recipient: recipient,
+            session: session,
+            chunks: chunks,
+            before: before
         )
     }
 }
@@ -574,6 +655,7 @@ public struct KeepTalkingContextSyncTranscriptLinesResult: Codable, Sendable {
     public let responder: UUID
     public let session: UUID
     public let lines: [KeepTalkingVoiceTranscriptLineDTO]
+    public let nextBefore: KeepTalkingContextSyncPageKey?
 
     public init(
         request: UUID,
@@ -581,7 +663,8 @@ public struct KeepTalkingContextSyncTranscriptLinesResult: Codable, Sendable {
         requester: UUID,
         responder: UUID,
         session: UUID,
-        lines: [KeepTalkingVoiceTranscriptLineDTO]
+        lines: [KeepTalkingVoiceTranscriptLineDTO],
+        nextBefore: KeepTalkingContextSyncPageKey? = nil
     ) {
         self.request = request
         self.context = context
@@ -589,8 +672,65 @@ public struct KeepTalkingContextSyncTranscriptLinesResult: Codable, Sendable {
         self.responder = responder
         self.session = session
         self.lines = lines
+        self.nextBefore = nextBefore
     }
+
 }
+
+/// A directed terminal response when a peer cannot execute a context-sync
+/// request. The requester uses `request` to fail whichever resource registry
+/// owns that round-trip, so every request phase terminates immediately.
+public struct KeepTalkingContextSyncFailureResult: Codable, Sendable, Equatable {
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let responder: UUID
+    public let message: String
+
+    public init(
+        request: UUID,
+        context: UUID,
+        requester: UUID,
+        responder: UUID,
+        message: String
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.responder = responder
+        self.message = message
+    }
+
+}
+
+protocol KeepTalkingContextSyncDirectedRequest {
+    var request: UUID { get }
+    var context: UUID { get }
+    var requester: UUID { get }
+    var recipient: UUID { get }
+}
+
+extension KeepTalkingContextSyncSummaryRequest:
+    KeepTalkingContextSyncDirectedRequest
+{}
+extension KeepTalkingContextSyncTailRequest:
+    KeepTalkingContextSyncDirectedRequest
+{}
+extension KeepTalkingContextSyncChunkRequest:
+    KeepTalkingContextSyncDirectedRequest
+{}
+extension KeepTalkingContextSyncAttachmentRecordsRequest:
+    KeepTalkingContextSyncDirectedRequest
+{}
+extension KeepTalkingContextSyncTranscriptSummaryRequest:
+    KeepTalkingContextSyncDirectedRequest
+{}
+extension KeepTalkingContextSyncTranscriptTailRequest:
+    KeepTalkingContextSyncDirectedRequest
+{}
+extension KeepTalkingContextSyncTranscriptChunkRequest:
+    KeepTalkingContextSyncDirectedRequest
+{}
 
 public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
     // Message sync (contextSyncing): summary → tail → chunk, both phases answered
@@ -614,12 +754,6 @@ public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
     /// Attachment records answering `attachmentRecordsRequest`.
     case attachmentRecordsResult(KeepTalkingContextSyncAttachmentRecordsResult)
 
-    // Side notes: full-set pull, merged by `(key, updatedAt)`.
-    /// Pull the peer's entire side-note set for the context.
-    case sideNotesRequest(KeepTalkingContextSyncSideNotesRequest)
-    /// Side notes answering `sideNotesRequest`.
-    case sideNotesResult(KeepTalkingContextSyncSideNotesResult)
-
     // Transcript-line sync (transcriptSyncing): per-session mirror of the message
     // summary → tail → chunk reconcile, both phases answered by
     // `transcriptLinesResult`. Only exchanged while a voice session is ongoing.
@@ -633,6 +767,13 @@ public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
     case transcriptChunkRequest(KeepTalkingContextSyncTranscriptChunkRequest)
     /// Transcript lines answering a `transcriptTailRequest` or `transcriptChunkRequest`.
     case transcriptLinesResult(KeepTalkingContextSyncTranscriptLinesResult)
+
+    /// Side notes that just changed on the sender. Broadcast; the digest on the
+    /// summary exchange is the catch-up path.
+    case sideNotesPush(KeepTalkingContextSyncSideNotesPush)
+
+    /// Terminal failure answering any directed context-sync request.
+    case failureResult(KeepTalkingContextSyncFailureResult)
 }
 
 // `KeepTalkingContextSyncSnapshot` + `contextSyncSnapshot(for:)` moved to

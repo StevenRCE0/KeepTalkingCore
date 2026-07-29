@@ -31,6 +31,8 @@ private struct KeepTalkingVoiceTranscriptDigestPayload: Codable {
     let id: UUID
     let author: UUID
     let text: String
+    /// Milliseconds, in lockstep with `KeepTalkingContextSyncDigestPayload` —
+    /// same round-trip hazard, same fix.
     let timestamp: Int64
     let sender: KeepTalkingContextMessage.Sender
     let sequence: Int
@@ -118,7 +120,11 @@ public struct KeepTalkingVoiceTranscriptSyncSnapshot: Sendable, KeepTalkingConte
         chunkSize: Int = KeepTalkingContextSyncMetadata.defaultChunkSize
     ) {
         self.session = session
-        self.summary = .buildFromTranscriptLines(lines, chunkSize: chunkSize)
+        let summary = KeepTalkingContextSyncMetadata.buildFromTranscriptLines(
+            lines,
+            chunkSize: chunkSize
+        )
+        self.summary = summary
         self.linesBySender = Dictionary(grouping: lines) {
             KeepTalkingContextMessage.Sender.node(node: $0.author)
         }.mapValues { $0.sortedForTranscriptSync() }
@@ -126,27 +132,76 @@ public struct KeepTalkingVoiceTranscriptSyncSnapshot: Sendable, KeepTalkingConte
 
     /// Lines past each author's tail cursor (append-only delta).
     public func items(
-        after cursors: [KeepTalkingContextSyncTailCursor]
-    ) -> [KeepTalkingVoiceTranscriptLine] {
-        cursors.flatMap { cursor in
-            Array(
-                linesBySender[cursor.sender, default: []]
-                    .dropFirst(max(0, cursor.messageCount))
-            )
-        }
+        after cursors: [KeepTalkingContextSyncTailCursor],
+        before: KeepTalkingContextSyncPageKey?
+    ) -> (
+        items: [KeepTalkingVoiceTranscriptLine],
+        nextBefore: KeepTalkingContextSyncPageKey?
+    ) {
+        let items = cursors.flatMap { cursor -> [KeepTalkingVoiceTranscriptLine] in
+            let senderItems = linesBySender[cursor.sender, default: []]
+            let start = min(cursor.startIndex, senderItems.count)
+            let end = min(cursor.endIndex, senderItems.count)
+            guard start < end else { return [] }
+            return Array(senderItems[start..<end])
+        }.sortedForTranscriptPage()
+        return KeepTalkingContextSyncPage.newestFirst(
+            items,
+            before: before,
+            key: transcriptPageKey,
+            limit: summary.chunkSize
+        )
     }
 
-    /// Lines from each diverging chunk onward (mid-stream repair) — mirrors the
-    /// message snapshot, which re-pulls from the mismatch chunk to the end.
+    /// One bounded page beginning at the first diverging chunk.
     public func items(
-        in chunks: [KeepTalkingContextSyncChunkCursor]
-    ) -> [KeepTalkingVoiceTranscriptLine] {
+        in chunks: [KeepTalkingContextSyncChunkCursor],
+        before: KeepTalkingContextSyncPageKey?
+    ) -> (
+        items: [KeepTalkingVoiceTranscriptLine],
+        nextBefore: KeepTalkingContextSyncPageKey?
+    ) {
         let chunkSize = summary.chunkSize
-        return chunks.flatMap { cursor in
-            Array(
-                linesBySender[cursor.sender, default: []]
-                    .dropFirst(cursor.index * chunkSize)
+        let items = chunks.sorted(by: {
+            let lhs = senderSortKey($0.sender)
+            let rhs = senderSortKey($1.sender)
+            return lhs == rhs ? $0.index < $1.index : lhs < rhs
+        }).flatMap { cursor -> [KeepTalkingVoiceTranscriptLine] in
+            let senderItems = linesBySender[cursor.sender, default: []]
+            let (rawStart, overflow) = cursor.index.multipliedReportingOverflow(
+                by: chunkSize
             )
+            guard !overflow else { return [] }
+            let start = min(rawStart, senderItems.count)
+            let end = min(cursor.endIndex, senderItems.count)
+            guard start < end else { return [] }
+            return Array(senderItems[start..<end])
+        }.sortedForTranscriptPage()
+        return KeepTalkingContextSyncPage.newestFirst(
+            items,
+            before: before,
+            key: transcriptPageKey,
+            limit: chunkSize
+        )
+    }
+}
+
+private func transcriptPageKey(
+    _ line: KeepTalkingVoiceTranscriptLine
+) -> KeepTalkingContextSyncPageKey {
+    KeepTalkingContextSyncPageKey(
+        timestamp: line.timestamp,
+        id: requireTranscriptLineID(line)
+    )
+}
+
+extension Array where Element == KeepTalkingVoiceTranscriptLine {
+    fileprivate func sortedForTranscriptPage() -> [KeepTalkingVoiceTranscriptLine] {
+        sorted { lhs, rhs in
+            if lhs.timestamp != rhs.timestamp {
+                return lhs.timestamp < rhs.timestamp
+            }
+            return (lhs.id?.uuidString ?? "") < (rhs.id?.uuidString ?? "")
         }
     }
 }

@@ -254,11 +254,12 @@ extension KeepTalkingClient {
                 actionID: query.actionID
             )
             guard
-                try await isActionGrantedToNode(
+                let grant = try await allowedActionScope(
                     node: remoteNode,
                     action: action,
                     context: context
-                )
+                ),
+                !grant.isDenied
             else {
                 throw KeepTalkingClientError.actionCallNotAuthorized(
                     action: query.actionID,
@@ -278,19 +279,10 @@ extension KeepTalkingClient {
                     )
                     // Filter by the caller's per-grant tool allowlist.
                     // nil allowedTools → all tools visible; non-nil → explicit set.
-                    let grant = try await resolveGrantPermission(
-                        node: remoteNode,
-                        action: action,
-                        context: context
-                    )
                     // `.callTool`/`.all` → all tools (nil); a `.verbs` set → its
-                    // `.named` tools; no recorded grant → unfiltered (prior behavior).
-                    let allowedTools: Set<String>?
-                    if let grant {
-                        allowedTools = grant.allowedNames(classWildcard: .callTool).map { Set($0) }
-                    } else {
-                        allowedTools = nil
-                    }
+                    // `.named` tools.
+                    let allowedTools = grant.allowedNames(classWildcard: .callTool)
+                        .map(Set.init)
                     let projectedTools = tools.compactMap { tool -> KeepTalkingActionCatalogMCPTool? in
                         if let allowedTools, !allowedTools.contains(tool.name) { return nil }
                         return KeepTalkingActionCatalogMCPTool(
@@ -337,16 +329,9 @@ extension KeepTalkingClient {
                     guard case .filesystem(let bundle) = action.payload else {
                         throw KeepTalkingClientError.unsupportedActionPayload
                     }
-                    let grant = try await resolveGrantPermission(
-                        node: remoteNode,
-                        action: action,
-                        context: context
-                    )
-                    // No recorded grant → deny (no tools), matching prior behavior
-                    // where an absent/off-axis grant produced an empty mask.
                     let tools = await filesystemActionManager.availableTools(
                         bundle: bundle,
-                        scope: grant ?? .verbs([])
+                        scope: grant
                     )
                     return KeepTalkingActionCatalogItemResult(
                         actionID: query.actionID,

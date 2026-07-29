@@ -3,7 +3,69 @@ import Testing
 
 @testable import KeepTalkingSDK
 
+@Suite(.serialized)
 struct PassKVServiceTests {
+    @Test("context push is sent while the recipient transport is still online")
+    func contextPushDoesNotUseTransportLivenessAsVisibility() async throws {
+        let localNodeID = UUID()
+        let remoteNodeID = UUID()
+        let contextID = UUID()
+        let context = KeepTalkingContext(id: contextID)
+        let localNode = KeepTalkingNode(id: localNodeID)
+        let remoteNode = KeepTalkingNode(id: remoteNodeID)
+        remoteNode.contextWakeHandles = [
+            KeepTalkingPushWakeHandle(
+                purpose: .contextMessage,
+                contextID: contextID,
+                opaqueValue: "context-handle",
+                topic: "com.keeptalking.test",
+                environment: "development"
+            )
+        ]
+
+        let store = try await KeepTalkingInMemoryStore.make()
+        try await context.save(on: store.database)
+        try await localNode.save(on: store.database)
+        try await remoteNode.save(on: store.database)
+        try await KeepTalkingNodeRelation(
+            from: localNode,
+            to: remoteNode,
+            relationship: .trusted([context])
+        ).save(on: store.database)
+
+        let recorder = PassKVRequestRecorder()
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [PassKVURLProtocol.self]
+        PassKVURLProtocol.recorder = recorder
+        let service = KeepTalkingPassKVService(
+            baseURL: try #require(URL(string: "https://passkv.test")),
+            session: URLSession(configuration: sessionConfiguration)
+        )
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(
+                contextID: contextID,
+                node: localNodeID
+            ),
+            kvService: service,
+            localStore: store
+        )
+        _ = client.livenessState.observePresence(
+            from: remoteNodeID,
+            echoCooldown: 1
+        )
+
+        await client.sendContextWakeNotificationsIfNeeded(
+            for: context,
+            messagePreview: KeepTalkingPushWakeMessagePreview(
+                sender: .autonomous(name: "ai", node: localNodeID),
+                content: "Done",
+                isTruncated: false
+            )
+        )
+
+        #expect(await recorder.requests.map(\.path) == ["/api/apn/send"])
+    }
+
     @Test("deregister removes node and stale pair keys from PassKeyValue")
     func deregisterNodeIDRemovesOwnedNodeAndStaleKeys() async throws {
         let node = try #require(UUID(uuidString: "00000000-0000-0000-0000-000000000001"))
@@ -66,7 +128,9 @@ private actor PassKVRequestRecorder {
 
         let status = method == "POST" ? 201 : 200
         let payload: [String: Any]
-        if method == "GET" {
+        if url.path == "/api/apn/send" {
+            payload = ["accepted": true, "messageID": "push-id"]
+        } else if method == "GET" {
             payload = ["items": listResponse]
         } else if method == "POST" {
             payload = ["item": ["key": url.lastPathComponent, "value": "[]"]]

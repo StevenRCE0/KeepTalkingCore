@@ -8,7 +8,7 @@ import Testing
 struct InlinePromptAttachmentTests {
     @Test("prepared prompt attachments survive source file deletion")
     func preparedPromptAttachmentsSurviveSourceDeletion() async throws {
-        let client = makeClient()
+        let client = makeClient(localStore: try await KeepTalkingInMemoryStore.make())
         let fileURL = try makeTemporaryFile(
             named: "inline-note.txt",
             contents: "snapshot-content"
@@ -34,7 +34,7 @@ struct InlinePromptAttachmentTests {
 
     @Test("prepared prompt attachments reuse normal context attachment persistence")
     func preparedPromptAttachmentsPersistAsContextAttachments() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let client = makeClient(localStore: localStore)
         let context = KeepTalkingContext(
             id: UUID(uuidString: "F0000000-0000-0000-0000-000000000021")!
@@ -80,7 +80,7 @@ struct InlinePromptAttachmentTests {
 
     @Test("agent run failures are published back into context")
     func agentRunFailuresPublishContextMessage() async throws {
-        let localStore = KeepTalkingInMemoryStore()
+        let localStore = try await KeepTalkingInMemoryStore.make()
         let client = makeClient(localStore: localStore)
         let contextID = UUID(uuidString: "F0000000-0000-0000-0000-000000000031")!
 
@@ -100,7 +100,11 @@ struct InlinePromptAttachmentTests {
 
         let message = try #require(messages.first)
         #expect(messages.count == 1)
-        #expect(message.content == "Agent run failed: Attachment preparation failed.")
+        // The published message is deliberately neutral: internal failure detail
+        // stays in `onLog?` and reaches the user through the failed queue entry's
+        // localized message, not through the conversation transcript.
+        #expect(message.content == "AI error")
+        #expect(message.type == .haywire(reason: .failed))
         if case .autonomous(let name, _, let model) = message.sender {
             #expect(name == "ai")
             #expect(model == "gpt-5-codex")
@@ -109,8 +113,10 @@ struct InlinePromptAttachmentTests {
         }
     }
 
+    // Required, not defaulted: a default argument cannot await, and building a
+    // store is async now.
     private func makeClient(
-        localStore: any KeepTalkingLocalStore = KeepTalkingInMemoryStore()
+        localStore: any KeepTalkingLocalStore
     ) -> KeepTalkingClient {
         KeepTalkingClient(
             config: KeepTalkingConfig(

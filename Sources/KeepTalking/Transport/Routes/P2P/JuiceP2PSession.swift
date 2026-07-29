@@ -11,10 +11,10 @@ import SwiftJUICE
 /// that, ICE connectivity checks complete and `send(_:)` works.
 ///
 /// Datagram semantics are *exactly* UDP — no streams, no retransmission,
-/// no ordering guarantees beyond what the OS provides. A real production
-/// route layered on top of this would wrap envelopes with the existing
-/// `PacketFragmenter` + sequence numbers + acks. For the lab, raw send is
-/// enough to demonstrate "the path works."
+/// no ordering guarantees beyond what the OS provides. For the lab, raw
+/// send is enough to demonstrate "the path works." Production traffic goes
+/// through `KeepTalkingDirectChannel`, which runs envelopes over an HTTP/2
+/// stream rather than these datagrams.
 public final class KeepTalkingJuiceP2PSession: @unchecked Sendable {
     public enum State: Sendable, Equatable, CustomStringConvertible {
         case idle

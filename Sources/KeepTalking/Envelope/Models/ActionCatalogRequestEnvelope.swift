@@ -3,10 +3,6 @@ import Foundation
 extension KeepTalkingActionCatalogRequest: KeepTalkingEnvelope {
     public static var kind: KeepTalkingEnvelopeKind { .actionCatalogRequest }
 
-    public var participantNodeIDs: [UUID] {
-        [callerNodeID, targetNodeID]
-    }
-
     public var targetPeerNodeID: UUID? {
         targetNodeID
     }

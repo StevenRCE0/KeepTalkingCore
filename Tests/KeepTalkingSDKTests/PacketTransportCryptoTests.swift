@@ -18,7 +18,8 @@ struct PacketTransportCryptoTests {
             content: "hello cryptor"
         )
 
-        let payload = try KeepTalkingPacketTransportCrypto
+        let payload =
+            try KeepTalkingPacketTransportCrypto
             .outboundPayload(
                 for: envelope,
                 localNodeID: senderNodeID,
@@ -30,7 +31,8 @@ struct PacketTransportCryptoTests {
         let plaintext = try JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope))
         #expect(payload != plaintext)
 
-        let decoded = try KeepTalkingPacketTransportCrypto
+        let decoded =
+            try KeepTalkingPacketTransportCrypto
             .inboundEnvelope(
                 from: payload,
                 contextSecretProvider: { requestedContextID in
@@ -53,7 +55,8 @@ struct PacketTransportCryptoTests {
         let nodeID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
         let envelope = KeepTalkingNode(id: nodeID)
 
-        let payload = try KeepTalkingPacketTransportCrypto
+        let payload =
+            try KeepTalkingPacketTransportCrypto
             .outboundPayload(
                 for: envelope,
                 localNodeID: nodeID,
@@ -67,7 +70,8 @@ struct PacketTransportCryptoTests {
             )) == nil
         )
 
-        let decoded = try KeepTalkingPacketTransportCrypto
+        let decoded =
+            try KeepTalkingPacketTransportCrypto
             .inboundEnvelope(
                 from: payload,
                 contextSecretProvider: nil
@@ -78,55 +82,6 @@ struct PacketTransportCryptoTests {
             return
         }
         #expect(decodedNode.id == nodeID)
-    }
-
-    @Test("context envelopes use encrypted transport payloads")
-    func contextEnvelopeRoundTripsThroughTransportCrypto() throws {
-        let contextID = UUID(uuidString: "55555555-5555-5555-5555-555555555555")!
-        let senderNodeID = UUID(
-            uuidString: "66666666-6666-6666-6666-666666666666"
-        )!
-        let secret = Data("transport-secret-32-bytes-length!!".utf8)
-        let message = KeepTalkingContextMessage(
-            id: UUID(uuidString: "77777777-7777-7777-7777-777777777777")!,
-            context: KeepTalkingContext(id: contextID),
-            sender: .node(node: senderNodeID),
-            content: "embedded context message"
-        )
-        let envelope = KeepTalkingContext(
-            id: contextID,
-            messages: [message]
-        )
-
-        let payload = try KeepTalkingPacketTransportCrypto
-            .outboundPayload(
-                for: envelope,
-                localNodeID: senderNodeID,
-                contextSecretProvider: { requestedContextID in
-                    requestedContextID == contextID ? secret : nil
-                }
-            )
-
-        let plaintext = try JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope))
-        #expect(payload != plaintext)
-
-        let decoded = try KeepTalkingPacketTransportCrypto
-            .inboundEnvelope(
-                from: payload,
-                contextSecretProvider: { requestedContextID in
-                    requestedContextID == contextID ? secret : nil
-                }
-            )
-
-        let contextEnvelope = try #require(decoded)
-        guard let context = contextEnvelope.context else {
-            Issue.record("Expected decrypted envelope to be a context payload")
-            return
-        }
-
-        #expect(context.id == contextID)
-        #expect(context.messages.count == 1)
-        #expect(context.messages.first?.content == "embedded context message")
     }
 
     @Test("context sync envelopes use encrypted transport payloads")
@@ -143,7 +98,8 @@ struct PacketTransportCryptoTests {
             )
         )
 
-        let payload = try KeepTalkingPacketTransportCrypto
+        let payload =
+            try KeepTalkingPacketTransportCrypto
             .outboundPayload(
                 for: envelope,
                 localNodeID: requester,
@@ -155,7 +111,8 @@ struct PacketTransportCryptoTests {
         let plaintext = try JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope))
         #expect(payload != plaintext)
 
-        let decoded = try KeepTalkingPacketTransportCrypto
+        let decoded =
+            try KeepTalkingPacketTransportCrypto
             .inboundEnvelope(
                 from: payload,
                 contextSecretProvider: { requestedContextID in

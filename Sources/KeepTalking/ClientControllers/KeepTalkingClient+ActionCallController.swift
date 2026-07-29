@@ -384,7 +384,7 @@ extension KeepTalkingClient {
         }
 
         guard
-            let grant = try await resolveGrantPermission(
+            let grant = try await allowedActionScope(
                 node: callerNode,
                 action: action,
                 context: context
@@ -441,6 +441,21 @@ extension KeepTalkingClient {
         let requestID = request.id.uuidString.lowercased()
         let actionID = request.call.action.uuidString.lowercased()
         let inFlightTask: Task<KeepTalkingActionCallResult, Never>
+
+        // An envelope off the wire can never legitimately claim to be from this
+        // node. A local call short-circuits before transport — `dispatchActionCall`
+        // executes it directly when the delivery node is self — and the SFU does
+        // not echo a broadcast back to its sender. So a caller ID equal to ours
+        // is spoofed, and it is the most valuable identity to spoof: the grants
+        // keyed to this node are the self-grants the local agent runs its own
+        // tools under, so accepting one would hand a peer the whole local tool
+        // surface. Drop it before acknowledging — a spoofer gets no reply.
+        guard request.callerNodeID != config.node else {
+            onLog?(
+                "[action-call/request] refused request=\(requestID) action=\(actionID): caller claims this node's own identity"
+            )
+            return
+        }
 
         await sendActionCallAcknowledgementBestEffort(
             request,
@@ -1288,35 +1303,18 @@ extension KeepTalkingClient {
         selfNode: KeepTalkingNode,
         on database: any Database
     ) async throws -> Bool {
-        let nodeID = try node.requireID()
-        let actionID = try action.requireID()
-        /// Kept here for remote granting future-proof
         _ = try selfNode.requireID()
-        guard let ownerNodeID = action.$node.id else {
+        guard
+            let scope = try await allowedActionScope(
+                node: node,
+                action: action,
+                context: context,
+                on: database
+            )
+        else {
             return false
         }
-
-        let relationIDs = try await trustedRelations(
-            from: ownerNodeID,
-            to: nodeID,
-            allowing: context,
-            on: database
-        )
-        .compactMap(\.id)
-        guard !relationIDs.isEmpty else {
-            return false
-        }
-
-        let approvals =
-            try await KeepTalkingNodeRelationActionRelation
-            .query(on: database)
-            .filter(\.$relation.$id ~~ relationIDs)
-            .filter(\.$action.$id, .equal, actionID)
-            .all()
-
-        return approvals.contains { approval in
-            approval.applicable(in: context)
-        }
+        return !scope.isDenied
     }
 
     public func isActionGrantedToNode(

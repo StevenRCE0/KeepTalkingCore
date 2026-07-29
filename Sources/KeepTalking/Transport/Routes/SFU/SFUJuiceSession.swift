@@ -1,6 +1,5 @@
 import Crypto
 import Foundation
-import KeepTalkingSFUClient
 import KeepTalkingSFUProtocol
 
 /// Public CLI-driveable wrapper around the internal `KeepTalkingSFUJuice
@@ -181,8 +180,3 @@ public final class KeepTalkingSFUJuiceSession: @unchecked Sendable {
         }
     }
 }
-
-/// Sibling type alias so the dispatcher signature reads cleanly without
-/// pulling the underlying client's `SFUClient.InboundEnvelope` into the
-/// public surface area.
-typealias KeepTalkingSFUInboundEnvelope = SFUClient.InboundEnvelope

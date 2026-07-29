@@ -17,7 +17,7 @@ struct TrustInvitationQueueTests {
 
     @Test("trust invitation upsert is idempotent per context, pair, and direction")
     func upsertIsIdempotent() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let contextID = UUID()
         let inviterID = UUID()
         let recipientID = UUID()
@@ -47,7 +47,7 @@ struct TrustInvitationQueueTests {
 
     @Test("trust invitation skip detection accepts covering all-context trust")
     func skipDetectionUsesCoveringTrust() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let context = KeepTalkingContext(id: UUID())
         let recipient = KeepTalkingNode(id: UUID())
         let inviter = KeepTalkingNode(id: UUID())
@@ -77,7 +77,7 @@ struct TrustInvitationQueueTests {
     func pendingOutgoingInvitationCreatesAndMergesPreTrustedRelation()
         async throws
     {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let inviterID = UUID()
         let recipientID = UUID()
         let firstContextID = UUID()
@@ -115,7 +115,7 @@ struct TrustInvitationQueueTests {
 
     @Test("pending outgoing invitation does not downgrade trusted relation")
     func pendingOutgoingInvitationDoesNotDowngradeTrustedRelation() async throws {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let context = KeepTalkingContext(id: UUID())
         let inviter = KeepTalkingNode(id: UUID())
         let recipient = KeepTalkingNode(id: UUID())
@@ -152,7 +152,7 @@ struct TrustInvitationQueueTests {
     func failedOutgoingInvitationRemovesOnlyMatchingPreTrustedContext()
         async throws
     {
-        let store = KeepTalkingInMemoryStore()
+        let store = try await KeepTalkingInMemoryStore.make()
         let inviter = KeepTalkingNode(id: UUID())
         let recipient = KeepTalkingNode(id: UUID())
         let first = KeepTalkingContext(id: UUID())

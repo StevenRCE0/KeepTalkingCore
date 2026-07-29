@@ -12,6 +12,59 @@ extension KeepTalkingClient {
         on database: any Database,
         callbackForBroadcasting: ((String) async -> Void)? = nil
     ) async throws {
+        try await upsertAliasPermission(
+            aliasID: aliasID,
+            toNodeID: toNodeID,
+            scope: scope,
+            grantScope: grantScope,
+            eligibility: eligibility,
+            mergingScope: true,
+            node: node,
+            on: database
+        )
+
+        await callbackForBroadcasting?(
+            "grant alias=\(aliasID.uuidString.lowercased()) to=\(toNodeID.uuidString.lowercased())"
+        )
+    }
+
+    public static func setAliasPermissionScope(
+        aliasID: UUID,
+        toNodeID: UUID,
+        scope: KeepTalkingActionPermissionScope,
+        eligibility: KeepTalkingRelationEligibility = .trustedOnly,
+        node: KeepTalkingNode,
+        on database: any Database,
+        callbackForBroadcasting: ((String) async -> Void)? = nil
+    ) async throws {
+        try await database.transaction { database in
+            try await upsertAliasPermission(
+                aliasID: aliasID,
+                toNodeID: toNodeID,
+                scope: scope,
+                grantScope: nil,
+                eligibility: eligibility,
+                mergingScope: false,
+                node: node,
+                on: database
+            )
+        }
+
+        await callbackForBroadcasting?(
+            "set alias scope=\(aliasID.uuidString.lowercased()) to=\(toNodeID.uuidString.lowercased())"
+        )
+    }
+
+    private static func upsertAliasPermission(
+        aliasID: UUID,
+        toNodeID: UUID,
+        scope: KeepTalkingActionPermissionScope,
+        grantScope: KeepTalkingActionScope?,
+        eligibility: KeepTalkingRelationEligibility,
+        mergingScope: Bool,
+        node: KeepTalkingNode,
+        on database: any Database
+    ) async throws {
         let alias = try await requireActionTag(aliasID, on: database)
         let action = try await requireTaggedAction(alias, on: database)
         let hostNode = try await resolveGrantHostNode(
@@ -34,18 +87,42 @@ extension KeepTalkingClient {
             throw KeepTalkingClientError.relationNotTrustedOrOwned(toNodeID)
         }
 
+        let relationID = try relation.requireID()
+        let relationIDs =
+            if mergingScope {
+                [relationID]
+            } else {
+                try await KeepTalkingNodeRelation.query(on: database)
+                    .filter(\.$from.$id, .equal, hostNodeID)
+                    .filter(\.$to.$id, .equal, toNodeID)
+                    .all()
+                    .compactMap(\.id)
+            }
         let matchingGrants = try await aliasGrants(
             matching: alias,
-            relationIDs: [try relation.requireID()],
+            relationIDs: relationIDs,
             on: database
         )
-        if let grant = matchingGrants.first {
-            grant.approvingContext = mergedApprovingContext(
-                current: grant.approvingContext,
-                requestedScope: scope
-            )
-            if let grantScope {
-                grant.permission = grantScope
+        let targetGrant = matchingGrants.first {
+            $0.$relation.id == relationID
+        }
+        let permission =
+            mergingScope
+            ? grantScope
+            : consolidatedPermission(from: matchingGrants)
+
+        if let grant = targetGrant {
+            grant.approvingContext =
+                mergingScope
+                ? mergedApprovingContext(
+                    current: grant.approvingContext,
+                    requestedScope: scope
+                )
+                : scope.approvingContext
+            if let permission {
+                grant.permission = permission
+            } else if !mergingScope {
+                grant.permission = nil
             }
             try await grant.update(on: database)
         } else {
@@ -53,14 +130,16 @@ extension KeepTalkingClient {
                 relation: relation,
                 alias: alias,
                 approvingContext: scope.approvingContext,
-                permission: grantScope
+                permission: permission
             )
             try await grant.create(on: database)
         }
 
-        await callbackForBroadcasting?(
-            "grant alias=\(aliasID.uuidString.lowercased()) to=\(toNodeID.uuidString.lowercased())"
-        )
+        if !mergingScope {
+            for grant in matchingGrants where grant !== targetGrant {
+                try await grant.delete(on: database)
+            }
+        }
     }
 
     public func grantAliasPermission(
@@ -86,6 +165,40 @@ extension KeepTalkingClient {
             callbackForBroadcasting: {
                 await self.broadcastLocalNodeState(reason: $0)
             }
+        )
+        await invalidateActionToolCatalog(
+            contextID: scope.context?.id,
+            reason:
+                "grant_alias_permission alias=\(aliasID.uuidString.lowercased()) to=\(toNodeID.uuidString.lowercased())"
+        )
+    }
+
+    public func setAliasPermissionScope(
+        aliasID: UUID,
+        toNodeID: UUID,
+        scope: KeepTalkingActionPermissionScope,
+        eligibility: KeepTalkingRelationEligibility = .trustedOnly
+    ) async throws {
+        let node = try await ensure(
+            config.node,
+            for: KeepTalkingNode.self,
+            strict: true
+        )
+        try await Self.setAliasPermissionScope(
+            aliasID: aliasID,
+            toNodeID: toNodeID,
+            scope: scope,
+            eligibility: eligibility,
+            node: node,
+            on: localStore.database,
+            callbackForBroadcasting: {
+                await self.broadcastLocalNodeState(reason: $0)
+            }
+        )
+        await invalidateActionToolCatalog(
+            contextID: scope.context?.id,
+            reason:
+                "set_alias_permission_scope alias=\(aliasID.uuidString.lowercased()) to=\(toNodeID.uuidString.lowercased())"
         )
     }
 
@@ -153,6 +266,11 @@ extension KeepTalkingClient {
                 await self.broadcastLocalNodeState(reason: $0)
             }
         )
+        await invalidateActionToolCatalog(
+            contextID: context?.id,
+            reason:
+                "revoke_alias_permission alias=\(aliasID.uuidString.lowercased()) from=\(fromNodeID.uuidString.lowercased())"
+        )
     }
 
     public static func grantedNodeIDs(
@@ -161,6 +279,23 @@ extension KeepTalkingClient {
         node: KeepTalkingNode,
         on database: any Database
     ) async throws -> Set<UUID> {
+        let scopes = try await grantedAliasScopes(
+            forAlias: aliasID,
+            node: node,
+            on: database
+        )
+        return Set(
+            scopes.compactMap { nodeID, scope in
+                scope.applicable(in: context) ? nodeID : nil
+            }
+        )
+    }
+
+    public static func grantedAliasScopes(
+        forAlias aliasID: UUID,
+        node: KeepTalkingNode,
+        on database: any Database
+    ) async throws -> [UUID: KeepTalkingNodeRelationApprovingContext] {
         let alias = try await requireActionTag(aliasID, on: database)
         let action = try await requireTaggedAction(alias, on: database)
         let hostNode = try await resolveGrantHostNode(
@@ -168,7 +303,7 @@ extension KeepTalkingClient {
             authorizingNode: node,
             on: database
         )
-        guard let hostNodeID = hostNode.id else { return [] }
+        guard let hostNodeID = hostNode.id else { return [:] }
 
         let relations = try await KeepTalkingNodeRelation.query(on: database)
             .filter(\.$from.$id == hostNodeID)
@@ -184,17 +319,50 @@ extension KeepTalkingClient {
             on: database
         )
 
-        return Set(
-            grants.compactMap { grant in
-                guard
-                    let relation = relationByID[grant.$relation.id],
-                    relation.relationship.allowsGrantStaging(context: context),
-                    grant.applicable(in: context)
-                else {
-                    return nil
-                }
-                return relation.$to.id
-            })
+        var scopes: [UUID: KeepTalkingNodeRelationApprovingContext] = [:]
+        for grant in grants {
+            guard
+                let relation = relationByID[grant.$relation.id],
+                let effectiveScope = grant.approvingContext?.restricted(
+                    to: relation.relationship
+                )
+            else {
+                continue
+            }
+            scopes[relation.$to.id] = scopes[relation.$to.id]
+                .merging(effectiveScope)
+        }
+        return scopes
+    }
+
+    static func aliasGrantPermissions(
+        forActionID actionID: UUID,
+        relationIDs: [UUID],
+        context: KeepTalkingContext?,
+        on database: any Database
+    ) async throws -> [KeepTalkingActionScope] {
+        guard !relationIDs.isEmpty else { return [] }
+
+        let actionTags = try await KeepTalkingMapping.query(on: database)
+            .filter(\.$action.$id, .equal, actionID)
+            .filter(\.$kind, .equal, .tag)
+            .filter(\.$deletedAt == nil)
+            .all()
+        guard !actionTags.isEmpty else { return [] }
+
+        return try await KeepTalkingNodeRelationAliasRelation.query(on: database)
+            .filter(\.$relation.$id ~~ relationIDs)
+            .with(\.$alias)
+            .all()
+            .filter { grant in
+                grant.applicable(in: context)
+                    && actionTags.contains { tag in
+                        grant.alias.kind == tag.kind
+                            && grant.alias.namespace == tag.namespace
+                            && grant.alias.normalizedValue == tag.normalizedValue
+                    }
+            }
+            .map { $0.permission ?? .all }
     }
 
     private static func requireActionTag(
@@ -264,6 +432,64 @@ extension KeepTalkingClient {
             try await grant.update(on: database)
         }
     }
+
+    private static func consolidatedPermission(
+        from grants: [KeepTalkingNodeRelationAliasRelation]
+    ) -> KeepTalkingActionScope? {
+        guard !grants.isEmpty else { return nil }
+        let permission = KeepTalkingActionScope.union(
+            grants.map { $0.permission ?? .all }
+        )
+        return permission.isUnrestricted ? nil : permission
+    }
+}
+
+extension KeepTalkingActionPermissionScope {
+    fileprivate var approvingContext: KeepTalkingNodeRelationApprovingContext {
+        switch self {
+            case .all:
+                .all
+            case .context(let context):
+                .contexts([context])
+        }
+    }
+}
+
+extension Optional where Wrapped == KeepTalkingNodeRelationApprovingContext {
+    fileprivate func merging(
+        _ other: KeepTalkingNodeRelationApprovingContext
+    ) -> KeepTalkingNodeRelationApprovingContext {
+        guard let current = self else { return other }
+        switch (current, other) {
+            case (.all, _), (_, .all):
+                return .all
+            case (.contexts(let lhs), .contexts(let rhs)):
+                return .contexts(Array(Set(lhs + rhs)))
+        }
+    }
+}
+
+extension KeepTalkingNodeRelationApprovingContext {
+    fileprivate func restricted(
+        to relationship: KeepTalkingRelationship
+    ) -> KeepTalkingNodeRelationApprovingContext? {
+        switch self {
+            case .all:
+                switch relationship {
+                    case .owner, .trustedInAllContext:
+                        return .all
+                    case .trusted(let contexts):
+                        return contexts.isEmpty ? nil : .contexts(contexts)
+                    case .pending, .preTrusted:
+                        return nil
+                }
+            case .contexts(let contexts):
+                let allowed = contexts.filter {
+                    relationship.allows(context: $0)
+                }
+                return allowed.isEmpty ? nil : .contexts(allowed)
+        }
+    }
 }
 
 extension KeepTalkingActionPermissionScope {
@@ -271,13 +497,6 @@ extension KeepTalkingActionPermissionScope {
         switch self {
             case .all: nil
             case .context(let context): context
-        }
-    }
-
-    fileprivate var approvingContext: KeepTalkingNodeRelationApprovingContext {
-        switch self {
-            case .all: .all
-            case .context(let context): .contexts([context])
         }
     }
 }

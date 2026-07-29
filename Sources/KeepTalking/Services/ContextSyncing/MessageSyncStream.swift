@@ -19,10 +19,11 @@ public struct KeepTalkingContextSyncSnapshot: Sendable, KeepTalkingContextSyncSt
         chunkSize: Int = KeepTalkingContextSyncMetadata.defaultChunkSize
     ) {
         self.context = context
-        self.summary = KeepTalkingContext.buildSyncMetadata(
+        let summary = KeepTalkingContext.buildSyncMetadata(
             from: messages,
             chunkSize: chunkSize
         )
+        self.summary = summary
         self.messagesBySender = Dictionary(
             grouping: messages,
             by: \.sender
@@ -50,26 +51,52 @@ public struct KeepTalkingContextSyncSnapshot: Sendable, KeepTalkingContextSyncSt
     }
 
     public func items(
-        after cursors: [KeepTalkingContextSyncTailCursor]
-    ) -> [KeepTalkingContextMessage] {
-        cursors.flatMap { cursor in
-            Array(
-                messagesBySender[cursor.sender, default: []]
-                    .dropFirst(max(0, cursor.messageCount))
-            )
+        after cursors: [KeepTalkingContextSyncTailCursor],
+        before: KeepTalkingContextSyncPageKey?
+    ) -> (
+        items: [KeepTalkingContextMessage],
+        nextBefore: KeepTalkingContextSyncPageKey?
+    ) {
+        let items = cursors.flatMap { cursor -> [KeepTalkingContextMessage] in
+            let senderItems = messagesBySender[cursor.sender, default: []]
+            let start = min(cursor.startIndex, senderItems.count)
+            let end = min(cursor.endIndex, senderItems.count)
+            guard start < end else { return [] }
+            return Array(senderItems[start..<end])
         }.sortedForSync()
+        return KeepTalkingContextSyncPage.newestFirst(
+            items,
+            before: before,
+            key: messagePageKey,
+            limit: summary.chunkSize
+        )
     }
 
     public func items(
-        in chunks: [KeepTalkingContextSyncChunkCursor]
-    ) -> [KeepTalkingContextMessage] {
+        in chunks: [KeepTalkingContextSyncChunkCursor],
+        before: KeepTalkingContextSyncPageKey?
+    ) -> (
+        items: [KeepTalkingContextMessage],
+        nextBefore: KeepTalkingContextSyncPageKey?
+    ) {
         let chunkSize = summary.chunkSize
-        return chunks.flatMap { cursor in
-            Array(
-                messagesBySender[cursor.sender, default: []]
-                    .dropFirst(cursor.index * chunkSize)
+        let items = chunks.flatMap { cursor -> [KeepTalkingContextMessage] in
+            let senderItems = messagesBySender[cursor.sender, default: []]
+            let (rawStart, overflow) = cursor.index.multipliedReportingOverflow(
+                by: chunkSize
             )
+            guard !overflow else { return [] }
+            let start = min(rawStart, senderItems.count)
+            let end = min(cursor.endIndex, senderItems.count)
+            guard start < end else { return [] }
+            return Array(senderItems[start..<end])
         }.sortedForSync()
+        return KeepTalkingContextSyncPage.newestFirst(
+            items,
+            before: before,
+            key: messagePageKey,
+            limit: chunkSize
+        )
     }
 
     public func attachments(
@@ -88,18 +115,21 @@ public struct KeepTalkingContextSyncSnapshot: Sendable, KeepTalkingContextSyncSt
     }
 }
 
+private func messagePageKey(
+    _ message: KeepTalkingContextMessage
+) -> KeepTalkingContextSyncPageKey {
+    KeepTalkingContextSyncPageKey(
+        timestamp: message.timestamp,
+        id: requireMessageID(message)
+    )
+}
+
 extension KeepTalkingClient {
     func contextSyncSnapshot(
         for context: UUID
     ) async throws -> KeepTalkingContextSyncSnapshot {
-        let resolvedContext = try await ensure(context, for: KeepTalkingContext.self)
-        let chunkSize =
-            resolvedContext.syncMetadata?.chunkSize
-            ?? KeepTalkingContextSyncMetadata.defaultChunkSize
-        try await resolvedContext.refreshSyncMetadata(
-            on: localStore.database,
-            chunkSize: chunkSize
-        )
+        _ = try await ensure(context, for: KeepTalkingContext.self)
+        let chunkSize = config.contextSyncChunkSize
         let messages = try await KeepTalkingContextMessage.query(on: localStore.database)
             .filter(\.$context.$id, .equal, context)
             .all()

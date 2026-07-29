@@ -1,3 +1,4 @@
+import Dispatch
 import FluentKit
 import FluentSQLiteDriver
 import Foundation
@@ -13,6 +14,18 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
     private let databaseID: DatabaseID
     private let logger: Logger
 
+    /// Construction is synchronous and does NO I/O — it registers databases,
+    /// middleware and the migration list. Running the migrations is separate
+    /// (`migrate()`) because it is async work.
+    ///
+    /// Keeping the two apart is deliberate. When construction *also* ran the
+    /// migrations, callers who could not await had to bridge with a semaphore,
+    /// and that bridge deadlocks in two different ways: under parallel tests the
+    /// whole cooperative pool fills with waiters, and in the app the bridged
+    /// work can hop to the main actor that is already blocked waiting for it.
+    /// A synchronous init means neither caller has to bridge anything.
+    ///
+    /// Use `make(...)` when you are already in an async context.
     public init(
         databaseURL: URL? = nil,
         databaseFileName: String? = nil,
@@ -28,7 +41,7 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
 
         do {
             try Self.prepareDatabaseDirectory(at: self.databaseURL)
-            try Self.configure(
+            Self.configure(
                 manager: manager,
                 databaseID: databaseID,
                 sqliteConfiguration: .file(self.databaseURL.path)
@@ -39,8 +52,41 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
         }
     }
 
+    /// Constructs and migrates in one step, for callers already in an async
+    /// context.
+    public static func make(
+        databaseURL: URL? = nil,
+        databaseFileName: String? = nil,
+        databaseID: DatabaseID = .sqlite,
+        logger: Logger = .init(label: "KeepTalking.ModelStore")
+    ) async throws -> KeepTalkingModelStore {
+        let store = try KeepTalkingModelStore(
+            databaseURL: databaseURL,
+            databaseFileName: databaseFileName,
+            databaseID: databaseID,
+            logger: logger
+        )
+        try await store.migrate()
+        return store
+    }
+
+    /// Applies any outstanding migrations. Must complete before the store is
+    /// queried.
+    public func migrate() async throws {
+        try await manager.autoMigrate()
+    }
+
     deinit {
-        self.manager.shutdown()
+        // `shutdown()` blocks until the NIO event-loop group has terminated.
+        // Running it inline parks whatever thread released the store — and
+        // under parallel tests that is a cooperative thread, so releasing a
+        // batch of stores starves the pool exactly the way `blocking {}` used
+        // to. `deinit` cannot be async, so hand the wait to a utility queue and
+        // return immediately. The manager is captured by value; `self` is not.
+        let manager = self.manager
+        DispatchQueue.global(qos: .utility).async {
+            manager.shutdown()
+        }
     }
 
     public var database: any Database {
@@ -76,7 +122,7 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
         manager: FluentManager,
         databaseID: DatabaseID,
         sqliteConfiguration: SQLiteConfiguration
-    ) throws {
+    ) {
         manager.databases.use(
             .sqlite(sqliteConfiguration),
             as: databaseID,
@@ -114,11 +160,11 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             CreateKeepTalkingOutboxEntriesMigration(),
             CreateKeepTalkingTrustInvitationsMigration(),
             CreateKeepTalkingVoiceTranscriptLinesMigration(),
+            DropKeepTalkingOutboxAttemptTrackingMigration(),
+            AddSideNoteVersionMigration(),
+            DropContextSyncMetadataMigration(),
             to: databaseID
         )
-        try blocking {
-            try await manager.autoMigrate()
-        }
     }
 }
 
@@ -130,22 +176,37 @@ public final class KeepTalkingInMemoryStore: KeepTalkingLocalStore,
     )
     private let databaseID: DatabaseID = .sqlite
 
+    /// Synchronous, like `KeepTalkingModelStore.init` — see its note. Call
+    /// `migrate()` before querying, or use `make()`.
     public init() {
-        do {
-            try KeepTalkingModelStore.configure(
-                manager: manager,
-                databaseID: databaseID,
-                sqliteConfiguration: .memory
-            )
-        } catch {
-            fatalError(
-                "Failed to initialize in-memory store: \(error.localizedDescription)"
-            )
-        }
+        KeepTalkingModelStore.configure(
+            manager: manager,
+            databaseID: databaseID,
+            sqliteConfiguration: .memory
+        )
+    }
+
+    public static func make() async throws -> KeepTalkingInMemoryStore {
+        let store = KeepTalkingInMemoryStore()
+        try await store.migrate()
+        return store
+    }
+
+    public func migrate() async throws {
+        try await manager.autoMigrate()
     }
 
     deinit {
-        self.manager.shutdown()
+        // `shutdown()` blocks until the NIO event-loop group has terminated.
+        // Running it inline parks whatever thread released the store — and
+        // under parallel tests that is a cooperative thread, so releasing a
+        // batch of stores starves the pool exactly the way `blocking {}` used
+        // to. `deinit` cannot be async, so hand the wait to a utility queue and
+        // return immediately. The manager is captured by value; `self` is not.
+        let manager = self.manager
+        DispatchQueue.global(qos: .utility).async {
+            manager.shutdown()
+        }
     }
 
     public var database: any Database {

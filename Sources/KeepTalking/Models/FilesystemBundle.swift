@@ -96,7 +96,7 @@ extension KeepTalkingFilesystemOperation {
                 return "Search file trees recursively with a regex pattern."
             case .sed:
                 return
-                    "Apply a sed-style s/pattern/replacement/flags substitution to a file in place. Returns a summary of what changed."
+                    "Replace text in a file with a regular expression. Multiline patterns and replacements are supported."
             case .writeFile:
                 return "Write or overwrite the content of a file."
             case .stat:
@@ -143,10 +143,20 @@ extension KeepTalkingFilesystemOperation {
                         "type": "string",
                         "description": "File to edit in place, relative to the action's root.",
                     ],
-                    "expression": [
+                    "pattern": [
                         "type": "string",
                         "description":
-                            "A sed substitution, e.g. s/foo/bar/g (s/pattern/replacement/flags; flag 'g' = global).",
+                            "Regular expression to replace. May contain line breaks.",
+                    ],
+                    "replacement": [
+                        "type": "string",
+                        "description":
+                            #"Replacement text. May contain line breaks; use \1 for capture groups."#,
+                    ],
+                    "flags": [
+                        "type": "string",
+                        "description":
+                            "Optional flags: g (all matches), i (case-insensitive), m (line anchors), s (dot matches line breaks).",
                     ],
                 ]
             case .writeFile:
@@ -192,7 +202,7 @@ extension KeepTalkingFilesystemOperation {
             case .ls: return ["path"]
             case .readFile: return ["path"]
             case .grep: return ["pattern", "path"]
-            case .sed: return ["path", "expression"]
+            case .sed: return ["path", "pattern", "replacement"]
             case .writeFile: return ["path", "content"]
             case .stat: return ["path"]
             case .getFile: return ["path"]

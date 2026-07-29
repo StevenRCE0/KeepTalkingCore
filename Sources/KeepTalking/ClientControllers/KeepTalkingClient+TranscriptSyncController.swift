@@ -15,8 +15,16 @@ extension KeepTalkingClient {
     /// Reconcile one session's transcript with `node`: pull its metadata, then the
     /// tail delta, then any diverging chunk. Best-effort — failures are logged, not
     /// thrown (it runs inside maintenance).
-    func syncTranscriptLines(session: UUID, contextID: UUID, with node: UUID) async {
-        guard node != config.node else { return }
+    func syncTranscriptLines(
+        session: UUID,
+        contextID: UUID,
+        with node: UUID,
+        generation: UInt64
+    ) async {
+        guard
+            node != config.node,
+            isConnectionLifecycleActive(generation)
+        else { return }
         let sessionTag = session.uuidString.prefix(8)
         let peerTag = node.uuidString.prefix(8)
         do {
@@ -28,27 +36,45 @@ extension KeepTalkingClient {
                         try await self.localTranscriptSyncSnapshot(session: session).summary
                     },
                     remoteSummary: {
-                        try await self.dispatchContextSyncTranscriptSummaryRequest(
-                            to: node, session: session, contextID: contextID
-                        ).summary
+                        let result =
+                            try await self.dispatchContextSyncTranscriptSummaryRequest(
+                                to: node,
+                                session: session,
+                                contextID: contextID,
+                                generation: generation
+                            )
+                        return result.summary
                     },
                     makeTail: { local, remote in
                         KeepTalkingContextSyncTranscriptTailRequest(
                             context: contextID, requester: self.config.node,
-                            recipient: node, session: session, local: local, remote: remote
+                            recipient: node, session: session, local: local,
+                            remote: remote
                         )
                     },
-                    dispatchTail: { try await self.dispatchContextSyncTranscriptTailRequest($0) },
+                    dispatchTail: {
+                        try await self.dispatchContextSyncTranscriptTailRequest(
+                            $0,
+                            generation: generation
+                        )
+                    },
                     makeChunk: { local, remote in
                         KeepTalkingContextSyncTranscriptChunkRequest(
                             context: contextID, requester: self.config.node,
-                            recipient: node, session: session, local: local, remote: remote
+                            recipient: node, session: session, local: local,
+                            remote: remote
                         )
                     },
-                    dispatchChunk: { try await self.dispatchContextSyncTranscriptChunkRequest($0) },
+                    dispatchChunk: {
+                        try await self.dispatchContextSyncTranscriptChunkRequest(
+                            $0,
+                            generation: generation
+                        )
+                    },
                     persist: { try await self.persistTranscriptLines($0) }
                 )
             )
+            guard isConnectionLifecycleActive(generation) else { return }
             onLog?("[voice-transcript] sync done session=\(sessionTag) peer=\(peerTag)")
         } catch {
             onLog?(
@@ -121,7 +147,7 @@ extension KeepTalkingClient {
             requester: request.requester,
             responder: config.node,
             session: request.session,
-            summary: snapshot.summary
+            summary: snapshot.summary,
         )
     }
 
@@ -129,14 +155,18 @@ extension KeepTalkingClient {
         _ request: KeepTalkingContextSyncTranscriptTailRequest
     ) async throws -> KeepTalkingContextSyncTranscriptLinesResult {
         let snapshot = try await localTranscriptSyncSnapshot(session: request.session)
-        let lines = snapshot.items(after: request.senders)
+        let page = snapshot.items(
+            after: request.senders,
+            before: request.before
+        )
         return KeepTalkingContextSyncTranscriptLinesResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
             session: request.session,
-            lines: lines.compactMap(KeepTalkingVoiceTranscriptLineDTO.init)
+            lines: page.items.compactMap(KeepTalkingVoiceTranscriptLineDTO.init),
+            nextBefore: page.nextBefore
         )
     }
 
@@ -144,14 +174,18 @@ extension KeepTalkingClient {
         _ request: KeepTalkingContextSyncTranscriptChunkRequest
     ) async throws -> KeepTalkingContextSyncTranscriptLinesResult {
         let snapshot = try await localTranscriptSyncSnapshot(session: request.session)
-        let lines = snapshot.items(in: request.chunks)
+        let page = snapshot.items(
+            in: request.chunks,
+            before: request.before
+        )
         return KeepTalkingContextSyncTranscriptLinesResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
             session: request.session,
-            lines: lines.compactMap(KeepTalkingVoiceTranscriptLineDTO.init)
+            lines: page.items.compactMap(KeepTalkingVoiceTranscriptLineDTO.init),
+            nextBefore: page.nextBefore
         )
     }
 
@@ -160,7 +194,8 @@ extension KeepTalkingClient {
     func dispatchContextSyncTranscriptSummaryRequest(
         to node: UUID,
         session: UUID,
-        contextID: UUID
+        contextID: UUID,
+        generation: UInt64? = nil
     ) async throws -> KeepTalkingContextSyncTranscriptSummaryResult {
         let request = KeepTalkingContextSyncTranscriptSummaryRequest(
             context: contextID,
@@ -171,9 +206,13 @@ extension KeepTalkingClient {
         if node == config.node {
             return try await executeContextSyncTranscriptSummaryRequest(request)
         }
+        guard let generation else {
+            throw KeepTalkingClientError.clientDisconnected
+        }
         return try await syncTranscriptSummaries.response(
             for: request.request,
             timeout: Self.transcriptSyncTimeoutSeconds,
+            generation: generation,
             send: { [weak self] in
                 try self?.rtcClient.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.transcriptSummaryRequest(request)
@@ -183,14 +222,19 @@ extension KeepTalkingClient {
     }
 
     func dispatchContextSyncTranscriptTailRequest(
-        _ request: KeepTalkingContextSyncTranscriptTailRequest
+        _ request: KeepTalkingContextSyncTranscriptTailRequest,
+        generation: UInt64? = nil
     ) async throws -> KeepTalkingContextSyncTranscriptLinesResult {
         if request.recipient == config.node {
             return try await executeContextSyncTranscriptTailRequest(request)
         }
+        guard let generation else {
+            throw KeepTalkingClientError.clientDisconnected
+        }
         return try await syncTranscriptLines.response(
             for: request.request,
             timeout: Self.transcriptSyncTimeoutSeconds,
+            generation: generation,
             send: { [weak self] in
                 try self?.rtcClient.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.transcriptTailRequest(request)
@@ -200,14 +244,19 @@ extension KeepTalkingClient {
     }
 
     func dispatchContextSyncTranscriptChunkRequest(
-        _ request: KeepTalkingContextSyncTranscriptChunkRequest
+        _ request: KeepTalkingContextSyncTranscriptChunkRequest,
+        generation: UInt64? = nil
     ) async throws -> KeepTalkingContextSyncTranscriptLinesResult {
         if request.recipient == config.node {
             return try await executeContextSyncTranscriptChunkRequest(request)
         }
+        guard let generation else {
+            throw KeepTalkingClientError.clientDisconnected
+        }
         return try await syncTranscriptLines.response(
             for: request.request,
             timeout: Self.transcriptSyncTimeoutSeconds,
+            generation: generation,
             send: { [weak self] in
                 try self?.rtcClient.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.transcriptChunkRequest(request)

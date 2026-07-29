@@ -15,7 +15,7 @@ extension KeepTalkingClient {
     ///     routes through the shared `rtcClient` — needs to reach chat
     ///     envelope handlers for bystander presence.
     ///   - *Audio frames* (realtime data) go directly through the broadcast
-    ///     channel's `.realtime` channel, bypassing the routing strategy
+    ///     channel's `.realtime` channel, bypassing envelope routing
     ///     entirely. Same SFU connection, no P2P detour.
     ///
     /// Callers own the session and are responsible for calling `stop()`

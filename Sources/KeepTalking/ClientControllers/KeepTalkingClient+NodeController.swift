@@ -636,9 +636,7 @@ extension KeepTalkingClient {
     /// Broadcasts the current node record to connected peers.
     public func announceCurrentNode() async throws {
         let node = try await getCurrentNodeInstance()
-        try blocking {
-            try await node.save(on: self.localStore.database)
-        }
+        try await node.save(on: localStore.database)
         try rtcClient.sendEnvelope(node)
     }
 
@@ -686,11 +684,14 @@ extension KeepTalkingClient {
         }
     }
 
-    func handlePeerConnect(nodeID: UUID) async {
+    func handlePeerConnect(nodeID: UUID, generation: UInt64) async {
         // Centralized: the node-online task set (presence re-broadcast, voice
         // re-assert, contextSyncing, transcriptSyncing, attachment recovery,
         // outbox drain) lives in ContextMaintenance.
-        await dispatchMaintenance(.nodeOnline(node: nodeID))
+        await dispatchMaintenance(
+            .nodeOnline(node: nodeID),
+            generation: generation
+        )
     }
 
     func mergeDiscoveredNodeStatus(_ status: KeepTalkingNodeStatus) async throws {
@@ -1037,7 +1038,7 @@ extension KeepTalkingClient {
 
         let grantScope: KeepTalkingActionScope?
         if let recipient,
-            let resolved = try? await resolveGrantPermission(
+            let resolved = try? await allowedActionScope(
                 node: recipient,
                 action: action,
                 context: context
@@ -1197,26 +1198,6 @@ extension KeepTalkingClient {
                         return .trusted([context])
                 }
         }
-    }
-
-    func ensureLocalNodeSigningKeypair(
-        to node: KeepTalkingNode
-    ) async throws
-        -> KeepTalkingNodeIdentityKey
-    {
-        guard let toNodeID = node.id else {
-            throw KeepTalkingClientError.missingNode
-        }
-
-        guard
-            let relation = try await getCurrentNodeInstance().$outgoingNodeRelations.query(
-                on: localStore.database
-            ).filter(\.$to.$id == toNodeID).first()
-        else {
-            throw KeepTalkingClientError.missingRelation
-        }
-
-        return try await ensureOutgoingIdentityKeypair(for: relation)
     }
 
     private func ensureLocalIdentityRelation() async throws

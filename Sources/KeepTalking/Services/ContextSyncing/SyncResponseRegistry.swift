@@ -1,5 +1,16 @@
 import Foundation
 
+private enum KeepTalkingSyncResponseRegistryError: LocalizedError {
+    case duplicateRequest(UUID)
+
+    var errorDescription: String? {
+        switch self {
+            case .duplicateRequest(let request):
+                return "A context-sync request is already pending: \(request)."
+        }
+    }
+}
+
 /// One request/response round-trip keyed by request id, with a timeout.
 ///
 /// The context-sync layer is request/response: send an envelope tagged with a
@@ -11,11 +22,18 @@ import Foundation
 ///
 /// Lock-guarded (`@unchecked Sendable`) rather than an actor so `resolve`/`fail`
 /// stay synchronous — they're called from the envelope handler and from
-/// `disconnect()`, matching the previous `DispatchQueue`-guarded behavior
-/// (the continuation is resumed while holding the lock, exactly as before).
+/// `disconnect()`, matching the previous `DispatchQueue`-guarded behavior.
 final class KeepTalkingSyncResponseRegistry<Result: Sendable>: @unchecked Sendable {
+    private struct Pending {
+        let registrationID: UUID
+        let continuation: CheckedContinuation<Result, Error>
+        var timeoutTask: Task<Void, Never>?
+    }
+
     private let lock = NSLock()
-    private var pending: [UUID: CheckedContinuation<Result, Error>] = [:]
+    private var pending: [UUID: Pending] = [:]
+    private var closedError: Error?
+    private var activeGeneration: UInt64?
 
     /// Register `request`, run `send`, and await the matching `resolve(_:with:)`
     /// or a `contextSyncTimeout` after `timeout` seconds. If `send` throws, the
@@ -23,34 +41,91 @@ final class KeepTalkingSyncResponseRegistry<Result: Sendable>: @unchecked Sendab
     func response(
         for request: UUID,
         timeout: TimeInterval,
+        generation: UInt64? = nil,
         send: @escaping @Sendable () throws -> Void
     ) async throws -> Result {
-        try await withThrowingTaskGroup(of: Result.self) { group in
-            group.addTask {
-                try await withCheckedThrowingContinuation {
-                    (continuation: CheckedContinuation<Result, Error>) in
-                    self.lock.withLock { self.pending[request] = continuation }
-                    do {
-                        try send()
-                    } catch {
-                        self.fail(request, error: error)
+        let registrationID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Result, Error>) in
+                let registrationError: Error? = lock.withLock {
+                    if let generation,
+                        generation != activeGeneration
+                    {
+                        return KeepTalkingClientError.clientDisconnected
                     }
+                    if let closedError {
+                        return closedError
+                    }
+                    guard pending[request] == nil else {
+                        return
+                            KeepTalkingSyncResponseRegistryError
+                            .duplicateRequest(request)
+                    }
+                    pending[request] = Pending(
+                        registrationID: registrationID,
+                        continuation: continuation,
+                        timeoutTask: nil
+                    )
+                    return nil
+                }
+                if let registrationError {
+                    continuation.resume(throwing: registrationError)
+                    return
+                }
+
+                guard !Task.isCancelled else {
+                    failRegistered(
+                        request,
+                        registrationID: registrationID,
+                        error: CancellationError()
+                    )
+                    return
+                }
+
+                do {
+                    try send()
+                } catch {
+                    failRegistered(
+                        request,
+                        registrationID: registrationID,
+                        error: error
+                    )
+                    return
+                }
+
+                let timeoutTask = Task { [weak self] in
+                    do {
+                        try await Task.sleep(for: .seconds(timeout))
+                    } catch {
+                        return
+                    }
+                    self?.failRegistered(
+                        request,
+                        registrationID: registrationID,
+                        error: KeepTalkingClientError.contextSyncTimeout(request)
+                    )
+                }
+                let retained = lock.withLock {
+                    guard var entry = pending[request],
+                        entry.registrationID == registrationID
+                    else {
+                        return false
+                    }
+                    entry.timeoutTask = timeoutTask
+                    pending[request] = entry
+                    return true
+                }
+                if !retained {
+                    timeoutTask.cancel()
                 }
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                self.fail(
-                    request,
-                    error: KeepTalkingClientError.contextSyncTimeout(request)
-                )
-                throw KeepTalkingClientError.contextSyncTimeout(request)
-            }
-            let first = try await group.next()
-            group.cancelAll()
-            guard let first else {
-                throw KeepTalkingClientError.contextSyncTimeout(request)
-            }
-            return first
+        } onCancel: {
+            failRegistered(
+                request,
+                registrationID: registrationID,
+                error: CancellationError()
+            )
         }
     }
 
@@ -58,34 +133,76 @@ final class KeepTalkingSyncResponseRegistry<Result: Sendable>: @unchecked Sendab
     /// timed out, or a stray/duplicate result).
     @discardableResult
     func resolve(_ request: UUID, with result: Result) -> Bool {
-        lock.withLock {
-            guard let continuation = pending.removeValue(forKey: request) else {
-                return false
-            }
-            continuation.resume(returning: result)
-            return true
+        guard let entry = take(request) else {
+            return false
         }
+        entry.timeoutTask?.cancel()
+        entry.continuation.resume(returning: result)
+        return true
     }
 
-    /// Fail a single pending request (no-op if not present).
-    func fail(_ request: UUID, error: Error) {
-        lock.withLock {
-            guard let continuation = pending.removeValue(forKey: request) else {
-                return
-            }
-            continuation.resume(throwing: error)
+    /// Fail a single pending request. Returns false if none is pending.
+    @discardableResult
+    func fail(_ request: UUID, error: Error) -> Bool {
+        guard let entry = take(request) else {
+            return false
         }
+        entry.timeoutTask?.cancel()
+        entry.continuation.resume(throwing: error)
+        return true
     }
 
-    /// Fail every pending request — used on disconnect.
-    func failAll(error: Error) {
-        let drained: [UUID: CheckedContinuation<Result, Error>] = lock.withLock {
+    /// Reject new registrations until `open()` and fail every current waiter.
+    func close(error: Error) {
+        let drained: [Pending] = lock.withLock {
+            closedError = error
+            activeGeneration = nil
             let snapshot = pending
             pending.removeAll()
-            return snapshot
+            return Array(snapshot.values)
         }
-        for continuation in drained.values {
-            continuation.resume(throwing: error)
+        for entry in drained {
+            entry.timeoutTask?.cancel()
+            entry.continuation.resume(throwing: error)
+        }
+    }
+
+    func open(generation: UInt64) {
+        lock.withLock {
+            activeGeneration = generation
+            closedError = nil
+        }
+    }
+
+    private func failRegistered(
+        _ request: UUID,
+        registrationID: UUID,
+        error: Error
+    ) {
+        guard
+            let entry = take(
+                request,
+                registrationID: registrationID
+            )
+        else {
+            return
+        }
+        entry.timeoutTask?.cancel()
+        entry.continuation.resume(throwing: error)
+    }
+
+    private func take(
+        _ request: UUID,
+        registrationID: UUID? = nil
+    ) -> Pending? {
+        lock.withLock {
+            guard let entry = pending[request] else { return nil }
+            if let registrationID {
+                guard entry.registrationID == registrationID else {
+                    return nil
+                }
+            }
+            return pending.removeValue(forKey: request)
         }
     }
 }

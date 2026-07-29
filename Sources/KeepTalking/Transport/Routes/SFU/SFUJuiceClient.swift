@@ -3,6 +3,20 @@ import Foundation
 import KeepTalkingSFUClient
 import KeepTalkingSFUProtocol
 
+struct KeepTalkingSFUInboundEnvelope: Sendable {
+    let bytes: Data
+    let context: UUID?
+    let sender: Data
+    let channel: SFUChannel
+
+    init(_ inbound: SFUClient.InboundEnvelope, bytes: Data) {
+        self.bytes = bytes
+        self.context = inbound.context
+        self.sender = inbound.sender
+        self.channel = inbound.channel
+    }
+}
+
 /// `KeepTalkingTransportClient` over the Swift `KeepTalkingSFU` server.
 /// Carries opaque, encrypted KT envelopes through `SFUClient`.
 ///
@@ -62,7 +76,7 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
     /// sender/channel metadata; this forwarder surfaces those so the
     /// session can dispatch (e.g. route p2pSignal channel frames into
     /// the libjuice agent).
-    var rawInboundForwarder: ((SFUClient.InboundEnvelope) -> Void)?
+    var rawInboundForwarder: ((KeepTalkingSFUInboundEnvelope) -> Void)?
 
     /// Direct unicast: routes opaque bytes to a specific peer pubkey on
     /// a specific channel. Used by the session's
@@ -200,11 +214,7 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
             self?.handleClientState(state)
         }
         client.onEnvelope = { [weak self] inbound in
-            // Pre-handler hook: lets the session-layer wrapper see the
-            // full channel/sender info before we collapse to the
-            // transport-protocol surface.
-            self?.rawInboundForwarder?(inbound)
-            self?.handleInboundEnvelope(inbound)
+            self?.handleInbound(inbound)
         }
         client.onRelayOpen = { [weak self] relayID, peer, ctx in
             self?.onRelayOpen?(relayID, peer, ctx)
@@ -573,7 +583,17 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
         if !retained { task.cancel() }
     }
 
-    private func handleInboundEnvelope(_ inbound: SFUClient.InboundEnvelope) {
+    private func handleInbound(_ inbound: SFUClient.InboundEnvelope) {
+        // Envelopes are never fragmented: an oversized one is rejected at send
+        // time by `PacketTransportCrypto.assertFits`, so whatever arrives here
+        // is one whole envelope.
+        let logicalInbound = KeepTalkingSFUInboundEnvelope(
+            inbound, bytes: inbound.bytes)
+        rawInboundForwarder?(logicalInbound)
+        handleInboundEnvelope(logicalInbound)
+    }
+
+    private func handleInboundEnvelope(_ inbound: KeepTalkingSFUInboundEnvelope) {
         stateQueue.sync { recvCount += 1 }
         if inbound.channel == .realtime {
             onRealtimeData?(inbound.bytes)

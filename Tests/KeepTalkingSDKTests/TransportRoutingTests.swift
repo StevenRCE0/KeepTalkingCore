@@ -4,8 +4,8 @@ import Testing
 @testable import KeepTalkingSDK
 
 struct TransportRoutingTests {
-    @Test("untargeted message envelopes fan out through broadcast")
-    func untargetedMessageUsesBroadcast() async throws {
+    @Test("untargeted chat fans out over ready direct channels and broadcast")
+    func untargetedMessageFansOutOverDirect() async throws {
         let harness = makeHarness()
         try await harness.transport.start().value
         defer { harness.transport.stop() }
@@ -19,14 +19,65 @@ struct TransportRoutingTests {
 
         try harness.transport.sendEnvelope(envelope)
 
-        #expect(direct.sentSequenced.isEmpty)
-        #expect(harness.broadcast.sentSequenced.count == 1)
-        let sentEnvelope = try #require(harness.broadcast.sentSequenced.first?.envelope)
+        // The direct leg is the point of the change: chat used to be
+        // structurally unable to take it, because an untargeted envelope
+        // resolved no channel.
+        #expect(direct.sentEnvelopes.count == 1)
+        // Broadcast still goes out to cover peers with no direct channel. The
+        // duplicate this creates for `remote` is absorbed at persistence.
+        #expect(harness.broadcast.sentEnvelopes.count == 1)
+        let sentEnvelope = try #require(harness.broadcast.sentEnvelopes.first)
         guard let message = sentEnvelope.message else {
             Issue.record("expected chat message on broadcast channel")
             return
         }
         #expect(message.content == "hello over broadcast")
+    }
+
+    @Test("a peer with no ready direct channel is covered by broadcast alone")
+    func untargetedChatFallsBackToBroadcastWhenNoDirectIsReady() async throws {
+        let harness = makeHarness()
+        try await harness.transport.start().value
+        defer { harness.transport.stop() }
+
+        let remote = UUID(uuidString: "42000000-0000-0000-0000-000000000000")!
+        let direct = harness.registerPeer(remote, isReady: false)
+        let envelope = makeMessageEnvelope(
+            contextID: harness.config.contextID,
+            senderNodeID: harness.config.node
+        )
+
+        try harness.transport.sendEnvelope(envelope)
+
+        #expect(direct.sentEnvelopes.isEmpty)
+        #expect(harness.broadcast.sentEnvelopes.count == 1)
+    }
+
+    @Test("non-fan-out-eligible kinds never take the direct fan-out path")
+    func ineligibleKindsStayOnBroadcast() {
+        // The two kinds that break on redelivery must not be direct-capable,
+        // which is what keeps them off the fan-out path entirely.
+        #expect(!KeepTalkingEnvelopeKind.voiceCallSignal.allowsDirect)
+        #expect(!KeepTalkingEnvelopeKind.trustRequest.allowsDirect)
+
+        // Everything direct-capable is either fan-out eligible or carries a
+        // target, so the untargeted fan-out arm only ever sees safe kinds.
+        for kind in [
+            KeepTalkingEnvelopeKind.message,
+            .attachment,
+            .voiceCallTranscriptLine,
+        ] {
+            #expect(kind.allowsDirect)
+            #expect(kind.isFanOutEligible)
+        }
+        for kind in [
+            KeepTalkingEnvelopeKind.actionCallRequest,
+            .requestAck,
+            .actionCallResult,
+        ] {
+            #expect(kind.allowsDirect)
+            #expect(!kind.isFanOutEligible)
+        }
     }
 
     @Test("context sync envelopes use the membership-gated SFU")
@@ -37,7 +88,7 @@ struct TransportRoutingTests {
             recipient: UUID(uuidString: "30000000-0000-0000-0000-000000000000")!
         )
 
-        #expect(envelope.routingPolicy == .sfuOnly)
+        #expect(!envelope.allowsDirect)
     }
 
     @Test("context sync metadata identifies its directed peer")
@@ -50,20 +101,32 @@ struct TransportRoutingTests {
             requester: requester,
             recipient: recipient
         )
+        let summary = KeepTalkingContextSyncMetadata(
+            messageCount: 0,
+            senders: [],
+            chunks: []
+        )
         let result = KeepTalkingContextSyncSummaryResult(
             request: request.request,
             context: context,
             requester: requester,
             responder: recipient,
-            summary: KeepTalkingContextSyncMetadata(
-                messageCount: 0,
-                senders: [],
-                chunks: []
-            )
+            summary: summary
         )
 
         #expect(KeepTalkingContextSyncEnvelope.summaryRequest(request).targetPeerNodeID == recipient)
         #expect(KeepTalkingContextSyncEnvelope.summaryResult(result).targetPeerNodeID == requester)
+        #expect(
+            KeepTalkingContextSyncEnvelope.failureResult(
+                KeepTalkingContextSyncFailureResult(
+                    request: request.request,
+                    context: context,
+                    requester: requester,
+                    responder: recipient,
+                    message: "unavailable"
+                )
+            ).targetPeerNodeID == requester
+        )
         #expect(
             KeepTalkingContextSyncEnvelope.attachmentRequest(
                 KeepTalkingContextSyncAttachmentRequest(
@@ -83,12 +146,7 @@ struct TransportRoutingTests {
 
         let remote = UUID(uuidString: "40000000-0000-0000-0000-000000000000")!
         harness.broadcast.simulateReceive(
-            KeepTalkingSequencedEnvelope(
-                senderNode: remote,
-                sequence: 1,
-                envelope: KeepTalkingP2PPresencePayload(node: remote)
-            )
-        )
+            KeepTalkingP2PPresencePayload(node: remote))
 
         let direct = try #require(harness.registry.channel(for: remote))
         #expect(direct.attemptUpgradeCount == 1)
@@ -117,6 +175,131 @@ struct TransportRoutingTests {
         #expect(direct.retrialCount == 0)
     }
 
+    @Test("the mesh cap tears down the mesh and refuses the peer that trips it")
+    func meshCapTearsDownAndRefuses() async throws {
+        let harness = makeHarness(maxDirectMeshSize: 2)
+        try await harness.transport.start().value
+        defer { harness.transport.stop() }
+
+        let peers = [
+            UUID(uuidString: "51500000-0000-0000-0000-000000000000")!,
+            UUID(uuidString: "51500000-0000-0000-0000-000000000001")!,
+            UUID(uuidString: "51500000-0000-0000-0000-000000000002")!,
+        ]
+        for peer in peers.prefix(2) {
+            harness.deliverPresence(from: peer)
+        }
+        #expect(harness.registry.channel(for: peers[0])?.attemptUpgradeCount == 1)
+        #expect(harness.registry.channel(for: peers[1])?.attemptUpgradeCount == 1)
+
+        // The third peer projects to 3 > 2: the whole mesh comes down and the
+        // peer that tripped it is refused rather than stored.
+        harness.deliverPresence(from: peers[2])
+        #expect(harness.registry.channel(for: peers[0])?.teardownCount == 1)
+        #expect(harness.registry.channel(for: peers[1])?.teardownCount == 1)
+        #expect(harness.registry.channel(for: peers[2])?.teardownCount == 1)
+        #expect(harness.registry.channel(for: peers[2])?.attemptUpgradeCount == 0)
+    }
+
+    @Test("a disabled mesh stops allocating a channel on every presence beat")
+    func disabledMeshDoesNotReallocatePerBeat() async throws {
+        let harness = makeHarness(maxDirectMeshSize: 2)
+        try await harness.transport.start().value
+        defer { harness.transport.stop() }
+
+        let peers = [
+            UUID(uuidString: "52500000-0000-0000-0000-000000000000")!,
+            UUID(uuidString: "52500000-0000-0000-0000-000000000001")!,
+            UUID(uuidString: "52500000-0000-0000-0000-000000000002")!,
+        ]
+        for peer in peers {
+            harness.deliverPresence(from: peer)
+        }
+        let allocationsAtTrip = harness.registry.makeChannelCalls
+
+        // Once the cap has tripped no peer has a channel, so the join backstop
+        // has nothing to suppress it but the disabled flag itself. Without that
+        // check every beat from every peer allocated a channel, bound its
+        // callbacks, had the cap refuse it, and fired a spurious `.joined`.
+        for _ in 0..<5 {
+            for peer in peers {
+                harness.deliverPresence(from: peer)
+            }
+        }
+        #expect(harness.registry.makeChannelCalls == allocationsAtTrip)
+    }
+
+    @Test("a network environment change re-arms the mesh cap")
+    func environmentChangeReArmsMeshCap() async throws {
+        let harness = makeHarness(maxDirectMeshSize: 2)
+        try await harness.transport.start().value
+        defer { harness.transport.stop() }
+
+        let peers = [
+            UUID(uuidString: "53500000-0000-0000-0000-000000000000")!,
+            UUID(uuidString: "53500000-0000-0000-0000-000000000001")!,
+            UUID(uuidString: "53500000-0000-0000-0000-000000000002")!,
+        ]
+        for peer in peers {
+            harness.deliverPresence(from: peer)
+        }
+        let allocationsAtTrip = harness.registry.makeChannelCalls
+
+        // Same environment: the cap's verdict still stands.
+        harness.transport.reconcileNetworkEnvironment()
+        harness.deliverPresence(from: peers[0])
+        #expect(harness.registry.makeChannelCalls == allocationsAtTrip)
+
+        // Moved networks: the verdict was about the old vantage point, so the
+        // backstop is allowed to rebuild the mesh from scratch.
+        harness.environment.move(to: "net-b")
+        harness.transport.reconcileNetworkEnvironment()
+        harness.deliverPresence(from: peers[0])
+        #expect(harness.registry.makeChannelCalls > allocationsAtTrip)
+        #expect(harness.registry.channel(for: peers[0])?.attemptUpgradeCount == 2)
+    }
+
+    @Test("a network environment change retries a channel that gave up")
+    func environmentChangeRetriesAbandonedChannel() async throws {
+        let harness = makeHarness()
+        try await harness.transport.start().value
+        defer { harness.transport.stop() }
+
+        let remote = UUID(uuidString: "54500000-0000-0000-0000-000000000000")!
+        harness.deliverPresence(from: remote)
+        let direct = try #require(harness.registry.channel(for: remote))
+        #expect(direct.attemptUpgradeCount == 1)
+
+        // The channel exhausts its failure budget. A still-online peer produces
+        // no reachability edge, so nothing else would ever revive it.
+        direct.state = .abandoned
+        harness.transport.reconcileNetworkEnvironment()
+        #expect(direct.retrialCount == 0)
+
+        harness.environment.move(to: "net-b")
+        harness.transport.reconcileNetworkEnvironment()
+        #expect(direct.retrialCount == 1)
+        #expect(direct.attemptUpgradeCount == 2)
+    }
+
+    @Test("a ready channel is left alone when the environment changes")
+    func environmentChangeLeavesReadyChannelAlone() async throws {
+        let harness = makeHarness()
+        try await harness.transport.start().value
+        defer { harness.transport.stop() }
+
+        let remote = UUID(uuidString: "55500000-0000-0000-0000-000000000000")!
+        harness.deliverPresence(from: remote)
+        let direct = try #require(harness.registry.channel(for: remote))
+        direct.state = .ready
+        direct.isReady = true
+
+        harness.environment.move(to: "net-b")
+        harness.transport.reconcileNetworkEnvironment()
+        #expect(direct.retrialCount == 0)
+        #expect(direct.attemptUpgradeCount == 1)
+    }
+
     @Test("context sync stays on SFU when a direct channel is ready")
     func contextSyncUsesSFUWhenDirectIsReady() async throws {
         let harness = makeHarness()
@@ -133,14 +316,14 @@ struct TransportRoutingTests {
 
         try harness.transport.sendEnvelope(envelope)
 
-        #expect(direct.sentSequenced.isEmpty)
-        let sentEnvelope = try #require(harness.broadcast.sentSequenced.first?.envelope)
+        #expect(direct.sentEnvelopes.isEmpty)
+        let sentEnvelope = try #require(harness.broadcast.sentEnvelopes.first)
         guard case .summaryRequest(let request) = sentEnvelope.contextSync else {
             Issue.record("expected context sync summary request on broadcast channel")
             return
         }
         #expect(request.recipient == remote)
-        #expect(harness.broadcast.sentSequenced.count == 1)
+        #expect(harness.broadcast.sentEnvelopes.count == 1)
     }
 
     @Test("directed context sync never uses direct channels")
@@ -162,9 +345,9 @@ struct TransportRoutingTests {
             )
         )
 
-        #expect(recipientChannel.sentSequenced.isEmpty)
-        #expect(unrelatedChannel.sentSequenced.isEmpty)
-        #expect(harness.broadcast.sentSequenced.count == 1)
+        #expect(recipientChannel.sentEnvelopes.isEmpty)
+        #expect(unrelatedChannel.sentEnvelopes.isEmpty)
+        #expect(harness.broadcast.sentEnvelopes.count == 1)
     }
 
     @Test("presence reannounces on SFU peer join and reconnect")
@@ -232,9 +415,9 @@ struct TransportRoutingTests {
 
         try harness.transport.sendEnvelope(envelope)
 
-        #expect(direct.sentSequenced.count == 1)
-        #expect(harness.broadcast.sentSequenced.count == 1)
-        let sentEnvelope = try #require(harness.broadcast.sentSequenced.first?.envelope)
+        #expect(direct.sentEnvelopes.count == 1)
+        #expect(harness.broadcast.sentEnvelopes.count == 1)
+        let sentEnvelope = try #require(harness.broadcast.sentEnvelopes.first)
         guard let request = sentEnvelope.actionCallRequest else {
             Issue.record("expected action call request on broadcast channel")
             return
@@ -258,14 +441,14 @@ struct TransportRoutingTests {
 
         try harness.transport.sendEnvelope(envelope)
 
-        #expect(direct.sentSequenced.count == 1)
-        let sentEnvelope = try #require(direct.sentSequenced.first?.envelope)
+        #expect(direct.sentEnvelopes.count == 1)
+        let sentEnvelope = try #require(direct.sentEnvelopes.first)
         guard let request = sentEnvelope.actionCallRequest else {
             Issue.record("expected action call request on direct channel")
             return
         }
         #expect(request.targetNodeID == remote)
-        #expect(harness.broadcast.sentSequenced.isEmpty)
+        #expect(harness.broadcast.sentEnvelopes.isEmpty)
     }
 
     @Test("trusted envelopes are encrypted before transport routing")
@@ -307,12 +490,12 @@ struct TransportRoutingTests {
             }
         )
 
-        #expect(direct.sentSequenced.count == 1)
-        let sentEnvelope = try #require(direct.sentSequenced.first?.envelope)
+        #expect(direct.sentEnvelopes.count == 1)
+        let sentEnvelope = try #require(direct.sentEnvelopes.first)
         let encryptedRequest = try #require(sentEnvelope.encryptedActionCallRequest)
         #expect(encryptedRequest.recipientNodeID == remote)
         #expect(encryptedRequest.ciphertext == Data("ciphertext".utf8))
-        #expect(harness.broadcast.sentSequenced.isEmpty)
+        #expect(harness.broadcast.sentEnvelopes.isEmpty)
     }
 
     @Test("blob bytes use direct when the target peer is ready")
@@ -423,7 +606,7 @@ struct TransportRoutingTests {
             Issue.record("unexpected error: \(error)")
         }
 
-        #expect(harness.broadcast.sentSequenced.count == 1)
+        #expect(harness.broadcast.sentEnvelopes.count == 1)
         #expect(harness.broadcast.state == .reconnecting(attempt: 1))
     }
 
@@ -447,13 +630,7 @@ struct TransportRoutingTests {
             )
         )
 
-        harness.broadcast.simulateReceive(
-            KeepTalkingSequencedEnvelope(
-                senderNode: remote,
-                sequence: 2,
-                envelope: signal
-            )
-        )
+        harness.broadcast.simulateReceive(signal)
 
         let direct = try #require(harness.registry.channel(for: remote))
         #expect(direct.attemptUpgradeCount == 1)
@@ -561,56 +738,6 @@ struct ChannelStateMachineTests {
             Issue.record("expected scheduleBackoff, got \(effect)")
             return
         }
-    }
-
-    @Test("conservative strategy promotes after stable waves and locks on faults")
-    func conservativePromotionAndLockout() {
-        let strategy = KeepTalkingConservativeStrategy(promotionWaves: 3, maxFaults: 2)
-        let peer = UUID(uuidString: "aa000000-0000-0000-0000-000000000000")!
-        let p2pUp = KeepTalkingRouteAvailability(p2pReady: true, sfuReady: true, targetPeer: peer)
-        let sfuOnly = KeepTalkingRouteAvailability(p2pReady: false, sfuReady: true, targetPeer: peer)
-
-        // Before promotion — always SFU even with P2P ready.
-        #expect(strategy.resolve(p2pUp) == .sfu)
-
-        // Tick 3 stable waves — promotes to P2P.
-        strategy.tick(peer: peer, p2pReady: true)
-        strategy.tick(peer: peer, p2pReady: true)
-        #expect(strategy.resolve(p2pUp) == .sfu)
-        strategy.tick(peer: peer, p2pReady: true)
-        #expect(strategy.resolve(p2pUp) == .p2p)
-
-        // P2P goes away — demotes without faulting.
-        strategy.tick(peer: peer, p2pReady: false)
-        #expect(strategy.resolve(sfuOnly) == .sfu)
-        #expect(strategy.peerState(for: peer)?.faults == 0)
-
-        // Re-promote after 3 stable waves again.
-        strategy.tick(peer: peer, p2pReady: true)
-        strategy.tick(peer: peer, p2pReady: true)
-        strategy.tick(peer: peer, p2pReady: true)
-        #expect(strategy.resolve(p2pUp) == .p2p)
-
-        // Send fault — back to SFU, fault counted.
-        strategy.recordFault(for: peer)
-        #expect(strategy.resolve(p2pUp) == .sfu)
-        #expect(strategy.peerState(for: peer)?.faults == 1)
-        #expect(strategy.peerState(for: peer)?.locked == false)
-
-        // Re-promote then fault again — now locked.
-        strategy.tick(peer: peer, p2pReady: true)
-        strategy.tick(peer: peer, p2pReady: true)
-        strategy.tick(peer: peer, p2pReady: true)
-        #expect(strategy.resolve(p2pUp) == .p2p)
-        strategy.recordFault(for: peer)
-        #expect(strategy.resolve(p2pUp) == .sfu)
-        #expect(strategy.peerState(for: peer)?.locked == true)
-
-        // Locked: ticks can't promote anymore.
-        strategy.tick(peer: peer, p2pReady: true)
-        strategy.tick(peer: peer, p2pReady: true)
-        strategy.tick(peer: peer, p2pReady: true)
-        #expect(strategy.resolve(p2pUp) == .sfu)
     }
 
     @Test("direct state machine allows forced retry during backoff")
@@ -801,11 +928,15 @@ private func makeActionCallRequestEnvelope(
     )
 }
 
-private func makeHarness() -> TransportHarness {
+private func makeHarness(
+    maxDirectMeshSize: Int = 4,
+    environment: FakeNetworkEnvironment = FakeNetworkEnvironment("net-a")
+) -> TransportHarness {
     let config = KeepTalkingConfig(
         contextID: UUID(uuidString: "01000000-0000-0000-0000-000000000000")!,
         node: UUID(uuidString: "02000000-0000-0000-0000-000000000000")!,
-        sfuEndpoint: .init(host: "127.0.0.1", port: 9701)
+        sfuEndpoint: .init(host: "127.0.0.1", port: 9701),
+        maxDirectMeshSize: maxDirectMeshSize
     )
     let livenessState = KeepTalkingContextLivenessState(localNode: config.node)
     let broadcast = FakeBroadcastChannel()
@@ -816,14 +947,32 @@ private func makeHarness() -> TransportHarness {
         broadcast: broadcast,
         directChannelFactory: { peerNodeID in
             registry.makeChannel(peerNodeID: peerNodeID)
-        }
+        },
+        environmentDigest: { environment.current }
     )
     return TransportHarness(
         config: config,
         transport: transport,
         broadcast: broadcast,
-        registry: registry
+        registry: registry,
+        environment: environment
     )
+}
+
+/// Mutable stand-in for `KeepTalkingNetworkEnvironment.digest()`.
+final class FakeNetworkEnvironment: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: String
+
+    init(_ value: String) {
+        self.value = value
+    }
+
+    var current: String { lock.withLock { value } }
+
+    func move(to newValue: String) {
+        lock.withLock { value = newValue }
+    }
 }
 
 private struct TransportHarness {
@@ -831,6 +980,7 @@ private struct TransportHarness {
     let transport: KeepTalkingContextTransport
     let broadcast: FakeBroadcastChannel
     let registry: FakePeerRegistry
+    let environment: FakeNetworkEnvironment
 
     @discardableResult
     func registerPeer(_ peerNodeID: UUID, isReady: Bool) -> FakePeerChannel {
@@ -843,19 +993,18 @@ private struct TransportHarness {
     /// Simulate one inbound presence heartbeat from `peerNodeID`.
     func deliverPresence(from peerNodeID: UUID) {
         broadcast.simulateReceive(
-            KeepTalkingSequencedEnvelope(
-                senderNode: peerNodeID,
-                sequence: UInt64.random(in: 1...UInt64.max),
-                envelope: KeepTalkingP2PPresencePayload(node: peerNodeID)
-            )
-        )
+            KeepTalkingP2PPresencePayload(node: peerNodeID))
     }
 }
 
 private final class FakePeerRegistry: @unchecked Sendable {
     private var channels: [UUID: FakePeerChannel] = [:]
+    /// Counts factory invocations, not distinct channels — the storm the mesh
+    /// cap can cause shows up here as repeated allocation for the same peer.
+    private(set) var makeChannelCalls = 0
 
     func makeChannel(peerNodeID: UUID) -> FakePeerChannel {
+        makeChannelCalls += 1
         if let existing = channels[peerNodeID] {
             return existing
         }
@@ -872,7 +1021,7 @@ private final class FakePeerRegistry: @unchecked Sendable {
 private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, @unchecked Sendable {
     var isReady: Bool { state == .ready }
     let route: KeepTalkingTransportRoute = .sfu
-    var onReceive: (@Sendable (KeepTalkingSequencedEnvelope) -> Void)?
+    var onReceive: (@Sendable (any KeepTalkingEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRealtimeData: KeepTalkingTransportRealtimeDataHandler?
     var onStateChange: (@Sendable () -> Void)?
@@ -881,7 +1030,7 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider?
     var state: BroadcastChannelState = .ready
 
-    var sentSequenced: [KeepTalkingSequencedEnvelope] = []
+    var sentEnvelopes: [any KeepTalkingEnvelope] = []
     var sentRaw: [any KeepTalkingEnvelope] = []
     var sentBlob: [Data] = []
     var sentRealtime: [Data] = []
@@ -908,8 +1057,8 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
         state = .failed
     }
 
-    func send(_ sequenced: KeepTalkingSequencedEnvelope) throws {
-        sentSequenced.append(sequenced)
+    func send(_ envelope: any KeepTalkingEnvelope) throws {
+        sentEnvelopes.append(envelope)
         if let sendError {
             state = .reconnecting(attempt: 1)
             throw sendError
@@ -946,7 +1095,7 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
 
     func runtimeStats() -> KeepTalkingRuntimeStats {
         KeepTalkingRuntimeStats(
-            sent: sentSequenced.count + sentBlob.count + sentRealtime.count,
+            sent: sentEnvelopes.count + sentBlob.count + sentRealtime.count,
             received: 0,
             outboundLabel: nil,
             outboundState: isReady ? 1 : 0,
@@ -957,8 +1106,8 @@ private final class FakeBroadcastChannel: KeepTalkingBroadcastTransportChannel, 
         )
     }
 
-    func simulateReceive(_ sequenced: KeepTalkingSequencedEnvelope) {
-        onReceive?(sequenced)
+    func simulateReceive(_ envelope: any KeepTalkingEnvelope) {
+        onReceive?(envelope)
     }
 
     func simulatePeerJoin() {
@@ -976,7 +1125,7 @@ private final class FakePeerChannel: KeepTalkingPeerTransportChannel, @unchecked
     let peerNodeID: UUID
 
     var isReady = false
-    var onReceive: (@Sendable (KeepTalkingSequencedEnvelope) -> Void)?
+    var onReceive: (@Sendable (any KeepTalkingEnvelope) -> Void)?
     var onBlobData: KeepTalkingTransportBlobDataHandler?
     var onRealtimeData: KeepTalkingTransportRealtimeDataHandler?
     var onStateChange: (@Sendable () -> Void)?
@@ -989,7 +1138,7 @@ private final class FakePeerChannel: KeepTalkingPeerTransportChannel, @unchecked
     var attemptUpgradeCount = 0
     var teardownCount = 0
     var retrialCount = 0
-    var sentSequenced: [KeepTalkingSequencedEnvelope] = []
+    var sentEnvelopes: [any KeepTalkingEnvelope] = []
     var sentBlob: [Data] = []
     var receivedSignals: [KeepTalkingP2PSignalPayload] = []
     var sendError: Error?
@@ -999,8 +1148,8 @@ private final class FakePeerChannel: KeepTalkingPeerTransportChannel, @unchecked
         self.peerNodeID = peerNodeID
     }
 
-    func send(_ sequenced: KeepTalkingSequencedEnvelope) throws {
-        sentSequenced.append(sequenced)
+    func send(_ envelope: any KeepTalkingEnvelope) throws {
+        sentEnvelopes.append(envelope)
         if let sendError {
             throw sendError
         }

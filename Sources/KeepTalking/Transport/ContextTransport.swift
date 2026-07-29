@@ -8,16 +8,25 @@ import Foundation
 /// `KeepTalkingTransportChannelProtocol` and `KeepTalkingPeerTransportChannel`.
 /// It does not know about SFU, P2P, WebRTC, ICE, or data channels.
 ///
-/// Routing:
-///   switch envelope.routingStrategy:
-///     .sfuOnly       → broadcast.send (no P2P attempt)
-///     .preferDirect  → directChannels[target] → fallback broadcast
-///     .conservative  → broadcast → fallback directChannels[target]
-///   all failed → throw
+/// Routing — three shapes, chosen by `allowsDirect` and whether the envelope
+/// names a target:
+///   !allowsDirect            → broadcast only (SFU reaches every peer)
+///   allowsDirect + target    → that peer's direct channel, else broadcast
+///   allowsDirect + no target → fan out over every ready direct channel, with
+///                              broadcast covering peers that have none
+///   nothing available → throw
+///
+/// The SFU stays the always-on backbone: presence, signaling, trust and voice
+/// setup are `!allowsDirect` precisely because they must reach peers no direct
+/// channel exists for yet. Direct channels are an opportunistic overlay.
+///
+/// A fanned-out envelope can reach a dual-connected peer twice. That is safe
+/// because every fan-out-eligible kind is idempotent on receive — see
+/// `KeepTalkingEnvelopeKind.isFanOutEligible`. There is no transport-level
+/// dedup; duplicate suppression lives at persistence, keyed on row id.
 ///
 /// Receive:
-///   dedup(sender, seq) → dup? drop
-///   envelopeType == .p2pSignaling → consume internally
+///   channel == .signaling → consume internally
 ///   else → deliver to app
 public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unchecked Sendable {
 
@@ -37,16 +46,6 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     var onLog: (@Sendable (String) -> Void)?
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider?
 
-    // MARK: - Public state
-
-    /// Called when a participant joins or leaves.
-    public var onParticipantChange: (@Sendable (ParticipantEvent) -> Void)?
-
-    public enum ParticipantEvent: Sendable {
-        case joined(nodeID: UUID)
-        case left(nodeID: UUID)
-    }
-
     // MARK: - Dependencies
 
     private let config: KeepTalkingConfig
@@ -58,19 +57,22 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     /// Factory for creating peer direct channels — injected for testability.
     private let directChannelFactory: (UUID) -> any KeepTalkingPeerTransportChannel
 
+    /// Fingerprint of the local network vantage point — injected so tests can
+    /// drive an environment change without touching real interfaces.
+    private let environmentDigest: @Sendable () -> String
+
     // MARK: - Internal state
 
     private var directChannels: [UUID: any KeepTalkingPeerTransportChannel] = [:]
-    private let dedup = KeepTalkingEnvelopeDedup()
-    /// Monotonic per-send counter, used ONLY for receiver-side dedup keyed on
-    /// `(senderNode, sequence)`. Seeded from a millisecond time base rather
-    /// than 0 so that a transport bounce (`reestablishTransport`) or process
-    /// restart resumes *above* any sequence a peer still remembers for this
-    /// node. Restarting at 0 caused re-announces (incl. `voice.started`) to be
-    /// silently deduped by peers that hadn't reset — manifesting as one-way
-    /// discovery ("A sees B, B never sees A"). Never reset on `start()`.
-    private var sendSequence: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000)
-    private let sequenceLock = NSLock()
+    /// Once the context outgrows `maxDirectMeshSize` we stop maintaining a
+    /// direct mesh and stay on the SFU. Sticky so a peer leaving does not flap
+    /// the whole mesh back up; cleared on a transport start or when the network
+    /// environment changes under us. Mirrors `KeepTalkingVoiceSession`'s auto
+    /// mesh cap, which solved the same problem for the ICE mesh.
+    private var directMeshDisabled = false
+    /// Last sampled `environmentDigest()`. Guarded by `stateQueue` alongside
+    /// `directMeshDisabled`, whose validity it decides.
+    private var lastEnvironmentDigest: String?
     private var heartbeatTask: Task<Void, Never>?
     private var discoveredPeers = Set<UUID>()
     private var peerMissedWaves: [UUID: Int] = [:]
@@ -81,22 +83,18 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     private let stateQueue = DispatchQueue(label: "kt.context-transport.state")
     private let lifecycleOperationLock = NSLock()
 
-    /// Strategy instances keyed by policy. Each owns its own state
-    /// (e.g. conservative tracks per-peer promotion internally).
-    private let strategies: [KeepTalkingRoutingPolicy: any KeepTalkingRoutingStrategy] = [
-        .preferDirect: KeepTalkingPreferDirectStrategy(),
-        .sfuOnly: KeepTalkingSFUOnlyStrategy(),
-        .conservative: KeepTalkingConservativeStrategy(),
-    ]
-
     // MARK: - Init
 
     init(
         config: KeepTalkingConfig,
         livenessState: KeepTalkingContextLivenessState,
         broadcast: any KeepTalkingBroadcastTransportChannel,
-        directChannelFactory: @escaping (UUID) -> any KeepTalkingPeerTransportChannel
+        directChannelFactory: @escaping (UUID) -> any KeepTalkingPeerTransportChannel,
+        environmentDigest: @escaping @Sendable () -> String = {
+            KeepTalkingNetworkEnvironment.digest()
+        }
     ) {
+        self.environmentDigest = environmentDigest
         self.config = config
         self.livenessState = livenessState
         self.broadcast = broadcast
@@ -167,9 +165,11 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         guard isLifecycleActive(generation) else { throw CancellationError() }
 
         livenessState.reset()
-        dedup.reset()
-        // Never reset `sendSequence`: peers may still remember this node's
-        // prior sequence after a transport bounce.
+        let digest = environmentDigest()
+        stateQueue.sync {
+            directMeshDisabled = false
+            lastEnvironmentDigest = digest
+        }
         rememberPeer(config.node)
         bindBroadcastCallbacks(generation: generation)
         return try broadcast.start()
@@ -213,7 +213,6 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         for direct in stopped.1 {
             direct.teardown()
         }
-        for (_, strategy) in strategies { strategy.reset() }
 
         broadcast.stop()
         stateQueue.sync {
@@ -221,19 +220,26 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         }
     }
 
-    // MARK: - Send (strategy-based dispatch)
+    // MARK: - Send
 
     func sendEnvelope(_ envelope: any KeepTalkingEnvelope) throws {
-        let sequenced = makeSequenced(envelope)
-        try send(
-            policy: envelope.routingPolicy,
-            targetPeerNodeID: envelope.targetPeerNodeID,
-            sendViaP2P: { direct in
-                try direct.send(sequenced)
-            },
-            sendViaSFU: {
-                try broadcast.send(sequenced)
-            }
+        guard envelope.kind.allowsDirect else {
+            try sendBroadcastOnly(
+                sendViaSFU: { try broadcast.send(envelope) })
+            return
+        }
+        if let target = envelope.targetPeerNodeID {
+            try sendDirected(
+                to: target,
+                sendViaP2P: { try $0.send(envelope) },
+                sendViaSFU: { try broadcast.send(envelope) }
+            )
+            return
+        }
+        try sendFannedOut(
+            envelope,
+            sendViaP2P: { try $0.send(envelope) },
+            sendViaSFU: { try broadcast.send(envelope) }
         )
     }
 
@@ -241,15 +247,18 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         _ data: Data,
         targetPeerNodeID: UUID?
     ) throws {
-        try send(
-            policy: .preferDirect,
-            targetPeerNodeID: targetPeerNodeID,
-            sendViaP2P: { direct in
-                try direct.sendBlobData(data)
-            },
-            sendViaSFU: {
-                try broadcast.sendBlobData(data)
-            }
+        // Blob bytes are never fanned out: an untargeted blob is a broadcast,
+        // not "send to everyone individually". Without this guard a nil target
+        // would push the whole payload down every direct channel.
+        guard let targetPeerNodeID else {
+            try sendBroadcastOnly(
+                sendViaSFU: { try broadcast.sendBlobData(data) })
+            return
+        }
+        try sendDirected(
+            to: targetPeerNodeID,
+            sendViaP2P: { try $0.sendBlobData(data) },
+            sendViaSFU: { try broadcast.sendBlobData(data) }
         )
     }
 
@@ -316,29 +325,12 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         onLog?("[\(ts)] [transport] route=\(currentRoute().rawValue) \(message)")
     }
 
-    // MARK: - Sequencing
-
-    private func nextSequence() -> UInt64 {
-        sequenceLock.lock()
-        defer { sequenceLock.unlock() }
-        sendSequence += 1
-        return sendSequence
-    }
-
-    private func makeSequenced(_ envelope: any KeepTalkingEnvelope) -> KeepTalkingSequencedEnvelope {
-        KeepTalkingSequencedEnvelope(
-            senderNode: config.node,
-            sequence: nextSequence(),
-            envelope: envelope
-        )
-    }
-
     // MARK: - Broadcast callback binding
 
     private func bindBroadcastCallbacks(generation: UInt64) {
-        broadcast.onReceive = { [weak self] sequenced in
+        broadcast.onReceive = { [weak self] envelope in
             guard self?.isLifecycleActive(generation) == true else { return }
-            self?.handleIncoming(sequenced, generation: generation)
+            self?.handleIncoming(envelope, generation: generation)
         }
         broadcast.onStateChange = { [weak self] in
             self?.handleBroadcastStateChange(generation: generation)
@@ -375,32 +367,26 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     // MARK: - Receive (dedup + type dispatch)
 
     private func handleIncoming(
-        _ sequenced: KeepTalkingSequencedEnvelope,
+        _ envelope: any KeepTalkingEnvelope,
         generation: UInt64
     ) {
+        // The lock still guards the lifecycle read — it was never dedup
+        // scaffolding, and dropping it here would race teardown.
         lifecycleOperationLock.lock()
-        guard isLifecycleActive(generation) else {
-            lifecycleOperationLock.unlock()
-            return
-        }
-        // Dedup across both channels
-        if sequenced.sequence != 0 {
-            guard !dedup.checkAndRecord(sender: sequenced.senderNode, sequence: sequenced.sequence) else {
-                lifecycleOperationLock.unlock()
-                return
-            }
-        }
+        let isActive = isLifecycleActive(generation)
         lifecycleOperationLock.unlock()
+        guard isActive else { return }
 
-        let envelope = sequenced.envelope
+        // Duplicate delivery is absorbed at persistence (by row id), not here:
+        // fan-out can reach a dual-connected peer over both routes, and every
+        // fan-out-eligible kind is idempotent. See `isFanOutEligible`.
 
         // P2P signaling consumed internally — never reaches app
-        switch envelope.envelopeType {
-            case .p2pSignaling:
-                handleP2PSignaling(envelope, generation: generation)
-            case .chat, .service:
-                guard isLifecycleActive(generation) else { return }
-                onEnvelope?(envelope)
+        if envelope.channel == .signaling {
+            handleP2PSignaling(envelope, generation: generation)
+        } else {
+            guard isLifecycleActive(generation) else { return }
+            onEnvelope?(envelope)
         }
     }
 
@@ -480,11 +466,20 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         // beat — defeating both the exponential backoff and the maxFailures
         // circuit breaker. This is the same wave→edge lesson the liveness state
         // already applies to peer notification and presence echo; keep them
-        // aligned. The `!hasChannel` backstop only fires until the channel
-        // object exists, so it can't itself storm.
+        // aligned.
+        //
+        // The backstop fires only until a durable record of the decision
+        // exists. A stored channel is that record in the normal case — its
+        // state machine then owns the retry budget. When the mesh cap refused
+        // this peer there is no channel to hold that state, so the disabled
+        // flag is the record instead; without checking it, every beat would
+        // allocate a channel the cap refuses again, which is exactly the storm
+        // this comment claims cannot happen.
         if node != config.node {
-            let hasChannel = stateQueue.sync { directChannels[node] != nil }
-            if observation.isNewConnection || !hasChannel {
+            let needsBackstop = stateQueue.sync {
+                directChannels[node] == nil && !directMeshDisabled
+            }
+            if observation.isNewConnection || needsBackstop {
                 handleParticipantJoined(node, generation: generation)
             }
         }
@@ -500,6 +495,58 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         guard nodeID != config.node else { return }
         guard let generation = activeLifecycleGeneration() else { return }
         handleParticipantJoined(nodeID, generation: generation)
+    }
+
+    /// Whether a direct channel to `nodeID` should be maintained at all.
+    ///
+    /// A full mesh costs one ICE agent plus one HTTP/2 channel per peer per
+    /// node, so it stops paying off well before the context does. Above the cap
+    /// we tear the mesh down and let the SFU carry everything — it already
+    /// reaches every peer, which is why it stays the backbone.
+    private func admitsDirectMesh(joining nodeID: UUID) -> Bool {
+        enum Admission {
+            case admit
+            case refuse
+            case trip(projected: Int)
+        }
+        // One critical section: reading the flag a second time to tell "already
+        // disabled" from "admitted" would let a concurrent trip flip the answer
+        // between the two reads.
+        let admission = stateQueue.sync { () -> Admission in
+            if directMeshDisabled { return .refuse }
+            let projected =
+                directChannels.keys.contains(nodeID)
+                ? directChannels.count
+                : directChannels.count + 1
+            guard projected > config.maxDirectMeshSize else { return .admit }
+            directMeshDisabled = true
+            return .trip(projected: projected)
+        }
+        switch admission {
+            case .admit:
+                return true
+            case .refuse:
+                return false
+            case .trip(let projected):
+                debug(
+                    "direct mesh disabled: \(projected) peers would exceed maxDirectMeshSize=\(config.maxDirectMeshSize); staying on SFU"
+                )
+                tearDownDirectMesh()
+                return false
+        }
+    }
+
+    /// Closes every direct channel and drops them. Callers hold
+    /// `lifecycleOperationLock`; teardown itself happens outside `stateQueue`.
+    private func tearDownDirectMesh() {
+        let channels = stateQueue.sync { () -> [any KeepTalkingPeerTransportChannel] in
+            let existing = Array(directChannels.values)
+            directChannels.removeAll()
+            return existing
+        }
+        for channel in channels {
+            channel.teardown()
+        }
     }
 
     private func handleParticipantJoined(_ nodeID: UUID, generation: UInt64) {
@@ -519,6 +566,10 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
                 lifecycleOperationLock.unlock()
                 return
             }
+            guard admitsDirectMesh(joining: nodeID) else {
+                lifecycleOperationLock.unlock()
+                return
+            }
             existing.requestRetrial()
             existing.attemptUpgrade()
             lifecycleOperationLock.unlock()
@@ -528,7 +579,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
 
         let direct = directChannelFactory(nodeID)
         let directID = ObjectIdentifier(direct)
-        direct.onReceive = { [weak self] sequenced in
+        direct.onReceive = { [weak self] envelope in
             guard
                 self?.isCurrentDirectChannel(
                     directID,
@@ -536,7 +587,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
                     generation: generation
                 ) == true
             else { return }
-            self?.handleIncoming(sequenced, generation: generation)
+            self?.handleIncoming(envelope, generation: generation)
         }
         direct.onBlobData = { [weak self] data in
             guard
@@ -600,10 +651,14 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
             direct.teardown()
             return
         }
+        guard admitsDirectMesh(joining: nodeID) else {
+            lifecycleOperationLock.unlock()
+            direct.teardown()
+            return
+        }
         stateQueue.sync { directChannels[nodeID] = direct }
         direct.attemptUpgrade()
         lifecycleOperationLock.unlock()
-        onParticipantChange?(.joined(nodeID: nodeID))
         debug("participant joined node=\(nodeID.uuidString.prefix(8))")
     }
 
@@ -630,7 +685,6 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         lifecycleOperationLock.unlock()
         guard let direct else { return }
         direct.teardown()
-        onParticipantChange?(.left(nodeID: nodeID))
         debug("participant left node=\(nodeID.uuidString.prefix(8))")
     }
 
@@ -651,7 +705,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
                 guard !Task.isCancelled, self.isLifecycleActive(generation) else { break }
                 self.sendPresence()
                 self.checkPeerLiveness(generation: generation)
-                self.tickStrategies(generation: generation)
+                self.reconcileNetworkEnvironment(generation: generation)
             }
         }
         let retained = stateQueue.sync {
@@ -666,6 +720,62 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         }
         if !retained { task.cancel() }
         return retained
+    }
+
+    /// Re-arm direct-path decisions that were reached in a different network.
+    ///
+    /// `directMeshDisabled` and an exhausted per-channel failure budget both
+    /// encode "direct does not work from here". Neither survives a move to
+    /// another network, and neither notices one: the mesh flag clears only on a
+    /// transport start, and an abandoned channel revives only on a per-peer
+    /// reachability edge that a still-online peer never produces. Sampling the
+    /// environment digest each beat makes the move itself the trigger.
+    ///
+    /// Peers the cap refused have no channel to retry — clearing the flag is
+    /// their retry, since the next presence beat's backstop re-creates them.
+    ///
+    /// Not private: the tests drive it directly rather than waiting out a beat.
+    func reconcileNetworkEnvironment() {
+        guard let generation = activeLifecycleGeneration() else { return }
+        reconcileNetworkEnvironment(generation: generation)
+    }
+
+    private func reconcileNetworkEnvironment(generation: UInt64) {
+        guard isLifecycleActive(generation) else { return }
+        let digest = environmentDigest()
+
+        lifecycleOperationLock.lock()
+        defer { lifecycleOperationLock.unlock() }
+        guard isLifecycleActive(generation) else { return }
+
+        let changed = stateQueue.sync { () -> Bool in
+            guard let last = lastEnvironmentDigest else {
+                lastEnvironmentDigest = digest
+                return false
+            }
+            guard last != digest else { return false }
+            lastEnvironmentDigest = digest
+            directMeshDisabled = false
+            return true
+        }
+        guard changed else { return }
+        debug("network environment changed; re-arming direct paths")
+
+        // Only channels that gave up or are waiting out a now-meaningless
+        // backoff. A negotiation started in the old environment fails on its
+        // own timeout, and restarting a ready channel would drop a live path.
+        let retryable = stateQueue.sync {
+            directChannels.values.filter { channel in
+                switch channel.state {
+                    case .abandoned, .backingOff: return true
+                    default: return false
+                }
+            }
+        }
+        for channel in retryable {
+            channel.requestRetrial()
+            channel.attemptUpgrade()
+        }
     }
 
     private func isLifecycleActive(_ generation: UInt64) -> Bool {
@@ -738,23 +848,6 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         }
     }
 
-    // MARK: - Conservative promotion
-
-    /// Tick every strategy with each peer's current channel readiness.
-    /// Stateless strategies no-op; the conservative strategy uses this
-    /// to track promotion.
-    private func tickStrategies(generation: UInt64) {
-        lifecycleOperationLock.lock()
-        defer { lifecycleOperationLock.unlock() }
-        guard isLifecycleActive(generation) else { return }
-        let channels = stateQueue.sync { directChannels }
-        for (_, strategy) in strategies {
-            for (nodeID, direct) in channels {
-                strategy.tick(peer: nodeID, p2pReady: direct.isReady)
-            }
-        }
-    }
-
     // MARK: - Peer tracking
 
     private func rememberPeer(_ node: UUID) {
@@ -771,9 +864,22 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         }
     }
 
-    private func directChannel(for targetPeerNodeID: UUID?) -> (any KeepTalkingPeerTransportChannel)? {
-        guard let targetPeerNodeID else { return nil }
-        return stateQueue.sync { directChannels[targetPeerNodeID] }
+    private func readyDirectChannel(
+        for targetPeerNodeID: UUID
+    ) -> (any KeepTalkingPeerTransportChannel)? {
+        let channel = stateQueue.sync { directChannels[targetPeerNodeID] }
+        // `isReady` reaches into the channel's own queue, so it is evaluated
+        // after `stateQueue` is released rather than nested inside it.
+        guard let channel, channel.isReady else { return nil }
+        return channel
+    }
+
+    /// Every peer we currently hold a ready direct channel to.
+    private func readyDirectChannels() -> [(peer: UUID, channel: any KeepTalkingPeerTransportChannel)] {
+        let snapshot = stateQueue.sync { directChannels }
+        return snapshot.compactMap { peer, channel in
+            channel.isReady ? (peer, channel) : nil
+        }
     }
 
     private func isCurrentDirectChannel(
@@ -790,44 +896,103 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         }
     }
 
-    private func send(
-        policy: KeepTalkingRoutingPolicy,
-        targetPeerNodeID: UUID?,
+    /// SFU only. Used by kinds that must reach every peer in the context,
+    /// including ones no direct channel exists for.
+    private func sendBroadcastOnly(sendViaSFU: () throws -> Void) throws {
+        guard broadcast.isReady else {
+            throw KeepTalkingTransportError.allChannelsUnavailable
+        }
+        try sendViaSFU()
+    }
+
+    /// One named peer. Prefers its direct channel and falls back to the SFU,
+    /// which can still reach the peer because the SFU is the always-on
+    /// backbone every node stays joined to.
+    private func sendDirected(
+        to peer: UUID,
         sendViaP2P: ((any KeepTalkingPeerTransportChannel) throws -> Void),
         sendViaSFU: () throws -> Void
     ) throws {
-        guard let strategy = strategies[policy] else {
+        if let direct = readyDirectChannel(for: peer) {
+            do {
+                try sendViaP2P(direct)
+                return
+            } catch let error as KeepTalkingTransportError {
+                // An oversized envelope is the publisher's bug, not a route
+                // failure — retrying it on the SFU would just fail again.
+                if case .envelopeTooLarge = error { throw error }
+                debug(
+                    "p2p send failed peer=\(peer.uuidString.prefix(8)) error=\(error.localizedDescription)"
+                )
+            } catch {
+                debug(
+                    "p2p send failed peer=\(peer.uuidString.prefix(8)) error=\(error.localizedDescription)"
+                )
+            }
+        }
+        guard broadcast.isReady else {
             throw KeepTalkingTransportError.allChannelsUnavailable
         }
-        let direct = directChannel(for: targetPeerNodeID)
-        let availability = KeepTalkingRouteAvailability(
-            p2pReady: direct?.isReady ?? false,
-            sfuReady: broadcast.isReady,
-            targetPeer: targetPeerNodeID
-        )
-        guard let route = strategy.resolve(availability) else {
-            throw KeepTalkingTransportError.allChannelsUnavailable
+        try sendViaSFU()
+    }
+
+    /// Broadcast-addressed and direct-capable: hand the envelope to every ready
+    /// direct channel, and let the SFU cover the peers that have none.
+    ///
+    /// Peers holding a direct channel may also receive the SFU copy, because an
+    /// SFU broadcast reaches the whole context. That is safe only for kinds
+    /// that are idempotent on receive — hence the `isFanOutEligible` check.
+    private func sendFannedOut(
+        _ envelope: any KeepTalkingEnvelope,
+        sendViaP2P: ((any KeepTalkingPeerTransportChannel) throws -> Void),
+        sendViaSFU: () throws -> Void
+    ) throws {
+        guard envelope.kind.isFanOutEligible else {
+            // Soft, not a precondition: falling back to the SFU is always
+            // correct, so an unexpected kind degrades instead of trapping.
+            assertionFailure(
+                "\(envelope.kind.rawValue) is untargeted and allowsDirect but not fan-out eligible"
+            )
+            debug("fan-out refused for kind=\(envelope.kind.rawValue); using broadcast")
+            try sendBroadcastOnly(sendViaSFU: sendViaSFU)
+            return
         }
-        switch route {
-            case .p2p:
-                guard let direct else {
-                    throw KeepTalkingTransportError.allChannelsUnavailable
+
+        let direct = readyDirectChannels()
+        var delivered = 0
+        var oversize: KeepTalkingTransportError?
+        for (peer, channel) in direct {
+            do {
+                try sendViaP2P(channel)
+                delivered += 1
+            } catch {
+                // One bad channel must not stop the others; the SFU leg below
+                // still covers this peer.
+                if let transportError = error as? KeepTalkingTransportError,
+                    case .envelopeTooLarge = transportError
+                {
+                    oversize = transportError
                 }
-                do {
-                    try sendViaP2P(direct)
-                } catch {
-                    if let peer = targetPeerNodeID {
-                        strategy.recordFault(for: peer)
-                    }
-                    debug(
-                        "p2p send failed peer=\(direct.peerNodeID.uuidString.prefix(8)) error=\(error.localizedDescription)"
-                    )
-                    guard broadcast.isReady else { throw error }
-                    try sendViaSFU()
-                }
-            case .sfu:
-                try sendViaSFU()
+                debug(
+                    "fan-out leg failed peer=\(peer.uuidString.prefix(8)) error=\(error.localizedDescription)"
+                )
+            }
         }
+
+        guard broadcast.isReady else {
+            // No SFU: the fan-out legs are all we had. Succeed only if at
+            // least one landed, otherwise report the send as failed.
+            //
+            // Report oversize as itself rather than as an outage. Every leg
+            // failed the same size check and every retry will too, so the
+            // outbox needs to see the real cause to drop the entry instead of
+            // queueing it behind a wait for channels that are already up.
+            guard delivered > 0 else {
+                throw oversize ?? KeepTalkingTransportError.allChannelsUnavailable
+            }
+            return
+        }
+        try sendViaSFU()
     }
 
     private func observePeerAlive(

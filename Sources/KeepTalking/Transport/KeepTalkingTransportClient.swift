@@ -29,7 +29,7 @@ protocol KeepTalkingTransportClient: AnyObject, Sendable {
         targetPeerNodeID: UUID?
     ) throws
     /// Send blob data directly through the SFU broadcast channel,
-    /// bypassing the routing strategy.
+    /// bypassing envelope routing.
     func sendBlobDataViaBroadcast(_ data: Data) throws
     /// Send realtime data directly through the SFU realtime channel.
     func sendRealtimeDataViaBroadcast(_ data: Data) throws
@@ -50,7 +50,7 @@ protocol KeepTalkingTransportClient: AnyObject, Sendable {
 extension KeepTalkingTransportClient {
     /// Default: falls back to `sendBlobData` with no target peer.
     /// `ContextTransport` overrides to go straight to the SFU broadcast
-    /// channel, bypassing the routing strategy.
+    /// channel, bypassing envelope routing.
     func sendBlobDataViaBroadcast(_ data: Data) throws {
         try sendBlobData(data, targetPeerNodeID: nil)
     }

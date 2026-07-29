@@ -177,48 +177,29 @@ extension KeepTalkingClient {
             context: context
         )
 
-        let incomingRelations = try await selfNode.$incomingNodeRelations
-            .query(on: localStore.database)
-            .all()
-
-        let remoteActions = try await withThrowingTaskGroup(
-            of: [KeepTalkingAction].self,
-            returning: [KeepTalkingAction].self
-        ) { group in
-            for relation in incomingRelations
-            where relation.allows(
-                context: context
-            ) {
-                group.addTask {
-                    let actionRelations = try await relation.$actionRelations
-                        .query(on: self.localStore.database)
-                        .with(\.$action)
-                        .all()
-                    var injectedActions: [KeepTalkingAction] = []
-                    injectedActions.reserveCapacity(actionRelations.count)
-                    for actionRelation in actionRelations
-                    where actionRelation.applicable(in: context) {
-                        let action = actionRelation.action
-                        if action.disabled == true { continue }
-                        guard let ownerNodeID = action.$node.id else {
-                            continue
-                        }
-                        if try await self.shouldInjectActionIntoCatalog(
-                            action,
-                            ownerNodeID: ownerNodeID
-                        ) {
-                            injectedActions.append(action)
-                        }
-                    }
-                    return injectedActions
-                }
+        let storedRemoteActions = try await KeepTalkingAction.query(
+            on: localStore.database
+        )
+        .filter(\.$node.$id, .notEqual, config.node)
+        .all()
+        let grantedRemoteActions = try await grantedActions(
+            storedRemoteActions,
+            for: selfNode,
+            context: context
+        )
+        var remoteActions: [KeepTalkingAction] = []
+        remoteActions.reserveCapacity(grantedRemoteActions.count)
+        for action in grantedRemoteActions {
+            guard
+                let ownerNodeID = action.$node.id,
+                try await shouldInjectActionIntoCatalog(
+                    action,
+                    ownerNodeID: ownerNodeID
+                )
+            else {
+                continue
             }
-
-            var result: [KeepTalkingAction] = []
-            for try await actions in group {
-                result.append(contentsOf: actions)
-            }
-            return result
+            remoteActions.append(action)
         }
 
         let allActions = deduplicatedAndSortedActions(

@@ -27,12 +27,17 @@ struct OpenAIConnectorPromptTests {
             platform: "macOS"
         )
 
+        // Asserted as invariant fragments rather than whole sentences: the
+        // contract is "route actions through kt_run_action, and ACT owns tool
+        // discovery", not the exact copy, which gets edited often.
         #expect(
             prompt.contains(
-                "Call \(KeepTalkingClient.runActionToolFunctionName)(action_id, task) to execute an action end-to-end"
+                "\(KeepTalkingClient.runActionToolFunctionName)(action_id, task)"
             )
         )
-        #expect(prompt.contains("ACT agent will handle tool discovery"))
+        #expect(prompt.contains("end-to-end"))
+        #expect(prompt.contains("ACT agent"))
+        #expect(prompt.contains("tool discovery"))
         #expect(!prompt.contains("listing tool"))
     }
 
@@ -65,16 +70,22 @@ struct OpenAIConnectorPromptTests {
                 "Use those provided files or images directly before considering any tool call."
             )
         )
-        #expect(
-            prompt.contains(
-                "When a file or image is already present in the current turn, or was just injected into the transcript after a tool call, inspect that provided content directly instead of listing or re-reading the same attachment."
-            )
+        #expect(prompt.contains("Do not call attachment tools"))
+    }
+
+    @Test("ask-for-file lead text tells the model the attachment is already present")
+    func attachmentInjectionLeadTextIsSelfDescribing() {
+        // This guidance used to live in the system prompt. It now rides with the
+        // injected file itself, so it is asserted where it actually is.
+        let text = AIPromptPresets.attachmentInjectionLeadText(
+            filename: "report.pdf",
+            isImage: false
         )
-        #expect(
-            prompt.contains(
-                "A file or image injected immediately after ask-for-file is the user-provided attachment you requested."
-            )
-        )
+
+        #expect(text.contains("report.pdf"))
+        #expect(text.contains("the user-provided attachment you just requested"))
+        #expect(text.contains("already included in this turn"))
+        #expect(text.contains("Do not call context attachment tools"))
     }
 
     @Test("system prompt includes response language preference")

@@ -19,10 +19,6 @@ extension KeepTalkingContextSyncEnvelope {
                 return request.recipient
             case .attachmentRecordsResult(let result):
                 return result.requester
-            case .sideNotesRequest(let request):
-                return request.recipient
-            case .sideNotesResult(let result):
-                return result.requester
             case .transcriptSummaryRequest(let request):
                 return request.recipient
             case .transcriptSummaryResult(let result):
@@ -33,41 +29,10 @@ extension KeepTalkingContextSyncEnvelope {
                 return request.recipient
             case .transcriptLinesResult(let result):
                 return result.requester
-        }
-    }
-
-    public var participantNodeIDs: [UUID] {
-        switch self {
-            case .summaryRequest(let request):
-                return [request.requester, request.recipient]
-            case .summaryResult(let result):
-                return [result.requester, result.responder]
-            case .tailRequest(let request):
-                return [request.requester, request.recipient]
-            case .chunkRequest(let request):
-                return [request.requester, request.recipient]
-            case .messagesResult(let result):
-                return [result.requester, result.responder]
-            case .attachmentRequest(let request):
-                return [request.requester]
-            case .attachmentRecordsRequest(let request):
-                return [request.requester, request.recipient]
-            case .attachmentRecordsResult(let result):
-                return [result.requester, result.responder]
-            case .sideNotesRequest(let request):
-                return [request.requester, request.recipient]
-            case .sideNotesResult(let result):
-                return [result.requester, result.responder]
-            case .transcriptSummaryRequest(let request):
-                return [request.requester, request.recipient]
-            case .transcriptSummaryResult(let result):
-                return [result.requester, result.responder]
-            case .transcriptTailRequest(let request):
-                return [request.requester, request.recipient]
-            case .transcriptChunkRequest(let request):
-                return [request.requester, request.recipient]
-            case .transcriptLinesResult(let result):
-                return [result.requester, result.responder]
+            case .sideNotesPush:
+                return nil
+            case .failureResult(let result):
+                return result.requester
         }
     }
 
@@ -89,10 +54,6 @@ extension KeepTalkingContextSyncEnvelope {
                 return request.context
             case .attachmentRecordsResult(let result):
                 return result.context
-            case .sideNotesRequest(let request):
-                return request.context
-            case .sideNotesResult(let result):
-                return result.context
             case .transcriptSummaryRequest(let request):
                 return request.context
             case .transcriptSummaryResult(let result):
@@ -102,6 +63,10 @@ extension KeepTalkingContextSyncEnvelope {
             case .transcriptChunkRequest(let request):
                 return request.context
             case .transcriptLinesResult(let result):
+                return result.context
+            case .sideNotesPush(let push):
+                return push.context
+            case .failureResult(let result):
                 return result.context
         }
     }
