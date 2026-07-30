@@ -109,6 +109,17 @@ public protocol KeepTalkingLocalStore: Sendable {
     /// store must be migrated before it is queried.
     func migrate() async throws
     func reset() async throws
+
+    /// Drains in-flight queries, then releases the thread pool and event-loop
+    /// group. Idempotent.
+    ///
+    /// Call this before dropping the last reference to a store you are
+    /// retiring — switching to another identity's database, for instance.
+    /// Merely releasing it runs the teardown from `deinit` on a background
+    /// queue, which can tear the event loop down underneath a query still in
+    /// flight; NIO then trips its `EventLoopFuture.deinit` debug assertion and
+    /// the process traps.
+    func shutdown() async
 }
 
 public struct KeepTalkingAsymmetricCipherEnvelope: Codable, Sendable {

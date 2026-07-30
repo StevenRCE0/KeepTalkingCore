@@ -13,6 +13,9 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
     private let manager: FluentManager
     private let databaseID: DatabaseID
     private let logger: Logger
+    /// Guards against shutting the manager down twice — once explicitly and
+    /// again from `deinit`.
+    private let hasShutDown = NIOLockedValueBox(false)
 
     /// Construction is synchronous and does NO I/O — it registers databases,
     /// middleware and the migration list. Running the migrations is separate
@@ -76,6 +79,22 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
         try await manager.autoMigrate()
     }
 
+    /// Drains in-flight queries and releases the event-loop group.
+    ///
+    /// Prefer this over just dropping the store when you know it is being
+    /// retired while the process keeps running: `deinit`'s teardown races any
+    /// query still in flight, and NIO traps on the resulting
+    /// `EventLoopFuture.deinit`. Awaiting here lets the pool drain first.
+    public func shutdown() async {
+        guard
+            !hasShutDown.withLockedValue({ was in
+                defer { was = true }
+                return was
+            })
+        else { return }
+        await manager.shutdown()
+    }
+
     deinit {
         // `shutdown()` blocks until the NIO event-loop group has terminated.
         // Running it inline parks whatever thread released the store — and
@@ -83,6 +102,12 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
         // batch of stores starves the pool exactly the way `blocking {}` used
         // to. `deinit` cannot be async, so hand the wait to a utility queue and
         // return immediately. The manager is captured by value; `self` is not.
+        guard
+            !hasShutDown.withLockedValue({ was in
+                defer { was = true }
+                return was
+            })
+        else { return }
         let manager = self.manager
         DispatchQueue.global(qos: .utility).async {
             manager.shutdown()
@@ -175,6 +200,7 @@ public final class KeepTalkingInMemoryStore: KeepTalkingLocalStore,
         logger: .init(label: "KeepTalking.InMemoryStore")
     )
     private let databaseID: DatabaseID = .sqlite
+    private let hasShutDown = NIOLockedValueBox(false)
 
     /// Synchronous, like `KeepTalkingModelStore.init` — see its note. Call
     /// `migrate()` before querying, or use `make()`.
@@ -196,6 +222,17 @@ public final class KeepTalkingInMemoryStore: KeepTalkingLocalStore,
         try await manager.autoMigrate()
     }
 
+    /// See `KeepTalkingModelStore.shutdown()`.
+    public func shutdown() async {
+        guard
+            !hasShutDown.withLockedValue({ was in
+                defer { was = true }
+                return was
+            })
+        else { return }
+        await manager.shutdown()
+    }
+
     deinit {
         // `shutdown()` blocks until the NIO event-loop group has terminated.
         // Running it inline parks whatever thread released the store — and
@@ -203,6 +240,12 @@ public final class KeepTalkingInMemoryStore: KeepTalkingLocalStore,
         // batch of stores starves the pool exactly the way `blocking {}` used
         // to. `deinit` cannot be async, so hand the wait to a utility queue and
         // return immediately. The manager is captured by value; `self` is not.
+        guard
+            !hasShutDown.withLockedValue({ was in
+                defer { was = true }
+                return was
+            })
+        else { return }
         let manager = self.manager
         DispatchQueue.global(qos: .utility).async {
             manager.shutdown()
