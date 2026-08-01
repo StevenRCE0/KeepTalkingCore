@@ -515,6 +515,11 @@ extension KeepTalkingClient {
                 try await action.delete(on: database)
             }
 
+            // Invitations naming this node in either role. Without this the
+            // rows outlive the node, and a pending outgoing one would still
+            // auto-accept its inbound trust handshake if it reappears.
+            try await deleteTrustInvitations(involving: nodeID, on: database)
+
             if let node = try await KeepTalkingNode.find(nodeID, on: database) {
                 try await node.delete(on: database)
             }

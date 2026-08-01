@@ -108,4 +108,23 @@ public struct KeepTalkingGrantTransaction: Sendable, Equatable {
     public func change(for key: Key) -> Change? {
         changes[key]
     }
+
+    /// The transaction that undoes this one — grants become revokes and
+    /// revokes become grants.
+    ///
+    /// The permission a revoked grant carried isn't recovered, so reverting a
+    /// change that narrowed an existing grant restores it unrestricted. Pair
+    /// this with the original permission at the call site if that matters.
+    public func reverted() -> Self {
+        var result = Self()
+        for entry in entries {
+            switch entry.change {
+                case .grant:
+                    result.changes[entry.key] = .revoke
+                case .revoke:
+                    result.changes[entry.key] = .grant(nil)
+            }
+        }
+        return result
+    }
 }

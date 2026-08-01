@@ -142,6 +142,96 @@ extension KeepTalkingClient {
         }
     }
 
+    /// Alias twin of `stageActionPermissionWithTrustInvitation`: grants a tag to
+    /// a peer who isn't trusted in `contextID` yet, raising the pending
+    /// invitation that makes the grant legible first.
+    ///
+    /// Without this, tag grants could only ever land on a peer some *other*
+    /// grant had already pre-trusted — `.grantStaging` eligibility rejects a
+    /// `.pending` relation — so tagging a fresh peer failed with
+    /// `relationNotTrustedOrOwned`.
+    public static func stageAliasPermissionWithTrustInvitation(
+        contextID: UUID,
+        aliasID: UUID,
+        toNodeID: UUID,
+        grantScope: KeepTalkingActionScope? = nil,
+        node: KeepTalkingNode,
+        on database: any Database,
+        callbackForBroadcasting: ((String) async -> Void)? = nil
+    ) async throws {
+        let context = try await ensureContext(contextID, on: database)
+        let alias = try await requireActionTag(aliasID, on: database)
+        let action = try await requireTaggedAction(alias, on: database)
+        let hostNode = try await resolveGrantHostNode(
+            for: action,
+            authorizingNode: node,
+            on: database
+        )
+        guard let hostNodeID = hostNode.id else {
+            throw KeepTalkingClientError.missingNode
+        }
+
+        let alreadyTrusted =
+            try await preferredTrustedRelation(
+                from: hostNodeID,
+                to: toNodeID,
+                allowing: context,
+                on: database
+            ) != nil
+
+        if !alreadyTrusted {
+            try await upsertTrustInvitation(
+                contextID: contextID,
+                inviterNodeID: hostNodeID,
+                recipientNodeID: toNodeID,
+                direction: .outgoing,
+                status: .pending,
+                on: database
+            )
+        }
+
+        try await grantAliasPermission(
+            aliasID: aliasID,
+            toNodeID: toNodeID,
+            scope: .context(context),
+            grantScope: grantScope,
+            eligibility: .grantStaging,
+            node: node,
+            on: database,
+            callbackForBroadcasting: callbackForBroadcasting
+        )
+    }
+
+    public func stageAliasPermissionWithTrustInvitation(
+        contextID: UUID,
+        aliasID: UUID,
+        toNodeID: UUID,
+        grantScope: KeepTalkingActionScope? = nil
+    ) async throws {
+        let selfNode = try await ensure(
+            config.node,
+            for: KeepTalkingNode.self,
+            strict: true
+        )
+
+        try await Self.stageAliasPermissionWithTrustInvitation(
+            contextID: contextID,
+            aliasID: aliasID,
+            toNodeID: toNodeID,
+            grantScope: grantScope,
+            node: selfNode,
+            on: localStore.database,
+            callbackForBroadcasting: {
+                await self.broadcastLocalNodeState(reason: $0)
+            }
+        )
+        await invalidateActionToolCatalog(
+            contextID: contextID,
+            reason:
+                "stage_alias_permission alias=\(aliasID.uuidString.lowercased()) to=\(toNodeID.uuidString.lowercased())"
+        )
+    }
+
     public func grantAliasPermission(
         aliasID: UUID,
         toNodeID: UUID,
@@ -238,6 +328,13 @@ extension KeepTalkingClient {
         for grant in grants {
             try await revoke(grant, in: context, on: database)
         }
+
+        try await reconcilePendingTrustInvitations(
+            from: hostNodeID,
+            to: fromNodeID,
+            in: context,
+            on: database
+        )
 
         await callbackForBroadcasting?(
             "revoke alias=\(aliasID.uuidString.lowercased()) from=\(fromNodeID.uuidString.lowercased())"

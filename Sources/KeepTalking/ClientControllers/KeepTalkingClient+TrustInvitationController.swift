@@ -247,6 +247,114 @@ extension KeepTalkingClient {
         return invitation
     }
 
+    /// Re-establishes the invariant that a *pending outgoing* invitation exists
+    /// only while the invitee still holds at least one grant in that context.
+    ///
+    /// An outgoing invitation is never a standalone intent — it is created as a
+    /// precondition of a grant to a peer who isn't trusted yet
+    /// (`stageActionPermissionWithTrustInvitation` and its alias twin). Once the
+    /// last grant is revoked the invitation has nothing left to authorise, so
+    /// it is deleted along with the pre-trusted context it introduced.
+    ///
+    /// This matters beyond tidiness: a pending outgoing invitation is a standing
+    /// auto-accept for that peer's inbound trust handshake, so a stale row would
+    /// silently establish trust after the user revoked everything.
+    ///
+    /// Pass `context: nil` to sweep every context in which the pair currently
+    /// has a pending invitation — used by all-context revokes.
+    ///
+    /// Terminal rows (declined/failed/established/skipped) are history and are
+    /// left untouched, as are incoming invitations, which record a handshake
+    /// rather than authorise one.
+    @discardableResult
+    public static func reconcilePendingTrustInvitations(
+        from inviterNodeID: UUID,
+        to recipientNodeID: UUID,
+        in context: KeepTalkingContext?,
+        on database: any Database
+    ) async throws -> Int {
+        guard inviterNodeID != recipientNodeID else { return 0 }
+
+        var query = KeepTalkingTrustInvitation.query(on: database)
+            .filter(\.$inviterNodeID, .equal, inviterNodeID)
+            .filter(\.$recipientNodeID, .equal, recipientNodeID)
+            .filter(\.$direction, .equal, .outgoing)
+            .filter(\.$status, .equal, .pending)
+        if let contextID = context?.id {
+            query = query.filter(\.$context.$id, .equal, contextID)
+        }
+
+        var removed = 0
+        for invitation in try await query.all() {
+            let invitationContext = KeepTalkingContext(id: invitation.$context.id)
+            if try await holdsAnyGrant(
+                from: inviterNodeID,
+                to: recipientNodeID,
+                in: invitationContext,
+                on: database
+            ) {
+                continue
+            }
+
+            try await invitation.delete(on: database)
+            try await removePreTrustedContext(
+                from: inviterNodeID,
+                to: recipientNodeID,
+                context: invitationContext,
+                on: database
+            )
+            removed += 1
+        }
+        return removed
+    }
+
+    /// Drops every invitation anchored to `nodeID` in either role.
+    ///
+    /// Issued explicitly rather than relying on the schema's `onDelete` rules so
+    /// the result holds whether or not the SQLite connection has foreign-key
+    /// enforcement on — matching `deleteNodeLocally`, whose teardown this
+    /// completes.
+    public static func deleteTrustInvitations(
+        involving nodeID: UUID,
+        on database: any Database
+    ) async throws {
+        try await KeepTalkingTrustInvitation.query(on: database)
+            .group(.or) { group in
+                group.filter(\.$inviterNodeID, .equal, nodeID)
+                group.filter(\.$recipientNodeID, .equal, nodeID)
+            }
+            .delete()
+    }
+
+    /// Withdraws the pending outgoing invitation for a pair, leaving any grants
+    /// they hold alone.
+    ///
+    /// This is the one direction in which the grant/invitation invariant may be
+    /// broken deliberately, and it is the safe one: the peer keeps what they
+    /// were given but loses the standing auto-accept, so their next inbound
+    /// trust handshake prompts rather than resolving silently. The reverse —
+    /// an invitation outliving its grants — stays impossible, since that would
+    /// leave an auto-accept behind with nothing to authorise.
+    ///
+    /// Pass `context: nil` to withdraw across every context, which is what
+    /// tearing down the relation itself calls for.
+    public static func deletePendingOutgoingTrustInvitations(
+        from inviterNodeID: UUID,
+        to recipientNodeID: UUID,
+        in context: KeepTalkingContext? = nil,
+        on database: any Database
+    ) async throws {
+        var query = KeepTalkingTrustInvitation.query(on: database)
+            .filter(\.$inviterNodeID, .equal, inviterNodeID)
+            .filter(\.$recipientNodeID, .equal, recipientNodeID)
+            .filter(\.$direction, .equal, .outgoing)
+            .filter(\.$status, .equal, .pending)
+        if let contextID = context?.id {
+            query = query.filter(\.$context.$id, .equal, contextID)
+        }
+        try await query.delete()
+    }
+
     public static func pendingOutgoingTrustInvitation(
         from inviterNodeID: UUID,
         to recipientNodeID: UUID,

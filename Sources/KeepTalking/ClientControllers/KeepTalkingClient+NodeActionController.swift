@@ -1066,10 +1066,17 @@ extension KeepTalkingClient {
     /// Direct action grants and grants inherited from active action tags are
     /// additive. This is the sole grant gate used by execution, advertisement,
     /// and UI availability.
+    ///
+    /// `eligibility` selects which relations count. The default `.trustedOnly`
+    /// answers "may this peer use the action right now". `.grantStaging` also
+    /// counts pre-trusted relations, answering "does a grant exist at all" —
+    /// which is what the trust-invitation invariant is keyed on, since a
+    /// pending invitee is pre-trusted by construction.
     public static func allowedActionScope(
         node: KeepTalkingNode,
         action: KeepTalkingAction,
         context: KeepTalkingContext?,
+        eligibility: KeepTalkingRelationEligibility = .trustedOnly,
         on database: any Database
     ) async throws -> KeepTalkingActionScope? {
         let nodeID = try node.requireID()
@@ -1080,6 +1087,7 @@ extension KeepTalkingClient {
             from: ownerNodeID,
             to: nodeID,
             allowing: context,
+            eligibility: eligibility,
             on: database
         )
         .compactMap(\.id)
@@ -1107,14 +1115,46 @@ extension KeepTalkingClient {
     public func allowedActionScope(
         node: KeepTalkingNode,
         action: KeepTalkingAction,
-        context: KeepTalkingContext?
+        context: KeepTalkingContext?,
+        eligibility: KeepTalkingRelationEligibility = .trustedOnly
     ) async throws -> KeepTalkingActionScope? {
         try await Self.allowedActionScope(
             node: node,
             action: action,
             context: context,
+            eligibility: eligibility,
             on: localStore.database
         )
+    }
+
+    /// Whether `nodeID` still holds any grant — direct or tag-inherited — on
+    /// any action hosted by `hostNodeID`, within `context`.
+    ///
+    /// Routed through `allowedActionScope` so the action/alias union stays in
+    /// one place; `.grantStaging` is used because the peers this question is
+    /// asked about are pre-trusted (invitation pending), not yet trusted.
+    static func holdsAnyGrant(
+        from hostNodeID: UUID,
+        to nodeID: UUID,
+        in context: KeepTalkingContext?,
+        on database: any Database
+    ) async throws -> Bool {
+        let node = KeepTalkingNode(id: nodeID)
+        let hostedActions = try await KeepTalkingAction.query(on: database)
+            .filter(\.$node.$id, .equal, hostNodeID)
+            .all()
+
+        for action in hostedActions {
+            let scope = try await allowedActionScope(
+                node: node,
+                action: action,
+                context: context,
+                eligibility: .grantStaging,
+                on: database
+            )
+            if scope != nil { return true }
+        }
+        return false
     }
 
     /// Lists the tool names currently exposed by a locally-hosted MCP action.
@@ -1182,6 +1222,13 @@ extension KeepTalkingClient {
             try await actionRelation.delete(on: database)
         }
 
+        try await reconcilePendingTrustInvitations(
+            from: hostNodeID,
+            to: fromNodeID,
+            in: context,
+            on: database
+        )
+
         await callbackForBroadcasting?(
             "revoke action=\(actionID.uuidString.lowercased()) from=\(fromNodeID.uuidString.lowercased())"
         )
@@ -1222,7 +1269,14 @@ extension KeepTalkingClient {
             )
         else { return }
         let actionID = row.$action.id
+        let revokedContexts = Self.contexts(of: row.approvingContext)
+        let relationID = row.$relation.id
         try await row.delete(on: localStore.database)
+        try await Self.reconcilePendingTrustInvitations(
+            forRelation: relationID,
+            in: revokedContexts,
+            on: localStore.database
+        )
         await broadcastLocalNodeState(
             reason: "revoke-grant grant=\(grantID.uuidString.lowercased()) action=\(actionID.uuidString.lowercased())"
         )
@@ -1239,8 +1293,15 @@ extension KeepTalkingClient {
         else { return }
 
         guard case .contexts(let contexts) = row.approvingContext else {
-            // .all grant — delete the whole row
+            // .all grant — delete the whole row, and sweep every context it
+            // was covering rather than just the one named here.
+            let relationID = row.$relation.id
             try await row.delete(on: localStore.database)
+            try await Self.reconcilePendingTrustInvitations(
+                forRelation: relationID,
+                in: nil,
+                on: localStore.database
+            )
             await broadcastLocalNodeState(
                 reason:
                     "revoke-grant grant=\(grantID.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"
@@ -1255,10 +1316,53 @@ extension KeepTalkingClient {
             row.approvingContext = .contexts(remaining)
             try await row.save(on: localStore.database)
         }
+        try await Self.reconcilePendingTrustInvitations(
+            forRelation: row.$relation.id,
+            in: [KeepTalkingContext(id: contextID)],
+            on: localStore.database
+        )
         await broadcastLocalNodeState(
             reason:
                 "revoke-context grant=\(grantID.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"
         )
+    }
+
+    /// Contexts a grant row applied to, or `nil` for an all-contexts grant —
+    /// which reconciles as a full sweep.
+    static func contexts(
+        of approvingContext: KeepTalkingNodeRelationApprovingContext?
+    ) -> [KeepTalkingContext]? {
+        switch approvingContext {
+            case .contexts(let contexts):
+                return contexts
+            case .all, nil:
+                return nil
+        }
+    }
+
+    /// Reconciles invitations for the pair behind `relationID`. `contexts` of
+    /// `nil` sweeps every context the pair has a pending invitation in.
+    static func reconcilePendingTrustInvitations(
+        forRelation relationID: UUID,
+        in contexts: [KeepTalkingContext]?,
+        on database: any Database
+    ) async throws {
+        guard
+            let relation = try await KeepTalkingNodeRelation.find(
+                relationID,
+                on: database
+            )
+        else { return }
+
+        let targets: [KeepTalkingContext?] = contexts ?? [nil]
+        for context in targets {
+            try await reconcilePendingTrustInvitations(
+                from: relation.$from.id,
+                to: relation.$to.id,
+                in: context,
+                on: database
+            )
+        }
     }
 
     /// Upserts the action metadata carried by a context-scoped node status.
