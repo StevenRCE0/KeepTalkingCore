@@ -512,6 +512,60 @@ extension KeepTalkingClient {
         throw KeepTalkingClientError.remoteIdentityPublicKeyInvalid(remoteNodeID)
     }
 
+    /// Re-opens an envelope **this** node sealed for somebody else.
+    ///
+    /// X25519 is symmetric: the secret the recipient derives from its private
+    /// key and our public key is the same one we derived from our private key
+    /// and theirs, so the sender never actually loses the ability to read what
+    /// it sealed. `decryptAsymmetricPayload` refuses to anyway — it enforces
+    /// `recipient == self` so an envelope addressed elsewhere can't be opened
+    /// off the wire — and this is the narrow, deliberate exception to that rule.
+    /// It only ever applies to payloads we authored, and exists so the caller
+    /// can still show its user what it asked a peer to run without that payload
+    /// having to travel in the clear.
+    func decryptAsymmetricPayloadAsSender(
+        _ envelope: KeepTalkingAsymmetricCipherEnvelope,
+        purpose: String
+    ) async throws -> Data {
+        guard envelope.senderNodeID == config.node else {
+            throw KeepTalkingClientError.malformedEncryptedActionCall
+        }
+
+        let recipientNodeID = envelope.recipientNodeID
+        let localMaterials = try await Self.localKeyAgreementMaterials(
+            localNodeID: config.node,
+            remoteNodeID: recipientNodeID,
+            on: localStore.database,
+            keychain: keychain
+        )
+        let recipientCandidates = try await remoteKeyAgreementPublicKeys(
+            nodeID: recipientNodeID
+        )
+        let sealed = try AES.GCM.SealedBox(combined: envelope.ciphertext)
+
+        // Both sides rotate keys, so walk every (ours × theirs) pair rather
+        // than assuming the newest material is the one that sealed this.
+        for material in localMaterials {
+            for candidate in recipientCandidates {
+                let sharedSecret = try material.privateKey
+                    .sharedSecretFromKeyAgreement(with: candidate.publicKey)
+                let symmetricKey = Self.asymmetricEnvelopeSymmetricKey(
+                    from: sharedSecret
+                )
+                if let decrypted = try? AES.GCM.open(sealed, using: symmetricKey) {
+                    rtcClient.debug(
+                        "[asym.decrypt] success-as-sender purpose=\(purpose) recipient=\(recipientNodeID.uuidString.lowercased()) relation=\(candidate.relationID.uuidString.lowercased())"
+                    )
+                    return decrypted
+                }
+            }
+        }
+
+        throw KeepTalkingClientError.remoteIdentityPublicKeyInvalid(
+            recipientNodeID
+        )
+    }
+
     private static func asymmetricEnvelopeSymmetricKey(
         from sharedSecret: SharedSecret
     ) -> SymmetricKey {

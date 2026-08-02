@@ -399,6 +399,34 @@ extension KeepTalkingClient {
             )
         }
 
+        // The one place tool-call arguments get sealed before they become a
+        // context message. The row's own `targetNodeID` names the recipient —
+        // the peer being asked to run the thing — so caller and callee can open
+        // it and the rest of the context sees the hint without the arguments.
+        // A nil target is a built-in or local tool: sealed to this node, where
+        // both ends of the call are us.
+        let toolHintPublisher: AIOrchestrator.ToolHintPublisher = {
+            [self] name, messageType, parameters in
+            var sealedType = messageType
+            if case .intermediate(let hint, let targetNodeID, let actionID, let actionName, _) =
+                messageType,
+                let parameters,
+                !parameters.isEmpty
+            {
+                sealedType = .intermediate(
+                    hint: hint,
+                    targetNodeID: targetNodeID,
+                    actionID: actionID,
+                    actionName: actionName,
+                    sealedParameters: await sealCallParameters(
+                        parameters,
+                        for: targetNodeID
+                    )
+                )
+            }
+            try await assistantPublisher((name, sealedType))
+        }
+
         let actAgent = AIOrchestrator.ACTAgent(
             canHandle: { $0.name == Self.runActionToolFunctionName },
             execute: { [self] toolCalls, activeModel in
@@ -418,7 +446,7 @@ extension KeepTalkingClient {
                                 context: persistedContext,
                                 actConnector: actConnector,
                                 actModel: actModel ?? activeModel,
-                                publisher: assistantPublisher,
+                                publisher: toolHintPublisher,
                                 agentTurnID: agentTurnID
                             )
                         )
@@ -468,6 +496,7 @@ extension KeepTalkingClient {
                 },
                 actAgent: actAgent,
                 assistantPublisher: assistantPublisher,
+                toolHintPublisher: toolHintPublisher,
                 toolNameResolver: { [self] toolCall in
                     publishedToolName(
                         for: toolCall,
@@ -1069,7 +1098,7 @@ extension KeepTalkingClient {
                                 context: context,
                                 actConnector: connector,
                                 actModel: actModel ?? activeModel,
-                                publisher: { @Sendable _ in },
+                                publisher: { @Sendable _, _, _ in },
                                 agentTurnID: nil
                             )
                         )

@@ -134,7 +134,7 @@ extension KeepTalkingClient {
         context: KeepTalkingContext,
         actConnector: any AIConnector,
         actModel: String,
-        publisher: AIOrchestrator.AssistantPublisher,
+        publisher: AIOrchestrator.ToolHintPublisher,
         agentTurnID: UUID? = nil
     ) async throws -> [AIMessage] {
         let args = try decodeToolArguments(rawArguments)
@@ -233,7 +233,7 @@ extension KeepTalkingClient {
         context: KeepTalkingContext,
         actConnector: any AIConnector,
         actModel: String,
-        publisher: AIOrchestrator.AssistantPublisher,
+        publisher: AIOrchestrator.ToolHintPublisher,
         agentTurnID: UUID? = nil,
         inputHandles: [UUID]? = nil,
         resolvedInputHandles: [(kind: KTResourceManifest.Kind?, id: UUID)] = [],
@@ -979,21 +979,20 @@ extension KeepTalkingClient {
     /// parent tool-call row's expand — so successive ACT steps accumulate
     /// as additional rows there without spawning standalone entries.
     fileprivate func publishACTTraceUpdate(
-        publisher: AIOrchestrator.AssistantPublisher,
+        publisher: AIOrchestrator.ToolHintPublisher,
         parentActionName: String,
         params: [String: String]
     ) async throws {
         try await publisher(
-            (
-                parentActionName,
-                .intermediate(
-                    hint: "Output",
-                    targetNodeID: nil,
-                    actionID: nil,
-                    actionName: parentActionName,
-                    parameters: params
-                )
-            )
+            parentActionName,
+            .intermediate(
+                hint: "Output",
+                targetNodeID: nil,
+                actionID: nil,
+                actionName: parentActionName,
+                sealedParameters: nil
+            ),
+            params
         )
     }
 }

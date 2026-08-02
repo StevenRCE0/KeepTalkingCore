@@ -102,13 +102,18 @@ extension KeepTalkingContextMessage {
         /// - `actionID`:     UUID of the action being called (nil for built-in tools).
         /// - `actionName`:   Display name of the action (not all peers have the action, so receivers
         ///                   may not be able to resolve it from `actionID` alone).
-        /// - `parameters`:   Raw string-keyed arguments the agent passed to the tool.
+        /// - `sealedParameters`: The arguments the agent passed to the tool, sealed to the two ends
+        ///                   of the call. This row replicates to every member of the context, but a
+        ///                   command line or a file path is the caller's and the executor's business
+        ///                   alone — so the hint stays legible to everyone while the arguments open
+        ///                   only for those two. Seal with `KeepTalkingClient.sealCallParameters`,
+        ///                   read with `openSealedCallParameters` (nil for anyone else).
         case intermediate(
             hint: String,
             targetNodeID: UUID? = nil,
             actionID: UUID? = nil,
             actionName: String? = nil,
-            parameters: [String: String]? = nil
+            sealedParameters: Data? = nil
         )
 
         /// Stored by an AI agent to label the current live thread or to signal

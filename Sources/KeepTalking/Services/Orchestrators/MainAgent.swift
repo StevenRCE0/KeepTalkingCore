@@ -67,6 +67,18 @@ public struct AIOrchestrator {
         Void
     public typealias ToolNameResolver = (ToolCall) -> String
 
+    /// Publishes a tool-hint row along with the call's parameters **in the
+    /// clear**.
+    ///
+    /// The orchestrator holds no key material, so it can't seal them itself; the
+    /// host takes the plaintext and seals it onto the row before that row is
+    /// persisted and replicated to the context. Hosts that don't supply one get
+    /// the default, which publishes the row with no parameters at all — never a
+    /// row carrying them unsealed.
+    public typealias ToolHintPublisher =
+        @Sendable (String, KeepTalkingContextMessage.MessageType, [String: String]?)
+        async throws -> Void
+
     /// The orchestrator filters tool-result messages out of the executor output
     /// so they can be passed to the connector's optional `toolExecutor`. With
     /// the KT-native `AIMessage` IR, "tool result" simply means `role == .tool`.
@@ -139,6 +151,7 @@ public struct AIOrchestrator {
         public let toolExecutor: ToolExecutor
         public let toolTranscriptAdapter: ToolTranscriptAdapter
         public let assistantPublisher: AssistantPublisher
+        public let toolHintPublisher: ToolHintPublisher
         public let toolNameResolver: ToolNameResolver
         public let toolHintResolver: ToolHintResolver
         public let actAgent: ACTAgent?
@@ -152,6 +165,7 @@ public struct AIOrchestrator {
             toolTranscriptAdapter: @escaping ToolTranscriptAdapter = { _ in [] },
             actAgent: ACTAgent? = nil,
             assistantPublisher: @escaping AssistantPublisher,
+            toolHintPublisher: ToolHintPublisher? = nil,
             toolNameResolver: @escaping ToolNameResolver = { $0.name },
             toolHintResolver: @escaping ToolHintResolver = { _, _ in .init(hint: .toolUse) },
             toolRetryObserver: ToolRetryObserver? = nil
@@ -181,6 +195,12 @@ public struct AIOrchestrator {
             self.toolTranscriptAdapter = toolTranscriptAdapter
             self.actAgent = actAgent
             self.assistantPublisher = assistantPublisher
+            // No host sealer ⇒ publish the row bare rather than in the clear.
+            self.toolHintPublisher =
+                toolHintPublisher
+                ?? { name, type, _ in
+                    try await assistantPublisher((name, type))
+                }
             self.toolNameResolver = toolNameResolver
             self.toolHintResolver = toolHintResolver
             self.toolRetryObserver = toolRetryObserver
@@ -278,14 +298,18 @@ public struct AIOrchestrator {
                 try await dependencies.assistantPublisher((assistantText, .message))
             }
 
-            if let hint = Self.toolHint(
+            if let (name, messageType, parameters) = Self.toolHint(
                 for: turn,
                 stage: .execution,
                 toolNameResolver: dependencies.toolNameResolver,
                 toolHintResolver: dependencies.toolHintResolver
             ) {
                 try Task.checkCancellation()
-                try await dependencies.assistantPublisher(hint)
+                try await dependencies.toolHintPublisher(
+                    name,
+                    messageType,
+                    parameters
+                )
             }
 
             guard !turn.toolCalls.isEmpty else {
@@ -405,12 +429,15 @@ public struct AIOrchestrator {
         return executions
     }
 
+    /// Builds the tool-hint row for a turn. Returns the row's display name, the
+    /// message type with `sealedParameters` still empty, and the parameters in
+    /// the clear for the host to seal — see `ToolHintPublisher`.
     static func toolHint(
         for turn: AITurnResult,
         stage: AIStage,
         toolNameResolver: ToolNameResolver,
         toolHintResolver: ToolHintResolver
-    ) -> (String, KeepTalkingContextMessage.MessageType)? {
+    ) -> (String, KeepTalkingContextMessage.MessageType, [String: String]?)? {
         guard !turn.toolCalls.isEmpty else {
             return nil
         }
@@ -442,8 +469,9 @@ public struct AIOrchestrator {
                 targetNodeID: singleContext?.targetNodeID,
                 actionID: singleContext?.actionID,
                 actionName: singleContext?.actionName,
-                parameters: singleContext?.parameters
-            )
+                sealedParameters: nil
+            ),
+            singleContext?.parameters
         )
     }
 
