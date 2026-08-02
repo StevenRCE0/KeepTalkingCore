@@ -193,9 +193,6 @@ public final class KeepTalkingBlobHTTP2Channel: @unchecked Sendable {
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .channelOption(ChannelOptions.socketOption(.so_keepalive), value: 1)
             .channelInitializer { channel in
-                channel.closeFuture.whenComplete { _ in
-                    weakSelf.value?.handleConnectionLost(reason: "client channel closed")
-                }
                 let ssl: NIOSSLClientHandler
                 do {
                     ssl = try NIOSSLClientHandler(context: sslContext, serverHostname: nil)
@@ -216,6 +213,9 @@ public final class KeepTalkingBlobHTTP2Channel: @unchecked Sendable {
             switch result {
                 case .success(let channel):
                     self.stateLock.sync { self.connectionChannel = channel }
+                    channel.closeFuture.whenComplete { _ in
+                        weakSelf.value?.handleConnectionLost(reason: "client channel closed")
+                    }
                     channel.eventLoop.execute {
                         channel.pipeline.handler(type: HTTP2StreamMultiplexer.self).whenComplete { muxResult in
                             switch muxResult {
