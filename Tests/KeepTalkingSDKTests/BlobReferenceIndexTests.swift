@@ -147,6 +147,99 @@ struct BlobReferenceIndexTests {
         #expect(candidates.first?.relativePath == "00/\(exclusive).pdf")
     }
 
+    // MARK: - references(inFileTreeOf:)
+
+    private func makeBlobStore() throws -> KeepTalkingBlobStore {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("KTBlobScan-\(UUID().uuidString)", isDirectory: true)
+        let store = KeepTalkingBlobStore(baseURL: base)
+        try store.ensureBaseDirectory()
+        return store
+    }
+
+    @Test("the file tree stands in for an index, ready files and partials alike")
+    func fileTreeReferences() async throws {
+        let store = try makeBlobStore()
+        defer { try? FileManager.default.removeItem(at: store.baseURL) }
+
+        let ready = blobID(1)
+        let partial = blobID(2)
+        try store.put(data: Data([0xAB]), blobID: ready, pathExtension: "png")
+        try store.appendPartial(data: Data([0xCD]), blobID: partial)
+        // Not a blob: nothing may attribute it to an identity, so nothing may
+        // delete it on an identity's behalf.
+        try Data().write(to: store.baseURL.appendingPathComponent("README"))
+
+        let references = KeepTalkingBlobReferenceIndex.references(inFileTreeOf: store)
+
+        #expect(references.map(\.blobID) == [ready, partial].sorted())
+        #expect(
+            references.first { $0.blobID == ready }?.relativePath
+                == (try store.relativePath(for: ready, pathExtension: "png"))
+        )
+        #expect(
+            references.first { $0.blobID == partial }?.relativePath
+                == (try store.partialRelativePath(for: partial))
+        )
+    }
+
+    /// A blob can be on disk twice — a promoted file plus a leftover partial.
+    /// One reference per blob, carrying the ready path, keeps deletion counts
+    /// honest (and `remove` clears the partial either way).
+    @Test("a blob present as both ready and partial yields one reference")
+    func fileTreeDeduplicatesReadyAndPartial() async throws {
+        let store = try makeBlobStore()
+        defer { try? FileManager.default.removeItem(at: store.baseURL) }
+
+        let both = blobID(5)
+        try store.put(data: Data([0xAB]), blobID: both, pathExtension: "pdf")
+        try store.appendPartial(data: Data([0xCD]), blobID: both)
+
+        let references = KeepTalkingBlobReferenceIndex.references(inFileTreeOf: store)
+
+        #expect(references.count == 1)
+        #expect(references.first?.relativePath?.hasPrefix("partial/") == false)
+    }
+
+    @Test("an empty or missing blob directory yields no references")
+    func fileTreeHandlesEmptyDirectory() throws {
+        let store = try makeBlobStore()
+        defer { try? FileManager.default.removeItem(at: store.baseURL) }
+        #expect(KeepTalkingBlobReferenceIndex.references(inFileTreeOf: store).isEmpty)
+
+        let missing = KeepTalkingBlobStore(
+            baseURL: store.baseURL.appendingPathComponent("nope", isDirectory: true)
+        )
+        #expect(KeepTalkingBlobReferenceIndex.references(inFileTreeOf: missing).isEmpty)
+    }
+
+    /// The tolerance path end to end: the identity being deleted has a database
+    /// nobody can read, so its claim is taken to be every blob on disk — and the
+    /// surviving identity still narrows it down to what only the doomed identity
+    /// had. What the survivor references must come through untouched.
+    @Test("file-tree candidates still exclude a survivor's references")
+    func fileTreeCandidatesExcludeSurvivor() async throws {
+        let store = try makeBlobStore()
+        defer { try? FileManager.default.removeItem(at: store.baseURL) }
+
+        let shared = blobID(42)
+        let doomedOnly = blobID(7)
+        for id in [shared, doomedOnly] {
+            try store.put(data: Data([0x01]), blobID: id, pathExtension: "bin")
+        }
+        let survivor = try await makeStore(blobIDs: [shared])
+
+        var candidates = KeepTalkingBlobReferenceIndex.references(inFileTreeOf: store)
+        #expect(candidates.count == 2)
+
+        try await KeepTalkingBlobReferenceIndex.subtractReferences(
+            on: survivor.database,
+            from: &candidates
+        )
+
+        #expect(candidates.map(\.blobID) == [doomedOnly])
+    }
+
     // MARK: - subtractReferences
 
     @Test("disjoint references leave every candidate standing")

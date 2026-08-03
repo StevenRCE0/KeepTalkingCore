@@ -140,6 +140,40 @@ public enum KeepTalkingBlobReferenceIndex {
         return references
     }
 
+    /// Every blob file present on disk, in the same shape `references(on:)`
+    /// returns — the file tree standing in for an index.
+    ///
+    /// This is what reclamation falls back to for an identity being deleted
+    /// whose database cannot be read: the largest reference set that identity
+    /// could possibly have is "every blob on this device". Taking it as the
+    /// candidate set is what makes a broken store deletable — the candidates are
+    /// still narrowed by every readable identity's own references before
+    /// anything is removed.
+    ///
+    /// A file whose name is not a well-formed blob hash cannot be attributed to
+    /// any identity, so it never becomes a candidate here. `pruneOrphanFiles` is
+    /// the path that reclaims those.
+    public static func references(
+        inFileTreeOf store: KeepTalkingBlobStore
+    ) -> [Reference] {
+        var byDigest = [Digest: Reference]()
+        for file in store.scanBlobFiles() {
+            guard let digest = Digest(hex: file.blobID) else { continue }
+            // A blob can be on disk twice — a promoted file plus a leftover
+            // partial. Keep the ready path: `KeepTalkingBlobStore.remove` clears
+            // the partial alongside it either way, and one reference per blob
+            // keeps reclamation counts honest.
+            if let existing = byDigest[digest],
+                existing.relativePath?.hasPrefix("partial/") == false
+            {
+                continue
+            }
+            byDigest[digest] = Reference(digest: digest, relativePath: file.relativePath)
+        }
+
+        return byDigest.values.sorted { $0.digest < $1.digest }
+    }
+
     /// Every blob ID `database` references, ascending and deduplicated.
     ///
     /// Reads the primary-key column alone rather than hydrating whole records.

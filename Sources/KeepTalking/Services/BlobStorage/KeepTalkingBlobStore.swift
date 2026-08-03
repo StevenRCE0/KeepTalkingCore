@@ -233,19 +233,64 @@ public struct KeepTalkingBlobStore: Sendable {
         keepRelativePaths: Set<String>,
         keepBlobIDs: Set<String>
     ) throws -> (removedCount: Int, freedBytes: Int) {
-        let fileManager = FileManager.default
+        var removedCount = 0
+        var freedBytes = 0
+
+        try enumerateFiles { fileURL, relativePath, fileSize in
+            if relativePath.hasPrefix("partial/") {
+                // Indexed iff a record tracks the blob ID encoded in the filename.
+                guard let blobID = blobID(fromRelativePath: relativePath),
+                    !keepBlobIDs.contains(blobID)
+                else { return }
+            } else if keepRelativePaths.contains(relativePath) {
+                return
+            }
+
+            try FileManager.default.removeItem(at: fileURL)
+            removedCount += 1
+            freedBytes += fileSize
+        }
+
+        return (removedCount, freedBytes)
+    }
+
+    /// Every blob file on disk, keyed the way records key them.
+    ///
+    /// This is the file tree standing in for an index: what reclamation falls
+    /// back to when a database cannot be read and that identity's reference set
+    /// has to be assumed maximal. Ready and partial files are both reported —
+    /// the caller can tell them apart by the `partial/` prefix on the path.
+    ///
+    /// Files whose name is not a well-formed blob hash are skipped. They are not
+    /// blobs, so no identity may claim them and nothing may delete them on that
+    /// basis — the same rule `pruneOrphanFiles` applies to unparseable partials.
+    public func scanBlobFiles() -> [(blobID: String, relativePath: String)] {
+        var found = [(blobID: String, relativePath: String)]()
+        enumerateFiles { _, relativePath, _ in
+            guard let blobID = blobID(fromRelativePath: relativePath) else { return }
+            found.append((blobID: blobID, relativePath: relativePath))
+        }
+        return found
+    }
+
+    /// Walks every regular file under `baseURL`, handing `body` the URL, the
+    /// path relative to `baseURL`, and the file's size (0 when unavailable).
+    ///
+    /// Shared by the two full-tree walks so they agree on what counts as a blob
+    /// file. Safe for `body` to delete the file it was handed —
+    /// `FileManager.DirectoryEnumerator` tolerates removal of already-visited
+    /// entries.
+    private func enumerateFiles(
+        _ body: (_ fileURL: URL, _ relativePath: String, _ fileSize: Int) throws -> Void
+    ) rethrows {
         guard
-            let enumerator = fileManager.enumerator(
+            let enumerator = FileManager.default.enumerator(
                 at: baseURL,
                 includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
                 options: [.skipsHiddenFiles]
             )
-        else {
-            return (0, 0)
-        }
+        else { return }
 
-        var removedCount = 0
-        var freedBytes = 0
         for case let fileURL as URL in enumerator {
             let resourceValues = try? fileURL.resourceValues(
                 forKeys: [.isRegularFileKey, .fileSizeKey]
@@ -254,20 +299,8 @@ public struct KeepTalkingBlobStore: Sendable {
                 let relativePath = relativePath(of: fileURL)
             else { continue }
 
-            if relativePath.hasPrefix("partial/") {
-                // Indexed iff a record tracks the blob ID encoded in the filename.
-                guard let blobID = partialBlobID(fromRelativePath: relativePath),
-                    !keepBlobIDs.contains(blobID)
-                else { continue }
-            } else if keepRelativePaths.contains(relativePath) {
-                continue
-            }
-
-            try fileManager.removeItem(at: fileURL)
-            removedCount += 1
-            freedBytes += resourceValues?.fileSize ?? 0
+            try body(fileURL, relativePath, resourceValues?.fileSize ?? 0)
         }
-        return (removedCount, freedBytes)
     }
 
     /// Path of `fileURL` relative to `baseURL`, in the same `prefix/hash.ext`
@@ -281,9 +314,11 @@ public struct KeepTalkingBlobStore: Sendable {
         return relative.isEmpty ? nil : relative
     }
 
-    /// The blob ID encoded in a partial file's name (`partial/prefix/hash.part`),
-    /// or `nil` if it isn't a well-formed blob hash. Mirrors `partialRelativePath`.
-    private func partialBlobID(fromRelativePath relativePath: String) -> String? {
+    /// The blob ID encoded in a file's name — `prefix/hash.ext` for a ready file,
+    /// `partial/prefix/hash.part` for a partial — or `nil` if it isn't a
+    /// well-formed blob hash. Mirrors `relativePath(for:pathExtension:)` and
+    /// `partialRelativePath(for:)`, which both put the hash in the file name.
+    private func blobID(fromRelativePath relativePath: String) -> String? {
         let fileName = (relativePath as NSString).lastPathComponent
         let candidate = (fileName as NSString).deletingPathExtension
         return try? normalizedBlobID(candidate)

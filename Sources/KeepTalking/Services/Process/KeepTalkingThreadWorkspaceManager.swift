@@ -134,6 +134,23 @@ public actor KeepTalkingThreadWorkspaceManager {
         }
     }
 
+    /// Threads that have a workspace directory on disk — the file tree standing
+    /// in for the thread table.
+    ///
+    /// The base directory is shared by every identity on the device (it sits
+    /// beside the databases, not inside one), so this is "every thread anyone
+    /// has a workspace for", not one identity's threads. Reclamation uses it as
+    /// the maximal candidate set when an identity's database cannot be read, and
+    /// narrows it by subtracting the threads the readable identities still own.
+    public func threadIDsOnDisk() -> [UUID] {
+        let entries =
+            (try? FileManager.default.contentsOfDirectory(
+                at: baseDirectory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles])) ?? []
+        return entries.compactMap { UUID(uuidString: $0.lastPathComponent) }
+    }
+
     // MARK: - Quota (best-effort; seatbelt cannot enforce a hard cap)
 
     /// Best-effort pre-run check that a thread's workspace is under the soft byte
