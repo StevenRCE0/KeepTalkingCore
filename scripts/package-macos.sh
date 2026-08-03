@@ -64,4 +64,4 @@ echo "Done. Distribution folder:"
 echo "  $OUTPUT_DIR"
 echo
 echo "Run with:"
-echo "  $OUTPUT_DIR/KeepTalking --signal-url ws://127.0.0.1:17000/ws --context 11111111-2222-3333-4444-555555555555 --id alice"
+echo "  $OUTPUT_DIR/KeepTalking --sfu 127.0.0.1:9701 --context 11111111-2222-3333-4444-555555555555"

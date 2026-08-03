@@ -8,14 +8,14 @@ import NIOPosix
 import NIOSSL
 
 /// Direct-peer data carrier: a single long-lived bidirectional HTTP/2
-/// stream between two peers, TLS over TCP. Replaces the previous QUIC
-/// carrier — wire shape on top of HTTP/2 is unchanged (4-byte BE length
-/// prefix + payload), so the existing `BlobLab` framing keeps working.
+/// stream between two peers, TLS over TCP. The wire shape on top of HTTP/2
+/// is a 4-byte big-endian length prefix followed by the payload, which is
+/// what `BlobLab` framing expects.
 ///
-/// Role selection mirrors the QUIC version: the lexicographically-lower
-/// node-ID listens, the higher dials. libjuice's ICE handshake still
-/// provides reachability; the listener publishes its TCP port over the
-/// existing p2p signal channel.
+/// Role selection is deterministic: the lexicographically-lower node-ID
+/// listens, the higher dials. libjuice's ICE handshake provides
+/// reachability; the listener publishes its TCP port over the p2p signal
+/// channel.
 ///
 /// Why HTTP/2 here instead of raw TCP? Because the SDK uses NIOHTTP2 for
 /// its SFU client too, so the same TLS+H2 setup, certificate-validation

@@ -8,6 +8,8 @@ public enum KeepTalkingTransportRoute: String, Codable, Sendable {
     /// Ed25519 auth and opaque envelope routing). Also carries
     /// SFU-mediated relay payloads when direct P2P falls back.
     case sfu
-    /// Direct P2P over libjuice-negotiated ICE with QUIC on top.
+    /// Direct P2P to a single peer. libjuice-negotiated ICE only proves the
+    /// path; the payload then rides one long-lived bidirectional HTTP/2 stream
+    /// over TLS, and the ICE session is closed once that carrier connects.
     case p2p
 }

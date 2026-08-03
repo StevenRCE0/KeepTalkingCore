@@ -157,9 +157,16 @@ extension KeepTalkingClient {
     /// Marks a remote node as trusted or owned and returns the local public key for that relation.
     ///
     /// - Parameters:
-    ///   - targetNodeID: Remote node to update.
+    ///   - targetNodeID: Remote node to update. Its node row is created if it is
+    ///     not already known locally.
     ///   - scope: Trust scope to grant.
-    ///   - own: Whether the relationship should become ownership.
+    ///   - own: Whether the relationship should become ownership. When `false` the
+    ///     new scope is merged into any existing trust relationship rather than
+    ///     replacing it.
+    ///   - localNode: The local node the relation originates from. It must already
+    ///     be persisted — its identifier is required to key the relation.
+    ///   - database: Database holding the node and relation rows to read and write.
+    ///   - keychain: Secure store backing the relation's key material.
     /// - Returns: The public key shared with the remote node.
     @discardableResult
     public static func trust(

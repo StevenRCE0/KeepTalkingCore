@@ -525,10 +525,14 @@ public actor MCPManager {
 
     /// Invokes an MCP tool for the supplied action call.
     ///
-    /// - Parameter scope: The caller's grant scope. `.all` or a `.verbs` set
-    ///   containing the `.callTool` class wildcard permits all tools; otherwise
-    ///   only tools named by `.named(...)` tokens are permitted (an empty set
-    ///   rejects every call).
+    /// - Parameters:
+    ///   - action: The MCP-backed action whose server hosts the tool. Its client is
+    ///     connected on demand and reused across calls.
+    ///   - call: The action call to invoke, supplying the tool name and arguments.
+    ///   - scope: The caller's grant scope. `.all` or a `.verbs` set
+    ///     containing the `.callTool` class wildcard permits all tools; otherwise
+    ///     only tools named by `.named(...)` tokens are permitted (an empty set
+    ///     rejects every call).
     ///
     /// MCP tool calls do NOT receive a per-call resource manifest (the
     /// `KT_<KIND>_<H8>` env vars Skills and ACP get): the stdio server is launched

@@ -10,10 +10,9 @@ decide *how bytes actually reach the wire*. ``KeepTalkingContextTransport`` impl
 first half and knows nothing about the second: it depends only on the internal channel
 protocols (`KeepTalkingTransportChannelProtocol`, and its broadcast and peer refinements)
 plus two declarative properties of the envelope's kind. There is no ICE, WebRTC, SDP, or
-data-channel vocabulary anywhere in it. That is why the direct path could be re-implemented
-— WebRTC data channels replaced by libjuice ICE, then QUIC replaced by HTTP/2 over TLS —
-without the routing code changing at all, and why tests can inject a fake channel factory
-and exercise routing with no network.
+data-channel vocabulary anywhere in it. That is why the direct path's entire carrier stack
+can be swapped without the routing code changing at all, and why tests can inject a fake
+channel factory and exercise routing with no network.
 
 Below the orchestrator sit exactly two concrete channels:
 
