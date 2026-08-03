@@ -40,6 +40,8 @@ let package = Package(
         // swift-uuidv7: time-ordered (RFC 9562 v7) UUID generation used for
         // default primary keys on newly created entities. See Helpers/UUIDv7.swift.
         .package(url: "https://github.com/mhayes853/swift-uuidv7.git", from: "0.6.1"),
+        // DocC catalog build: `swift package generate-documentation`.
+        .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.0.0"),
     ],
     targets: [
         .target(

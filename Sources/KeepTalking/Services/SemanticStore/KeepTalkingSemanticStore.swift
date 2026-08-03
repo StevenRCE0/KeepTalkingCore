@@ -29,10 +29,17 @@ public protocol KeepTalkingSemanticStore: Sendable {
     /// Hybrid (semantic + keyword) search: return the top-k threads most
     /// relevant to the query.
     ///
-    /// - Parameter threshold: the minimum combined relevance score (0…1) a
-    ///   result must clear, or `nil` to use the store's default. Unattended
-    ///   retrieval (agents) should pass a low value for recall; interactive
-    ///   search should pass a higher value for precision.
+    /// - Parameters:
+    ///   - query: the natural-language text matched against the indexed thread
+    ///     documents, both semantically and by keyword.
+    ///   - topK: the maximum number of results to return. Callers treat it as an
+    ///     upper bound and re-rank the returned results themselves.
+    ///   - threshold: the minimum combined relevance score (0…1) a
+    ///     result must clear, or `nil` to use the store's default. Unattended
+    ///     retrieval (agents) should pass a low value for recall; interactive
+    ///     search should pass a higher value for precision.
+    /// - Returns: at most `topK` results, each pairing a matching thread's UUID
+    ///   with its indexed document text and relevance score.
     func search(
         query: String,
         topK: Int,

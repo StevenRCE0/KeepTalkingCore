@@ -13,6 +13,12 @@ public struct FilesystemTransferBridge: Sendable {
             _ fileURL: URL, _ filename: String, _ mimeType: String, _ recipient: UUID
         ) async throws -> KeepTalkingOneTimeBlobRef
 
+    /// Creates a bridge around the closure that performs the transfer.
+    ///
+    /// - Parameter sendOneTimeBlob: Streams the file at `fileURL` to `recipient`
+    ///   as a one-time encrypted blob, tagging it with `filename` and
+    ///   `mimeType`, and returns the ref (with the sealed key) to embed in the
+    ///   action result.
     public init(
         sendOneTimeBlob:
             @escaping @Sendable (
@@ -85,6 +91,12 @@ public actor FilesystemActionManager {
 
     public init() {}
 
+    /// Caches an action's filesystem bundle so later calls can resolve its
+    /// `rootPath` sandbox.
+    ///
+    /// - Parameter action: An action whose payload is a filesystem bundle.
+    /// - Throws: `FilesystemActionManagerError.invalidAction` if the payload is
+    ///   not a filesystem bundle, or `.missingActionID` if the action has no ID.
     public func registerFilesystemAction(_ action: KeepTalkingAction) async throws {
         guard case .filesystem(let bundle) = action.payload else {
             throw FilesystemActionManagerError.invalidAction
@@ -133,6 +145,20 @@ public actor FilesystemActionManager {
     ///   - call: The call payload containing `operation` and arguments.
     ///   - scope: Effective grant scope from the caller's grant.
     ///   - contextID: The active context's UUID.
+    ///   - callerNodeID: Node that issued the call. Used as the recipient when
+    ///     `get-file` streams a host file back as a one-time encrypted blob.
+    ///   - isLocalExecution: `true` when the caller is this node and therefore
+    ///     already has filesystem access. `get-file` then reports the resolved
+    ///     host path instead of streaming a blob, and `put-file` reads its bytes
+    ///     from the caller-supplied `source` argument instead of `inputFiles`.
+    ///   - inputFiles: Files the controller materialized from the call's
+    ///     one-time blob transfers. Only consulted for a remote `put-file`,
+    ///     which uses the first entry as its source; ignored for every other
+    ///     operation and for local execution.
+    /// - Returns: The operation's text content, an `isError` flag (always
+    ///   `false` — failures are thrown rather than reported), and any one-time
+    ///   blob refs the operation produced. `outputTransfers` is non-empty only
+    ///   for a remote `get-file`.
     public func callAction(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,

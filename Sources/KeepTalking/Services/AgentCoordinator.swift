@@ -132,10 +132,8 @@ actor AgentCoordinator {
             cancelledRunIDs.insert(runID)
             entry.value.task.cancel()
             active[contextID] = nil
-            if let turnID = runItem.agentTurnID,
-                let continuation = suspensionContinuations.removeValue(forKey: turnID)
-            {
-                continuation.resume(throwing: CancellationError())
+            if let turnID = runItem.agentTurnID {
+                failContinuations(forTurn: turnID)
             }
             startNextQueued(contextID: contextID)
             emit()
@@ -147,9 +145,7 @@ actor AgentCoordinator {
         if let turnEntry = suspended.first(where: { $0.value.id == runID }) {
             let turnID = turnEntry.key
             suspended.removeValue(forKey: turnID)
-            if let continuation = suspensionContinuations.removeValue(forKey: turnID) {
-                continuation.resume(throwing: CancellationError())
-            }
+            failContinuations(forTurn: turnID)
             emit()
             return
         }
@@ -371,14 +367,34 @@ actor AgentCoordinator {
     /// Cancels a suspended run by failing its continuation.
     func cancelSuspended(agentTurnID: UUID) {
         suspended.removeValue(forKey: agentTurnID)
-        let continuationIDs = continuationTurnIDs.compactMap { key, value in
-            value == agentTurnID ? key : nil
+        failContinuations(forTurn: agentTurnID)
+    }
+
+    /// Continuation ids installed for `agentTurnID`.
+    ///
+    /// `suspensionContinuations` and `earlyResponses` are keyed by the per-park
+    /// continuation-message id — one agent run can suspend more than once — while
+    /// `active`/`suspended` are keyed by agentTurnID. `continuationTurnIDs` is the
+    /// only bridge between the two; neither map may be indexed with the other's key.
+    private func continuationIDs(forTurn agentTurnID: UUID) -> [UUID] {
+        continuationTurnIDs.compactMap { $0.value == agentTurnID ? $0.key : nil }
+    }
+
+    /// True while at least one of `agentTurnID`'s continuations is still parked.
+    private func hasPendingContinuation(forTurn agentTurnID: UUID) -> Bool {
+        continuationIDs(forTurn: agentTurnID).contains {
+            suspensionContinuations[$0] != nil
         }
-        for continuationID in continuationIDs {
+    }
+
+    /// Unwinds every continuation parked for `agentTurnID` with cancellation and
+    /// discards any response stashed for it, so the run's task cannot be left
+    /// awaiting a response that will never arrive. Idempotent.
+    private func failContinuations(forTurn agentTurnID: UUID) {
+        for continuationID in continuationIDs(forTurn: agentTurnID) {
             continuationTurnIDs[continuationID] = nil
-            if let continuation = suspensionContinuations.removeValue(forKey: continuationID) {
-                continuation.resume(throwing: CancellationError())
-            }
+            suspensionContinuations.removeValue(forKey: continuationID)?
+                .resume(throwing: CancellationError())
         }
         earlyResponses = earlyResponses.filter { $0.value.agentTurnID != agentTurnID }
     }
@@ -458,9 +474,7 @@ actor AgentCoordinator {
         var result: [KeepTalkingAgentRunSnapshot] = []
         for (_, entry) in active {
             let isSuspended =
-                entry.item.agentTurnID.map {
-                    suspensionContinuations[$0] != nil
-                } ?? false
+                entry.item.agentTurnID.map(hasPendingContinuation(forTurn:)) ?? false
             result.append(
                 KeepTalkingAgentRunSnapshot(
                     id: entry.item.id,
@@ -490,7 +504,7 @@ actor AgentCoordinator {
             // is still pending; once `deliverContinuationResponse` resumes it (drops
             // the pending continuation) it is running again — reflect that, otherwise
             // a resumed run reads as "suspended" until it completes.
-            let isStillSuspended = suspensionContinuations[turnID] != nil
+            let isStillSuspended = hasPendingContinuation(forTurn: turnID)
             result.append(
                 KeepTalkingAgentRunSnapshot(
                     id: item.id,

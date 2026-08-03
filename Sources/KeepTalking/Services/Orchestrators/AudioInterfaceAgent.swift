@@ -25,6 +25,33 @@ public struct AudioInterfaceAgent: Sendable {
         public let deferralSystemPrompt: String
         public let responseLanguages: [String]
 
+        /// Creates a bridge configuration.
+        ///
+        /// Each `…SystemPrompt` argument overrides the corresponding built-in
+        /// default; passing `nil` keeps the default. In both cases the language
+        /// instruction derived from `responseLanguages` is appended to the
+        /// stored prompt.
+        ///
+        /// - Parameters:
+        ///   - audioModel: Model identifier used for every audio-model turn.
+        ///   - voice: Voice name requested for synthesized audio output.
+        ///   - audioFormat: Wire format requested for synthesized audio output.
+        ///   - maxBridgeTurns: Maximum number of intent-extraction turns before
+        ///     the bridge flow gives up.
+        ///   - responseLanguages: Languages the spoken replies should use.
+        ///     Entries are trimmed of surrounding whitespace, and empty or
+        ///     duplicate entries are dropped. An empty list adds no language
+        ///     instruction to the prompts.
+        ///   - bridgeSystemPrompt: System prompt for the intent-extraction
+        ///     turns, which decide whether to speak back or call the delegation
+        ///     tool.
+        ///   - rephraseSystemPrompt: System prompt used to rephrase the main
+        ///     agent's answer for spoken delivery. Also used by
+        ///     `speak(text:connector:audioOutputHandler:)`.
+        ///   - ackSystemPrompt: System prompt for the short acknowledgement
+        ///     spoken while the delegate is running.
+        ///   - deferralSystemPrompt: System prompt for the notice spoken when
+        ///     the delegated turn defers instead of answering.
         public init(
             audioModel: String,
             voice: String = "alloy",
@@ -120,6 +147,12 @@ public struct AudioInterfaceAgent: Sendable {
         /// Distilled intent — suitable as the prompt text for the main agent.
         public let intent: String
 
+        /// Creates a delegation request.
+        ///
+        /// - Parameters:
+        ///   - contextID: The context this voice session belongs to.
+        ///   - transcript: Verbatim transcription of what the user said.
+        ///   - intent: Distilled intent, suitable as the main agent's prompt text.
         public init(contextID: UUID, transcript: String, intent: String) {
             self.contextID = contextID
             self.transcript = transcript
@@ -138,6 +171,19 @@ public struct AudioInterfaceAgent: Sendable {
         /// The initial acknowledgement audio (from the extraction turn).
         public let ackAudioOutput: AIAudioOutput?
 
+        /// Creates a bridge result.
+        ///
+        /// - Parameters:
+        ///   - contextID: The context the voice session belonged to.
+        ///   - transcript: Verbatim transcription of what the user said. Empty
+        ///     when the audio model answered without calling the delegation tool
+        ///     and reported no transcript.
+        ///   - intent: The intent extracted from the user's speech.
+        ///   - delegateResponse: The main agent's answer, or the deferral reason
+        ///     when the agent turn suspended. Empty when no delegation happened.
+        ///   - audioOutput: The final rephrased audio output for the user.
+        ///   - ackAudioOutput: The initial acknowledgement audio from the
+        ///     extraction turn, if the model produced any.
         public init(
             contextID: UUID,
             transcript: String,
@@ -235,10 +281,29 @@ public struct AudioInterfaceAgent: Sendable {
     /// - Parameters:
     ///   - audioData: Raw audio bytes (PCM16 or WAV, depending on `inputFormat`).
     ///   - inputFormat: Wire format of the input audio (e.g. "wav", "pcm16").
-    ///   - connector: The AI connector to use for both audio model and main agent calls.
+    ///   - contextID: The context this voice session belongs to. Stamped onto
+    ///     the `DelegationRequest` handed to `delegate` and onto the returned
+    ///     `BridgeResult`; it is not otherwise interpreted here.
+    ///   - connector: The AI connector used for every audio-model turn
+    ///     (extraction, acknowledgement, deferral notice, and rephrase). The
+    ///     main agent is reached through `delegate`, not through this connector.
     ///   - delegate: Callback that forwards the extracted intent to the main agent.
     ///   - audioOutputHandler: Called when audio output is produced (for real-time playback).
     ///   - statusObserver: Called with status updates during the flow.
+    ///   - routingContext: Optional extra system-prompt text prepended to the
+    ///     intent-extraction turns, after the bridge system prompt and before
+    ///     the user's audio. Ignored when `nil` or empty.
+    /// - Returns: A `BridgeResult` carrying the transcript, extracted intent,
+    ///   the delegate's response, and the ack/final audio outputs. When the
+    ///   audio model answers the utterance itself without calling the delegate
+    ///   tool, `delegateResponse` is empty and the ack audio is returned as both
+    ///   `audioOutput` and `ackAudioOutput`.
+    /// - Throws: `AudioInterfaceAgentError.intentExtractionFailed` if the
+    ///   extraction loop uses up `Configuration.maxBridgeTurns` without the
+    ///   model producing either a parsable delegation tool call or a spoken
+    ///   reply. Also rethrows any error from the audio-model turns, from
+    ///   `delegate`, and `CancellationError` if the task is cancelled between
+    ///   extraction turns.
     public func run(
         audioData: Data,
         inputFormat: String,
@@ -647,6 +712,16 @@ public struct AudioInterfaceAgent: Sendable {
     /// Speak an already-finished answer aloud, naturally. Used to read out the
     /// result of a previously-deferred turn if the user is still on the call
     /// when it resolves. Streams audio chunk-by-chunk via `audioOutputHandler`.
+    ///
+    /// - Parameters:
+    ///   - text: The finished answer to speak. Sent as the user message under
+    ///     the configured rephrase system prompt, so the model delivers it in
+    ///     natural spoken form rather than verbatim.
+    ///   - connector: The AI connector used for the audio-model turn.
+    ///   - audioOutputHandler: Called with each streamed audio chunk as it
+    ///     arrives. The turn's aggregate result is discarded, so this handler is
+    ///     the only way to receive the audio.
+    /// - Throws: Any error raised by the audio-model turn.
     public func speak(
         text: String,
         connector: any AIConnector,

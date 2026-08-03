@@ -38,6 +38,12 @@ extension KeepTalkingClient {
     ///     for `.forward`).
     ///   - direction: walk direction relative to the cursor.
     ///   - limit: maximum messages to return.
+    ///   - lowerBound: inclusive oldest timestamp to consider. Messages
+    ///     with `timestamp < lowerBound` are excluded regardless of
+    ///     `cursor` and `direction`. Pass `nil` for no lower bound.
+    ///   - upperBound: inclusive newest timestamp to consider. Messages
+    ///     with `timestamp > upperBound` are excluded regardless of
+    ///     `cursor` and `direction`. Pass `nil` for no upper bound.
     /// - Returns: messages in the direction's natural order. The caller
     ///   sorts ascending for canonical display when needed.
     public func loadMessagePage(

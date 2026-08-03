@@ -168,15 +168,63 @@ extension KeepTalkingClient {
     /// SDK's in-memory `AgentCoordinator`; callers that need persistence across
     /// navigation, app switching, or process death should own the durable
     /// queue and call this only when the item reaches the head.
+    ///
     /// - Parameters:
+    ///   - prompt: The prompt text. Persisted and broadcast as the prompt
+    ///     message when `sendPromptMessage` is `true`, and handed to the model
+    ///     as the current user message either way.
+    ///   - attachments: Local files to attach to the prompt. Each is read from
+    ///     its `sourceURL` into the blob store, attached to the prompt message
+    ///     row, and included in the model's user message — images inline, other
+    ///     types as a text fallback. An attachment larger than
+    ///     `maxAINativeAttachmentBytes` is replaced by an omission note in the
+    ///     model input.
+    ///   - contextID: Identifies the context the prompt message and every
+    ///     message the run publishes belong to.
+    ///   - model: Model identifier driving the main agent loop. Also recorded
+    ///     on the `.autonomous` sender of the messages the run publishes.
+    ///   - actModel: Model for the ACT sub-agent that executes `kt_run_action`
+    ///     calls. When `nil`, the ACT agent reuses the main loop's active
+    ///     model.
+    ///   - roleName: Sender name recorded on the `.autonomous` messages the run
+    ///     publishes.
+    ///   - reasoningEffort: Reasoning effort forwarded to the connector through
+    ///     the turn configuration. `nil` leaves the choice to the connector.
+    ///   - sendPromptMessage: When `true`, the prompt and its attachments are
+    ///     persisted and broadcast into the context before the run starts. Pass
+    ///     `false` when the prompt message is already in the context — the call
+    ///     then runs the AI side only and appends no duplicate user message.
     ///   - promptType: Message type to stamp on the prompt row. Defaults to
     ///     `.message` (a typed prompt); the voice→AI bridge passes
     ///     `.transcript(source:)` so the prompt renders as a (fainter)
     ///     transcript bubble and skips wake-notifications, while the AI still
     ///     receives the same text.
+    ///   - agentTurnID: Turn identifier stamped on the prompt message and on
+    ///     every message the run publishes, tying them together as one turn.
+    ///     It also scopes the stale-continuation cancellation performed once the
+    ///     run returns, and — when `checkpoint` is non-`nil` — excludes this
+    ///     turn's already-recorded messages from the rebuilt context transcript,
+    ///     since the checkpoint already carries them.
+    ///   - onPromptMessageSent: Invoked after the prompt message has been
+    ///     persisted and broadcast and before the AI run begins. Not invoked
+    ///     when `sendPromptMessage` is `false`.
+    ///   - checkpoint: Durable progress from an earlier, interrupted attempt at
+    ///     this same turn. When supplied, the orchestrator resumes from it
+    ///     instead of starting a fresh transcript, and returns the recorded
+    ///     assistant text immediately if the checkpoint is already complete.
+    ///     `nil` starts a new run.
+    ///   - onCheckpoint: Invoked with an updated checkpoint each time the run
+    ///     makes durable progress — after each completed tool call and at every
+    ///     turn boundary — so the caller can persist it. Errors thrown from it
+    ///     propagate out of this call.
     /// - Returns: The agent run's final assistant text, so callers (e.g. the
     ///   voice bridge) can speak the reply. Empty string if the run produced
     ///   no text.
+    /// - Throws: `CancellationError` if the surrounding task is cancelled
+    ///   before or between phases, `KeepTalkingClientError.aiNotConfigured`
+    ///   when no AI connector is configured, or any error raised while reading
+    ///   and storing `attachments`, publishing the prompt message, or running
+    ///   the agent loop.
     @discardableResult
     public func runDequeuedAIPrompt(
         _ prompt: String,

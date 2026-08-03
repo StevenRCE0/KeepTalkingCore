@@ -559,20 +559,36 @@ public final class KeepTalkingClient: @unchecked Sendable {
     ///                  on incoming action calls). Should match the active
     ///                  provider's model — for OpenRouter this is provider-prefixed
     ///                  (e.g. `openai/gpt-5-codex`).
+    ///   - responseLanguages: Preferred natural-language output languages for
+    ///                        agent prompts. Empty means infer from the user.
+    ///   - aiConnector: Optional pre-built connector for the main agent. When
+    ///                  supplied it is used as-is and the `openAI*` parameters are
+    ///                  ignored. When `nil`, the client builds an OpenAI-compatible
+    ///                  connector from `openAIAPIKey` (falling back to the
+    ///                  `OPENAI_API_KEY` environment variable); if no key is found
+    ///                  anywhere, no connector is created and AI features stay off
+    ///                  while messaging and transport continue to work.
     ///   - actConnector: Optional connector for the ACT (action/tool-calling)
     ///                   sub-agent. When `nil`, the ACT agent reuses
     ///                   `aiConnector`. Pass a distinct connector only when the
     ///                   ACT role targets a different provider/endpoint than the
     ///                   main agent.
-    ///   - responseLanguages: Preferred natural-language output languages for
-    ///                        agent prompts. Empty means infer from the user.
     ///   - stdioTransportLauncher: Optional stdio transport launcher used for
     ///     MCP stdio actions.
     ///   - skillScriptExecutor: Optional skill script executor used for skill
     ///     script tool calls.
-    ///   - primitiveActionCallback: Callback used by primitive actions.
+    ///   - primitiveRegistry: Optional registry supplying the platform primitive
+    ///                        actions available to agents on this host. When `nil`,
+    ///                        no primitive actions are exposed.
     ///   - logon: Correlation identifier for the current client runtime.
-    ///   - localStore: Local persistence backend for models and state.
+    ///   - localStore: Local persistence backend for models and state. Required —
+    ///                 constructing a store is asynchronous and a default argument
+    ///                 cannot await, so callers build the store first and inject it.
+    ///   - keychain: Secure backing store for secrets that must never live in the
+    ///               model database — group chat secrets, node identity private
+    ///               keys, and credentials. Defaults to an in-memory store, which
+    ///               forgets every secret on process exit; shipping hosts should
+    ///               pass a persistent implementation.
     public init(
         config: KeepTalkingConfig,
         kvService: (any KeepTalkingKVService)? = nil,

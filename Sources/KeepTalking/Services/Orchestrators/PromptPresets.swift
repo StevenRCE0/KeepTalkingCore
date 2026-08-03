@@ -205,7 +205,8 @@ public enum AIPromptPresets {
 
     // MARK: - On-device system prompt (Apple Intelligence / FoundationModels)
 
-    /// A compact system prompt for the on-device ``SystemLanguageModel``.
+    /// A compact system prompt for the on-device `SystemLanguageModel`
+    /// (Apple `FoundationModels`, available only on Apple platforms).
     public static func onDeviceSystemPrompt(
         currentDate: String,
         platform: String

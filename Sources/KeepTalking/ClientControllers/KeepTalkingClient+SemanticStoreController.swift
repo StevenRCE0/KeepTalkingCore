@@ -6,6 +6,16 @@ extension KeepTalkingClient {
 
     /// Re-indexes all threads for `contextID` and prunes any store entries that no
     /// longer correspond to a known thread. Fire-and-forget.
+    ///
+    /// The work is detached onto a background-priority `Task` and any thrown error
+    /// is discarded; use `reconcileContextThreads(_:on:semanticStore:)` directly
+    /// when the caller needs to await completion or observe failures.
+    /// - Parameters:
+    ///   - contextID: Context whose threads are reconciled against the index.
+    ///   - database: Database the thread, message and attachment rows are read
+    ///     from, and where each thread's semantic document digest is recorded.
+    ///   - semanticStore: Store that receives the resulting index, update and
+    ///     remove calls.
     public static func autoEmbedContext(
         _ contextID: UUID,
         on database: any Database,
@@ -21,6 +31,13 @@ extension KeepTalkingClient {
     }
 
     /// Removes a single thread from the semantic store. Fire-and-forget.
+    ///
+    /// The removal is detached onto a background-priority `Task` and any thrown
+    /// error is discarded.
+    /// - Parameters:
+    ///   - threadID: Thread to remove. A thread's UUID is also its document ID in
+    ///     the store.
+    ///   - semanticStore: Store the document is removed from.
     public static func autoDeindex(
         _ threadID: UUID,
         semanticStore: any KeepTalkingSemanticStore
@@ -36,6 +53,21 @@ extension KeepTalkingClient {
     /// is rethrown after the pass so a caller can retry the whole idempotent
     /// reconciliation later. A retry always reloads thread state and therefore
     /// incorporates edits made after the event that requested reconciliation.
+    /// - Parameters:
+    ///   - contextID: Context whose threads are rebuilt. Only threads belonging to
+    ///     this context are re-indexed, but stale-document pruning is evaluated
+    ///     against every known thread ID, so documents for threads deleted in any
+    ///     context are removed by this pass.
+    ///   - database: Database the thread, message and attachment rows are read
+    ///     from, and where each thread's semantic document digest is written back
+    ///     once its document has been committed to the store.
+    ///   - semanticStore: Store that is brought in line with the loaded rows via
+    ///     `indexThread`, `updateThread` and `removeThread`. Its current contents
+    ///     are read first, so a thread whose digest and indexed text already match
+    ///     the freshly built document is skipped.
+    /// - Throws: The first error raised while pruning or rebuilding a document.
+    ///   Every document is still attempted, and the error is rethrown only after
+    ///   the pass finishes.
     public static func reconcileContextThreads(
         _ contextID: UUID,
         on database: any Database,
@@ -124,10 +156,21 @@ extension KeepTalkingClient {
     ///
     /// Unlike ``autoEmbedContext(_:on:semanticStore:)`` this awaits completion, so
     /// a caller (e.g. a "Reindex" button) can report progress and refresh counts.
-    /// - Parameter onProgress: invoked after each thread with `(completed, total)`.
-    ///   Use it to surface progress and to drain the embedder's memory between
-    ///   documents — bulk embedding is the heaviest part and benefits from a
-    ///   periodic cache release.
+    /// - Parameters:
+    ///   - database: Database every thread is read from — along with the messages
+    ///     and attachments that make up each document — and where each thread's
+    ///     semantic document digest is written back after its document is
+    ///     committed to the store.
+    ///   - semanticStore: Store that is rebuilt. Its current document list is read
+    ///     first to decide, per thread, between `indexThread`, `updateThread` and
+    ///     `removeThread`.
+    ///   - onProgress: invoked after each thread with `(completed, total)`.
+    ///     Use it to surface progress and to drain the embedder's memory between
+    ///     documents — bulk embedding is the heaviest part and benefits from a
+    ///     periodic cache release.
+    /// - Throws: Any error raised by the database queries or the semantic store.
+    ///   Unlike `reconcileContextThreads(_:on:semanticStore:)` the pass stops at
+    ///   the first failure, leaving the remaining threads untouched.
     public static func reindexAllThreads(
         on database: any Database,
         semanticStore: any KeepTalkingSemanticStore,
@@ -193,6 +236,16 @@ extension KeepTalkingClient {
     /// Builds the indexable text content for a thread.
     /// Includes the full thread transcript, prefixed by the thread summary when
     /// available, plus attachment metadata for any attachments in range.
+    /// - Parameters:
+    ///   - thread: Thread to render. Its resolved message range selects the
+    ///     messages, its `chitterChatter` IDs are dropped, rows whose type is not
+    ///     `.message` are dropped, and its trimmed `summary` — when non-empty —
+    ///     becomes the `Topic:` prefix.
+    ///   - database: Database the context's messages and attachments are loaded
+    ///     from. Attachment blobs are never read, only metadata.
+    /// - Returns: The document text, or an empty string when the thread's message
+    ///   range cannot be resolved or the range yields no summary, message or
+    ///   attachment content.
     public static func threadDocumentText(
         for thread: KeepTalkingThread,
         on database: any Database
