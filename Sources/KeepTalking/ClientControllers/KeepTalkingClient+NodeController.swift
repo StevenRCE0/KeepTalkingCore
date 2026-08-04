@@ -1212,10 +1212,19 @@ extension KeepTalkingClient {
         }
     }
 
+    /// The self→self relation, guaranteed to carry a usable identity keypair.
+    ///
+    /// The keypair is what makes this relation good for anything: without it
+    /// `localKeyAgreementMaterials` finds the relation, finds no key rows, and
+    /// throws `localIdentityPrivateKeyMissing` — so every seal addressed to this
+    /// node fails. It's minted on the way out of *both* branches, not just on
+    /// creation, because an install that has already run holds a keypair-less
+    /// relation and would otherwise never be repaired.
     private func ensureLocalIdentityRelation() async throws
         -> KeepTalkingNodeRelation
     {
         let localNode = try await getCurrentNodeInstance()
+        let relation: KeepTalkingNodeRelation
 
         if let existing = try await KeepTalkingNodeRelation.query(
             on: localStore.database
@@ -1227,16 +1236,19 @@ extension KeepTalkingClient {
                 existing.relationship = .owner
                 try await existing.save(on: localStore.database)
             }
-            return existing
+            relation = existing
+        } else {
+            relation = try KeepTalkingNodeRelation(
+                from: localNode,
+                to: localNode,
+                relationship: .owner
+            )
+            try await relation.save(on: localStore.database)
         }
 
-        let relation = try KeepTalkingNodeRelation(
-            from: localNode,
-            to: localNode,
-            relationship: .owner
-        )
-
-        try await relation.save(on: localStore.database)
+        // Idempotent: returns the existing keypair when the Keychain still holds
+        // its private half, and regenerates when it doesn't.
+        _ = try await ensureOutgoingIdentityKeypair(for: relation)
         return relation
     }
 
