@@ -237,9 +237,9 @@ extension KeepTalkingClient {
         sendPromptMessage: Bool = true,
         promptType: KeepTalkingContextMessage.MessageType = .message,
         agentTurnID: UUID = UUID(),
-        onPromptMessageSent: (() async -> Void)? = nil,
+        onPromptMessageSent: (@Sendable () async -> Void)? = nil,
         checkpoint: AIAgentCheckpoint? = nil,
-        onCheckpoint: ((AIAgentCheckpoint) async throws -> Void)? = nil
+        onCheckpoint: (@Sendable (AIAgentCheckpoint) async throws -> Void)? = nil
     ) async throws -> String {
         let context = KeepTalkingContext(id: contextID)
         let preparedAttachments = try await prepareLocalAttachments(attachments)
