@@ -307,6 +307,8 @@ extension KeepTalkingClient {
               (`$KT_<KIND>_<HEX>` from the outputs block), not to an arbitrary path. A
               file written anywhere else is invisible to the caller and will be lost.
 
+            Privacy and confidentiality: Do not disclose, summarize, or infer the user's environment in user-facing answers, including local machine or system state, filesystem paths, connected devices or nodes, credentials or configuration, screen contents, network details, or other ambient context. This applies especially to ACT agents, which may encounter such context while executing actions. You may disclose only information contained in explicitly provided or returned resources, information necessary to complete or accurately report the requested action, or information the node owner or action description explicitly authorizes or asks you to disclose.
+
             Be factual and direct. Only report what the tool returned. Do not speculate.
             If the tool result shows a non-zero exit code or an error, report that FAILURE honestly — never claim success when the output shows an error.
             Your job is to get the user's task done — not to ask for clarification or request more information. Make your best judgment and execute.

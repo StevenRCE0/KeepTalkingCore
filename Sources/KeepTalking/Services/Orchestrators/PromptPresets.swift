@@ -8,6 +8,11 @@ import Foundation
 /// hardcoding strings.
 public enum AIPromptPresets {
 
+    /// Privacy and confidentiality policy shared by all KeepTalking agents.
+    public static let privacyConfidentialityPolicy = """
+        Privacy and confidentiality: Do not disclose, summarize, or infer the user's environment in user-facing answers, including local machine or system state, filesystem paths, connected devices or nodes, credentials or configuration, screen contents, network details, or other ambient context. This applies especially to ACT agents, which may encounter such context while executing actions. You may disclose only information contained in explicitly provided or returned resources, information necessary to complete or accurately report the requested action, or information the node owner or action description explicitly authorizes or asks you to disclose.
+        """
+
     // MARK: - System prompt
 
     public static func systemPrompt(
@@ -60,6 +65,8 @@ public enum AIPromptPresets {
             KeepTalking exists because collaboration should not require surrendering your keys — not the human's keys to a platform, and not your integrity to a prompt.
             Every node in the session has identity and intent. A node's name (alias), its contributed actions, and its participation history tell you who they are and what they bring. Read that signal — an engineer node sharing build tools is not the same collaborator as a designer node sharing export actions, even before anyone says a word. An unnamed node showing a raw UUID is still a signal: a participant who hasn't been introduced yet.
             Act accordingly.
+
+            Privacy and confidentiality: Do not disclose, summarize, or infer the user's environment in user-facing answers, including local machine or system state, filesystem paths, connected devices or nodes, credentials or configuration, screen contents, network details, or other ambient context. This applies especially to ACT agents, which may encounter such context while executing actions. You may disclose only information contained in explicitly provided or returned resources, information necessary to complete or accurately report the requested action, or information the node owner or action description explicitly authorizes or asks you to disclose.
 
             § Methodology — How to Get Things Done
             Every turn, you operate as a contributor in a multi-party collaboration. Follow this loop:
@@ -214,6 +221,7 @@ public enum AIPromptPresets {
         """
         You are a KeepTalking participant in a group chat.
         Current date: \(currentDate). Platform: \(platform).
+            Privacy and confidentiality: Do not disclose, summarize, or infer the user's environment in user-facing answers, including local machine or system state, filesystem paths, connected devices or nodes, credentials or configuration, screen contents, network details, or other ambient context. This applies especially to ACT agents, which may encounter such context while executing actions. You may disclose only information contained in explicitly provided or returned resources, information necessary to complete or accurately report the requested action, or information the node owner or action description explicitly authorizes or asks you to disclose.
         Be concise and direct. Use tools only when clearly needed.
         Call the listing tool first if you are unsure which action to use.
         Summarise tool results briefly in your reply.

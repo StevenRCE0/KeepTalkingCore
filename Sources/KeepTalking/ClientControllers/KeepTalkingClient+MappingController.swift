@@ -186,6 +186,47 @@ extension KeepTalkingClient {
         )
     }
 
+    /// Repaints every mapping row that carries the given tag — colour is a
+    /// property of the tag itself, not of any one target, so all rows (including
+    /// soft-deleted ones, which `addTag` revives in place) move together.
+    public static func setTagColor(
+        _ colorHex: String?,
+        forTag value: String,
+        namespace: String? = nil,
+        on database: any Database
+    ) async throws {
+        let normalizedValue = KeepTalkingMapping.normalizeLookupValue(value)
+        guard !normalizedValue.isEmpty else {
+            return
+        }
+
+        let normalizedNamespace = KeepTalkingMapping.normalizeOptional(namespace)
+        let color = KeepTalkingMapping.normalizeOptional(colorHex)
+        let mappings = try await KeepTalkingMapping.query(on: database)
+            .filter(\.$kind, .equal, .tag)
+            .filter(\.$namespace == normalizedNamespace)
+            .filter(\.$normalizedValue == normalizedValue)
+            .all()
+
+        for mapping in mappings where mapping.colorHex != color {
+            mapping.colorHex = color
+            try await mapping.save(on: database)
+        }
+    }
+
+    public func setTagColor(
+        _ colorHex: String?,
+        forTag value: String,
+        namespace: String? = nil
+    ) async throws {
+        try await Self.setTagColor(
+            colorHex,
+            forTag: value,
+            namespace: namespace,
+            on: localStore.database
+        )
+    }
+
     public static func removeTag(
         _ value: String,
         namespace: String? = nil,
