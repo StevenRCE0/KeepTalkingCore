@@ -342,7 +342,7 @@ extension KeepTalkingClient {
         )
 
         // TODO: be able to switch off in the configurations
-        let webSearchTool = makeWebSearchTool()
+        let webSearchTool = Self.makeWebSearchTool()
         let ktSkillMetainfoTool = makeKtSkillMetainfoTool()
         let attachmentListingTool = makeContextAttachmentListingTool()
         let attachmentReadTool = makeContextAttachmentReadTool()

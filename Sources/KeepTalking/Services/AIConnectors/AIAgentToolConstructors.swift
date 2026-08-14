@@ -612,7 +612,7 @@ extension KeepTalkingClient {
         )
     }
 
-    func makeWebSearchTool() -> KeepTalkingActionToolDefinition {
+    static func makeWebSearchTool() -> KeepTalkingActionToolDefinition {
         // Chat Completions only — Responses-API-style web_search_preview was dropped
         // when the protocol moved off the Responses API.
         .init(
