@@ -1067,7 +1067,10 @@ extension KeepTalkingClient {
                 "reason": "duplicate_mark_message_id",
             ])
         }
-        try await consumePendingMarks(in: contextID)
+        // Materialise the split from the mark just stored. Peers reproduce the
+        // same threading from the projection this derivation also feeds, so the
+        // marking node and its peers cannot disagree.
+        try await applyLocalTurningPointMarkThreading(in: contextID)
         return jsonString(["ok": true, "created": true])
     }
 

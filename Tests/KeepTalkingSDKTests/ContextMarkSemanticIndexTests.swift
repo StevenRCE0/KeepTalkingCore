@@ -5,8 +5,8 @@ import Testing
 @testable import KeepTalkingSDK
 
 struct ContextMarkSemanticIndexTests {
-    @Test("consuming an incoming turning-point mark queues semantic reconciliation")
-    func incomingTurningPointQueuesReconciliation() async throws {
+    @Test("applying a peer's thread projection queues semantic reconciliation")
+    func appliedProjectionQueuesReconciliation() async throws {
         let store = try await KeepTalkingInMemoryStore.make()
         let contextID = UUID()
         let context = KeepTalkingContext(id: contextID)
@@ -39,21 +39,6 @@ struct ContextMarkSemanticIndexTests {
         )
         try await main.save(on: store.database)
 
-        let markID = UUID()
-        let incomingMark = KeepTalkingContextMessage(
-            id: markID,
-            context: context,
-            sender: .node(node: UUID()),
-            content: "",
-            timestamp: Date(timeIntervalSince1970: 3),
-            type: .markTurningPoint(
-                messageID: secondID,
-                previousTopicName: "Previous",
-                currentTopicName: "Current"
-            )
-        )
-        try await incomingMark.save(on: store.database)
-
         let client = KeepTalkingClient(
             config: KeepTalkingConfig(contextID: contextID, node: UUID()),
             localStore: store
@@ -63,14 +48,17 @@ struct ContextMarkSemanticIndexTests {
             await probe.record(contextID)
         }
 
-        try await client.consumePendingMarks(in: contextID)
+        // What a peer's summary carries: the AI threading it derived from its
+        // own turning points.
+        try await client.applyTurningPointMarkThreading(
+            [
+                .init(startMessageID: firstID, endMessageID: firstID, topicName: "Previous"),
+                .init(startMessageID: secondID, topicName: "Current"),
+            ],
+            in: contextID
+        )
 
         #expect(await probe.recordedIDs() == [contextID])
-        let savedContext = try #require(
-            try await KeepTalkingContext.find(contextID, on: store.database)
-        )
-        #expect(savedContext.consumedMarks?.contains(markID) == true)
-
         let threads = try await KeepTalkingThread.query(on: store.database)
             .filter(\.$context.$id == contextID)
             .all()

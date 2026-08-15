@@ -45,6 +45,11 @@ extension KeepTalkingClient {
             )
             let persistedContextID = try context.requireID()
 
+            // The peer's AI threading arrives with the summary, but its ranges
+            // name messages we may not hold yet — so hold it until the reconcile
+            // below has landed them all.
+            let peerThreadDTOs = KeepTalkingThreadDTOBox()
+
             // Messages: the shared summary→tail→chunk reconcile (see runSyncReconcile).
             try await runSyncReconcile(
                 KeepTalkingSyncReconcile(
@@ -62,6 +67,9 @@ extension KeepTalkingClient {
                                 notes, contextID: persistedContextID)
                         {
                             await self.notifySideNotesChanged(persistedContextID)
+                        }
+                        if let threadDTOs = result.threadDTOs {
+                            await peerThreadDTOs.set(threadDTOs)
                         }
                         return result.summary
                     },
@@ -113,6 +121,15 @@ extension KeepTalkingClient {
             guard isConnectionLifecycleActive(generation) else {
                 throw KeepTalkingClientError.clientDisconnected
             }
+
+            // Every page has landed, so the local message list finally spans the
+            // peer's ranges — the first point at which its threading can be
+            // reproduced here.
+            if let threadDTOs = await peerThreadDTOs.value {
+                try await applyTurningPointMarkThreading(threadDTOs, in: persistedContextID)
+            }
+            try await consumePendingMarks(in: persistedContextID)
+
             rtcClient.debug(
                 "context sync complete peer=\(node.uuidString.lowercased()) context=\(persistedContextID.uuidString.lowercased())"
             )
@@ -384,13 +401,18 @@ extension KeepTalkingClient {
                 )
             }
         }
+        // The AI-marked threading rides along too. It is small, derived, and
+        // the requester needs it only after its messages land — so it is sent
+        // unconditionally rather than digest-gated like side notes.
+        let threadDTOs = try await turningPointMarkThreading(in: request.context)
         return KeepTalkingContextSyncSummaryResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
             summary: snapshot.summary,
-            sideNotes: sideNotes
+            sideNotes: sideNotes,
+            threadDTOs: threadDTOs
         )
     }
 
@@ -438,9 +460,9 @@ extension KeepTalkingClient {
     private func executeContextSyncAttachmentRecordsRequest(
         _ request: KeepTalkingContextSyncAttachmentRecordsRequest
     ) async throws -> KeepTalkingContextSyncAttachmentRecordsResult {
-        let dtos: [KeepTalkingContextAttachmentDTO]
+        let attachmentDTOs: [KeepTalkingContextAttachmentDTO]
         if request.messageIDs.isEmpty {
-            dtos = []
+            attachmentDTOs = []
         } else {
             let rows = try await KeepTalkingContextAttachment.query(
                 on: localStore.database
@@ -448,14 +470,14 @@ extension KeepTalkingClient {
             .filter(\.$context.$id, .equal, request.context)
             .filter(\.$parentMessage.$id ~~ request.messageIDs)
             .all()
-            dtos = rows.compactMap(KeepTalkingContextAttachmentDTO.init)
+            attachmentDTOs = rows.compactMap(KeepTalkingContextAttachmentDTO.init)
         }
         return KeepTalkingContextSyncAttachmentRecordsResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
-            attachments: dtos
+            attachments: attachmentDTOs
         )
     }
 
@@ -491,7 +513,19 @@ extension KeepTalkingClient {
                 in: result.context
             )
         }
-        // Apply any mark messages that arrived from remote nodes.
-        try await consumePendingMarks(in: result.context)
+        // Marks are deliberately NOT consumed here. Pages arrive newest-first,
+        // so mid-sync the local message list is a suffix of the context and the
+        // spans between turning points would be wrong. The driver consumes once,
+        // on completion.
+    }
+}
+
+/// Carries the peer's threading out of the summary closure, which runs inside
+/// the reconcile and so cannot hand it back directly.
+private actor KeepTalkingThreadDTOBox {
+    private(set) var value: [KeepTalkingThreadDTO]?
+
+    func set(_ threadDTOs: [KeepTalkingThreadDTO]) {
+        value = threadDTOs
     }
 }

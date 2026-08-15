@@ -98,6 +98,13 @@ public struct KeepTalkingContextSyncSummaryResult: Codable, Sendable,
     public let summary: KeepTalkingContextSyncMetadata
     /// Present only when the requester's side-note digest disagreed with ours.
     public let sideNotes: [KeepTalkingSideNoteDTO]?
+    /// The responder's AI-marked threading, derived from its turning points.
+    ///
+    /// Threads are local rows and never sync as such; this projection of the
+    /// AI's marking rides the summary exchange so a peer can reproduce the same
+    /// threading. Applied only once the requester's message sync completes,
+    /// since the ranges name messages it may not hold yet.
+    public let threadDTOs: [KeepTalkingThreadDTO]?
 
     public init(
         request: UUID,
@@ -105,7 +112,8 @@ public struct KeepTalkingContextSyncSummaryResult: Codable, Sendable,
         requester: UUID,
         responder: UUID,
         summary: KeepTalkingContextSyncMetadata,
-        sideNotes: [KeepTalkingSideNoteDTO]? = nil
+        sideNotes: [KeepTalkingSideNoteDTO]? = nil,
+        threadDTOs: [KeepTalkingThreadDTO]? = nil
     ) {
         self.request = request
         self.context = context
@@ -113,6 +121,7 @@ public struct KeepTalkingContextSyncSummaryResult: Codable, Sendable,
         self.responder = responder
         self.summary = summary
         self.sideNotes = sideNotes
+        self.threadDTOs = threadDTOs
     }
 }
 

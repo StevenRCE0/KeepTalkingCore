@@ -251,10 +251,23 @@ struct AgentCoordinatorSuspensionTests {
 
     /// One-shot latch used to hold a resumed run alive while its snapshot is read.
     private final class Gate: @unchecked Sendable {
-        private let semaphore = DispatchSemaphore(value: 0)
-        func open() { semaphore.signal() }
+        private let lock = NSLock()
+        private var isOpen = false
+
+        func open() {
+            lock.lock()
+            defer { lock.unlock() }
+            isOpen = true
+        }
+
+        private var opened: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return isOpen
+        }
+
         func wait() async {
-            while semaphore.wait(timeout: .now()) == .timedOut {
+            while !opened {
                 try? await Task.sleep(nanoseconds: 20_000_000)
             }
         }

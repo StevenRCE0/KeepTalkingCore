@@ -221,7 +221,7 @@ working context.
   caller and the executor. The row itself replicates to every member of the
   context, so the hint stays legible to everyone while the arguments open only for
   those two ends; `openSealedCallParameters` returns `nil` for anyone else.
-- `.markTurningPoint` and `.markChitterChatter` — annotations an agent stores to
+- `.threads` and `.markChitterChatter` — annotations an agent stores to
   name the live thread, signal a topic shift, or flag a message as noise. They are
   ordinary messages, so they replicate through normal sync; each node applies them
   locally once and records them in the context's consumed-marks list, which is not

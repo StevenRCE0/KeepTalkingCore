@@ -274,7 +274,7 @@ re-read, re-render, do not attempt to infer the delta from the callback alone.
 ``KeepTalkingClient/onThreadsChanged`` fires when a context's thread structure moves:
 ``KeepTalkingClient/toggleChitterChatter(messageID:in:)``,
 ``KeepTalkingClient/setChitterChatter(messageID:in:marked:)``, and
-``KeepTalkingClient/markTurningPoint(at:in:)`` — which freezes the current
+the `kt_mark_turning_point` agent tool — which freezes the current
 `.contextMain` thread as `.stored` and opens a new one at the turning-point message.
 It also fires from the mark consumer, once per agent-authored turning-point or
 chitter-chatter mark applied out of the message stream.
@@ -290,7 +290,7 @@ pings. Aliases and tags a host sets directly through the mapping API do not ping
 the same reason. Re-read with ``KeepTalkingClient/aliasLookup()``.
 
 Note that only the *agent-authored* turning point applies a topic name, so the
-host-called ``KeepTalkingClient/markTurningPoint(at:in:)`` pings
+the `kt_mark_turning_point` agent tool pings
 ``KeepTalkingClient/onThreadsChanged`` alone — the mark-consumer path pings both.
 
 ### onSideNotesChanged
@@ -523,7 +523,6 @@ consequence inside it.
 - ``KeepTalkingSideNote``
 - ``KeepTalkingSideNoteDTO``
 - ``KeepTalkingClient/threads(for:)``
-- ``KeepTalkingClient/markTurningPoint(at:in:)``
 - ``KeepTalkingClient/toggleChitterChatter(messageID:in:)``
 - ``KeepTalkingClient/setChitterChatter(messageID:in:marked:)``
 - ``KeepTalkingClient/aliasLookup()``

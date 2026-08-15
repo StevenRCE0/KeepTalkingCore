@@ -119,13 +119,23 @@ extension KeepTalkingClient {
     }
 
     /// Explicitly marks or unmarks a message as chitter-chatter, locating its owning thread
-    /// within the context. A no-op if the message isn't found or already has the desired state.
-    public func setChitterChatter(messageID: UUID, in contextID: UUID, marked: Bool) async throws {
+    /// within the context.
+    ///
+    /// Returns `false` when no thread owns the message yet — mid-sync that means
+    /// the surrounding history hasn't landed, not that the message is unknown,
+    /// so a mark driving this must stay unconsumed and retry. Returns `true`
+    /// when the flag was applied or already had the desired state.
+    @discardableResult
+    public func setChitterChatter(
+        messageID: UUID,
+        in contextID: UUID,
+        marked: Bool
+    ) async throws -> Bool {
         guard let thread = try await owningThread(for: messageID, in: contextID) else {
-            return
+            return false
         }
         let isMarked = thread.chitterChatter.contains(messageID)
-        guard isMarked != marked else { return }
+        guard isMarked != marked else { return true }
         if marked {
             thread.chitterChatter.append(messageID)
         } else {
@@ -133,6 +143,7 @@ extension KeepTalkingClient {
         }
         try await thread.save(on: localStore.database)
         onThreadsChanged?()
+        return true
     }
 
     public func archiveThread(_ threadID: UUID) async throws {
@@ -156,125 +167,160 @@ extension KeepTalkingClient {
         try await thread.delete(on: localStore.database)
     }
 
-    /// Marks a turning point at the given message.
+    /// The AI-marked threading for this context, as it travels to peers.
     ///
-    /// The current `.contextMain` thread is frozen as `.stored` with its range
-    /// set to [contextMainStart ... turningMessage - 1].
-    /// A new `.contextMain` is created starting at the turning-point message.
-    /// Returns the frozen stored thread representing the previous topic.
-    @discardableResult
-    public func markTurningPoint(
-        at messageID: UUID,
-        in contextID: UUID
-    ) async throws -> KeepTalkingThread {
-        let db = localStore.database
-
-        let messages = try await KeepTalkingContextMessage.query(on: db)
+    /// Derived from the context: the message list plus every `.markTurningPoint`
+    /// in it. Turning points remain the source of truth and the only thing
+    /// stored — a range is computed here and never written back into a mark.
+    ///
+    /// Built from the marks and **never from local thread rows** — those are
+    /// this user's memory, holding edits, archives and hand-made threads that
+    /// are nobody else's business. Only what the AI marked is common ground, so
+    /// only that travels.
+    func turningPointMarkThreading(in contextID: UUID) async throws -> [KeepTalkingThreadDTO] {
+        let messages = try await KeepTalkingContextMessage.query(on: localStore.database)
             .filter(\.$context.$id == contextID)
             .sort(\.$timestamp)
             .all()
+        guard messages.first?.id != nil else { return [] }
 
-        guard
-            let turningIndex = messages.firstIndex(where: { $0.id == messageID }),
-            turningIndex > 0
-        else {
-            throw KeepTalkingClientError.invalidTurningPoint(messageID)
+        var position: [UUID: Int] = [:]
+        for (index, message) in messages.enumerated() {
+            if let id = message.id { position[id] = index }
         }
 
-        guard let context = try await KeepTalkingContext.find(contextID, on: db) else {
-            throw KeepTalkingClientError.missingContext(contextID)
+        // Each turning point opens a thread. Read in document order rather than
+        // the order the marks were stored, and let a later mark on the same
+        // message win.
+        var openings: [Int: (previous: String?, current: String)] = [:]
+        for message in messages {
+            guard
+                case .markTurningPoint(let messageID, let previousTopicName, let currentTopicName) =
+                    message.type,
+                let index = position[messageID],
+                index > 0
+            else {
+                continue
+            }
+            openings[index] = (previous: previousTopicName, current: currentTopicName)
         }
 
-        let contextMain = try await ensureContextMainThread(for: contextID)
-        let endMessage = messages[turningIndex - 1]
+        // The leading thread opens at the first message even though no mark
+        // names it; every other boundary is a turning point.
+        let starts = [0] + openings.keys.sorted()
 
-        // Freeze the current contextMain as stored.
-        contextMain.state = .stored
-        contextMain.$endMessage.id = endMessage.id
-        try await contextMain.save(on: db)
+        var threadDTOs: [KeepTalkingThreadDTO] = []
+        for (offset, start) in starts.enumerated() {
+            guard let startMessageID = messages[start].id else { continue }
+            let nextStart = offset + 1 < starts.count ? starts[offset + 1] : nil
 
-        // Create the new contextMain starting at the turning-point message.
-        let newMain = KeepTalkingThread(
-            context: context,
-            startMessage: messages[turningIndex],
-            endMessage: nil,
-            state: .contextMain
-        )
-        try await newMain.save(on: db)
-        onThreadsChanged?()
-        return contextMain
+            // A thread is named by the mark that opened it, but the *next*
+            // mark's `previousTopicName` is a later and better-informed word on
+            // the same thread, so it wins where it exists.
+            var topicName = openings[start]?.current
+            if let nextStart, let refined = openings[nextStart]?.previous {
+                topicName = refined
+            }
+
+            threadDTOs.append(
+                KeepTalkingThreadDTO(
+                    startMessageID: startMessageID,
+                    // A nil end is what makes the trailing thread the live one.
+                    endMessageID: nextStart.flatMap { messages[$0 - 1].id },
+                    topicName: topicName
+                )
+            )
+        }
+        return threadDTOs
     }
 
-    func applyTurningPointMark(
-        at messageID: UUID,
-        in contextID: UUID,
-        previousTopicName: String?,
-        currentTopicName: String
-    ) async throws {
+    /// Materialises this node's own threads from its own turning points.
+    ///
+    /// The marking node runs the same derivation a peer runs on the projection
+    /// it receives, so both ends agree — rather than splitting positionally here
+    /// and reproducing there, which is how the two drifted apart before.
+    ///
+    /// Call after storing a turning-point mark. Safe on a complete context,
+    /// which the marking node has by definition.
+    @discardableResult
+    func applyLocalTurningPointMarkThreading(in contextID: UUID) async throws -> Bool {
+        try await applyTurningPointMarkThreading(
+            try await turningPointMarkThreading(in: contextID),
+            in: contextID
+        )
+    }
+
+    /// Reproduces the AI's threading locally from a published projection.
+    ///
+    /// Returns `false` when a thread names a message this node doesn't hold, so
+    /// the caller leaves it unconsumed until a later sync —
+    /// `kt_threads.start_message`/`end_message` are enforced foreign keys, so
+    /// such a row cannot be written at all, and substituting a local stand-in is
+    /// what corrupted ranges before.
+    ///
+    /// Keyed on the starting message, so applying reuses the existing row and
+    /// preserves the thread UUID the semantic store and workspaces depend on.
+    /// Threads the projection doesn't name are left alone — they are local
+    /// memory, which a peer's AI marking has no authority over.
+    @discardableResult
+    func applyTurningPointMarkThreading(
+        _ threadDTOs: [KeepTalkingThreadDTO],
+        in contextID: UUID
+    ) async throws -> Bool {
+        guard !threadDTOs.isEmpty else { return false }
         let db = localStore.database
-
-        let messages = try await KeepTalkingContextMessage.query(on: db)
-            .filter(\.$context.$id == contextID)
-            .sort(\.$timestamp)
-            .all()
-
-        guard
-            let turningIndex = messages.firstIndex(where: { $0.id == messageID })
-        else {
-            throw KeepTalkingClientError.invalidTurningPoint(messageID)
-        }
-
-        let currentTopicName = normalizedTopicName(currentTopicName)
-        guard let currentTopicName, !currentTopicName.isEmpty else {
-            throw KeepTalkingClientError.invalidToolArguments(
-                #"{"current_topic_name":""}"#
-            )
-        }
-
-        let contextMain = try await ensureContextMainThread(for: contextID)
-
-        if contextMain.$startMessage.id == messageID {
-            try await applyTopicName(
-                currentTopicName,
-                to: contextMain,
-                on: db
-            )
-            return
-        }
-
-        if turningIndex == 0 {
-            try await applyTopicName(
-                currentTopicName,
-                to: contextMain,
-                on: db
-            )
-            return
-        }
-
-        let endMessage = messages[turningIndex - 1]
-        contextMain.state = .stored
-        contextMain.$endMessage.id = endMessage.id
-        try await contextMain.save(on: db)
-
-        let existingTopicName = await threadTopicName(for: contextMain, on: db)
-        let previousTopicName =
-            normalizedTopicName(previousTopicName)
-            ?? existingTopicName
-            ?? currentTopicName
-        try await applyTopicName(previousTopicName, to: contextMain, on: db)
 
         guard let context = try await KeepTalkingContext.find(contextID, on: db) else {
             throw KeepTalkingClientError.missingContext(contextID)
         }
-
-        let newMain = KeepTalkingThread(
-            context: context,
-            startMessage: messages[turningIndex],
-            endMessage: nil,
-            state: .contextMain
+        let present = Set(
+            try await KeepTalkingContextMessage.query(on: db)
+                .filter(\.$context.$id == contextID)
+                .all()
+                .compactMap(\.id)
         )
-        try await newMain.save(on: db)
-        try await applyTopicName(currentTopicName, to: newMain, on: db)
+        guard
+            threadDTOs.allSatisfy({
+                present.contains($0.startMessageID)
+                    && ($0.endMessageID.map(present.contains) ?? true)
+            })
+        else {
+            return false
+        }
+
+        var existing = try await threads(for: contextID)
+        for threadDTO in threadDTOs {
+            let thread: KeepTalkingThread
+            if let index = existing.firstIndex(where: { $0.$startMessage.id == threadDTO.startMessageID }) {
+                thread = existing.remove(at: index)
+            } else {
+                thread = KeepTalkingThread(
+                    context: context,
+                    startMessage: nil,
+                    endMessage: nil,
+                    state: .stored
+                )
+                thread.$startMessage.id = threadDTO.startMessageID
+            }
+
+            thread.$endMessage.id = threadDTO.endMessageID
+            // A missing end is what makes a thread live; archiving is a local
+            // decision, so an archived thread keeps its state.
+            if thread.state != .archived {
+                thread.state = threadDTO.endMessageID == nil ? .contextMain : .stored
+            }
+            try await thread.save(on: db)
+            if let topicName = normalizedTopicName(threadDTO.topicName) {
+                try await applyTopicName(topicName, to: thread, on: db)
+            }
+        }
+
+        onThreadsChanged?()
+        // Boundaries just moved, and semantic documents are a derived cache of
+        // them. Enqueue only now that the durable state is committed — the
+        // reconciler reloads it rather than taking anything from here.
+        await onSemanticIndexNeedsReconciliation?(contextID)
+        return true
     }
 
     private func applyTopicName(

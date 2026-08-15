@@ -350,6 +350,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let syncTranscriptLines = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncTranscriptLinesResult>()
     let contextSyncSingleFlight = KeepTalkingContextSyncSingleFlight()
 
+    /// Serialises mark consumption per context, so two syncs completing at
+    /// once cannot both apply the same projection.
+    let markConsumptionGate = KeepTalkingSerialGate()
+
     // MARK: Trust handshake properties
     let trustQueue = DispatchQueue(
         label: "KeepTalking.client.trust"
