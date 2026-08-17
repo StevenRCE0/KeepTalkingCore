@@ -73,7 +73,8 @@ let package = Package(
         .executableTarget(
             name: "KeepTalking",
             dependencies: [
-                "KeepTalkingSDK"
+                "KeepTalkingSDK",
+                .product(name: "MCP", package: "swift-sdk"),
             ],
             path: "Sources/KeepTalkingCLI"
         ),
@@ -81,7 +82,7 @@ let package = Package(
             name: "KeepTalkingSDKTests",
             dependencies: [
                 .product(name: "Crypto", package: "swift-crypto"),
-                "KeepTalkingSDK"
+                "KeepTalkingSDK",
             ],
             path: "Tests/KeepTalkingSDKTests"
         ),

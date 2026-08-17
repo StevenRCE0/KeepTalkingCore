@@ -981,6 +981,8 @@ extension KeepTalkingClient {
                     return ("filesystem", bundle.name)
                 case .acp(let bundle):
                     return ("acp", bundle.name)
+                case .plugin(let bundle):
+                    return ("plugin", bundle.name)
             }
         }()
 
@@ -1066,6 +1068,12 @@ extension KeepTalkingClient {
                         try await acpManager.registerIfNeeded(action)
                         onLog?("[acp] registered local action=\(actionID)")
                         #endif
+                    case .plugin:
+                        // Nothing to register: the executor is a plugin process
+                        // that attaches on its own and is already known to the
+                        // host through pairing. Availability is the session,
+                        // not a registration step.
+                        return
                 }
             }
         } catch let error as KeepTalkingClientError {

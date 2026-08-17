@@ -222,6 +222,7 @@ extension KeepTalkingClient {
                 case .semanticRetrieval(let b): action.descriptor = Self.defaultDescriptor(for: b)
                 case .filesystem(let b): action.descriptor = Self.defaultDescriptor(for: b)
                 case .acp(let b): action.descriptor = Self.defaultDescriptor(for: b)
+                case .plugin(let b): action.descriptor = Self.defaultDescriptor(for: b)
             }
         }
         try await action.save(on: database)
@@ -324,6 +325,8 @@ extension KeepTalkingClient {
                     action.descriptor = Self.defaultDescriptor(for: bundle)
                 case .acp(let bundle):
                     action.descriptor = Self.defaultDescriptor(for: bundle)
+                case .plugin(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
             }
         }
 
@@ -354,6 +357,10 @@ extension KeepTalkingClient {
                     await acpManager.disableAction(actionID: actionID)
                 }
                 #endif
+            case .plugin:
+                // No executor to register: the plugin process attaches on its
+                // own and the Catalogue already holds its kind declaration.
+                break
         }
         await invalidateActionToolCatalog(
             reason: "register_action action=\(action.id?.uuidString.lowercased() ?? "unknown")"
@@ -396,6 +403,8 @@ extension KeepTalkingClient {
                 case .filesystem(let bundle):
                     action.descriptor = Self.defaultDescriptor(for: bundle)
                 case .acp(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
+                case .plugin(let bundle):
                     action.descriptor = Self.defaultDescriptor(for: bundle)
                 case .semanticRetrieval:
                     break
@@ -444,6 +453,11 @@ extension KeepTalkingClient {
                     try await acpManager.refreshACPAction(action)
                 }
                 #endif
+            case .plugin:
+                // Nothing to refresh: the plugin process owns its own
+                // lifecycle. `disabled` is honoured at call time by the
+                // normal action gating.
+                break
             case .semanticRetrieval:
                 break
         }
@@ -710,13 +724,33 @@ extension KeepTalkingClient {
                     description =
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
-                default:
+                case .plugin(let bundle):
                     isMCP = false
                     isSkill = false
                     isPrimitive = false
                     isFilesystem = false
-                    name = "unknown"
-                    description = action.descriptor?.action?.description ?? ""
+                    name = bundle.name
+                    description =
+                        action.descriptor?.action?.description
+                        ?? bundle.indexDescription
+                case .acp(let bundle):
+                    isMCP = false
+                    isSkill = false
+                    isPrimitive = false
+                    isFilesystem = false
+                    name = bundle.name
+                    description =
+                        action.descriptor?.action?.description
+                        ?? bundle.indexDescription
+                case .semanticRetrieval(let bundle):
+                    isMCP = false
+                    isSkill = false
+                    isPrimitive = false
+                    isFilesystem = false
+                    name = bundle.name
+                    description =
+                        action.descriptor?.action?.description
+                        ?? bundle.indexDescription
             }
 
             summaries.append(
@@ -1679,6 +1713,22 @@ extension KeepTalkingClient {
             subject: nil,
             action: KeepTalkingActionWithDescription(
                 description: bundle.indexDescription
+            ),
+            object: nil
+        )
+    }
+
+    /// Catalogue instances declare `.callTool` so the grant editor can narrow
+    /// to individual sub-tools, exactly as MCP-backed actions do. No sandbox
+    /// verbs: KT never launches the plugin process (design doc §9).
+    private static func defaultDescriptor(
+        for bundle: KeepTalkingPluginBundle
+    ) -> KeepTalkingActionDescriptor {
+        KeepTalkingActionDescriptor(
+            subject: nil,
+            action: KeepTalkingActionWithDescription(
+                description: bundle.indexDescription,
+                verbs: [.callTool]
             ),
             object: nil
         )

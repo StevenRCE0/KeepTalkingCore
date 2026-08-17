@@ -319,6 +319,9 @@ public enum AIPromptPresets {
             case .acp:
                 return
                     "ACP action — delegates to an external coding agent (Agent Client Protocol). Pass a single clear `prompt` describing the whole task; the agent works autonomously (reading/writing files, running tools) and returns its final result. Call it once with a complete brief rather than many small prompts."
+            case .plugin:
+                return
+                    "Catalogue action — provided by a plugin in the user's Companion app. It is already scoped to a specific boundary the user configured (a directory, a set of domains, an account), and the plugin enforces that boundary itself: a request outside it comes back refused, which is expected, not a fault to work around. Pass the arguments its schema describes and call it once."
         }
     }
 

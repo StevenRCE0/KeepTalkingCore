@@ -1,5 +1,6 @@
 import AIProxy
 import Foundation
+import MCP
 
 // MARK: - Action stub (lightweight, no server I/O)
 
@@ -11,6 +12,8 @@ public struct KeepTalkingActionStub: Sendable {
         case semanticRetrieval
         case filesystem
         case acp
+        /// Instance of a plugin-provided Catalogue kind.
+        case plugin
     }
 
     public let actionID: UUID
@@ -83,6 +86,7 @@ public struct KeepTalkingActionToolDefinition: Sendable {
         case primitive
         case filesystem
         case acp
+        case plugin
     }
 
     public let functionName: String
@@ -231,6 +235,19 @@ public struct KeepTalkingActionToolDefinition: Sendable {
                 .lowercased()
                 .prefix(prefixLength)
         )
+    }
+
+    /// Converts a JSON-Schema fragment carried as an MCP `Value` (how plugins
+    /// declare `inputSchema` on the wire) into the AIProxy form tool
+    /// definitions use. Returns nil when the fragment isn't an object, so the
+    /// caller can fall back to the permissive shape.
+    public static func jsonSchema(from value: Value) -> [String: AIProxyJSONValue]? {
+        guard case .object = value,
+            let data = try? JSONEncoder().encode(value),
+            let decoded = try? JSONDecoder().decode(
+                [String: AIProxyJSONValue].self, from: data)
+        else { return nil }
+        return decoded
     }
 
     /// Default parameters schema for proxy/wrapper tools whose actual argument shape

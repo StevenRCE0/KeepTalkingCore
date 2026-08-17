@@ -183,6 +183,18 @@ extension KeepTalkingClient {
             // outputs), in the unified agent-facing format — surfaced on the result.
             var producedResources: [KTResourceManifest.AgentResource] = []
             switch action.payload {
+                case .plugin:
+                    #if os(macOS)
+                    callResult = try await pluginHost.callAction(
+                        action: action,
+                        call: request.call,
+                        scope: grant,
+                        callerNodeID: request.callerNodeID,
+                        contextID: request.contextID
+                    )
+                    #else
+                    callResult = (content: [], isError: true)
+                    #endif
                 case .mcpBundle:
                     callResult = try await mcpManager.callAction(
                         action: action,
@@ -324,6 +336,8 @@ extension KeepTalkingClient {
                         return "semantic_retrieval"
                     case .acp:
                         return "acp"
+                    case .plugin:
+                        return "plugin"
                 }
             }()
             let rendered = callResult.content.map {
@@ -848,6 +862,7 @@ extension KeepTalkingClient {
                     case .filesystem: "filesystem"
                     case .semanticRetrieval: "semantic_retrieval"
                     case .acp: "acp"
+                    case .plugin: "plugin"
                 }
         } else {
             kind = actionID

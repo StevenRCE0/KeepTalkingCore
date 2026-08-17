@@ -286,6 +286,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
     #if os(macOS)
     let scopeManager: ScopeManager
     let acpManager: ACPManager
+    /// Shared per-node KTPP host. Constructed eagerly but INERT — it listens
+    /// only after `enablePluginHost()`, so a node that never uses plugins pays
+    /// nothing beyond reading the Catalogue file.
+    public let pluginHost: KeepTalkingPluginHost
     #endif
     let aiConnector: (any AIConnector)?
     /// Connector used by the ACT (action/tool-calling) sub-agent. `nil` means
@@ -681,6 +685,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.filesystemActionManager = FilesystemActionManager()
         #if os(macOS)
         self.scopeManager = ScopeManager(sandbox: SeatbeltSandbox())
+        self.pluginHost = KeepTalkingPluginHost.shared(forNode: config.node)
         self.acpManager = ACPManager(
             nodeConfig: config,
             stdioTransportLauncher: stdioTransportLauncher

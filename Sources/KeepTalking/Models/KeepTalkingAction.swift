@@ -289,6 +289,8 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
         case semanticRetrieval(KeepTalkingSemanticRetrievalBundle)
         case filesystem(KeepTalkingFilesystemBundle)
         case acp(KeepTalkingACPBundle)
+        /// An instance minted from a plugin-provided **Catalogue** kind.
+        case plugin(KeepTalkingPluginBundle)
 
         public var isSemanticRetrieval: Bool {
             if case .semanticRetrieval = self { return true }
@@ -316,6 +318,9 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
                 // ACP has no per-grant narrowing UI in v1 (owner grants are
                 // unrestricted; the action's compiled sandbox is the ceiling).
                 case .skill, .semanticRetrieval, .acp: return false
+                // Narrowing is meaningful whenever the kind exposes sub-tools;
+                // the editor keys off the Catalogue declaration, not the row.
+                case .plugin: return true
             }
         }
 
@@ -333,6 +338,8 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
                     "File"
                 case .acp:
                     "ACP"
+                case .plugin:
+                    "Catalogue"
             }
         }
     }
@@ -357,6 +364,9 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
         if case .acp(let bundle) = payload {
             return bundle.name
         }
+        if case .plugin(let bundle) = payload {
+            return bundle.name
+        }
 
         return id?.uuidString.uppercased() ?? "Unknown Action"
     }
@@ -375,7 +385,7 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
         switch payload {
             case .skill:
                 return true
-            case .mcpBundle, .primitive, .filesystem, .semanticRetrieval, .acp:
+            case .mcpBundle, .primitive, .filesystem, .semanticRetrieval, .acp, .plugin:
                 return false
         }
     }
@@ -451,6 +461,8 @@ public enum KeepTalkingActionType: String, CaseIterable, Identifiable, Hashable 
     case shortcut = "Shortcut"
     case filesystem = "Filesystem"
     case acp = "ACP"
+    /// Kinds contributed by paired plugins — the Catalogue group.
+    case catalogue = "Catalogue"
 
     public var id: Self { self }
 
@@ -463,6 +475,7 @@ public enum KeepTalkingActionType: String, CaseIterable, Identifiable, Hashable 
             case .shortcut: "square.2.layers.3d.bottom.filled"
             case .filesystem: "folder.fill"
             case .acp: "wand.and.rays"
+            case .catalogue: "heart.square.fill"
         }
     }
 
@@ -475,6 +488,7 @@ public enum KeepTalkingActionType: String, CaseIterable, Identifiable, Hashable 
             case .shortcut: "Run a macOS Shortcut by name"
             case .filesystem: "Expose a local filesystem path"
             case .acp: "Delegate tasks to an external coding agent (ACP)"
+            case .catalogue: "Ready-made actions from plugins in your Companion"
         }
     }
 }

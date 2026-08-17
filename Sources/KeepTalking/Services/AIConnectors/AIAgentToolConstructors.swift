@@ -247,6 +247,40 @@ extension KeepTalkingClient {
         )
     }
 
+    /// One callable tool per Catalogue *instance*. The parameters come from
+    /// the kind's declared `inputSchema` when the Catalogue has it, so the
+    /// model sees the plugin's real argument shape rather than a permissive
+    /// bag; the instance label carries the scope distinction between two rows
+    /// of the same kind.
+    func makePluginActionProxyDefinition(
+        actionID: UUID,
+        ownerNodeID: UUID,
+        bundle: KeepTalkingPluginBundle,
+        descriptor: KeepTalkingActionDescriptor?,
+        inputSchema: [String: AIProxyJSONValue]?,
+        supportsWakeAssist: Bool
+    ) -> KeepTalkingActionToolDefinition {
+        let description =
+            descriptor?.action?.description
+            ?? bundle.indexDescription
+        return KeepTalkingActionToolDefinition(
+            functionName: KeepTalkingActionToolDefinition.normalizedFunctionName(
+                ownerNodeID: ownerNodeID,
+                actionID: actionID,
+                targetName: bundle.kindName
+            ),
+            actionID: actionID,
+            ownerNodeID: ownerNodeID,
+            source: .plugin,
+            targetName: bundle.tool ?? bundle.kindName,
+            displayName: bundle.name,
+            supportsWakeAssist: supportsWakeAssist,
+            description: description,
+            parameters: inputSchema
+                ?? KeepTalkingActionToolDefinition.permissiveObjectParameters
+        )
+    }
+
     func makeACPActionProxyDefinition(
         actionID: UUID,
         ownerNodeID: UUID,

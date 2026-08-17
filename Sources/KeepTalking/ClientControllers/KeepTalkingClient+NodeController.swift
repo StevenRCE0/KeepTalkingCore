@@ -1048,6 +1048,15 @@ extension KeepTalkingClient {
             return nil
         }
 
+        // Catalogue instances are deliberately NOT advertised to peers yet:
+        // `PayloadSummary` is a closed Codable enum, so a build that predates
+        // `.plugin` fails to decode the whole status envelope, not just this
+        // row. Local use is unaffected; remote advertisement lands with the
+        // peer capability gate (design doc §5.4).
+        if case .plugin = payload {
+            return nil
+        }
+
         let grantScope: KeepTalkingActionScope?
         if let recipient,
             let resolved = try? await allowedActionScope(
@@ -1063,6 +1072,8 @@ extension KeepTalkingClient {
 
         let payloadSummary: KeepTalkingAdvertisedAction.PayloadSummary
         switch payload {
+            case .plugin:
+                return nil  // unreachable: filtered above
             case .mcpBundle(let bundle):
                 payloadSummary = .mcpBundle(
                     name: bundle.name,
@@ -1103,6 +1114,8 @@ extension KeepTalkingClient {
         var advertisedTools: [String]? = nil
 
         switch payload {
+            case .plugin:
+                return nil  // unreachable: filtered above
             case .mcpBundle:
                 if isDisabled {
                     availability = .disabled

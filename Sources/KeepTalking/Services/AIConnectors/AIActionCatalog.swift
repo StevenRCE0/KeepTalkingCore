@@ -227,6 +227,48 @@ extension KeepTalkingClient {
             }
 
             switch action.payload {
+                case .plugin(let bundle):
+                    // Catalogue instances expose one agent tool each; the
+                    // instance label (not the kind) is what distinguishes two
+                    // differently-scoped rows to the model.
+                    actionStubs.append(
+                        KeepTalkingActionStub(
+                            actionID: actionID,
+                            ownerNodeID: ownerNodeID,
+                            name: bundle.name,
+                            kind: .plugin,
+                            description: action.descriptor?.action?.description
+                                ?? bundle.indexDescription,
+                            supportsWakeAssist: supportsWakeAssist,
+                            isCurrentNode: isCurrentNode,
+                            objectContracts: objectContracts
+                        ))
+                    #if os(macOS)
+                    // A Catalogue instance is DORMANT until its plugin is
+                    // connected and has re-declared its catalogue: publishing a
+                    // tool for an absent plugin would offer the model something
+                    // that can only fail. The saved action stays intact and
+                    // comes back the moment the companion returns.
+                    guard
+                        let liveKind = await pluginHost.catalogue.resolvedKind(
+                            catalogID: bundle.catalogID, kindName: bundle.kindName),
+                        liveKind.isAvailable
+                    else { continue }
+                    let pluginSchema = liveKind.inputSchema
+                        .flatMap { KeepTalkingActionToolDefinition.jsonSchema(from: $0) }
+                    let pluginDefinition = makePluginActionProxyDefinition(
+                        actionID: actionID,
+                        ownerNodeID: ownerNodeID,
+                        bundle: bundle,
+                        descriptor: action.descriptor,
+                        inputSchema: pluginSchema,
+                        supportsWakeAssist: supportsWakeAssist
+                    )
+                    definitionsByName[pluginDefinition.functionName] = pluginDefinition
+                    routesByFunctionName[pluginDefinition.functionName] =
+                        .actionProxy(pluginDefinition)
+                    #endif
+
                 case .mcpBundle(let bundle):
                     let description =
                         action.descriptor?.action?.description

@@ -536,9 +536,10 @@ extension KeepTalkingClient {
                     context: context
                 )
 
-            case .acp:
-                // The callable ACP tool def (single `prompt` arg) is already in
-                // the runtime catalog; expose it like a primitive.
+            case .acp, .plugin:
+                // Their callable tool defs are already in the runtime catalog
+                // (one per instance for Catalogue actions); expose them like a
+                // primitive.
                 let definitions = runtimeCatalog.catalog.definitions
                     .filter { $0.actionID == actionID }
                 return .init(tools: definitions, promptContext: "")
