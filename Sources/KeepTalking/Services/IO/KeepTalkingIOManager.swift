@@ -156,7 +156,7 @@ final class KeepTalkingIOManager {
     }
 
     #if os(macOS)
-    func prepareCallBinding(
+    static func prepareCallBinding(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
         attachments: [StagedInputResource],
@@ -214,6 +214,29 @@ final class KeepTalkingIOManager {
                     isDirectory: false))
         }
 
+        // Context-ATTACHMENT handles the caller explicitly passed via
+        // `input_handles` bind to declared input objects too — a plugin handler
+        // addresses its source by the declared objectName, and "the PDF already
+        // attached to this context" is as legitimate an input as a kt_send_file
+        // OTB. Binding follows inputHandles order onto the remaining unconsumed
+        // declared inputs; attachments the caller did NOT name stay catch-all
+        // (objectName nil), exactly as before.
+        if let handles = call.inputHandles, !handles.isEmpty {
+            for handle in handles {
+                guard
+                    let j = pureInputs.indices.first(where: {
+                        !consumed.contains($0) && pureInputs[$0].name != nil
+                    })
+                else { break }
+                if let index = inputs.firstIndex(where: {
+                    $0.id == handle && $0.kind == .attachment && $0.objectName == nil
+                }) {
+                    inputs[index].objectName = pureInputs[j].name
+                    consumed.insert(j)
+                }
+            }
+        }
+
         var outputs: [KTCallBinding.BoundObject] = []
         if let workspaceDir {
             var usedNames = Set<String>()
@@ -229,14 +252,42 @@ final class KeepTalkingIOManager {
             }
 
             if let callerHandles = call.outputHandles, !callerHandles.isEmpty {
+                // For Catalogue (.plugin) instances the kind's DECLARED output
+                // objects are the handler's vocabulary: a caller may label its
+                // requested output anything ("catalogue_markdown"), but the
+                // slot must still answer to the declared objectName the plugin
+                // code looks up. Caller labels keep driving the delivered
+                // filename, persistence, and collection-ness; positional extras
+                // beyond the declared set keep their caller names. Skills keep
+                // the caller-label semantics unchanged (scripts are TOLD their
+                // exact write variables per run).
+                //
+                // Binding is by NAME first, position only as a fallback among
+                // the declared objects nothing has claimed yet. Pure position
+                // was wrong the moment a caller asked for a subset or a
+                // different order: requesting only the second declared output
+                // labelled the slot with the FIRST object's name, so the
+                // handler's lookup missed it and the slot harvested empty.
+                var unclaimedDeclared: [String] = []
+                if action.payload.bindsOutputsByDeclaredName {
+                    unclaimedDeclared = outputObjects.compactMap(\.name)
+                }
                 for (index, handle) in callerHandles.enumerated() {
+                    var objectName = handle.name
+                    if !unclaimedDeclared.isEmpty {
+                        if let exact = unclaimedDeclared.firstIndex(of: handle.name) {
+                            objectName = unclaimedDeclared.remove(at: exact)
+                        } else {
+                            objectName = unclaimedDeclared.removeFirst()
+                        }
+                    }
                     let base = sanitizeFileComponent(handle.name) ?? "output-\(index + 1)"
                     let kind: KTResourceManifest.Kind =
                         handle.persistence == .attachment ? .attachment : .otb
                     let isCollection = handle.multiple
                     outputs.append(
                         KTCallBinding.BoundObject(
-                            objectName: handle.name,
+                            objectName: objectName,
                             id: handle.id,
                             kind: kind,
                             path: workspaceDir.appendingPathComponent(
@@ -317,7 +368,7 @@ final class KeepTalkingIOManager {
             .sorted { $0.path < $1.path }
     }
 
-    private func sanitizeFileComponent(_ name: String) -> String? {
+    private static func sanitizeFileComponent(_ name: String) -> String? {
         let cleaned =
             name
             .components(separatedBy: .controlCharacters).joined()
@@ -328,7 +379,7 @@ final class KeepTalkingIOManager {
         return cleaned.isEmpty || cleaned == "." || cleaned == ".." ? nil : cleaned
     }
 
-    struct PreparedSkillRun {
+    struct PreparedActionRun {
         let attachmentsDir: URL?
         let sandboxPolicy: KTSandboxPolicy?
         let manifest: KTResourceManifest?
@@ -340,11 +391,17 @@ final class KeepTalkingIOManager {
         fileprivate let workspaceRunStarted: Bool
     }
 
-    func prepareSkillRun(
+    /// Stages a call's file inputs, allocates its workspace output slots, and
+    /// builds the run manifest — the shared front half of every file-consuming
+    /// executor. Skills additionally get a compiled sandbox policy; `.plugin`
+    /// payloads skip policy resolution entirely (KT neither launches nor
+    /// contains plugin processes — design doc §9; their manifest projects into
+    /// the KTPP call frame instead of a subprocess environment).
+    func prepareActionRun(
         action: KeepTalkingAction,
         request: KeepTalkingActionCallRequest,
         grant: KeepTalkingActionScope
-    ) async throws -> PreparedSkillRun {
+    ) async throws -> PreparedActionRun {
         let stagedInputs = try await staging.prepareInputs(action: action, request: request)
         let attachmentsDir = stagedInputs.directory
 
@@ -362,7 +419,7 @@ final class KeepTalkingIOManager {
             }
         }
 
-        let binding = prepareCallBinding(
+        let binding = Self.prepareCallBinding(
             action: action,
             call: request.call,
             attachments: stagedInputs.attachments,
@@ -370,25 +427,45 @@ final class KeepTalkingIOManager {
             attachmentsDir: attachmentsDir,
             workspaceDir: workspaceDir)
 
-        let policy = try await resolvePolicy(
-            action: action,
-            grant: grant,
-            binding: binding,
-            attachmentsDir: attachmentsDir,
-            workspaceDir: &workspaceDir)
+        let policy: (sandboxPolicy: KTSandboxPolicy?, attachmentsGranted: Bool)
+        if action.payload.usesCompiledSandboxPolicy {
+            policy = try await resolvePolicy(
+                action: action,
+                grant: grant,
+                binding: binding,
+                attachmentsDir: attachmentsDir,
+                workspaceDir: &workspaceDir)
+        } else {
+            policy = (nil, attachmentsDir != nil)
+        }
 
         let outputSlots = workspaceDir == nil ? [] : binding.outputs
         prepareOutputSlots(outputSlots)
 
+        // Plugin calls carry ONLY intentional reads: resources bound to a
+        // declared object or explicitly named in `input_handles`. Skills keep
+        // the catch-all (their scripts browse $KT_ATTACHMENTS by design), but a
+        // plugin handler addresses declared names — unnamed context attachments
+        // are noise that widens disclosure AND poisons lookups: one call's
+        // harvested output attachment would make the next call's sole-input
+        // fallback ambiguous (the exact live failure this rule came from).
+        var manifestBinding = binding
+        if action.payload.limitsManifestInputsToDeclared {
+            let explicitlyNamed = Set(request.call.inputHandles ?? [])
+            manifestBinding.inputs = binding.inputs.filter {
+                $0.objectName != nil || explicitlyNamed.contains($0.id)
+            }
+        }
+
         let manifest = buildManifest(
-            binding: binding,
+            binding: manifestBinding,
             outputSlots: outputSlots,
             attachmentsDir: attachmentsDir,
             attachmentsGranted: policy.attachmentsGranted)
 
         logPreparedSlots(outputSlots, actionID: request.call.action)
 
-        return PreparedSkillRun(
+        return PreparedActionRun(
             attachmentsDir: attachmentsDir,
             sandboxPolicy: policy.sandboxPolicy,
             manifest: manifest,
@@ -399,7 +476,7 @@ final class KeepTalkingIOManager {
             workspaceRunStarted: workspaceRunStarted)
     }
 
-    func cleanup(_ run: PreparedSkillRun, consumedInputHandles: [UUID]?) {
+    func cleanup(_ run: PreparedActionRun, consumedInputHandles: [UUID]?) {
         if run.workspaceRunStarted, let threadID = run.workspaceThreadID {
             Task { [weak client] in await client?.endThreadWorkspaceRun(threadID) }
         }

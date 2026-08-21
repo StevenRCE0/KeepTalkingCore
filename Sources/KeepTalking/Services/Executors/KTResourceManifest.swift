@@ -33,7 +33,10 @@ public struct KTResourceManifest: Sendable {
     /// it never reaches here; a read-write scratch DIRECTORY (the thread
     /// workspace / an ACP working root) projects to `.write` — it's the agent's
     /// own space to write into, read implied by the sandbox grant.
-    public enum Direction: Sendable {
+    /// Raw values are the KTPP wire vocabulary (`KTPPResourceEntry.direction`),
+    /// distinct from the declaration vocabulary ("input"/"output"/"inout" of
+    /// `KeepTalkingResourceDirection`) that this init maps from.
+    public enum Direction: String, Codable, Sendable {
         case read
         case write
 
@@ -162,6 +165,58 @@ public struct KTResourceManifest: Sendable {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if let id = UUID(uuidString: trimmed) { return (nil, id) }
         return nil
+    }
+
+    /// Resolves an agent-supplied handle against the handles that actually
+    /// exist, repairing a single mistyped character.
+    ///
+    /// The plain `resolveAgentHandle` cannot do this: it is a pure
+    /// `String -> (kind, id)` function, so a near-miss is indistinguishable
+    /// from a valid handle for something else. Given the candidate set the
+    /// question becomes answerable — with a handful of 128-bit ids, exactly one
+    /// candidate within one edit is the intended one, and anything else is
+    /// refused rather than guessed.
+    ///
+    /// This is the same discipline the word-based `UUIDFriendlyName.resolve`
+    /// uses. Handles keep their hex form because the handle string is also the
+    /// skill's `$KT_…` environment-variable name and part of the signed
+    /// `resourcesHash` the plugin SDK verifies — it cannot become words without
+    /// a breaking wire change.
+    public static func resolveAgentHandle(
+        _ raw: String,
+        among candidates: [UUID]
+    ) -> Resolution {
+        if let direct = resolveAgentHandle(raw), candidates.contains(direct.id) {
+            return .resolved(direct.id)
+        }
+        let typed = normalizedHandleHex(raw)
+        guard typed.count >= 30 else { return .unknown }
+
+        var matches: [UUID] = []
+        for candidate in candidates {
+            let hex = candidate.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            if UUIDFriendlyName.isWithinOneEdit(hex, typed) { matches.append(candidate) }
+        }
+        if matches.count == 1 {
+            let hex = matches[0].uuidString.replacingOccurrences(of: "-", with: "").uppercased()
+            return .corrected(matches[0], from: raw, to: hex)
+        }
+        return matches.isEmpty ? .unknown : .ambiguous(matches)
+    }
+
+    /// What an agent-supplied handle turned out to mean — the shared
+    /// `KTFuzzyResolution` vocabulary, same shape `UUIDFriendlyName.resolve`
+    /// answers with.
+    public typealias Resolution = KTFuzzyResolution<UUID>
+
+    /// Strips `$`, the `KT_<KIND>_` prefix, and dashes, leaving lowercase hex.
+    static func normalizedHandleHex(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if s.hasPrefix("$") { s.removeFirst() }
+        if s.hasPrefix("kt_"), let last = s.lastIndex(of: "_") {
+            s = String(s[s.index(after: last)...])
+        }
+        return s.replacingOccurrences(of: "-", with: "")
     }
 
     // MARK: - Build
@@ -405,7 +460,21 @@ extension KTResourceManifest {
                 byteCount: ref.byteCount)
         }
 
+        /// The resource's friendly name in agent form — `"amber-swift-koala"`
+        /// — derived from the id inside its handle.
+        ///
+        /// The handle stays canonical: it is the skill's `$KT_…` env var and
+        /// part of the signed `resourcesHash`, so it cannot become words. This
+        /// is the spelling the AGENT can copy without corrupting it, and it is
+        /// accepted anywhere a handle is, resolved against the resources the
+        /// agent was actually shown. Hyphenated rather than spaced so it stays
+        /// one token wherever the agent writes it.
+        public var friendlyName: String? {
+            KTResourceManifest.parseAgentHandle(handle)?.id.friendlyNameToken
+        }
+
         /// The canonical JSON object embedded in agent-facing tool payloads.
+
         public func jsonObject() -> [String: Any] {
             var obj: [String: Any] = [
                 "handle": handle,
@@ -414,6 +483,7 @@ extension KTResourceManifest {
                 "name": name,
                 "origin": origin,
             ]
+            if let friendlyName { obj["friendly"] = friendlyName }
             if let mimeType { obj["mime_type"] = mimeType }
             if let byteCount { obj["byte_count"] = byteCount }
             if let summary, !summary.isEmpty { obj["description"] = summary }

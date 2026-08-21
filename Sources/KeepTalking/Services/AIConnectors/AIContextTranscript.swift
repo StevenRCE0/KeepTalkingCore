@@ -160,7 +160,6 @@ extension KeepTalkingClient {
         }
 
         let (_, _, selected) = try await loadContextSelection(contextID: contextID)
-        let aliasLookup = try await aliasLookup()
 
         return selected.flatMap(\.messages).compactMap { message -> AIMessage? in
             if let excludeID = excludingMessageID, message.id == excludeID {
@@ -176,10 +175,15 @@ extension KeepTalkingClient {
                 case .autonomous:
                     return .assistant(message.content)
                 case .node(let nodeID):
-                    let name =
-                        aliasLookup
-                        .resolve(.node(nodeID))
-                        .primary(.uppercase)
+                    // Unaliased nodes read as their friendly name, not a raw
+                    // UUID: this prefix is on EVERY message, so a wall of hex
+                    // both drowns the transcript and gives the model 36
+                    // characters per line it can misread as meaningful.
+                    // The HANDLE, never the alias: an alias is user-editable
+                    // free text that `UUIDFriendlyName.resolve` cannot decode,
+                    // so attributing a message to one would name a speaker the
+                    // agent then cannot refer to.
+                    let name = nodeID.friendlyNameToken
                     return .user("[\(name)] \(message.content)")
             }
         }
@@ -373,12 +377,12 @@ extension KeepTalkingClient {
         }
 
         let lines = stubs.map { stub in
-            let nodeName = aliasLookup.resolve(.node(stub.ownerNodeID)).primary()
+            let nodeName = stub.ownerNodeID.friendlyNameToken
             let nodeTag = stub.isCurrentNode ? "\(nodeName) (current)" : nodeName
             let desc = stub.description.trimmingCharacters(in: .whitespacesAndNewlines)
             let descSuffix = desc.isEmpty ? "" : "  description: \(desc)"
             var line =
-                "- action_id: \(stub.actionID.uuidString.lowercased())  name: \(stub.name)  type: \(stub.kind.rawValue)  node: \(nodeTag)\(descSuffix)"
+                "- action: \(stub.actionID.friendlyNameToken)  name: \(stub.name)  type: \(stub.kind.rawValue)  node: \(nodeTag)\(descSuffix)"
             if !stub.objectContracts.isEmpty {
                 line += "\n    objects: \(Self.renderObjectContracts(stub.objectContracts))"
             }
@@ -387,8 +391,10 @@ extension KeepTalkingClient {
 
         return """
             Available actions (use \(Self.runActionToolFunctionName) to execute, \(Self.ktSkillMetainfoToolFunctionName) to inspect skill manifests):
+            Pass an action's `action:` word-name as `action_id` — copy it exactly. It is three words because words survive copying: a mistyped word is caught and corrected, whereas a mistyped hex digit silently becomes a valid-looking id for nothing.
             Types: mcp=external server tools · skill=directory-based agent skill · primitive=built-in operation · filesystem=sandboxed file access + context blob bridge · semanticretrieval=remote thread-memory search
             An `objects:` line lists an action's declared inputs/outputs (direction + whether it's a file) so you can plan data flow BETWEEN actions — feed one action's `out` to another's `in`. You never see or pass provider file paths; reference a produced file by the handle the action returns.
+            A file `in` is REQUIRED and is never filled implicitly: an action does not see this conversation's attachments. You must pass that file's handle in `input_handles` on \(Self.runActionToolFunctionName) — get it from \(Self.contextAttachmentListingToolFunctionName) for a file already attached here, or from `kt_send_file` for a local file you hold. Calling such an action without a handle fails with "could not resolve its SOURCE".
             \(lines.joined(separator: "\n"))
             """
     }
@@ -427,16 +433,18 @@ extension KeepTalkingClient {
 
         let sortedNodeIDs = nodeIDs.sorted { $0.uuidString < $1.uuidString }
         let lines = sortedNodeIDs.map { nodeID in
-            let name =
-                aliasLookup
-                .resolve(.node(nodeID))
-                .primary(.uppercase)
             let prefix = nodeID == config.node ? "current_node" : "node"
-            return "- \(prefix): \(name)"
+            // A node is ALWAYS listed by its handle. Its alias, when the user
+            // has set one, rides alongside as a description — it is a label,
+            // not an identifier, and cannot be resolved back to a node.
+            let alias = aliasLookup.alias(for: .node(nodeID))
+            let aliasSuffix = alias.map { "  (\($0))" } ?? ""
+            return "- \(prefix): \(nodeID.friendlyNameToken)\(aliasSuffix)"
         }
 
         return """
-            Known node names in this context (mapping aliases with uppercase UUID fallback):
+            Known nodes in this context. Each is listed by its stable name, with the user's own label in parentheses where they set one:
+            Refer to a node by the name, never the parenthesised label — the label is decoration and cannot be resolved. Raw ids are not needed and are not shown.
             \(lines.joined(separator: "\n"))
             """
     }
@@ -496,7 +504,8 @@ extension KeepTalkingClient {
         // --- Conversation-derived sections (single load) ---
         // One load feeds thread topics, participant names, and the recent tail —
         // the situational picture the model needs to answer in place.
-        if let aliasLookup = try? await aliasLookup(),
+        let nameLookup = try? await aliasLookup()
+        if let aliasLookup = nameLookup,
             let (allMessages, threadedSegments, _) = try? await loadContextSelection(
                 contextID: contextID)
         {
@@ -524,7 +533,8 @@ extension KeepTalkingClient {
             var block = "Ongoing voice call transcript (most recent lines):"
             var remaining = 400
             for line in recent {
-                let entry = "\n[\(line.author.uuidString.prefix(8))]: \(line.text)"
+                let speaker = line.author.friendlyNameToken
+                let entry = "\n[\(speaker)]: \(line.text)"
                 guard remaining > 0 else { break }
                 let clipped = String(entry.prefix(remaining))
                 block += clipped
@@ -557,7 +567,7 @@ extension KeepTalkingClient {
                 case .autonomous:
                     speaker = "assistant"
                 case .node(let nodeID):
-                    speaker = aliasLookup.resolve(.node(nodeID)).primary(.uppercase)
+                    speaker = nodeID.friendlyNameToken
             }
             let content =
                 message.content.count > perMessageCap

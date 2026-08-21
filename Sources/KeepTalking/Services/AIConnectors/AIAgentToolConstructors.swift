@@ -627,10 +627,10 @@ extension KeepTalkingClient {
                             "Absolute local path of the file to stage on the target node."
                         ),
                     ]),
-                    "target_node_id": .object([
+                    "target_node": .object([
                         "type": .string("string"),
                         "description": .string(
-                            "UUID of the node that hosts the action which will consume this file (the action's owner node)."
+                            "The node that hosts the action which will consume this file (the action's owner node), by its name from the node listing — e.g. \"amber-swift-koala\". Copy the name exactly."
                         ),
                     ]),
                     "filename": .object([
@@ -640,7 +640,7 @@ extension KeepTalkingClient {
                         ),
                     ]),
                 ]),
-                "required": .array([.string("path"), .string("target_node_id")]),
+                "required": .array([.string("path"), .string("target_node")]),
                 "additionalProperties": .bool(false),
             ]
         )

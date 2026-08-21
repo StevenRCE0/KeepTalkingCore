@@ -332,13 +332,13 @@ extension KeepTalkingClient {
                     let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
                     let agentName = (trimmed.isEmpty ? "ai" : trimmed).uppercased()
                     if let node {
-                        let nodeName = aliasLookup.resolve(.node(node)).primary(.uppercase)
+                        let nodeName = aliasLookup.resolve(.node(node)).primary(.friendly)
                         speaker = "\(agentName) (\(nodeName))"
                     } else {
                         speaker = agentName
                     }
                 case .node(let id):
-                    speaker = aliasLookup.resolve(.node(id)).primary(.uppercase)
+                    speaker = aliasLookup.resolve(.node(id)).primary(.friendly)
             }
             out += "[\(time.string(from: line.timestamp))] \(speaker): \(line.text)\n"
         }

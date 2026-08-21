@@ -15,20 +15,32 @@ import MCP
 
 extension KeepTalkingPluginHost {
 
+    /// What one plugin-backed action call yielded: the tool content plus the
+    /// elucidation notes the plugin narrated while running (backfed into the
+    /// caller's tool payload alongside `produced_resources`).
+    public struct ActionCallOutput: Sendable {
+        public let content: [Tool.Content]
+        public let isError: Bool?
+        public let elucidations: [String]
+    }
+
     /// Executes a `.plugin` action instance — the entry point
     /// `performActionCallRequest` calls, shaped like every other manager's
     /// `callAction`.
     ///
     /// The instance's stored scope bag is what gets bound into the signed
     /// authorization, so the receipt records which *scoped* instance ran, not
-    /// merely which kind.
-    public func callAction(
+    /// merely which kind. `manifest` (staged inputs + output slots) projects
+    /// into the frame's `resources` block and binds as `resourcesHash`.
+    public func callActionDetailed(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
         scope: KeepTalkingActionScope,
         callerNodeID: UUID,
-        contextID: UUID
-    ) async throws -> (content: [Tool.Content], isError: Bool?) {
+        contextID: UUID,
+        manifest: KTResourceManifest? = nil,
+        onElucidation: (@Sendable (String, String?) -> Void)? = nil
+    ) async throws -> ActionCallOutput {
         guard case .plugin(let bundle) = action.payload else {
             throw KTPPHostError.protocolViolation("action is not plugin-backed")
         }
@@ -38,23 +50,33 @@ extension KeepTalkingPluginHost {
         if let requestedTool,
             !scope.permitsNamed(requestedTool, classWildcard: .callTool)
         {
-            return (
+            return ActionCallOutput(
                 content: [.text("Denied: tool '\(requestedTool)' is outside the granted scope.")],
-                isError: true
+                isError: true,
+                elucidations: []
             )
         }
 
+        // Instances can hold a catalog id the store has since merged away;
+        // dispatch-time healing usually rewrites them, but canonicalize here
+        // too so no caller can race a stale id into a session lookup.
         let outcome = try await callKind(
-            catalogID: bundle.catalogID,
+            catalogID: await catalogue.canonicalCatalogID(bundle.catalogID),
             kindName: bundle.kindName,
             tool: requestedTool,
             arguments: Self.callArguments(call),
             instanceID: bundle.id,
             instanceScope: bundle.scopeValue,
             contextID: contextID,
-            callerNodeID: callerNodeID
+            callerNodeID: callerNodeID,
+            manifest: manifest,
+            onElucidation: onElucidation
         )
-        return (content: Self.toolContent(from: outcome.content), isError: outcome.isError)
+        return ActionCallOutput(
+            content: Self.toolContent(from: outcome.content),
+            isError: outcome.isError,
+            elucidations: outcome.elucidations
+        )
     }
 
     /// The agent may address a sub-tool either through the proxy-tool envelope
@@ -125,10 +147,36 @@ extension KeepTalkingPluginHost {
             resolved = defaults
         }
         if let resolved, case .object(let schema)? = kind.scopeSchema {
-            let unknown = resolved.keys.filter { schema[$0] == nil }.sorted()
+            // `capabilities` is a RESERVED scope key (§7.5 of the resources
+            // doc): the user's per-instance narrowing of the kind's declared
+            // capability set — valid on every kind without being part of its
+            // scopeSchema.
+            let unknown = resolved.keys
+                .filter { $0 != "capabilities" && schema[$0] == nil }.sorted()
             if !unknown.isEmpty {
                 throw KTPPHostError.protocolViolation(
                     "scope keys not declared by '\(kindName)': \(unknown.joined(separator: ", "))")
+            }
+        }
+        if let narrowing = resolved?["capabilities"] {
+            // Shape first: a `capabilities` value that isn't a token array is
+            // rejected here rather than tolerated. At call time an unreadable
+            // narrowing denies (fail-closed), so accepting one at save would
+            // mint an instance that silently never gets its capability.
+            guard case .array(let narrowed) = narrowing else {
+                throw KTPPHostError.protocolViolation(
+                    "instance 'capabilities' must be an array of capability tokens")
+            }
+            let declared = kind.declaredCapabilities
+            for entry in narrowed {
+                guard case .string(let token) = entry,
+                    let capability = KTPPPluginCapability(rawValue: token),
+                    declared.contains(capability)
+                else {
+                    throw KTPPHostError.protocolViolation(
+                        "instance capability narrowing may only keep capabilities "
+                            + "'\(kindName)' declared; offending entry: \(entry)")
+                }
             }
         }
         return KeepTalkingPluginBundle(
@@ -143,7 +191,10 @@ extension KeepTalkingPluginHost {
 
     /// Descriptor for a Catalogue instance. Plugins run in their own processes
     /// (KT never launches them), so this carries no sandbox-compilable verbs —
-    /// it exists for display, the grant editor, and remote advertisement.
+    /// it exists for display, the grant editor, remote advertisement, and (via
+    /// `objects`) the file-IO seam: the kind's declared directioned objects
+    /// materialize here, which is what flips `acceptsFileInput` and drives
+    /// input staging / output-slot minting for calls to this instance.
     public static func descriptor(
         for bundle: KeepTalkingPluginBundle,
         kind: KTPPKindDeclaration?
@@ -153,7 +204,30 @@ extension KeepTalkingPluginHost {
             action: KeepTalkingActionWithDescription(
                 description: summary,
                 verbs: [.callTool]
-            )
+            ),
+            objects: kind?.objects.flatMap { declarations in
+                let objects = declarations.compactMap(Self.materializedObject)
+                return objects.isEmpty ? nil : objects
+            }
+        )
+    }
+
+    /// One declared wire object → the descriptor's `KeepTalkingActionObject`.
+    /// Declarations with an unknown direction token are dropped rather than
+    /// silently re-interpreted (a plugin bug must not widen file acceptance).
+    private static func materializedObject(
+        _ declaration: KTPPObjectDeclaration
+    ) -> KeepTalkingActionObject? {
+        guard
+            let direction = KeepTalkingResourceDirection(rawValue: declaration.direction)
+        else { return nil }
+        let name = declaration.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        return KeepTalkingActionObject(
+            name: name,
+            description: declaration.description ?? "",
+            resource: .filePaths([]),
+            direction: direction
         )
     }
 }

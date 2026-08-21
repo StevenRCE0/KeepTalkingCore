@@ -342,6 +342,54 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
                     "Catalogue"
             }
         }
+
+        // MARK: IO-preparation capabilities
+
+        // `KeepTalkingIOManager` branches on these, never on payload identity,
+        // so every executor's IO semantics live here as one declaration. The
+        // switches are exhaustive on purpose: a NEW payload case must decide
+        // each capability at compile time instead of silently inheriting
+        // another executor's semantics.
+
+        /// Whether prepared runs compile a sandbox policy. Plugin handlers run
+        /// in the plugin's own process — KT never launches them — so there is
+        /// nothing to sandbox; every other executor resolves a policy.
+        var usesCompiledSandboxPolicy: Bool {
+            switch self {
+                case .plugin:
+                    false
+                case .mcpBundle, .skill, .primitive, .semanticRetrieval, .filesystem, .acp:
+                    true
+            }
+        }
+
+        /// Whether requested outputs bind to the kind's DECLARED object names
+        /// first, position only as a fallback among unclaimed declared
+        /// objects. Plugin handlers look outputs up by declared name; skills
+        /// keep caller-label semantics (scripts are TOLD their exact write
+        /// variables per run).
+        var bindsOutputsByDeclaredName: Bool {
+            switch self {
+                case .plugin:
+                    true
+                case .mcpBundle, .skill, .primitive, .semanticRetrieval, .filesystem, .acp:
+                    false
+            }
+        }
+
+        /// Whether the run manifest carries ONLY intentional reads — resources
+        /// bound to a declared object or explicitly named in `input_handles`.
+        /// Skills keep the catch-all (their scripts browse `$KT_ATTACHMENTS`
+        /// by design); a plugin handler addresses declared names, so unnamed
+        /// context attachments would widen disclosure and poison lookups.
+        var limitsManifestInputsToDeclared: Bool {
+            switch self {
+                case .plugin:
+                    true
+                case .mcpBundle, .skill, .primitive, .semanticRetrieval, .filesystem, .acp:
+                    false
+            }
+        }
     }
 
     public var isSemanticRetrieval: Bool {
@@ -378,14 +426,18 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
     /// Whether this action consumes a file as input — i.e. a caller may attach
     /// one-time blob (OTB) `inputTransfers` that the executor stages for it.
     /// This is the single gate for accepting pushed file bytes: a node never
-    /// spools a transfer for an action that doesn't accept one. Today only
-    /// skills consume files (their scripts read `$KT_ATTACHMENTS`); the property
-    /// is intentionally general so other payload types can opt in later.
+    /// spools a transfer for an action that doesn't accept one. Skills always
+    /// consume files (their scripts read `$KT_ATTACHMENTS`); a Catalogue
+    /// (plugin) instance consumes them iff its kind declared an input file
+    /// object, materialized onto the instance descriptor at instantiation
+    /// (DESIGN_PLUGIN_RESOURCES_ACT.md §3.3).
     public var acceptsFileInput: Bool {
         switch payload {
             case .skill:
                 return true
-            case .mcpBundle, .primitive, .filesystem, .semanticRetrieval, .acp, .plugin:
+            case .plugin:
+                return descriptor?.fileObjects(direction: .input).isEmpty == false
+            case .mcpBundle, .primitive, .filesystem, .semanticRetrieval, .acp:
                 return false
         }
     }

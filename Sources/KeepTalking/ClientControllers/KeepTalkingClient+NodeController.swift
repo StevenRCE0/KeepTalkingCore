@@ -1048,15 +1048,6 @@ extension KeepTalkingClient {
             return nil
         }
 
-        // Catalogue instances are deliberately NOT advertised to peers yet:
-        // `PayloadSummary` is a closed Codable enum, so a build that predates
-        // `.plugin` fails to decode the whole status envelope, not just this
-        // row. Local use is unaffected; remote advertisement lands with the
-        // peer capability gate (design doc §5.4).
-        if case .plugin = payload {
-            return nil
-        }
-
         let grantScope: KeepTalkingActionScope?
         if let recipient,
             let resolved = try? await allowedActionScope(
@@ -1072,8 +1063,14 @@ extension KeepTalkingClient {
 
         let payloadSummary: KeepTalkingAdvertisedAction.PayloadSummary
         switch payload {
-            case .plugin:
-                return nil  // unreachable: filtered above
+            case .plugin(let bundle):
+                payloadSummary = .plugin(
+                    name: bundle.name,
+                    indexDescription: bundle.indexDescription,
+                    catalogID: bundle.catalogID,
+                    kindName: bundle.kindName,
+                    tool: bundle.tool
+                )
             case .mcpBundle(let bundle):
                 payloadSummary = .mcpBundle(
                     name: bundle.name,
@@ -1114,8 +1111,9 @@ extension KeepTalkingClient {
         var advertisedTools: [String]? = nil
 
         switch payload {
-            case .plugin:
-                return nil  // unreachable: filtered above
+            case .plugin(let bundle):
+                availability =
+                    isDisabled ? .disabled : await pluginSessionAvailability(bundle)
             case .mcpBundle:
                 if isDisabled {
                     availability = .disabled
@@ -1176,6 +1174,26 @@ extension KeepTalkingClient {
             createdAt: action.createdAt,
             lastUsed: action.lastUsed
         )
+    }
+
+    /// Catalogue liveness as the OWNER sees it. A peer has no catalogue store
+    /// to consult, so a plugin's session state has to ride the advertisement —
+    /// otherwise a remote node would offer the model a tool whose plugin is
+    /// absent, the very thing the local dormancy guard exists to prevent.
+    /// `.connecting` rather than `.failed` while the companion is away, for the
+    /// same reason the MCP branch uses it: the instance is intact and comes
+    /// back the moment the plugin reattaches, so recipients should retry.
+    private func pluginSessionAvailability(
+        _ bundle: KeepTalkingPluginBundle
+    ) async -> KeepTalkingAdvertisedActionAvailability {
+        #if os(macOS)
+        return await pluginHost.catalogue.isConnected(bundle.catalogID)
+            ? .available : .connecting
+        #else
+        // `.plugin` rows are only ever minted on a node that runs a plugin
+        // host; a non-macOS owner has no session to report on.
+        return .notApplicable
+        #endif
     }
 
     func broadcastLocalNodeState(reason: String) async {

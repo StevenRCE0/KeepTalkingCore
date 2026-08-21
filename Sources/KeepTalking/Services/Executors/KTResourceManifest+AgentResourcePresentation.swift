@@ -66,9 +66,8 @@ extension KTResourceManifest {
         _ summary: KeepTalkingVoiceTranscriptSessionSummary,
         aliasLookup: KeepTalkingAliasLookup
     ) -> [String: Any] {
-        let names = summary.authors.map {
-            aliasLookup.resolve(.node($0)).primary(.uppercase)
-        }
+        // Handles, never aliases — an alias cannot be resolved back to a node.
+        let names = summary.authors.map(\.friendlyNameToken)
         let date = DateFormatter()
         date.dateStyle = .medium
         date.timeStyle = .short

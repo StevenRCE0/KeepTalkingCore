@@ -420,13 +420,49 @@ extension KeepTalkingClient {
         else {
             return jsonString(["ok": false, "error": "missing_path"])
         }
+        // `target_node` is the current name; `target_node_id` is still accepted
+        // so a model working from a cached older schema keeps working.
         guard
-            let targetString = args["target_node_id"]?.stringValue,
-            let target = UUID(uuidString: targetString)
+            let targetString = (args["target_node"] ?? args["target_node_id"])?.stringValue
         else {
             return jsonString([
-                "ok": false, "error": "missing_or_invalid_target_node_id",
+                "ok": false, "error": "missing_or_invalid_target_node",
             ])
+        }
+        // The agent reads nodes by name now, so it must be able to write one
+        // back. A raw id still works; a name is resolved against the nodes this
+        // node actually knows, and a near-miss is repaired rather than refused.
+        //
+        // The node list is only loaded when the caller actually passed a name.
+        // A UUID resolves without candidates, so the common path — and every
+        // existing caller — costs no query at all.
+        let needsNameResolution = UUID(uuidString: targetString) == nil
+        let knownNodeIDs: [UUID] =
+            needsNameResolution ? ((try? await knownNodeIDs()) ?? []) : []
+        let target: UUID
+        switch UUIDFriendlyName.resolve(targetString, among: knownNodeIDs) {
+            case .resolved(let id):
+                target = id
+            case .corrected(let id, let from, let to):
+                target = id
+                onLog?("[send-file/target] repaired '\(from)' -> '\(to)'")
+            case .ambiguous(let ids):
+                return jsonString([
+                    "ok": false,
+                    "error": "ambiguous_target_node",
+                    "candidates": ids.map { $0.friendlyNameToken },
+                ])
+            case .unknown:
+                // Fall back to a bare id for a node we have no row for yet.
+                guard let id = UUID(uuidString: targetString) else {
+                    return jsonString([
+                        "ok": false,
+                        "error": "missing_or_invalid_target_node",
+                        "hint": "Use a node's name or id exactly as the node listing shows it.",
+                        "known_nodes": knownNodeIDs.prefix(20).map { $0.friendlyNameToken },
+                    ])
+                }
+                target = id
         }
         let fileURL = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         let trimmedName = args["filename"]?.stringValue?
@@ -445,7 +481,7 @@ extension KeepTalkingClient {
                 "ok": true,
                 "handle": KTResourceManifest.agentHandle(kind: .otb, id: handle),
                 "filename": filename,
-                "target_node_id": target.uuidString.lowercased(),
+                "target_node": target.friendlyNameToken,
                 "note":
                     "Pass this handle in `input_handles` of a kt_run_action targeting an action on this node.",
             ])
@@ -539,6 +575,12 @@ extension KeepTalkingClient {
         // a listed one.
         if let produced = result.producedResources, !produced.isEmpty {
             payloadObject["produced_resources"] = produced.map { $0.jsonObject() }
+        }
+        // Backfeed: notes a plugin executor narrated while running — the ACT
+        // distillation summarizes from the plugin's own account of the work,
+        // not just its final content string.
+        if let elucidations = result.elucidations, !elucidations.isEmpty {
+            payloadObject["elucidations"] = elucidations
         }
         let payload = jsonString(payloadObject)
         return AgentToolProxyResult(payload: payload, inlineMessages: inlineMessages)

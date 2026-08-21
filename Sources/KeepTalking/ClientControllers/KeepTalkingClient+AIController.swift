@@ -835,13 +835,8 @@ extension KeepTalkingClient {
             if let leadText = sanitizedAttachmentLeadText(leadText) {
                 parts.append(.text(leadText))
             }
-            // Cap the longest side at 4000px before handing the image to a model.
-            let scaled = KeepTalkingImageDownscaler.downscaledIfNeeded(
-                data, mimeType: mimeType)
-            if let url = URL(
-                string: "data:\(scaled.mimeType);base64,\(scaled.data.base64EncodedString())")
-            {
-                parts.append(.imageURL(url))
+            if let inlined = Self.inlinedImagePart(mimeType: mimeType, data: data) {
+                parts.append(inlined.part)
             }
             return parts
         }
@@ -854,6 +849,26 @@ extension KeepTalkingClient {
             leadText: leadText
         )
         return [.text(summary)]
+    }
+
+    /// Downscales an image (longest side capped at 4000px) and embeds it as a
+    /// base64 data-URL image part — the ONE image-inlining pipeline, shared by
+    /// context-attachment rendering above and plugin ACT resources
+    /// (`KTPPActAttachmentRendering`). `byteCap` bounds the post-downscale
+    /// payload; nil is uncapped. Returns the part plus the post-downscale MIME
+    /// type (downscaling may transcode), or nil when the image cannot be
+    /// inlined — still over the cap, or the data URL failed to form — so the
+    /// caller renders its own too-large note.
+    static func inlinedImagePart(
+        mimeType: String, data: Data, byteCap: Int? = nil
+    ) -> (part: AIMessage.Part, mimeType: String)? {
+        let scaled = KeepTalkingImageDownscaler.downscaledIfNeeded(data, mimeType: mimeType)
+        if let byteCap, scaled.data.count > byteCap { return nil }
+        guard
+            let url = URL(
+                string: "data:\(scaled.mimeType);base64,\(scaled.data.base64EncodedString())")
+        else { return nil }
+        return (.imageURL(url), scaled.mimeType)
     }
 
     private func attachmentTextFallback(

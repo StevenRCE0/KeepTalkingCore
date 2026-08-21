@@ -298,6 +298,48 @@ extension KeepTalkingClient {
                         isError: false
                     )
 
+                case .pluginKind:
+                    guard case .plugin(let bundle) = action.payload else {
+                        throw KeepTalkingClientError.unsupportedActionPayload
+                    }
+                    #if os(macOS)
+                    guard
+                        let declaration = await pluginHost.catalogue.kind(
+                            catalogID: bundle.catalogID,
+                            kindName: bundle.kindName
+                        )
+                    else {
+                        throw KeepTalkingClientError.unsupportedActionPayload
+                    }
+                    // Narrow sub-tools to the caller's grant, exactly as the
+                    // mcpTools branch does: inspection answers what the caller
+                    // may already call, never more.
+                    var projected = declaration
+                    if let allowedTools = grant.allowedNames(classWildcard: .callTool)
+                        .map(Set.init)
+                    {
+                        projected.subTools = declaration.subTools?.filter {
+                            allowedTools.contains($0.name)
+                        }
+                    }
+                    let isAvailable = await pluginHost.catalogue.isConnected(
+                        bundle.catalogID
+                    )
+                    return KeepTalkingActionCatalogItemResult(
+                        actionID: query.actionID,
+                        kind: query.kind,
+                        pluginKind: KeepTalkingActionCatalogPluginKind(
+                            declaration: projected,
+                            isAvailable: isAvailable
+                        ),
+                        isError: false
+                    )
+                    #else
+                    // Only a node running a plugin host can own a `.plugin`
+                    // action, so this is unreachable for a well-formed query.
+                    throw KeepTalkingClientError.unsupportedActionPayload
+                    #endif
+
                 case .skillMetadata:
                     guard case .skill(let bundle) = action.payload else {
                         throw KeepTalkingClientError.unsupportedActionPayload

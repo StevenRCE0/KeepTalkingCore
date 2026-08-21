@@ -62,6 +62,14 @@ public enum KTPPFrameKind {
     /// doc's §12.1; this is its first member: a plugin asking the USER to
     /// create an instance of one of its kinds. It proposes, never creates.
     public static let hostActionCreate = "host.action.create"
+    /// Companion → host: open the "add action" UI without a pre-selected kind.
+    public static let hostUIAddAction = "host.ui.addAction"
+    /// Plugin → host: one bounded AI turn on the host's ACT connector, valid
+    /// only while servicing an in-flight call (resources design doc §4).
+    public static let hostActRequest = "host.act.request"
+    /// Plugin → host notification: a short explanatory note for the in-flight
+    /// call, published into the caller's trace and backfed to the ACT agent.
+    public static let hostActElucidate = "host.act.elucidate"
 }
 
 public enum KTPPConstants {
@@ -99,6 +107,11 @@ public struct KTPPHello: Codable, Sendable {
     public var pluginInfo: KTPPPluginInfo
     /// "companion" for the unified companion runtime app; nil for plugins.
     public var role: String?
+    /// Fresh per-connection nonce. When present on a resume, the host's ok
+    /// reply advertises its current identity key with a signature over this
+    /// nonce (domain `kt.plugin.hello.host.v1`), letting the SDK re-pin a
+    /// legitimately rotated host key instead of failing every authorization.
+    public var pluginNonce: String?
     /// Companion-signed endorsement of this plugin's identity (raw signed
     /// object, domain `kt.plugin.endorse.v1`). A valid endorsement from a
     /// paired companion catalog auto-approves this plugin's pairing — one
@@ -148,6 +161,20 @@ public struct KTPPMeterDeclaration: Codable, Sendable, Equatable {
     public var description: String?
 }
 
+/// The FIXED capability vocabulary a kind may declare (resources design doc
+/// §7.5 resolution): a closed enum, never freeform strings — plugins are the
+/// "controlled" surface. Unknown tokens in a declaration are dropped, never
+/// interpreted. The vocabulary grows here, one deliberate case at a time.
+/// (File IO is NOT a capability — it is governed by the kind's declared
+/// `objects`, which carry direction and drive staging/slots directly.)
+public enum KTPPPluginCapability: String, CaseIterable, Sendable {
+    /// May issue `host.act.request` while servicing a call. Enforced at three
+    /// levels, all required: this declaration (kind ceiling), the instance
+    /// scope's optional `capabilities` narrowing, and the catalog's
+    /// user-consent toggle (`allowsACT`).
+    case act
+}
+
 /// One registered action kind — the template the user instantiates (§4.3 of the
 /// design doc). `inputSchema`/`scopeSchema` are JSON Schema fragments; `defaultScope`
 /// makes one-click instantiation possible.
@@ -159,8 +186,29 @@ public struct KTPPKindDeclaration: Codable, Sendable, Equatable {
     public var scopeSchema: Value?
     public var defaultScope: Value?
     public var subTools: [KTPPSubTool]?
+    /// Directioned file objects this kind consumes/produces (§3.3 of the
+    /// resources design doc). Absent = the kind does no file IO.
+    public var objects: [KTPPObjectDeclaration]?
+    /// Capabilities from the FIXED `KTPPPluginCapability` vocabulary this kind
+    /// needs. The declaration is the kind-level ceiling; instances may narrow
+    /// it via the reserved `capabilities` scope key.
+    public var capabilities: [String]?
+    /// Legacy disclosure bit, superseded by `capabilities: ["act"]` — still
+    /// honored (it implies the act capability) so early declarations keep
+    /// working.
+    public var usesACT: Bool?
     public var remoteAuthorisable: Bool?
     public var blockingAuthorisation: Bool?
+
+    /// The recognized declared capability set: `capabilities` filtered to the
+    /// fixed vocabulary (unknown tokens dropped — a plugin bug or a newer
+    /// plugin's token must not widen anything), plus the legacy `usesACT`
+    /// alias for `.act`.
+    public var declaredCapabilities: Set<KTPPPluginCapability> {
+        var set = Set((capabilities ?? []).compactMap(KTPPPluginCapability.init(rawValue:)))
+        if usesACT == true { set.insert(.act) }
+        return set
+    }
 }
 
 public struct KTPPSubTool: Codable, Sendable, Equatable {
@@ -169,12 +217,107 @@ public struct KTPPSubTool: Codable, Sendable, Equatable {
     public var inputSchema: Value?
 }
 
+/// One directioned SVO file object a kind declares — the wire form of
+/// `KeepTalkingActionObject` (all declared objects are files; non-file
+/// parameters belong in `inputSchema`). Materialized onto the instance
+/// descriptor at instantiation, which is what flips `acceptsFileInput`
+/// and drives input staging / output-slot minting for plugin calls.
+public struct KTPPObjectDeclaration: Codable, Sendable, Equatable {
+    public var name: String
+    /// "input" | "output" | "inout" (`KeepTalkingResourceDirection` raw values).
+    public var direction: String
+    public var description: String?
+
+    public init(name: String, direction: String, description: String? = nil) {
+        self.name = name
+        self.direction = direction
+        self.description = description
+    }
+}
+
 public struct KTPPKindsResult: Codable, Sendable {
     public var manifestVersion: String
     public var manifestHash: String
     public var kinds: [KTPPKindDeclaration]
     public var meters: [KTPPMeterDeclaration]?
     public var priceSheet: Value?
+}
+
+// MARK: - Resource payloads (KTPP v1.1)
+
+/// One resource provisioned for a call — the wire projection of a
+/// `KTResourceManifest.Entry` (`envKey` → `handle`, canonicalized path carried
+/// verbatim). This IS the skill emission re-targeted: a skill subprocess gets
+/// `$KT_<HANDLE>=<path>` env vars; an attached plugin process gets the same
+/// pairs in the call frame. No file bytes ever cross the socket — the plugin
+/// SDK does direct local IO on the path and OBSCURES it from handler code,
+/// which sees only handles + streams (DESIGN_PLUGIN_RESOURCES_ACT.md §3.2).
+public struct KTPPResourceEntry: Codable, Sendable, Equatable {
+    /// `KT_<KIND>_<HEX>` — identical to the manifest entry's `envKey`, so the
+    /// orchestrating agent, a skill's `$KT_…` env var, and a plugin entry all
+    /// name the same resource with the same token.
+    public var handle: String
+    /// Resource family: "attachment" | "otb" | "fs".
+    public var kind: String
+    /// `.read` (input) or `.write` (output slot the host harvests after the
+    /// call) — typed at the wire boundary; encodes as "read"/"write".
+    public var direction: KTResourceManifest.Direction
+    /// Sanitized display name (host-side control-character strip).
+    public var name: String
+    /// The declared SVO object this resource binds to, when any.
+    public var objectName: String?
+    /// Resolved absolute path on this host — SDK-private on the plugin side,
+    /// never surfaced to handler code. Absent for fs-reached entries (none in
+    /// v1). Local-socket only; node-to-node envelopes never carry it.
+    public var path: String?
+    /// Directory resources (collection slots / staged dirs) take child files.
+    public var isDirectory: Bool
+
+    public init(
+        handle: String,
+        kind: String,
+        direction: KTResourceManifest.Direction,
+        name: String,
+        objectName: String? = nil,
+        path: String? = nil,
+        isDirectory: Bool
+    ) {
+        self.handle = handle
+        self.kind = kind
+        self.direction = direction
+        self.name = name
+        self.objectName = objectName
+        self.path = path
+        self.isDirectory = isDirectory
+    }
+}
+
+/// The `resources` block on `plugin.call.request`.
+public struct KTPPResources: Codable, Sendable, Equatable {
+    public var entries: [KTPPResourceEntry]
+
+    public init(entries: [KTPPResourceEntry]) {
+        self.entries = entries
+    }
+
+    /// The single-sourced projection: every wire entry derives from a manifest
+    /// entry here, so the two vocabularies can never diverge (the same rule the
+    /// manifest enforces between `environmentVariables()` and `promptBlock()`).
+    /// Returns nil for an absent/empty manifest — the field is then omitted
+    /// from the frame entirely.
+    public init?(manifest: KTResourceManifest?) {
+        guard let manifest, !manifest.entries.isEmpty else { return nil }
+        entries = manifest.entries.map { entry in
+            KTPPResourceEntry(
+                handle: entry.envKey,
+                kind: entry.kind.agentFamily,
+                direction: entry.direction,
+                name: entry.displayName,
+                objectName: entry.objectName,
+                path: entry.path?.path,
+                isDirectory: entry.isDirectory)
+        }
+    }
 }
 
 // MARK: - Call payloads
@@ -190,6 +333,9 @@ public struct KTPPCallRequest: Codable, Sendable {
     public var tool: String?
     public var arguments: Value  // object
     public var instance: KTPPInstanceRef
+    /// Resources provisioned for this call (path-free; §3.1 of the resources
+    /// design doc). When present, the authorization binds it as `resourcesHash`.
+    public var resources: KTPPResources?
     public var authorization: Value  // signed KTPPCallAuthorization object
     public var grant: Value?
 }
@@ -208,12 +354,82 @@ public struct KTPPCallResult: Codable, Sendable {
     public var receipt: Value?  // signed KTPPUsageReceipt object
 }
 
+// MARK: - ACT payloads (KTPP v1.1)
+
+/// plugin → host request payload for `host.act.request` — one bounded AI turn
+/// on the HOST's ACT connector, bound to an in-flight call. Execution is
+/// always local to the plugin's host node; remote callers contribute
+/// attribution only (resources design doc §4.2).
+public struct KTPPActRequest: Codable, Sendable {
+    /// The in-flight `plugin.call.request` id this turn is bound to.
+    public var requestID: String
+    public var task: String
+    /// Extra system guidance, appended to the host's plugin-ACT preamble.
+    public var system: String?
+    /// Resource handles FROM THIS CALL's `resources` block whose (text) content
+    /// the host injects into the transcript.
+    public var attachments: [String]?
+    /// "text" (default) | "json".
+    public var expects: String?
+    public var maxOutputTokens: Int?
+}
+
+public struct KTPPActUsage: Codable, Sendable {
+    public var inputTokens: Int?
+    public var outputTokens: Int?
+
+    public init(inputTokens: Int? = nil, outputTokens: Int? = nil) {
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+    }
+}
+
+/// host → plugin response payload to `host.act.request`.
+public struct KTPPActResult: Codable, Sendable {
+    public var text: String
+    public var thinking: String?
+    public var model: String
+    public var usage: KTPPActUsage?
+
+    public init(
+        text: String, thinking: String? = nil, model: String,
+        usage: KTPPActUsage? = nil
+    ) {
+        self.text = text
+        self.thinking = thinking
+        self.model = model
+        self.usage = usage
+    }
+}
+
+/// plugin → host NOTIFICATION payload for `host.act.elucidate` — a short
+/// explanatory note for the in-flight call. Never answered; narration must
+/// not be able to fail a call.
+public struct KTPPActElucidation: Codable, Sendable {
+    public var requestID: String
+    public var message: String
+    public var detail: String?
+}
+
 /// plugin → host request payload for `host.action.create`.
 public struct KTPPActionCreateRequest: Codable, Sendable {
     public var kindName: String
     public var suggestedName: String?
     public var reason: String?
     public var suggestedScope: Value?
+}
+
+/// plugin → host request payload for `host.ui.addAction` — Companion asks the
+/// host to open the "add action" UI, optionally pre-scoped to a kind/plugin.
+/// Both fields optional: an empty payload opens the unscoped flow.
+public struct KTPPUIAddActionRequest: Codable, Sendable {
+    public var kindName: String?
+    public var pluginName: String?
+
+    public init(kindName: String? = nil, pluginName: String? = nil) {
+        self.kindName = kindName
+        self.pluginName = pluginName
+    }
 }
 
 /// host → plugin response: what the user decided.

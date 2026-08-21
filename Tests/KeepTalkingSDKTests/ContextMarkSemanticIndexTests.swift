@@ -77,13 +77,13 @@ struct ContextMarkSemanticIndexTests {
         let firstMessage = KeepTalkingContextMessage(
             context: context,
             sender: .node(node: UUID()),
-            content: "First transcript",
+            content: "The first discussion covered database migration strategies and rollback procedures in depth",
             timestamp: Date(timeIntervalSince1970: 1)
         )
         let secondMessage = KeepTalkingContextMessage(
             context: context,
             sender: .node(node: UUID()),
-            content: "Second transcript",
+            content: "The second discussion explored semantic indexing approaches and document embedding pipelines",
             timestamp: Date(timeIntervalSince1970: 2)
         )
         try await firstMessage.save(on: store.database)

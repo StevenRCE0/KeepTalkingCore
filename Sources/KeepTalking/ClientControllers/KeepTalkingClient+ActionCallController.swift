@@ -182,16 +182,54 @@ extension KeepTalkingClient {
             // Resources this call PRODUCED (summoned attachments + private OTB
             // outputs), in the unified agent-facing format — surfaced on the result.
             var producedResources: [KTResourceManifest.AgentResource] = []
+            // Every executor branch merges delivered outputs the same way.
+            // Transfers APPEND (never assign): the filesystem branch has
+            // already seeded outputTransfers from the op result by the time it
+            // harvests produced files.
+            func absorb(_ delivered: KeepTalkingIOManager.DeliveredOutputs) {
+                producedResources.append(contentsOf: delivered.resources)
+                if !delivered.transfers.isEmpty {
+                    outputTransfers = (outputTransfers ?? []) + delivered.transfers
+                }
+            }
+            // Narration a plugin executor pushed while running — surfaced on the
+            // result so the caller's tool payload can backfeed it to the agent.
+            var elucidations: [String]? = nil
             switch action.payload {
                 case .plugin:
                     #if os(macOS)
-                    callResult = try await pluginHost.callAction(
+                    // Same IO lifecycle as skills — stage inputs, allocate
+                    // workspace output slots, build the manifest — but the
+                    // manifest rides the KTPP call frame (resources block +
+                    // signed resourcesHash) instead of a subprocess env, and
+                    // no sandbox policy is compiled (KT never launches plugin
+                    // processes). Harvest stays the fail-closed slot scan.
+                    await refreshPluginInstanceDescriptorIfStale(action)
+                    let pluginIO = KeepTalkingIOManager(client: self)
+                    let pluginRun = try await pluginIO.prepareActionRun(
+                        action: action, request: request, grant: grant)
+                    defer {
+                        pluginIO.cleanup(
+                            pluginRun, consumedInputHandles: request.call.inputHandles)
+                    }
+                    let pluginOutput = try await pluginHost.callActionDetailed(
                         action: action,
                         call: request.call,
                         scope: grant,
                         callerNodeID: request.callerNodeID,
-                        contextID: request.contextID
+                        contextID: request.contextID,
+                        manifest: pluginRun.manifest
                     )
+                    callResult = (content: pluginOutput.content, isError: pluginOutput.isError)
+                    if !pluginOutput.elucidations.isEmpty {
+                        elucidations = pluginOutput.elucidations
+                    }
+                    let pluginDelivered = await pluginIO.deliverOutputs(
+                        pluginRun.outputSlots,
+                        contextID: request.contextID,
+                        callerNodeID: request.callerNodeID,
+                        actionID: request.call.action)
+                    absorb(pluginDelivered)
                     #else
                     callResult = (content: [], isError: true)
                     #endif
@@ -204,7 +242,7 @@ extension KeepTalkingClient {
                 case .skill:
                     #if os(macOS)
                     let actionIO = KeepTalkingIOManager(client: self)
-                    let ioRun = try await actionIO.prepareSkillRun(
+                    let ioRun = try await actionIO.prepareActionRun(
                         action: action, request: request, grant: grant)
                     defer {
                         actionIO.cleanup(
@@ -224,10 +262,7 @@ extension KeepTalkingClient {
                         contextID: request.contextID,
                         callerNodeID: request.callerNodeID,
                         actionID: request.call.action)
-                    producedResources.append(contentsOf: delivered.resources)
-                    if !delivered.transfers.isEmpty {
-                        outputTransfers = (outputTransfers ?? []) + delivered.transfers
-                    }
+                    absorb(delivered)
                     #else
                     callResult = (content: [], isError: true)
                     #endif
@@ -258,10 +293,7 @@ extension KeepTalkingClient {
                                 persistence: persistence,
                                 in: request.contextID,
                                 to: request.callerNodeID)
-                        producedResources.append(contentsOf: delivered.resources)
-                        if !delivered.transfers.isEmpty {
-                            outputTransfers = (outputTransfers ?? []) + delivered.transfers
-                        }
+                        absorb(delivered)
                         onLog?(
                             "[io/primitive-output] action=\(request.call.action.uuidString.prefix(8)) "
                                 + "files=\(primitiveResult.outputFiles.count) "
@@ -299,6 +331,27 @@ extension KeepTalkingClient {
                     )
                     callResult = (content: fsResult.content, isError: fsResult.isError)
                     outputTransfers = fsResult.outputTransfers.isEmpty ? nil : fsResult.outputTransfers
+                    // A LOCAL get-file has nothing to stream — the bytes are
+                    // already on this disk — but the agent still needs a handle
+                    // to pass as another action's `file` input. Stage the file
+                    // in place so it surfaces as a $KT_OTB resource, the same
+                    // shape a remote get-file ends up with.
+                    if !fsResult.producedFiles.isEmpty {
+                        let persistence =
+                            request.call.outputHandles?.first?.persistence ?? .otb
+                        let delivered = await KeepTalkingIOManager(client: self)
+                            .deliverProducedOutputFiles(
+                                fsResult.producedFiles,
+                                persistence: persistence,
+                                in: request.contextID,
+                                to: request.callerNodeID)
+                        absorb(delivered)
+                        onLog?(
+                            "[io/filesystem-output] action=\(request.call.action.uuidString.prefix(8)) "
+                                + "files=\(fsResult.producedFiles.count) "
+                                + "persistence=\(persistence.rawValue) "
+                                + "produced=\(delivered.resources.count)")
+                    }
                 case .semanticRetrieval:
                     callResult = try await semanticRetrievalActionManager.callAction(
                         action: action,
@@ -361,7 +414,8 @@ extension KeepTalkingClient {
                 isError: callResult.isError ?? false,
                 errorMessage: nil,
                 outputTransfers: outputTransfers,
-                producedResources: producedResources.isEmpty ? nil : producedResources
+                producedResources: producedResources.isEmpty ? nil : producedResources,
+                elucidations: elucidations
             )
         } catch {
             return KeepTalkingActionCallResult(

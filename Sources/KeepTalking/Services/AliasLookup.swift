@@ -4,6 +4,11 @@ public struct KeepTalkingAliasResolution: Sendable, Hashable {
 
     public enum IDDisplayMode: Sendable, Hashable {
         case uppercase, lowercase, friendly, raw
+        /// `amber-swift-koala` — the friendly name as a single hyphenated
+        /// token. This is the form for anything an agent reads and types back:
+        /// one word-shaped token with no spaces to lose, and exactly what
+        /// `UUIDFriendlyName.resolve` matches on.
+        case friendlyToken
     }
 
     public let alias: String?
@@ -25,6 +30,7 @@ public struct KeepTalkingAliasResolution: Sendable, Hashable {
             case .uppercase: return id.uuidString.uppercased()
             case .lowercase: return id.uuidString.lowercased()
             case .friendly: return id.friendlyName
+            case .friendlyToken: return id.friendlyNameToken
             case .raw: return id.uuidString
         }
     }

@@ -44,10 +44,15 @@ extension KeepTalkingClient {
                   `kt_send_file` or a prior `produced_resources` entry with
                   persistence=otb). NOT retrievable via attachment tools.
 
-                To feed a file INTO the action: stage it on the action's owner
-                node with `kt_send_file` (returns a `KT_OTB_<HEX>` handle), then
-                pass that handle in `input_handles` here. The handle resolves
-                only on the node you staged it to.
+                To feed a file INTO the action: pass its handle in
+                `input_handles` here. This is the ONLY way an action receives a
+                file — it cannot see this conversation's attachments, so a file
+                the user attached does not reach it unless you pass the handle.
+                For a file already attached here, look up its
+                `KT_ATTACHMENT_<HEX>` handle in the context attachment listing.
+                For a local file you hold, stage it on the action's owner node
+                with `kt_send_file` (returns a `KT_OTB_<HEX>` handle); that
+                handle resolves only on the node you staged it to.
 
                 To capture a file the action PRODUCES: request it in `outputs`.
                 Each entry needs a `name` and a `persistence`:
@@ -83,7 +88,7 @@ extension KeepTalkingClient {
                         "type": .string("array"),
                         "items": .object(["type": .string("string")]),
                         "description": .string(
-                            "Optional resource handles (KT_OTB_<HEX> form — from kt_send_file or a prior produced_resources entry) to deliver as the action's file input. Only use handles staged on this action's owner node. KT_ATTACHMENT_<HEX> handles from the context attachment list are also accepted, but prefer kt_send_file for a local file you hold."
+                            "Resource handles to deliver as the action's file input. REQUIRED whenever the chosen action's `objects:` line lists a file `in` — that input is never filled implicitly, and the action cannot see this conversation's attachments, so omitting the handle makes the call fail with \"could not resolve its SOURCE\". For a file already attached to this conversation, get its KT_ATTACHMENT_<HEX> handle from the context attachment listing first. For a local file you hold, stage it with kt_send_file (returns KT_OTB_<HEX>) — only handles staged on this action's owner node resolve."
                         ),
                     ]),
                     "outputs": .object([
@@ -126,6 +131,36 @@ extension KeepTalkingClient {
 
     // MARK: - Tool executor
 
+    /// Display name for an action id, for disambiguation messages.
+    static func stubName(_ id: UUID, in catalog: KeepTalkingActionRuntimeCatalog) -> String {
+        catalog.actionStubs.first { $0.actionID == id }?.name ?? "(unknown)"
+    }
+
+    /// The `unknown_action_id` reply. A bare error string is a dead end — the
+    /// agent cannot tell a typo from a vanished action, and has been known to
+    /// conclude the host crashed — so hand back the roster for self-correction.
+    private func unknownActionReply(
+        _ actionToken: String,
+        toolCallID: String,
+        in runtimeCatalog: KeepTalkingActionRuntimeCatalog
+    ) -> AIMessage {
+        toolMessage(
+            payload: jsonString([
+                "ok": false,
+                "error": "unknown_action_id",
+                "action_id": actionToken,
+                "hint": "No action matches that name, and it is not close "
+                    + "enough to one to guess. Copy an `action:` value from "
+                    + "available_actions exactly. Do NOT conclude the action "
+                    + "or its host is unavailable — this is a naming miss.",
+                "available_actions": runtimeCatalog.actionStubs.prefix(40).map {
+                    ["action": $0.actionID.friendlyNameToken, "name": $0.name]
+                },
+            ]),
+            toolCallID: toolCallID
+        )
+    }
+
     /// Executes a `kt_run_action` tool call by running the ACT agent mini-loop.
     func executeRunActionToolCall(
         toolCallID: String,
@@ -139,10 +174,7 @@ extension KeepTalkingClient {
     ) async throws -> [AIMessage] {
         let args = try decodeToolArguments(rawArguments)
 
-        guard
-            let actionIDString = args["action_id"]?.stringValue,
-            let actionID = UUID(uuidString: actionIDString)
-        else {
+        guard let actionToken = args["action_id"]?.stringValue else {
             return [
                 toolMessage(
                     payload: jsonString(["ok": false, "error": "missing_or_invalid_action_id"]),
@@ -151,30 +183,155 @@ extension KeepTalkingClient {
             ]
         }
 
+        // The agent references actions by their word-name (`amber-swift-koala`),
+        // and a raw UUID still works. Resolution repairs a single mistyped word;
+        // it never repairs hex, which has no redundancy to repair from.
+        let candidates = runtimeCatalog.actionStubs.map(\.actionID)
+        let resolution = UUIDFriendlyName.resolve(actionToken, among: candidates)
+        let actionID: UUID
+        switch resolution {
+            case .resolved(let id):
+                actionID = id
+            case .corrected(let id, let from, let to):
+                actionID = id
+                onLog?("[act/action-id] repaired '\(from)' -> '\(to)'")
+            case .ambiguous(let ids):
+                return [
+                    toolMessage(
+                        payload: jsonString([
+                            "ok": false,
+                            "error": "ambiguous_action_id",
+                            "action_id": actionToken,
+                            "candidates": ids.map {
+                                ["action": $0.friendlyNameToken, "name": Self.stubName($0, in: runtimeCatalog)]
+                            },
+                            "hint": "More than one action matches. Retry with one of the "
+                                + "candidate names exactly.",
+                        ]),
+                        toolCallID: toolCallID
+                    )
+                ]
+            case .unknown:
+                return [unknownActionReply(actionToken, toolCallID: toolCallID, in: runtimeCatalog)]
+        }
+
+        // `resolve(_:among:)` only returns ids drawn from `candidates`, so this
+        // lookup is total; the fallback shares the `.unknown` reply so even a
+        // future desynchronisation cannot regress to a bare dead-end error.
         guard
             let stub = runtimeCatalog.actionStubs.first(where: { $0.actionID == actionID })
         else {
-            return [
-                toolMessage(
-                    payload: jsonString([
-                        "ok": false,
-                        "error": "unknown_action_id",
-                        "action_id": actionIDString,
-                    ]),
-                    toolCallID: toolCallID
-                )
-            ]
+            return [unknownActionReply(actionToken, toolCallID: toolCallID, in: runtimeCatalog)]
         }
 
         let task = args["task"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         // Keep the resolved (kind, id) — not just the bare UUID — so the ACT agent
         // can be TOLD which canonical handles it holds (the bare-UUID side-channel
         // alone left the agent blind to its own handles).
-        let resolvedInputHandles: [(kind: KTResourceManifest.Kind?, id: UUID)] =
-            args["input_handles"]?.arrayValue?.compactMap {
-                $0.stringValue.flatMap { KTResourceManifest.resolveAgentHandle($0) }
-            } ?? []
+        let suppliedHandles = args["input_handles"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        // A friendly name — or a repairable hex near-miss — only becomes an id
+        // against the handles that actually exist, so the caller-scoped staged
+        // set is fetched once, lazily: the common calls (no input handles, or
+        // exact non-OTB handles) skip the actor hop and its reap scan.
+        var stagedHandles: [UUID]?
+        func ownedHandles() async -> [UUID] {
+            if let stagedHandles { return stagedHandles }
+            let owned = await stagedFileStore.handles(forCaller: config.node)
+            stagedHandles = owned
+            return owned
+        }
+        // ONE resolution per handle, settled once: the resolved list, the
+        // repair log, and the failure report all derive from the same outcome
+        // and cannot disagree. A handle that does not resolve used to be
+        // dropped here in silence: the action then ran without its input and
+        // failed further downstream with "could not resolve its SOURCE", which
+        // tells the agent nothing about the handle it actually mistyped. Say
+        // so plainly instead — with a per-handle reason, because "re-copy it
+        // exactly" is the wrong advice for an ambiguous name.
+        var resolvedInputHandles: [(kind: KTResourceManifest.Kind?, id: UUID)] = []
+        var unresolvedHandles: [[String: String]] = []
+        func settle(
+            _ resolution: KTResourceManifest.Resolution,
+            supplied: String,
+            kind: KTResourceManifest.Kind?,
+            whenUnknown problem: String,
+            hint: String
+        ) {
+            switch resolution {
+                case .resolved(let id):
+                    resolvedInputHandles.append((kind, id))
+                case .corrected(let id, let from, let to):
+                    onLog?("[act/input-handle] repaired '\(from)' -> '\(to)'")
+                    resolvedInputHandles.append((kind, id))
+                case .ambiguous(let ids):
+                    unresolvedHandles.append([
+                        "handle": supplied,
+                        "problem": "ambiguous",
+                        "candidates": ids.map(\.friendlyNameToken).joined(separator: ", "),
+                        "hint": "More than one staged file plausibly matches. Retry with "
+                            + "one of the candidates exactly.",
+                    ])
+                case .unknown:
+                    unresolvedHandles.append([
+                        "handle": supplied, "problem": problem, "hint": hint,
+                    ])
+            }
+        }
+        for supplied in suppliedHandles {
+            let direct = KTResourceManifest.resolveAgentHandle(supplied)
+            if let direct, direct.kind != .otb {
+                // Attachment handles and bare UUIDs resolve in universes the
+                // staged store does not hold — they pass through as before.
+                resolvedInputHandles.append(direct)
+            } else if direct != nil {
+                // A parsed OTB handle claims caller-staged bytes: resolve it
+                // against the handles that exist, repairing a single mistyped
+                // hex character — a substitution typo still parses as a
+                // well-formed id for something that was never staged.
+                settle(
+                    KTResourceManifest.resolveAgentHandle(supplied, among: await ownedHandles()),
+                    supplied: supplied,
+                    kind: .otb,
+                    whenUnknown: "not_staged",
+                    hint: "Well-formed, but no file staged on this node matches — "
+                        + "stale, already consumed, or mistyped. Re-stage the file "
+                        + "with kt_send_file, or re-copy the handle from the "
+                        + "produced_resources of the call that created it.")
+            } else {
+                // Not a handle — a friendly name, or a handle mangled past
+                // parsing (dropped/extra character), which hex repair recovers.
+                var resolution = UUIDFriendlyName.resolve(supplied, among: await ownedHandles())
+                if case .unknown = resolution {
+                    resolution = KTResourceManifest.resolveAgentHandle(
+                        supplied, among: await ownedHandles())
+                }
+                settle(
+                    resolution,
+                    supplied: supplied,
+                    kind: nil,
+                    whenUnknown: "unrecognized",
+                    hint: "Not a resource handle. A handle looks like KT_OTB_<32 hex> "
+                        + "or KT_ATTACHMENT_<32 hex>, or the three-word `friendly` name "
+                        + "shown beside it — either works, but it must be copied exactly "
+                        + "from the resource that produced it. It is not a filename and "
+                        + "not a path. Re-read the produced_resources of the call that "
+                        + "created the file, or the context attachment listing, and copy "
+                        + "one of those two forms.")
+            }
+        }
         let inputHandles = resolvedInputHandles.map(\.id)
+        if !unresolvedHandles.isEmpty {
+            return [
+                toolMessage(
+                    payload: jsonString([
+                        "ok": false,
+                        "error": "unresolvable_input_handles",
+                        "handles": unresolvedHandles,
+                    ]),
+                    toolCallID: toolCallID
+                )
+            ]
+        }
         // Caller-requested OUTPUTS the action should PRODUCE. We mint each handle id
         // here (caller-side) so it round-trips with the produced output; `persistence`
         // is the caller's switch (durable attachment vs private OTB).
@@ -483,13 +640,18 @@ extension KeepTalkingClient {
                 name = await stagedFileStore.file(
                     handle: handle.id, callerNodeID: config.node)?.filename
             }
-            lines.append(name.map { "- \(token) — \"\($0)\"" } ?? "- \(token)")
+            let friendly = handle.id.friendlyName
+            lines.append(
+                name.map { "- \(token)  (\(friendly)) — \"\($0)\"" }
+                    ?? "- \(token)  (\(friendly))")
         }
         return """
 
             Resources provided for this run — the file(s) the task refers to. Reference each
             by its HANDLE (the handle IS the file): pass it verbatim as a tool's file
-            argument, or use it in $-form as the path in a shell command (e.g. "$\(handles.first.flatMap { h in h.kind.map { KTResourceManifest.agentHandle(kind: $0, id: h.id) } } ?? "KT_…")").
+            argument, or use it in $-form as the path in a shell command. The name in
+            parentheses is the same resource and is accepted wherever the handle is —
+            copy whichever you can reproduce exactly (e.g. "$\(handles.first.flatMap { h in h.kind.map { KTResourceManifest.agentHandle(kind: $0, id: h.id) } } ?? "KT_…")").
             \(lines.joined(separator: "\n"))
             """
     }
@@ -536,10 +698,17 @@ extension KeepTalkingClient {
                     context: context
                 )
 
-            case .acp, .plugin:
-                // Their callable tool defs are already in the runtime catalog
-                // (one per instance for Catalogue actions); expose them like a
-                // primitive.
+            case .plugin:
+                return try await resolvedACTPluginAction(
+                    actionID: actionID,
+                    stub: stub,
+                    runtimeCatalog: runtimeCatalog,
+                    context: context
+                )
+
+            case .acp:
+                // Its callable tool def is already in the runtime catalog;
+                // expose it like a primitive.
                 let definitions = runtimeCatalog.catalog.definitions
                     .filter { $0.actionID == actionID }
                 return .init(tools: definitions, promptContext: "")
@@ -652,6 +821,99 @@ extension KeepTalkingClient {
             tools: hydratedDefinitions.map(Self.actMCPToolDefinition),
             promptContext: ""
         )
+    }
+
+    /// Hydrates a Catalogue instance's tool definition at inspection time.
+    ///
+    /// A LOCAL instance is already schema-complete: the runtime catalog read
+    /// its kind's `inputSchema` straight off the connected plugin host. A
+    /// REMOTE one cannot be — the kind's schema is deliberately not advertised
+    /// (it would bloat every status envelope and go stale between
+    /// advertisements), so the catalog could only register the permissive
+    /// parameter shape. This is where the real declaration is fetched, on
+    /// demand, from the node that actually holds the plugin: the `pluginKind`
+    /// twin of the `mcpTools` query.
+    private func resolvedACTPluginAction(
+        actionID: UUID,
+        stub: KeepTalkingActionStub,
+        runtimeCatalog: KeepTalkingActionRuntimeCatalog,
+        context: KeepTalkingContext
+    ) async throws -> ACTResolvedAction {
+        let catalogDefinitions = runtimeCatalog.catalog.definitions
+            .filter { $0.actionID == actionID }
+
+        guard !stub.isCurrentNode else {
+            return .init(tools: catalogDefinitions, promptContext: "")
+        }
+        guard
+            let action = try await KeepTalkingAction.find(
+                actionID,
+                on: localStore.database
+            ),
+            case .plugin(let bundle) = action.payload
+        else {
+            return .init(tools: catalogDefinitions, promptContext: "")
+        }
+
+        actLog(
+            "outgoing-request action=\(actionID.uuidString.lowercased()) kind=plugin_kind target=\(stub.ownerNodeID.uuidString.lowercased())"
+        )
+        let result = try await dispatchActionCatalogRequest(
+            targetNodeID: stub.ownerNodeID,
+            queries: [
+                KeepTalkingActionCatalogQuery(
+                    actionID: actionID,
+                    kind: .pluginKind
+                )
+            ],
+            context: context
+        )
+        guard
+            let item = result.items.first(where: {
+                $0.actionID == actionID && $0.kind == .pluginKind
+            }),
+            !item.isError,
+            let remoteKind = item.pluginKind
+        else {
+            // Owner could not answer — plugin forgotten, grant narrowed, or a
+            // build without this query. Keep the permissive definition rather
+            // than dropping the tool: the call still routes, and the owner is
+            // the node that validates arguments anyway.
+            actLog(
+                "incoming-schema action=\(actionID.uuidString.lowercased()) source=remote_plugin result=unavailable"
+            )
+            return .init(tools: catalogDefinitions, promptContext: "")
+        }
+
+        // A pinned instance answers to its sub-tool's schema; an unpinned one
+        // to the kind's own.
+        let schema =
+            bundle.tool.flatMap { pinned in
+                remoteKind.declaration.subTools?
+                    .first { $0.name == pinned }?.inputSchema
+            } ?? remoteKind.declaration.inputSchema
+        actLog(
+            "incoming-schema action=\(actionID.uuidString.lowercased()) source=remote_plugin kind=\(remoteKind.declaration.kindName) available=\(remoteKind.isAvailable)"
+        )
+
+        let definitions = [
+            makePluginActionProxyDefinition(
+                actionID: actionID,
+                ownerNodeID: stub.ownerNodeID,
+                bundle: bundle,
+                descriptor: action.descriptor,
+                inputSchema: schema.flatMap {
+                    KeepTalkingActionToolDefinition.jsonSchema(from: $0)
+                },
+                supportsWakeAssist: action.blockingAuthorisation == true
+            )
+        ]
+        await cacheACTHydratedDefinitions(
+            definitions,
+            for: actionID,
+            runtimeCatalog: runtimeCatalog
+        )
+        return .init(tools: definitions, promptContext: "")
     }
 
     private func cacheACTHydratedDefinitions(

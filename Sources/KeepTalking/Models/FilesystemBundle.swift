@@ -98,12 +98,13 @@ extension KeepTalkingFilesystemOperation {
                 return
                     "Replace text in a file with a regular expression. Multiline patterns and replacements are supported."
             case .writeFile:
-                return "Write or overwrite the content of a file."
+                return
+                    "Create a file, or replace one you intend to replace. This REPLACES the whole file — it is not a way to read, fetch, or touch one. Writing over a path that already has content is refused unless you pass overwrite=true, so a wrong path costs you an error rather than the file."
             case .stat:
                 return "Return metadata (size, type, modification date) for a path."
             case .getFile:
                 return
-                    "Read a file on the host and return its bytes to you via a one-time encrypted transfer — point-to-point and ephemeral, NOT shared with the conversation. Use for binary or large files you need to pull from this host."
+                    "Fetch a file from the host and receive it as a resource handle you can pass straight into another action's file input. Works the same whether the host is this node or a remote one; remote hosts stream the bytes point-to-point and encrypted. Ephemeral and private — NOT shared with the conversation. Use for binary or large files, and whenever an action needs a file that only exists on disk. Never modifies the file."
             case .putFile:
                 return
                     "Write a file you provide onto the host's filesystem. Supply the destination `path`; the bytes are streamed privately as a one-time encrypted transfer, not published as a context attachment."
@@ -166,6 +167,11 @@ extension KeepTalkingFilesystemOperation {
                         "description": "File to write, relative to the action's root.",
                     ],
                     "content": ["type": "string", "description": "Content to write."],
+                    "overwrite": [
+                        "type": "boolean",
+                        "description":
+                            "Set true ONLY to deliberately replace an existing file's entire contents. Omit it otherwise; the write is then refused if something already lives at that path.",
+                    ],
                 ]
             case .stat:
                 return [

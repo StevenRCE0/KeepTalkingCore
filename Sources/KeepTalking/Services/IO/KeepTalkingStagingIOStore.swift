@@ -135,6 +135,17 @@ actor KeepTalkingStagingIOStore {
         return (handle, byteCount)
     }
 
+    /// Every live handle this caller owns.
+    ///
+    /// The candidate set for resolving a name the agent typed back: a friendly
+    /// name is a hash, so it only becomes an id against the handles that
+    /// actually exist. Reaps first, so an expired handle is never offered as a
+    /// candidate for repair.
+    func handles(forCaller callerNodeID: UUID) -> [UUID] {
+        reap()
+        return entries.compactMap { $0.value.callerNodeID == callerNodeID ? $0.key : nil }
+    }
+
     /// Resolves a caller-owned staged handle to its file + metadata. Caller-scoped:
     /// a foreign or unknown handle (or one whose bytes vanished) returns nil.
     func file(

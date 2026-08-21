@@ -163,6 +163,11 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
     /// to the orchestrating agent so it can reference them (same vocabulary as the
     /// context-attachment listing).
     public var producedResources: [KTResourceManifest.AgentResource]?
+    /// Explanatory notes a plugin executor narrated while running
+    /// (`host.act.elucidate`) — display/summarization data folded into the
+    /// caller's tool payload so the ACT distillation sees the plugin's own
+    /// account of the work, not just its final content.
+    public var elucidations: [String]?
 
     public init(
         requestID: UUID,
@@ -174,7 +179,8 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
         isError: Bool = false,
         errorMessage: String? = nil,
         outputTransfers: [KeepTalkingOneTimeBlobRef]? = nil,
-        producedResources: [KTResourceManifest.AgentResource]? = nil
+        producedResources: [KTResourceManifest.AgentResource]? = nil,
+        elucidations: [String]? = nil
     ) {
         self.requestID = requestID
         self.contextID = contextID
@@ -186,6 +192,7 @@ public struct KeepTalkingActionCallResult: Codable, Sendable {
         self.errorMessage = errorMessage
         self.outputTransfers = outputTransfers
         self.producedResources = producedResources
+        self.elucidations = elucidations
     }
 }
 
@@ -274,6 +281,9 @@ public enum KeepTalkingActionCatalogQueryKind: String, Codable, Sendable {
     case skillMetadata
     case skillFile
     case filesystemTools
+    /// The Catalogue kind behind a `.plugin` instance — the counterpart of
+    /// `mcpTools` for plugin-backed actions.
+    case pluginKind
 }
 
 public struct KeepTalkingActionCatalogQuery: Codable, Sendable {
@@ -327,6 +337,31 @@ public struct KeepTalkingActionCatalogMCPTool: Codable, Sendable {
         self.name = name
         self.description = description
         self.inputSchema = inputSchema
+    }
+}
+
+/// A Catalogue kind as its owner declares it — the inspection-time answer to
+/// "what arguments does this remote plugin tool actually take?".
+///
+/// The kind's `inputSchema` is deliberately absent from the advertised
+/// `PayloadSummary`: baking it into every status broadcast would bloat the
+/// envelope and go stale between advertisements. Callers register the
+/// permissive parameter shape from the advertisement and retrieve the real
+/// declaration here, on demand, from the node that actually holds the plugin —
+/// exactly how `mcpTools` serves a remote MCP server's schemas.
+public struct KeepTalkingActionCatalogPluginKind: Codable, Sendable {
+    /// The kind declaration, with `subTools` already narrowed to what the
+    /// caller's grant permits — the same projection `mcpTools` applies to a
+    /// remote server's tool list, so inspection never widens disclosure.
+    public var declaration: KTPPKindDeclaration
+    /// Whether the owner's plugin session is live right now. A caller can hold
+    /// a perfectly good schema for a plugin that is currently away; the call
+    /// would reach the owner and fail there.
+    public var isAvailable: Bool
+
+    public init(declaration: KTPPKindDeclaration, isAvailable: Bool) {
+        self.declaration = declaration
+        self.isAvailable = isAvailable
     }
 }
 
@@ -387,6 +422,7 @@ public struct KeepTalkingActionCatalogItemResult: Codable, Sendable {
     public var skillMetadata: KeepTalkingActionCatalogSkillMetadata?
     public var skillFile: KeepTalkingActionCatalogSkillFile?
     public var filesystemTools: [KeepTalkingFilesystemTool]
+    public var pluginKind: KeepTalkingActionCatalogPluginKind?
     public var isError: Bool
     public var errorMessage: String?
 
@@ -397,6 +433,7 @@ public struct KeepTalkingActionCatalogItemResult: Codable, Sendable {
         skillMetadata: KeepTalkingActionCatalogSkillMetadata? = nil,
         skillFile: KeepTalkingActionCatalogSkillFile? = nil,
         filesystemTools: [KeepTalkingFilesystemTool] = [],
+        pluginKind: KeepTalkingActionCatalogPluginKind? = nil,
         isError: Bool = false,
         errorMessage: String? = nil
     ) {
@@ -406,6 +443,7 @@ public struct KeepTalkingActionCatalogItemResult: Codable, Sendable {
         self.skillMetadata = skillMetadata
         self.skillFile = skillFile
         self.filesystemTools = filesystemTools
+        self.pluginKind = pluginKind
         self.isError = isError
         self.errorMessage = errorMessage
     }

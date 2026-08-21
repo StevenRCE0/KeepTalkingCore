@@ -117,7 +117,10 @@ public enum AIPromptPresets {
             If you call an attachment tool on a `KT_OTB_*` handle, it will not find it. OTB handles are ONLY usable as `input_handles` on a later \(ktRunActionToolFunctionName), or as identity to mention in chat. Identical filenames across handles are DISTINCT files — always reference by handle, never by name.
 
             Feeding a file INTO an action (input_handles):
-            To hand a local file (one you hold, e.g. one you just pulled from another node) to a usually-remote action, stage it with `kt_send_file` (returns a `KT_OTB_<HEX>` handle), then pass that handle in `input_handles` on \(ktRunActionToolFunctionName). A handle from `kt_send_file` resolves ONLY on the single target node you staged it to — pass it only to an action hosted on that SAME node.
+            An action NEVER picks up a file on its own. If its `objects:` line lists a file `in`, that input is filled ONLY by a handle you pass in `input_handles` on \(ktRunActionToolFunctionName) — a file being attached to this conversation, or named in the user's message, does NOT reach the action by itself. Omit the handle and the action runs with no input and fails.
+            - A file already in this conversation (the usual case — the user attached it): call \(attachmentListingToolFunctionName) to get its `KT_ATTACHMENT_<HEX>` handle, then pass that handle in `input_handles`. Do this BEFORE calling the action, in the same turn you decide to call it.
+            - A local file you hold (e.g. one you just pulled from another node): stage it with `kt_send_file` (returns a `KT_OTB_<HEX>` handle), then pass that handle. A `kt_send_file` handle resolves ONLY on the single target node you staged it to — pass it only to an action hosted on that SAME node.
+            If an action reports that it could not resolve its input, that is this mistake: get the handle and call it again. Do not ask the user to re-attach a file that is already in the conversation.
 
             Capturing a file an action PRODUCES (outputs):
             When you need an action to produce a file for you, request an entry in `outputs` on \(ktRunActionToolFunctionName). Each entry needs a `name` and a `persistence`:
@@ -296,9 +299,10 @@ public enum AIPromptPresets {
             case .filesystem:
                 return """
                     Filesystem action — tools operate on the owning node's sandboxed directories.
-                    Routing: when the action's node IS the current node (local), its files are on local disk and directly accessible — pass a file's local path (a `$KT_*` resource handle or an absolute path) straight to tools/scripts. When it is a REMOTE node there is no shared local path: use get-file to pull a file's bytes to you, and put-file to send one.
-                    Text ops (ls, read-file, grep, sed, write-file, stat) take/return strings inline. read-file only returns PLAIN-TEXT (UTF-8) content — for a binary file (PDF, image, .docx, etc.) use get-file to pull its bytes, or a skill that extracts its text.
-                    get-file: reads a file on the owning node and returns its bytes to you via a one-time ENCRYPTED, point-to-point transfer — private, NOT published to the conversation and NOT visible to other participants. Use when the task asks to fetch/pull a file from that node.
+                    Routing: get-file works the SAME whether the action's node is local or remote — always reach for it when you need a file itself rather than its text. A path string is not a handle: an action that declares a `file` input needs a `$KT_*` handle, and get-file is what mints one. On a remote node the bytes are streamed to you; on the local node the file is staged in place. Use put-file to send a file to the owning node.
+                    Text ops (ls, read-file, grep, sed, write-file, stat) take/return strings inline. read-file only returns PLAIN-TEXT (UTF-8) content — for a binary file (PDF, image, .docx, etc.) use get-file, or a skill that extracts its text.
+                    get-file: returns the file to you as a resource handle, privately — one-time, ENCRYPTED where it crosses the wire, NOT published to the conversation and NOT visible to other participants. It never modifies the file. Use it to fetch/pull a file, and to feed a file into another action.
+                    Never use write-file, sed, or put-file to read, fetch, or "produce" a file you actually want to obtain — those three MODIFY the filesystem and will destroy what is at the path. If get-file is not giving you a usable handle, say so and stop; do not improvise with a write.
                     put-file: streams YOUR local file (the `source` path) to a destination `path` on the owning node, also as a one-time encrypted transfer — private, not a shared attachment. Use when the task asks to send/upload a file to that node.
                     These transfers are ephemeral: they are not recorded as context attachments and are discarded after use.
                     """

@@ -1446,7 +1446,8 @@ extension KeepTalkingClient {
                         .semanticRetrieval(_, let description),
                         .filesystem(_, let description),
                         .acp(_, let description),
-                        .primitive(_, let description, _):
+                        .primitive(_, let description, _),
+                        .plugin(_, let description, _, _, _):
                         return description
                 }
             }()
@@ -1580,6 +1581,27 @@ extension KeepTalkingClient {
         fallbackDescription: String
     ) -> KeepTalkingAction.Payload? {
         switch action.payloadSummary {
+            case .plugin(
+                let name, let indexDescription, let catalogID, let kindName, let tool
+            ):
+                // Mirrored WITHOUT a scope bag: the owner binds its own
+                // instance scope into the signed authorization when the call
+                // reaches it, so a local copy would be both redundant and a
+                // disclosure of the owner's configuration.
+                return .plugin(
+                    KeepTalkingPluginBundle(
+                        id: action.actionID,
+                        name: name,
+                        indexDescription: indexDescription.isEmpty
+                            ? fallbackDescription
+                            : indexDescription,
+                        catalogID: catalogID,
+                        kindName: kindName,
+                        scope: nil,
+                        tool: tool,
+                        blockingAuthorisation: action.blockingAuthorisation
+                    )
+                )
             case .mcpBundle(let name, let indexDescription):
                 return .mcpBundle(
                     virtualRemoteMCPBundle(

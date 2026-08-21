@@ -46,6 +46,7 @@ public enum FilesystemActionManagerError: LocalizedError {
     case blobBridgeNotConfigured
     case contextRequired
     case blobNotAvailable(String)
+    case refusedOverwrite(path: String, existingBytes: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -67,7 +68,36 @@ public enum FilesystemActionManagerError: LocalizedError {
                 return "Context not found for the given context ID."
             case .blobNotAvailable(let blobID):
                 return "Blob '\(blobID)' is not available locally (missing or still transferring)."
+            case .refusedOverwrite(let path, let existingBytes):
+                return "Refused to overwrite '\(path)': \(existingBytes) bytes already exist "
+                    + "there and write-file replaces a file whole. If you meant to replace it, "
+                    + "retry with overwrite=true. If you were trying to READ or FETCH this file "
+                    + "you reached for the wrong tool — use read-file (text) or get-file "
+                    + "(binary); neither modifies the file. To write new content, choose a path "
+                    + "that does not exist yet."
         }
+    }
+}
+
+/// What a single filesystem operation produced.
+///
+/// Most operations return text only. `get-file` additionally yields either an
+/// OTB ref (remote caller — bytes streamed over the wire) or a `producedFile`
+/// (local caller — the bytes are already on this disk, so the controller stages
+/// the path into a handle instead of copying it through a transfer).
+struct FilesystemOperationOutcome {
+    var text: String
+    var outputTransfers: [KeepTalkingOneTimeBlobRef] = []
+    var producedFiles: [KeepTalkingLocalAttachmentInput] = []
+
+    init(
+        _ text: String,
+        outputTransfers: [KeepTalkingOneTimeBlobRef] = [],
+        producedFiles: [KeepTalkingLocalAttachmentInput] = []
+    ) {
+        self.text = text
+        self.outputTransfers = outputTransfers
+        self.producedFiles = producedFiles
     }
 }
 
@@ -169,7 +199,8 @@ public actor FilesystemActionManager {
         inputFiles: [URL] = []
     ) async throws -> (
         content: [Tool.Content], isError: Bool?,
-        outputTransfers: [KeepTalkingOneTimeBlobRef]
+        outputTransfers: [KeepTalkingOneTimeBlobRef],
+        producedFiles: [KeepTalkingLocalAttachmentInput]
     ) {
         guard case .filesystem(let bundle) = action.payload else {
             throw FilesystemActionManagerError.invalidAction
@@ -219,7 +250,8 @@ public actor FilesystemActionManager {
         return (
             content: [.text(text: result.text, annotations: nil, _meta: nil)],
             isError: false,
-            outputTransfers: result.outputTransfers
+            outputTransfers: result.outputTransfers,
+            producedFiles: result.producedFiles
         )
     }
 
@@ -233,49 +265,55 @@ public actor FilesystemActionManager {
         callerNodeID: UUID,
         isLocalExecution: Bool,
         inputFiles: [URL]
-    ) async throws -> (text: String, outputTransfers: [KeepTalkingOneTimeBlobRef]) {
+    ) async throws -> FilesystemOperationOutcome {
         switch operation {
             case .ls:
                 let resolved = try resolvedPath(
                     try requiredStringArg("path", from: arguments), root: rootPath)
-                return (try listDirectory(at: resolved), [])
+                return FilesystemOperationOutcome(try listDirectory(at: resolved))
 
             case .readFile:
                 let resolved = try resolvedPath(
                     try requiredStringArg("path", from: arguments), root: rootPath)
-                return (try readFile(at: resolved), [])
+                return FilesystemOperationOutcome(try readFile(at: resolved))
 
             case .grep:
                 let pattern = try requiredStringArg("pattern", from: arguments)
                 let resolved = try resolvedPath(
                     try requiredStringArg("path", from: arguments), root: rootPath)
-                return (try grepFiles(pattern: pattern, at: resolved), [])
+                return FilesystemOperationOutcome(try grepFiles(pattern: pattern, at: resolved))
 
             case .sed:
                 let resolved = try resolvedPath(
                     try requiredStringArg("path", from: arguments), root: rootPath)
-                return (
+                return FilesystemOperationOutcome(
                     try applySed(
                         pattern: try requiredStringArg("pattern", from: arguments),
                         replacement: try requiredStringArg(
                             "replacement", from: arguments),
                         flags: arguments["flags"]?.stringValue ?? "",
                         at: resolved
-                    ),
-                    []
+                    )
                 )
 
             case .writeFile:
                 let content = try requiredStringArg("content", from: arguments)
                 let resolved = try resolvedPath(
                     try requiredStringArg("path", from: arguments), root: rootPath)
+                // Fail closed on clobber. An agent that reaches for write-file
+                // while actually trying to FETCH a file (or to conjure an output
+                // slot) would otherwise destroy the very file it wanted, with no
+                // way back — the previous content is simply gone. Replacing an
+                // existing file has to be asked for explicitly.
+                try refuseUnlessOverwriteAllowed(at: resolved, arguments: arguments)
                 try writeFile(content: content, at: resolved)
-                return ("Written \(content.utf8.count) bytes to \(resolved).", [])
+                return FilesystemOperationOutcome(
+                    "Written \(content.utf8.count) bytes to \(resolved).")
 
             case .stat:
                 let resolved = try resolvedPath(
                     try requiredStringArg("path", from: arguments), root: rootPath)
-                return (try statPath(at: resolved), [])
+                return FilesystemOperationOutcome(try statPath(at: resolved))
 
             case .getFile:
                 let resolved = try resolvedPath(
@@ -287,18 +325,33 @@ public actor FilesystemActionManager {
                 }
                 let filename = fileURL.lastPathComponent
                 let mimeType = mimeTypeForPath(resolved)
-                // Local caller already has filesystem access — no transfer needed.
+                let byteCount = fileByteCount(at: resolved)
+                // Local caller already has filesystem access, so there is nothing
+                // to stream — but it still needs a HANDLE, not just a path: every
+                // action that takes a `file` input binds a resource handle, and a
+                // bare path is not one. Hand the file to the controller so it
+                // stages the existing bytes in place and mints an OTB handle.
                 if isLocalExecution {
-                    return ("File available locally at \(resolved) (mime_type=\(mimeType)).", [])
+                    return FilesystemOperationOutcome(
+                        "Read \(filename)"
+                            + (byteCount.map { " (\($0) bytes)" } ?? "")
+                            + " from \(resolved) (mime_type=\(mimeType)).",
+                        producedFiles: [
+                            KeepTalkingLocalAttachmentInput(
+                                sourceURL: fileURL,
+                                filename: filename,
+                                mimeType: mimeType)
+                        ]
+                    )
                 }
                 guard let bridge = transferBridge else {
                     throw FilesystemActionManagerError.blobBridgeNotConfigured
                 }
                 let ref = try await bridge.sendOneTimeBlob(
                     fileURL, filename, mimeType, callerNodeID)
-                return (
+                return FilesystemOperationOutcome(
                     "Streaming \(filename) (\(ref.byteCount) bytes) back as a one-time encrypted transfer.",
-                    [ref]
+                    outputTransfers: [ref]
                 )
 
             case .putFile:
@@ -323,7 +376,7 @@ public actor FilesystemActionManager {
                     at: destination.deletingLastPathComponent(),
                     withIntermediateDirectories: true)
                 try data.write(to: destination)
-                return ("Wrote \(data.count) bytes to \(resolved).", [])
+                return FilesystemOperationOutcome("Wrote \(data.count) bytes to \(resolved).")
         }
     }
 
@@ -483,6 +536,38 @@ public actor FilesystemActionManager {
         return results.isEmpty ? "(no matches)" : results.joined(separator: "\n")
     }
 
+    /// Throws unless it is safe to replace whatever currently sits at `path`.
+    ///
+    /// Writing to a path that holds nothing (or an empty placeholder) is always
+    /// allowed. Replacing a file that has content requires the caller to pass
+    /// `overwrite: true`, so destroying data is always a deliberate act rather
+    /// than a side effect of a mis-chosen tool.
+    private func refuseUnlessOverwriteAllowed(
+        at path: String,
+        arguments: [String: Value]
+    ) throws {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+            !isDirectory.boolValue
+        else { return }
+
+        guard let existingBytes = fileByteCount(at: path), existingBytes > 0 else { return }
+
+        // Tool callers are inconsistent about JSON booleans; accept the string forms too.
+        let overwrite: Bool = {
+            guard let raw = arguments["overwrite"] else { return false }
+            if let flag = raw.boolValue { return flag }
+            if let text = raw.stringValue {
+                return ["true", "yes", "1"].contains(text.lowercased())
+            }
+            return false
+        }()
+        guard !overwrite else { return }
+
+        throw FilesystemActionManagerError.refusedOverwrite(
+            path: path, existingBytes: existingBytes)
+    }
+
     private func writeFile(content: String, at path: String) throws {
         let url = URL(fileURLWithPath: path)
         try FileManager.default.createDirectory(
@@ -495,6 +580,11 @@ public actor FilesystemActionManager {
             )
         }
         try data.write(to: url)
+    }
+
+    /// Size in bytes of the file at `path`, or `nil` if it can't be read.
+    private func fileByteCount(at path: String) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int
     }
 
     private func statPath(at path: String) throws -> String {

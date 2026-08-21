@@ -24,12 +24,14 @@ public struct AudioInterfaceAgent: Sendable {
         public let ackSystemPrompt: String
         public let deferralSystemPrompt: String
         public let responseLanguages: [String]
+        public let wakePhrase: String?
 
         /// Creates a bridge configuration.
         ///
         /// Each `…SystemPrompt` argument overrides the corresponding built-in
-        /// default; passing `nil` keeps the default. In both cases the language
-        /// instruction derived from `responseLanguages` is appended to the
+        /// default; passing `nil` keeps the default. In both cases the wake
+        /// phrase instruction derived from `wakePhrase` and the language
+        /// instruction derived from `responseLanguages` are appended to the
         /// stored prompt.
         ///
         /// - Parameters:
@@ -42,6 +44,11 @@ public struct AudioInterfaceAgent: Sendable {
         ///     Entries are trimmed of surrounding whitespace, and empty or
         ///     duplicate entries are dropped. An empty list adds no language
         ///     instruction to the prompts.
+        ///   - wakePhrase: The wake phrase that activates the agent. When set,
+        ///     the prompts tell the model to adopt a name contained in the
+        ///     phrase as its identity, and the bridge prompt to treat the
+        ///     phrase opening the captured audio as the activation trigger
+        ///     rather than request content. `nil` or blank adds nothing.
         ///   - bridgeSystemPrompt: System prompt for the intent-extraction
         ///     turns, which decide whether to speak back or call the delegation
         ///     tool.
@@ -58,6 +65,7 @@ public struct AudioInterfaceAgent: Sendable {
             audioFormat: String = "pcm16",
             maxBridgeTurns: Int = 3,
             responseLanguages: [String] = [],
+            wakePhrase: String? = nil,
             bridgeSystemPrompt: String? = nil,
             rephraseSystemPrompt: String? = nil,
             ackSystemPrompt: String? = nil,
@@ -72,17 +80,23 @@ public struct AudioInterfaceAgent: Sendable {
                 guard !trimmed.isEmpty, !result.contains(trimmed) else { return }
                 result.append(trimmed)
             }
+            let trimmedWakePhrase = wakePhrase?.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.wakePhrase = (trimmedWakePhrase?.isEmpty ?? true) ? nil : trimmedWakePhrase
             self.bridgeSystemPrompt =
                 (bridgeSystemPrompt ?? Self.defaultBridgeSystemPrompt)
+                + Self.wakeInstruction(for: self.wakePhrase, coversCapturedAudio: true)
                 + Self.languageInstruction(for: self.responseLanguages)
             self.rephraseSystemPrompt =
                 (rephraseSystemPrompt ?? Self.defaultRephraseSystemPrompt)
+                + Self.wakeInstruction(for: self.wakePhrase, coversCapturedAudio: false)
                 + Self.languageInstruction(for: self.responseLanguages)
             self.ackSystemPrompt =
                 (ackSystemPrompt ?? Self.defaultAckSystemPrompt)
+                + Self.wakeInstruction(for: self.wakePhrase, coversCapturedAudio: false)
                 + Self.languageInstruction(for: self.responseLanguages)
             self.deferralSystemPrompt =
                 (deferralSystemPrompt ?? Self.defaultDeferralSystemPrompt)
+                + Self.wakeInstruction(for: self.wakePhrase, coversCapturedAudio: false)
                 + Self.languageInstruction(for: self.responseLanguages)
         }
 
@@ -125,6 +139,26 @@ public struct AudioInterfaceAgent: Sendable {
             conversation when it's ready. Do NOT attempt to answer the request \
             and do NOT invent any result. Respond with audio.
             """
+
+        /// Prompt appendix carrying the wake phrase. All prompts get the
+        /// identity rule (a name inside the phrase is the agent's name); the
+        /// bridge prompt — the only turn that hears the captured audio, which
+        /// starts at the wake phrase via pre-roll — additionally gets the rule
+        /// to treat that opening phrase as the trigger, not request content.
+        static func wakeInstruction(for wakePhrase: String?, coversCapturedAudio: Bool) -> String {
+            guard let wakePhrase else { return "" }
+            var instruction =
+                "\nThe user activates you by speaking the wake phrase \"\(wakePhrase)\". "
+                + "If that phrase contains a name, it is your name — adopt it as your "
+                + "identity when speaking about yourself."
+            if coversCapturedAudio {
+                instruction +=
+                    " The captured request audio starts at that wake phrase, so it may "
+                    + "open with it — treat it purely as the activation trigger, never "
+                    + "as part of the request's content."
+            }
+            return instruction
+        }
 
         static func languageInstruction(for languages: [String]) -> String {
             guard !languages.isEmpty else { return "" }

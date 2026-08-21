@@ -48,6 +48,24 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
         )
         case filesystem(name: String, indexDescription: String)
         case acp(name: String, indexDescription: String)
+        /// A Catalogue (plugin) instance. Carries the instance label plus the
+        /// identity a caller needs to name the tool: catalog, kind, and any
+        /// pinned sub-tool.
+        ///
+        /// Deliberately NOT carried — the kind's `inputSchema`, which would
+        /// bloat every status envelope and go stale between advertisements
+        /// (remote callers register the permissive parameter shape and
+        /// retrieve the real schema at inspection time from the node holding
+        /// the plugin); and the instance `scope` bag, which is the owner's
+        /// private configuration and is bound into the signed authorization on
+        /// the owning node at execution.
+        case plugin(
+            name: String,
+            indexDescription: String,
+            catalogID: UUID,
+            kindName: String,
+            tool: String?
+        )
     }
 
     public let actionID: UUID
