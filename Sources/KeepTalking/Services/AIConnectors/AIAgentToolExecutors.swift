@@ -885,9 +885,7 @@ extension KeepTalkingClient {
     ) async throws -> [AIMessage] {
         let args = try decodeToolArguments(rawArguments)
 
-        guard let actionIDString = args["action_id"]?.stringValue,
-            let actionID = UUID(uuidString: actionIDString)
-        else {
+        guard let actionToken = args["action_id"]?.stringValue else {
             return [
                 toolMessage(
                     payload: jsonString([
@@ -897,6 +895,54 @@ extension KeepTalkingClient {
                     toolCallID: toolCallID
                 )
             ]
+        }
+
+        // The catalog lists actions by word-name (`amber-swift-koala`), so this
+        // tool must accept the exact identifier the listing teaches — the same
+        // resolution discipline as kt_run_action: a raw UUID still works, a
+        // single mistyped word is repaired, anything ambiguous is refused.
+        let candidates = runtimeCatalog.actionStubs.map(\.actionID)
+        let actionID: UUID
+        switch UUIDFriendlyName.resolve(actionToken, among: candidates) {
+            case .resolved(let id):
+                actionID = id
+            case .corrected(let id, let from, let to):
+                actionID = id
+                onLog?("[skill-metainfo/action-id] repaired '\(from)' -> '\(to)'")
+            case .ambiguous(let ids):
+                return [
+                    toolMessage(
+                        payload: jsonString([
+                            "ok": false,
+                            "error": "ambiguous_action_id",
+                            "action_id": actionToken,
+                            "candidates": ids.map {
+                                ["action": $0.friendlyNameToken, "name": Self.stubName($0, in: runtimeCatalog)]
+                            },
+                            "hint": "More than one action matches. Retry with one of the "
+                                + "candidate names exactly.",
+                        ]),
+                        toolCallID: toolCallID
+                    )
+                ]
+            case .unknown:
+                return [
+                    toolMessage(
+                        payload: jsonString([
+                            "ok": false,
+                            "error": "unknown_action_id",
+                            "action_id": actionToken,
+                            "hint": "No action matches that name. Copy an `action:` value "
+                                + "from available_actions exactly — the same identifier "
+                                + "kt_run_action takes.",
+                            "available_skill_actions": runtimeCatalog.actionStubs
+                                .filter { $0.kind == .skill }
+                                .prefix(40)
+                                .map { ["action": $0.actionID.friendlyNameToken, "name": $0.name] },
+                        ]),
+                        toolCallID: toolCallID
+                    )
+                ]
         }
 
         guard
@@ -909,7 +955,7 @@ extension KeepTalkingClient {
                     payload: jsonString([
                         "ok": false,
                         "error": "action_not_found_or_not_a_skill",
-                        "action_id": actionIDString,
+                        "action_id": actionToken,
                     ]),
                     toolCallID: toolCallID
                 )
@@ -928,7 +974,7 @@ extension KeepTalkingClient {
                         payload: jsonString([
                             "ok": false,
                             "error": "skill_action_not_found",
-                            "action_id": actionIDString,
+                            "action_id": actionToken,
                         ]),
                         toolCallID: toolCallID
                     )
@@ -994,7 +1040,7 @@ extension KeepTalkingClient {
                         payload: jsonString([
                             "ok": false,
                             "error": "remote_skill_metadata_unavailable",
-                            "action_id": actionIDString,
+                            "action_id": actionToken,
                             "error_message": result.errorMessage ?? "no metadata returned",
                         ]),
                         toolCallID: toolCallID

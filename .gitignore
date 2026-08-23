@@ -1,7 +1,6 @@
 .DS_Store
 AGENTS.md
-/.build
-/.build-tests
+/.build*
 /dist
 /Packages
 xcuserdata/

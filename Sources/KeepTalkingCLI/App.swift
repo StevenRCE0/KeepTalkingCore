@@ -12,6 +12,10 @@ struct KeepTalkingApp {
             await BlobLabCommand.run(Array(argv.dropFirst()))
             return
         }
+        if QueryCommand.shouldHandle(argv) {
+            await QueryCommand.run(argv)
+            return
+        }
         await KeepTalkingCLIController.main()
     }
 }

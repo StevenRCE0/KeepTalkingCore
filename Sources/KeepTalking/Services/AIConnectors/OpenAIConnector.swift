@@ -1,5 +1,6 @@
 import AIProxy
 import Foundation
+
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -77,8 +78,13 @@ public actor OpenAIConnector: AIConnector {
         supportsThinking: true
     )
 
-    /// Default request timeout in seconds.
+    /// Default request timeout in seconds. Maps to `URLRequest.timeoutInterval`
+    /// — an IDLE timer, reset by every received byte.
     private static let defaultTimeoutSeconds: UInt = 60
+
+    /// Absolute per-request ceiling for one completion turn; see
+    /// `awaitTurnRequest` for why the idle timer alone is not enough.
+    private static let wallClockTimeoutSeconds: UInt = 480
 
     /// Construct a connector for the given backend.
     ///
@@ -204,26 +210,17 @@ public actor OpenAIConnector: AIConnector {
             )
         }
 
-        // Run the HTTP call in a child task so cancellation can be propagated
-        // to AIProxy's URLSession data task on parent cancel — without this,
-        // `entry.task.cancel()` only sets a flag and the request keeps
-        // streaming until its 60s timeout.
-        let request = Task<OpenAIChatCompletionResponseBody, Error> {
+        // The request runs as a task-group child so parent cancellation
+        // propagates to AIProxy's URLSession data task, and a wall-clock
+        // watchdog bounds it — `secondsToWait` is only an idle timer, which a
+        // slow-dripping response outlives forever (see `awaitTurnRequest`).
+        let response = try await awaitTurnRequest(
+            wallClockSeconds: Self.wallClockTimeoutSeconds
+        ) { [service] in
             try await service.chatCompletionRequest(
                 body: body,
                 secondsToWait: Self.defaultTimeoutSeconds
             )
-        }
-        let response: OpenAIChatCompletionResponseBody
-        do {
-            response = try await withTaskCancellationHandler {
-                try await request.value
-            } onCancel: {
-                request.cancel()
-            }
-        } catch is CancellationError {
-            request.cancel()
-            throw CancellationError()
         }
 
         var turnText: String? = nil

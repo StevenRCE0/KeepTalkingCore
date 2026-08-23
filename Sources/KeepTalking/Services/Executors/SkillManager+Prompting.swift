@@ -138,13 +138,12 @@ extension SkillManager {
             Run scripts, CLI tools, and multi-step pipelines through \(Self.shellToolName).
             It is a REAL sandboxed shell whose current directory is your writable
             workspace, so pipes, redirections (2>&1, > out.txt), quoting, and globs all
-            work. Every provisioned resource is an environment variable (`KT_<KIND>_<HEX>`)
-            whose VALUE is that file's absolute path — so use the handle in its $-form AS
-            the concrete path, e.g.
-            `python3 "$SKILL_DIR/scripts/run.py" --in "$KT_ATTACHMENT_<HEX>"` (always quote
-            it; paths can contain spaces). Never hardcode an absolute path and never invent
-            a handle that wasn't provided. Place any file you want returned to the caller at
-            a write-slot variable. Do NOT ask the user to run anything manually.
+            work. Every provisioned resource is an environment variable whose VALUE is
+            that file's absolute path — use the handle in its $-form AS the concrete path,
+            e.g. `python3 "$SKILL_DIR/scripts/run.py" --in "$KT_ATTACHMENT_…"` (always
+            quote it; paths can contain spaces). Never hardcode an absolute path and never
+            invent a handle that wasn't provided. Place any file you want returned to the
+            caller at a write-slot variable. Do NOT ask the user to run anything manually.
 
             ## Accessible directories
             These directories were granted by the user. Use \(Self.listFilesToolName) to discover
@@ -155,6 +154,20 @@ extension SkillManager {
             ## File tools
             - \(Self.listFilesToolName): List files in an accessible directory by label.
             - \(Self.getFileToolName): Read a PLAIN-TEXT (UTF-8) file from the skill directory or an accessible directory. Binary files (PDF, images, .docx) are not readable this way — use \(Self.shellToolName) with a tool that extracts their text.
+
+            ## Output handling
+            stdout returned by \(Self.shellToolName) is TRUNCATED to ~\(Self.scriptOutputMaxCharacters) characters.
+            When a command produces content meant for a `write` slot — a full transcript,
+            generated text, processed data — redirect stdout directly to the write-slot
+            path so the full content is captured regardless of length:
+
+                python3 "$SKILL_DIR/scripts/run.py" > "$KT_…"
+
+            Use the actual write-slot variable from the resources list below.
+            Only leave stdout un-redirected for short diagnostic output you need to inspect.
+            If a command already ran without redirection and output was truncated, re-run
+            with redirection to the write-slot path rather than trying to reconstruct the
+            content. Any file you write to the workspace is also harvested as output.
 
             ## Execution requirements
             - Use \(Self.shellToolName) to do the work. Never just describe a command.

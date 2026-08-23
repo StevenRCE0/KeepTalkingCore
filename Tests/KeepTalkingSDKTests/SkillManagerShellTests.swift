@@ -98,6 +98,24 @@ struct SkillManagerShellTests {
         #expect((try? String(contentsOf: probe, encoding: .utf8)) == "CWD-OK")
     }
 
+    @Test("kt_shell exposes the workspace as $KT_WORKSPACE")
+    func shellInjectsWorkspaceEnvironmentVariable() async throws {
+        let workspace = try makeFixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let manager = makeManager()
+
+        // The scrubber renders workspace paths as `$KT_WORKSPACE` in output the
+        // model reads back, so the variable must actually resolve when a later
+        // command reuses it — unset, it would expand to "" and retarget the path.
+        let block = try await manager.executeShellCommand(
+            ["command": .string("printf 'WS-ENV-OK' > \"$KT_WORKSPACE/env-probe.txt\"")],
+            actionID: UUID(), skillDirectory: nil, workspaceDirectory: workspace)
+        #expect(block.contains("exit_code: 0"))
+
+        let probe = workspace.appendingPathComponent("env-probe.txt")
+        #expect((try? String(contentsOf: probe, encoding: .utf8)) == "WS-ENV-OK")
+    }
+
     @Test("kt_shell expands a manifest resource handle to the real path")
     func shellExpandsManifestHandle() async throws {
         let workspace = try makeFixtureDirectory()

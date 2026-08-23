@@ -396,7 +396,9 @@ extension KeepTalkingIOManager {
         for resource: KTResourceManifest.AgentResource,
         contextID: UUID
     ) async -> AIMessage? {
-        guard let handle = KTResourceManifest.resolveAgentHandle(resource.handle)?.id
+        guard
+            let handle = resource.resourceID
+                ?? KTResourceManifest.resolveAgentHandle(resource.handle)?.id
         else { return nil }
         let leadText = resource.injectedContentLeadText
 

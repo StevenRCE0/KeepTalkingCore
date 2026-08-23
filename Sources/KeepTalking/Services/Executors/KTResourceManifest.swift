@@ -123,29 +123,59 @@ public struct KTResourceManifest: Sendable {
     /// resource. Full hex (not a short suffix) makes it globally unique — no
     /// collision escalation — and exactly reversible via `parseAgentHandle`.
     public static func agentHandle(kind: Kind, id: UUID) -> String {
-        let hex = id.uuidString.replacingOccurrences(of: "-", with: "").uppercased()
-        return "KT_\(kind.rawValue)_\(hex)"
+        let token = id.friendlyNameToken
+            .replacingOccurrences(of: "-", with: "_")
+            .uppercased()
+        return "KT_\(kind.rawValue)_\(token)"
     }
 
-    /// Inverts `agentHandle`: parses `KT_<KIND>_<HEX>` (a leading `$` tolerated)
-    /// back to its family + concrete id. Returns nil for anything that isn't a
-    /// well-formed KT handle (the caller then falls back to a bare-UUID parse).
+    /// Inverts `agentHandle`: parses `KT_<KIND>_<PAYLOAD>` (a leading `$`
+    /// tolerated) back to its family + concrete id. The payload may be a 6-char
+    /// Code hex (current format) or a legacy 32-char UUID hex. Returns nil when
+    /// the payload is neither — the caller falls back to `resolveAgentHandle`
+    /// or a bare-UUID parse.
     public static func parseAgentHandle(_ raw: String) -> (kind: Kind, id: UUID)? {
-        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if s.hasPrefix("$") { s.removeFirst() }
-        guard s.hasPrefix("KT_") else { return nil }
-        let body = String(s.dropFirst(3))  // "<TOKEN>_<HEX>"
-        guard let underscore = body.lastIndex(of: "_") else { return nil }
-        let token = String(body[..<underscore]).uppercased()
-        let hex = String(body[body.index(after: underscore)...])
-        guard let kind = Kind(rawValue: token), let id = uuidFromHex(hex) else {
-            return nil
-        }
+        guard let (kind, payload) = splitHandlePrefix(raw) else { return nil }
+        guard let id = uuidFromHex(payload) else { return nil }
         return (kind, id)
     }
 
-    /// Reconstitutes a UUID from a 32-char dash-free hex string (the form
-    /// `agentHandle` emits). Returns nil for any other shape.
+    /// Parses `KT_<KIND>_<FRIENDLY>` into a kind and a `UUIDFriendlyName.Code`.
+    /// The friendly payload is three underscore-separated words
+    /// (e.g. `AMBER_SWIFT_KOALA`). Also accepts legacy 32-char UUID hex and
+    /// 6-char Code hex for backward compatibility.
+    public static func parseAgentHandleCode(
+        _ raw: String
+    ) -> (kind: Kind, code: UUIDFriendlyName.Code)? {
+        guard let (kind, payload) = splitHandlePrefix(raw) else { return nil }
+        let normalized = payload.lowercased().replacingOccurrences(of: "_", with: "-")
+        if let code = UUIDFriendlyName.Code(name: normalized) {
+            return (kind, code)
+        }
+        if let code = codeFromHex(payload) { return (kind, code) }
+        if let id = uuidFromHex(payload) {
+            return (kind, UUIDFriendlyName.code(for: id))
+        }
+        return nil
+    }
+
+    /// Splits `$KT_<KIND>_<PAYLOAD>` into the Kind and the remaining payload.
+    /// The kind token is the first segment after `KT_`; the payload is
+    /// everything after `KT_<KIND>_`.
+    private static func splitHandlePrefix(_ raw: String) -> (Kind, String)? {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("$") { s.removeFirst() }
+        guard s.hasPrefix("KT_") else { return nil }
+        let body = String(s.dropFirst(3))
+        guard let underscore = body.firstIndex(of: "_") else { return nil }
+        let token = String(body[..<underscore]).uppercased()
+        let payload = String(body[body.index(after: underscore)...])
+        guard let kind = Kind(rawValue: token) else { return nil }
+        return (kind, payload)
+    }
+
+    /// Reconstitutes a UUID from a 32-char dash-free hex string (legacy handle
+    /// format). Returns nil for any other shape.
     static func uuidFromHex(_ hex: String) -> UUID? {
         let h = hex.uppercased()
         guard h.count == 32, h.allSatisfy({ $0.isHexDigit }) else { return nil }
@@ -156,10 +186,19 @@ public struct KTResourceManifest: Sendable {
         return UUID(uuidString: dashed)
     }
 
-    /// Resolves an agent-supplied resource handle to a concrete id, accepting BOTH
-    /// the canonical `KT_<KIND>_<HEX>` form and a bare UUID (lenient ingest — the
-    /// agent is always SHOWN KT handles, but a raw id still resolves). Returns the
-    /// family when known (KT handles carry it; bare UUIDs don't).
+    /// Parses a 6-char hex string as a `UUIDFriendlyName.Code` (24-bit hash).
+    static func codeFromHex(_ hex: String) -> UUIDFriendlyName.Code? {
+        let h = hex.uppercased()
+        guard h.count == 6, h.allSatisfy({ $0.isHexDigit }),
+            let rawValue = UInt32(h, radix: 16)
+        else { return nil }
+        return UUIDFriendlyName.Code(rawValue: Int(rawValue))
+    }
+
+    /// Resolves an agent-supplied resource handle to a concrete id, accepting
+    /// a legacy `KT_<KIND>_<32-char-hex>` handle or a bare UUID. Returns nil
+    /// for the current Code-based format — use `resolveAgentHandle(_:among:)`
+    /// with a candidate set for those.
     public static func resolveAgentHandle(_ raw: String) -> (kind: Kind?, id: UUID)? {
         if let parsed = parseAgentHandle(raw) { return (parsed.kind, parsed.id) }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -168,40 +207,48 @@ public struct KTResourceManifest: Sendable {
     }
 
     /// Resolves an agent-supplied handle against the handles that actually
-    /// exist, repairing a single mistyped character.
-    ///
-    /// The plain `resolveAgentHandle` cannot do this: it is a pure
-    /// `String -> (kind, id)` function, so a near-miss is indistinguishable
-    /// from a valid handle for something else. Given the candidate set the
-    /// question becomes answerable — with a handful of 128-bit ids, exactly one
-    /// candidate within one edit is the intended one, and anything else is
-    /// refused rather than guessed.
-    ///
-    /// This is the same discipline the word-based `UUIDFriendlyName.resolve`
-    /// uses. Handles keep their hex form because the handle string is also the
-    /// skill's `$KT_…` environment-variable name and part of the signed
-    /// `resourcesHash` the plugin SDK verifies — it cannot become words without
-    /// a breaking wire change.
+    /// exist. Accepts the current Code-based format (`KT_<KIND>_<6-hex>`),
+    /// legacy 32-char UUID hex, bare UUIDs, and friendly-name tokens
+    /// (`amber-swift-koala`). Repairs a single mistyped character in both hex
+    /// and word-based handles.
     public static func resolveAgentHandle(
         _ raw: String,
         among candidates: [UUID]
     ) -> Resolution {
+        // Legacy 32-char hex handle or bare UUID — exact match.
         if let direct = resolveAgentHandle(raw), candidates.contains(direct.id) {
             return .resolved(direct.id)
         }
+        // Code-based resolution: 6-char Code hex, friendly name, or legacy hex → Code.
+        if let codeResult = parseAgentHandleCode(raw) {
+            let matches = candidates.filter { $0.friendlyNameCode == codeResult.code }
+            if matches.count == 1 { return .resolved(matches[0]) }
+            if matches.count > 1 { return .ambiguous(matches) }
+        }
+        // Bare friendly name (no KT_ prefix).
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let friendlyResult = UUIDFriendlyName.resolve(trimmed, among: candidates)
+        switch friendlyResult {
+            case .resolved(let id): return .resolved(id)
+            case .corrected(let id, let from, let to): return .corrected(id, from: from, to: to)
+            case .ambiguous(let ids): return .ambiguous(ids)
+            case .unknown: break
+        }
+        // Legacy fuzzy hex matching (32-char near-miss).
         let typed = normalizedHandleHex(raw)
-        guard typed.count >= 30 else { return .unknown }
-
-        var matches: [UUID] = []
-        for candidate in candidates {
-            let hex = candidate.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-            if UUIDFriendlyName.isWithinOneEdit(hex, typed) { matches.append(candidate) }
+        if typed.count >= 30 {
+            var matches: [UUID] = []
+            for candidate in candidates {
+                let hex = candidate.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+                if UUIDFriendlyName.isWithinOneEdit(hex, typed) { matches.append(candidate) }
+            }
+            if matches.count == 1 {
+                let hex = matches[0].uuidString.replacingOccurrences(of: "-", with: "").uppercased()
+                return .corrected(matches[0], from: raw, to: hex)
+            }
+            if !matches.isEmpty { return .ambiguous(matches) }
         }
-        if matches.count == 1 {
-            let hex = matches[0].uuidString.replacingOccurrences(of: "-", with: "").uppercased()
-            return .corrected(matches[0], from: raw, to: hex)
-        }
-        return matches.isEmpty ? .unknown : .ambiguous(matches)
+        return .unknown
     }
 
     /// What an agent-supplied handle turned out to mean — the shared
@@ -360,7 +407,7 @@ extension KTResourceManifest {
     /// canonical. This replaces the former standalone `KTAgentResource` so the
     /// manifest is the single source of the handle vocabulary.
     public struct AgentResource: Codable, Sendable, Equatable {
-        /// `KT_<KIND>_<HEX>` — the canonical handle the agent references downstream.
+        /// `KT_<KIND>_<6HEX>` — the canonical handle the agent references downstream.
         public var handle: String
         /// Resource family: "attachment" (durable, synced), "otb" (private,
         /// ephemeral), or "fs" (reached via filesystem operations).
@@ -375,6 +422,11 @@ extension KTResourceManifest {
         public var summary: String?
         /// "context" (already present in the context) or "produced" (created by this call).
         public var origin: String
+        /// The concrete UUID this resource represents. Present when the resource
+        /// was built by the system (the `init(kind:id:…)` path); nil when
+        /// deserialized from a wire payload where only the handle is available.
+        /// Callers that need the UUID should prefer this over parsing the handle.
+        public var resourceID: UUID?
 
         public init(
             handle: String,
@@ -394,11 +446,12 @@ extension KTResourceManifest {
             self.byteCount = byteCount
             self.summary = summary
             self.origin = origin
+            self.resourceID = nil
         }
 
         /// Builds a resource from its concrete IDENTITY (`kind` + `id`), deriving
-        /// the canonical `KT_<KIND>_<HEX>` handle — the only correct way to mint
-        /// one, so the handle and the resource can never disagree.
+        /// the canonical handle — the only correct way to mint one, so the handle
+        /// and the resource can never disagree.
         public init(
             kind: KTResourceManifest.Kind,
             id: UUID,
@@ -409,15 +462,15 @@ extension KTResourceManifest {
             summary: String? = nil,
             origin: String
         ) {
-            self.init(
-                handle: KTResourceManifest.agentHandle(kind: kind, id: id),
-                kind: kind.agentFamily,
-                direction: direction,
-                name: name,
-                mimeType: mimeType,
-                byteCount: byteCount,
-                summary: summary,
-                origin: origin)
+            self.handle = KTResourceManifest.agentHandle(kind: kind, id: id)
+            self.kind = kind.agentFamily
+            self.direction = direction
+            self.name = name
+            self.mimeType = mimeType
+            self.byteCount = byteCount
+            self.summary = summary
+            self.origin = origin
+            self.resourceID = id
         }
 
         static func attachment(
@@ -460,21 +513,14 @@ extension KTResourceManifest {
                 byteCount: ref.byteCount)
         }
 
-        /// The resource's friendly name in agent form — `"amber-swift-koala"`
-        /// — derived from the id inside its handle.
-        ///
-        /// The handle stays canonical: it is the skill's `$KT_…` env var and
-        /// part of the signed `resourcesHash`, so it cannot become words. This
-        /// is the spelling the AGENT can copy without corrupting it, and it is
-        /// accepted anywhere a handle is, resolved against the resources the
-        /// agent was actually shown. Hyphenated rather than spaced so it stays
-        /// one token wherever the agent writes it.
+        /// The resource's friendly name — `"amber-swift-koala"` — extracted
+        /// from the handle. The handle IS the friendly name (uppercased,
+        /// underscored for env-var compatibility).
         public var friendlyName: String? {
-            KTResourceManifest.parseAgentHandle(handle)?.id.friendlyNameToken
+            KTResourceManifest.parseAgentHandleCode(handle)?.code.token
         }
 
         /// The canonical JSON object embedded in agent-facing tool payloads.
-
         public func jsonObject() -> [String: Any] {
             var obj: [String: Any] = [
                 "handle": handle,
@@ -483,7 +529,6 @@ extension KTResourceManifest {
                 "name": name,
                 "origin": origin,
             ]
-            if let friendlyName { obj["friendly"] = friendlyName }
             if let mimeType { obj["mime_type"] = mimeType }
             if let byteCount { obj["byte_count"] = byteCount }
             if let summary, !summary.isEmpty { obj["description"] = summary }

@@ -198,7 +198,8 @@ extension SkillManager {
             parameters: parameters,
             skillDirectory: skillDirectory,
             manifest: manifest,
-            attachmentsDir: attachmentsDir
+            attachmentsDir: attachmentsDir,
+            workspaceDirectory: workspaceDirectory
         )
         let cwd = workspaceDirectory ?? skillDirectory ?? URL(fileURLWithPath: "/")
 
@@ -229,11 +230,17 @@ extension SkillManager {
     /// `SKILL_DIR`, and the manifest's per-resource `KT_<KIND>_<H8>` keys plus the
     /// `KT_ATTACHMENTS` umbrella (falling back to the bare umbrella when no manifest
     /// was built). All values are canonical absolute paths.
+    ///
+    /// `KT_WORKSPACE` is injected whenever the run has a workspace, because the
+    /// output scrubber rewrites workspace paths to `$KT_WORKSPACE` — a token the
+    /// model reads back and reuses in later commands, where an unset variable
+    /// would expand to "" and silently retarget the path.
     func skillExecutionEnvironment(
         parameters: [String: String],
         skillDirectory: URL?,
         manifest: KTResourceManifest?,
-        attachmentsDir: URL?
+        attachmentsDir: URL?,
+        workspaceDirectory: URL? = nil
     ) -> [String: String] {
         var environment = parameters.filter { !$0.key.hasPrefix("KT_") }
         if let skillDir = skillDirectory {
@@ -246,12 +253,23 @@ extension SkillManager {
         } else if let attachmentsDir {
             environment["KT_ATTACHMENTS"] = attachmentsDir.path
         }
+        if let workspaceDirectory {
+            environment["KT_WORKSPACE"] = workspaceDirectory.standardizedFileURL.path
+        }
         return environment
     }
+
+    static let stdoutOverflowFilename = "_kt_stdout_overflow.txt"
 
     /// Scrubs a finished run's command line + stdout/stderr (path handles, clip to
     /// the output cap), logs the `[ACT]` trace, and renders the canonical
     /// `command/exit_code/stdout/stderr` block the outer chat parses into rows.
+    ///
+    /// When stdout exceeds `scriptOutputMaxCharacters` and a workspace directory
+    /// is available, the full sanitized output is saved to
+    /// `$KT_WORKSPACE/_kt_stdout_overflow.txt` so the inner agent (or a
+    /// post-loop auto-populate step) can access the un-truncated content. The
+    /// clipped block includes a note pointing to the file.
     func sanitizedExecutionBlock(
         _ execution: SkillScriptExecutionResult,
         manifest: KTResourceManifest?,
@@ -262,12 +280,26 @@ extension SkillManager {
             execution.command.joined(separator: " "),
             manifest: manifest, skillDirectory: skillDirectory,
             workspaceDirectory: workspaceDirectory)
-        let stdout = clipped(
-            sanitizeAgentVisiblePaths(
-                execution.stdout, manifest: manifest, skillDirectory: skillDirectory,
-                workspaceDirectory: workspaceDirectory),
-            maxCharacters: Self.scriptOutputMaxCharacters
-        )
+        let sanitizedStdout = sanitizeAgentVisiblePaths(
+            execution.stdout, manifest: manifest, skillDirectory: skillDirectory,
+            workspaceDirectory: workspaceDirectory)
+        let stdoutOverflowed = sanitizedStdout.count > Self.scriptOutputMaxCharacters
+        let stdout: String
+        if stdoutOverflowed, let workspaceDirectory {
+            let overflowURL = workspaceDirectory.appendingPathComponent(
+                Self.stdoutOverflowFilename)
+            try? sanitizedStdout.write(to: overflowURL, atomically: true, encoding: .utf8)
+            stdout =
+                clipped(sanitizedStdout, maxCharacters: Self.scriptOutputMaxCharacters)
+                + "\n[Full output (\(sanitizedStdout.count) chars) saved to "
+                + "$KT_WORKSPACE/\(Self.stdoutOverflowFilename) — use kt_shell to read, "
+                + "process, or copy it to a write slot]"
+            onLog?(
+                "[ACT/overflow] stdout \(sanitizedStdout.count) chars → saved to "
+                    + "\(overflowURL.lastPathComponent)")
+        } else {
+            stdout = clipped(sanitizedStdout, maxCharacters: Self.scriptOutputMaxCharacters)
+        }
         let stderr = clipped(
             sanitizeAgentVisiblePaths(
                 execution.stderr, manifest: manifest, skillDirectory: skillDirectory,

@@ -145,3 +145,44 @@ extension AIConnector {
         )
     }
 }
+
+// MARK: - Turn wall clock
+
+/// The wall-clock ceiling was reached before the provider finished responding.
+public struct AIConnectorTurnTimeoutError: Error, LocalizedError, Sendable {
+    public let wallClockSeconds: UInt
+    public var errorDescription: String? {
+        "The model provider did not finish responding within \(wallClockSeconds)s; "
+            + "the request was cancelled."
+    }
+}
+
+/// Awaits one non-streaming completion request under BOTH timeout regimes.
+///
+/// AIProxy's `secondsToWait` becomes `URLRequest.timeoutInterval` — an IDLE
+/// timer that resets whenever any byte arrives, so a provider that drips
+/// keep-alive bytes or stalls mid-body can outlive it indefinitely, and the
+/// agent run above hangs with no error surfaced (no haywire row, no failed
+/// queue entry — the exact live failure this exists for). The wall clock here
+/// is absolute: when it expires the request is cancelled and the turn fails
+/// through the ordinary error path instead of hanging.
+///
+/// Parent-task cancellation still propagates into the request child, so a
+/// user cancel keeps surfacing as `CancellationError`, never as a timeout.
+func awaitTurnRequest<Response: Sendable>(
+    wallClockSeconds: UInt,
+    _ request: @escaping @Sendable () async throws -> Response
+) async throws -> Response {
+    try await withThrowingTaskGroup(of: Response.self) { group in
+        group.addTask(operation: request)
+        group.addTask {
+            try await Task.sleep(nanoseconds: UInt64(wallClockSeconds) * 1_000_000_000)
+            throw AIConnectorTurnTimeoutError(wallClockSeconds: wallClockSeconds)
+        }
+        defer { group.cancelAll() }
+        guard let first = try await group.next() else {
+            throw CancellationError()
+        }
+        return first
+    }
+}

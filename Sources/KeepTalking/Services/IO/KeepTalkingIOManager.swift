@@ -595,5 +595,43 @@ final class KeepTalkingIOManager {
                 + "otb=\(outputSlots.filter { $0.kind == .otb }.count) "
                 + "collections=\(outputSlots.filter { $0.isDirectory }.count)")
     }
+
+    func harvestWorkspaceOutputs(
+        workspaceDirectory: URL?,
+        declaredSlotPaths: Set<String>,
+        contextID: UUID,
+        callerNodeID: UUID
+    ) async -> DeliveredOutputs {
+        guard let workspace = workspaceDirectory else { return DeliveredOutputs() }
+        let fm = FileManager.default
+        let items =
+            (try? fm.contentsOfDirectory(
+                at: workspace,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+
+        let candidates = items.filter { url in
+            let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            let isSlot = declaredSlotPaths.contains(url.standardizedFileURL.path)
+            return isFile && !isSlot
+        }
+        guard !candidates.isEmpty else { return DeliveredOutputs() }
+
+        let inputs = candidates.sorted(by: { $0.path < $1.path }).map {
+            KeepTalkingLocalAttachmentInput(
+                sourceURL: $0,
+                filename: $0.lastPathComponent,
+                mimeType: MIMEType.inferredMIMEType(
+                    forFileAt: $0, filename: $0.lastPathComponent))
+        }
+        client.onLog?(
+            "[io/workspace] harvesting \(inputs.count) file(s): "
+                + inputs.map(\.sourceURL.lastPathComponent).joined(separator: ", "))
+        return await deliverProducedOutputFiles(
+            inputs, persistence: .otb,
+            in: contextID, to: callerNodeID)
+    }
+
     #endif
 }

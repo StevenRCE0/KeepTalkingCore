@@ -396,7 +396,7 @@ extension KeepTalkingClient {
                     "action_id": .object([
                         "type": .string("string"),
                         "description": .string(
-                            "The action_id of the skill action to inspect, from the available actions list."
+                            "The skill action to inspect — copy its `action:` value from the available actions list exactly (the same identifier kt_run_action takes; a raw UUID also works)."
                         ),
                     ])
                 ]),

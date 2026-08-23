@@ -75,6 +75,7 @@ let package = Package(
             dependencies: [
                 "KeepTalkingSDK",
                 .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "FluentKit", package: "fluent-kit"),
             ],
             path: "Sources/KeepTalkingCLI"
         ),

@@ -91,9 +91,7 @@ extension KeepTalkingClient {
 
         let producedOTBIDs = Set(
             (result.producedResources ?? []).compactMap {
-                $0.kind == "otb"
-                    ? KTResourceManifest.parseAgentHandle($0.handle)?.id
-                    : nil
+                $0.kind == "otb" ? $0.resourceID : nil
             }
         )
         let producedTransfers = transfers.filter {

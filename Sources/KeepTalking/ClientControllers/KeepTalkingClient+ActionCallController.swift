@@ -230,6 +230,13 @@ extension KeepTalkingClient {
                         callerNodeID: request.callerNodeID,
                         actionID: request.call.action)
                     absorb(pluginDelivered)
+                    let pluginSlotPaths = Set(pluginRun.outputSlots.map(\.path.standardizedFileURL.path))
+                    let pluginHarvested = await pluginIO.harvestWorkspaceOutputs(
+                        workspaceDirectory: pluginRun.workspaceDirectory,
+                        declaredSlotPaths: pluginSlotPaths,
+                        contextID: request.contextID,
+                        callerNodeID: request.callerNodeID)
+                    absorb(pluginHarvested)
                     #else
                     callResult = (content: [], isError: true)
                     #endif
@@ -263,6 +270,13 @@ extension KeepTalkingClient {
                         callerNodeID: request.callerNodeID,
                         actionID: request.call.action)
                     absorb(delivered)
+                    let slotPaths = Set(ioRun.outputSlots.map(\.path.standardizedFileURL.path))
+                    let harvested = await actionIO.harvestWorkspaceOutputs(
+                        workspaceDirectory: ioRun.workspaceDirectory,
+                        declaredSlotPaths: slotPaths,
+                        contextID: request.contextID,
+                        callerNodeID: request.callerNodeID)
+                    absorb(harvested)
                     #else
                     callResult = (content: [], isError: true)
                     #endif
