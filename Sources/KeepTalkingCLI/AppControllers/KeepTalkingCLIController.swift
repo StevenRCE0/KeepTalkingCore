@@ -102,6 +102,7 @@ final class KeepTalkingCLIController {
 
     func bindCallbacks(to targetClient: KeepTalkingClient) {
         installMCPHTTPAuthHandler(on: targetClient)
+        installACPAuthHandler(on: targetClient)
 
         let renderMessage: @Sendable (KeepTalkingContextMessage) -> String = {
             message in

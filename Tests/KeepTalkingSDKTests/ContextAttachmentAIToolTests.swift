@@ -172,6 +172,7 @@ struct ContextAttachmentAIToolTests {
             routesByFunctionName: [:],
             actionStubs: [],
             remoteSemanticRetrievalActions: [],
+            remoteActionCreationActions: [],
             lazyRegistry: KeepTalkingLazyToolRegistry()
         )
     }
@@ -186,6 +187,7 @@ struct ContextAttachmentAIToolTests {
             ],
             actionStubs: [],
             remoteSemanticRetrievalActions: [],
+            remoteActionCreationActions: [],
             lazyRegistry: KeepTalkingLazyToolRegistry()
         )
     }

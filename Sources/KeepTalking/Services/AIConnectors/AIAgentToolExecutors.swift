@@ -141,6 +141,24 @@ extension KeepTalkingClient {
                         )
                     )
                     continue
+                } else if functionName == Self.createActionToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: try await executeCreateActionToolCall(
+                                        rawArguments: toolCall.argumentsJSON,
+                                        runtimeCatalog: runtimeCatalog,
+                                        context: context,
+                                        agentTurnID: agentTurnID
+                                    ),
+                                    toolCallID: toolCallID
+                                )
+                            ]
+                        )
+                    )
+                    continue
                 } else if functionName == Self.evaluateJSToolFunctionName {
                     executions.append(
                         .init(

@@ -125,16 +125,17 @@ extension KeepTalkingCLIController {
             : trimmedDescription
 
         let action = try await client.registerAction(
-            payload: .mcpBundle(KeepTalkingMCPBundle(
-                name: name,
-                indexDescription: indexDescription,
-                service: .http(
-                    url: url,
-                    payload: Data(),
-                    headers: headers,
-                    scope: nil
-                )
-            ))
+            payload: .mcpBundle(
+                KeepTalkingMCPBundle(
+                    name: name,
+                    indexDescription: indexDescription,
+                    service: .http(
+                        url: url,
+                        payload: Data(),
+                        headers: headers,
+                        scope: nil
+                    )
+                ))
         )
         let actionID = action.id?.uuidString.lowercased() ?? "unknown"
         let headerLabel =
@@ -187,6 +188,45 @@ extension KeepTalkingCLIController {
         return .completed(callbackURL: callbackURL)
     }
 
+    func installACPAuthHandler(on targetClient: KeepTalkingClient) {
+        targetClient.setACPAuthHandler { actionID, methods in
+            return await Self.handleACPAuthRequired(actionID: actionID, methods: methods)
+        }
+    }
+
+    /// Resolves an ACP agent's `auth_required` challenge at the prompt. The ACP
+    /// counterpart of `handleMCPHTTPAuthURL`: the agent rejected `session/new`
+    /// with -32000, and the answer picks one of the methods it advertised.
+    private static func handleACPAuthRequired(
+        actionID: UUID,
+        methods: [KeepTalkingACPAuthMethod]
+    ) async -> KeepTalkingACPAuthResult {
+        let actionLabel = actionID.uuidString.lowercased()
+        print("[acp][auth] action=\(actionLabel) the agent requires authentication")
+        guard !methods.isEmpty else {
+            Self.writeStderr("The agent advertised no authentication methods.\n")
+            return .declined
+        }
+        for (index, method) in methods.enumerated() {
+            let note = method.isDrivable ? "" : "  (terminal — run it yourself, not selectable)"
+            let detail = method.detail.map { " — \($0)" } ?? ""
+            print("  [\(index + 1)] \(method.name) (\(method.id))\(detail)\(note)")
+        }
+        print("Choose a method by number (or press Enter to cancel): ", terminator: "")
+        guard let raw = readLine(strippingNewline: true) else {
+            return .cancelled
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .cancelled
+        }
+        guard let choice = Int(trimmed), methods.indices.contains(choice - 1) else {
+            Self.writeStderr("Not one of the offered methods.\n")
+            return .declined
+        }
+        return .selected(methodID: methods[choice - 1].id)
+    }
+
     private static func openURLInDefaultBrowser(_ url: URL) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
@@ -204,14 +244,15 @@ extension KeepTalkingCLIController {
         environment: [String: String]
     ) async throws {
         let action = try await client.registerAction(
-            payload: .mcpBundle(KeepTalkingMCPBundle(
-                name: name,
-                indexDescription: "MCP stdio server: \(name)",
-                service: .stdio(
-                    arguments: command,
-                    environment: environment
-                )
-            ))
+            payload: .mcpBundle(
+                KeepTalkingMCPBundle(
+                    name: name,
+                    indexDescription: "MCP stdio server: \(name)",
+                    service: .stdio(
+                        arguments: command,
+                        environment: environment
+                    )
+                ))
         )
         let actionID = action.id?.uuidString.lowercased() ?? "unknown"
         let commandLabel = command.joined(separator: " ")

@@ -81,7 +81,7 @@ public final class KeepTalkingSecItemKeychainStore: KeepTalkingKeychainStore, @u
     }
 
     private var allKinds: [KeepTalkingKeychainKey.Kind] {
-        [.groupSecret, .nodeIdentityPriv, .loginCredential, .mcpCredentials]
+        [.groupSecret, .nodeIdentityPriv, .loginCredential, .mcpCredentials, .acpCredentials]
     }
 
     private func service(for kind: KeepTalkingKeychainKey.Kind) -> String {

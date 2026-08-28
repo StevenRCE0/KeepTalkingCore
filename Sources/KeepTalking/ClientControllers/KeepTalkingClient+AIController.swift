@@ -20,6 +20,7 @@ extension KeepTalkingClient {
     static let contextAttachmentUpdateMetadataToolFunctionName =
         "kt_update_context_attachment_metadata"
     static let searchThreadsToolFunctionName = "kt_search_threads"
+    static let createActionToolFunctionName = "kt_create_action"
     static let evaluateJSToolFunctionName = "kt_evaluate_js"
     /// Function name used for web search in chat-completions mode (e.g. OpenRouter).
     /// In Responses API mode the built-in webSearchPreview tool is used instead.
@@ -351,6 +352,7 @@ extension KeepTalkingClient {
         let attachmentUpdateMetadataTool =
             makeContextAttachmentUpdateMetadataTool()
         let searchThreadsTool = makeSearchThreadsTool()
+        let createActionTool = makeCreateActionTool()
         let evaluateJSTool = makeEvaluateJSTool()
 
         // Layer 0: meta tools + primitives (static schemas, no server I/O).
@@ -364,6 +366,7 @@ extension KeepTalkingClient {
             attachmentReadTool,
             attachmentUpdateMetadataTool,
             searchThreadsTool,
+            createActionTool,
             evaluateJSTool,
             webSearchTool,
             markTurningPointTool,
@@ -992,6 +995,8 @@ extension KeepTalkingClient {
                     return ("primitive", bundle.name)
                 case .semanticRetrieval(let bundle):
                     return ("semantic_retrieval", bundle.name)
+                case .actionCreation(let bundle):
+                    return ("action_creation", bundle.name)
                 case .filesystem(let bundle):
                     return ("filesystem", bundle.name)
                 case .acp(let bundle):
@@ -1066,6 +1071,9 @@ extension KeepTalkingClient {
                         )
                     case .semanticRetrieval:
                         // Handled app-side via semanticSearchCallback; no local executor.
+                        return
+                    case .actionCreation:
+                        // Handled app-side via actionCreationHandler; no local executor.
                         return
                     case .filesystem:
                         let actionID =

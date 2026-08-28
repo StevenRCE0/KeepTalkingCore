@@ -298,6 +298,7 @@ extension KeepTalkingClient {
                 peerPublicKey: inner.identityPublicKey
             )
         )
+        onTrustEstablished?(session.peerNodeID, session.contextID)
     }
 
     private func onTrustComplete(_ payload: KeepTalkingTrustCompletePayload) async throws {
@@ -362,6 +363,7 @@ extension KeepTalkingClient {
                 peerPublicKey: inner.identityPublicKey
             )
         )
+        onTrustEstablished?(session.peerNodeID, session.contextID)
     }
 
     private func onTrustReject(_ payload: KeepTalkingTrustRejectPayload) {

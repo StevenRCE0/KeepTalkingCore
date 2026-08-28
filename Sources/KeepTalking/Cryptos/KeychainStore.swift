@@ -6,6 +6,7 @@ public struct KeepTalkingKeychainKey: Hashable, Sendable {
         case nodeIdentityPriv = "node-identity-priv"
         case loginCredential = "login-credential"
         case mcpCredentials = "mcp-credentials"
+        case acpCredentials = "acp-credentials"
     }
 
     public let kind: Kind
@@ -34,6 +35,14 @@ public struct KeepTalkingKeychainKey: Hashable, Sendable {
     /// on demand at connect time and token exchange.
     public static func mcpCredentials(actionID: UUID) -> KeepTalkingKeychainKey {
         KeepTalkingKeychainKey(kind: .mcpCredentials, id: actionID.uuidString.lowercased())
+    }
+
+    /// ACP agent credentials (the subprocess's secret environment, plus the auth
+    /// method last used to satisfy `auth_required`) for an action, keyed by
+    /// action ID. Held only in the keychain — never in the action's
+    /// synced/database payload — and read back on demand at spawn time.
+    public static func acpCredentials(actionID: UUID) -> KeepTalkingKeychainKey {
+        KeepTalkingKeychainKey(kind: .acpCredentials, id: actionID.uuidString.lowercased())
     }
 
 }

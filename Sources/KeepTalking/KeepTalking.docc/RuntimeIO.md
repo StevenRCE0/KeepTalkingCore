@@ -286,6 +286,27 @@ bundle's additional directories — though the agent can still touch the disk di
 working root is also advertised as a `KT_FS_<HEX>` manifest resource, so an ACP agent
 sees the same handle convention a sandboxed skill does, rendered by the same code.
 
+Authentication is negotiated, not assumed. The `initialize` response is read rather
+than discarded: the agent's protocol version must match the one KeepTalking
+implements (anything else closes the connection, as the spec requires) and the
+`authMethods` it advertises are kept for the challenge that may follow. When the
+agent refuses `session/new` with `auth_required` (-32000), KeepTalking resolves it
+in-band — the ACP analogue of the MCP transport reacting to a 401/403 — by choosing
+a method, calling `authenticate`, and retrying `session/new` exactly once. The
+choice comes from the method that last worked, else the app-installed handler
+(`setACPAuthHandler`), else the sole drivable option; a real choice with no handler
+surfaces the advertised methods rather than picking an identity for the owner.
+`terminal`-type methods are advertised but never auto-selected — KeepTalking offers
+the agent no terminal to run a login command in.
+
+The method that worked is remembered in the keychain, so the owner is asked once
+rather than once per spawn. The agent's environment lives there too: it carries the
+agent's API keys, so `saveConstructedAction` relocates it out of the action payload
+on save — exactly as HTTP MCP request headers are relocated — leaving nothing
+sensitive in the database or in a sync envelope to a peer. ``KeepTalkingACPBundle``
+therefore persists with an empty `environment`, and the runtime rehydrates it at
+spawn time.
+
 The prompt turn has no deadline — a coding agent may legitimately work for many
 minutes — so liveness is polled instead of counting down, and a dead agent surfaces
 its exit status and stderr tail rather than an opaque "transport closed".
@@ -535,9 +556,14 @@ rather than truncated.
 
 `ACPManager`, its `callAction(action:call:scope:callerIsRemote:)` entry point, and
 `ACPManagerError` exist only on macOS; the bundle that describes an ACP action is
-cross-platform.
+cross-platform, and so are the auth types — the driver that negotiates
+authentication is macOS-only, but the model a picker renders is not.
 
 - ``KeepTalkingACPBundle``
+- ``KeepTalkingACPAuthMethod``
+- ``KeepTalkingACPAuthResult``
+- ``KeepTalkingACPCredentials``
+- ``KeepTalkingACPCredentialStore``
 
 ### Sandboxing and Scope
 

@@ -171,6 +171,9 @@ extension SkillManager {
 
             ## Execution requirements
             - Use \(Self.shellToolName) to do the work. Never just describe a command.
+            - Prefer calling the skill's own scripts (under scripts/) over writing \
+            ad-hoc command lines — the scripts are pre-authored with error handling \
+            and precondition checks. Invoke the entry-point script when one exists.
             - If a filename is ambiguous or uncertain, call \(Self.listFilesToolName) first to find the exact name.
             - stdout/stderr and the exit code are returned to you after each run.
             - Report results faithfully: a non-zero exit_code, or a stderr error, means the run FAILED. Never claim success or "exit code 0" unless the returned exit_code is actually 0 — if it failed, say so and quote the error.

@@ -23,6 +23,7 @@ struct SkillMetainfoResolutionTests {
             routesByFunctionName: [:],
             actionStubs: stubs,
             remoteSemanticRetrievalActions: [],
+            remoteActionCreationActions: [],
             lazyRegistry: KeepTalkingLazyToolRegistry()
         )
     }

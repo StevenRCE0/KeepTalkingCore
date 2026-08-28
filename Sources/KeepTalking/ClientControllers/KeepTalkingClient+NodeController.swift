@@ -829,9 +829,13 @@ extension KeepTalkingClient {
             for actionID in desiredActionSnapshot.keys.sorted(by: {
                 $0.uuidString < $1.uuidString
             }) {
+                // `try?`: a poisoned action row (undecodable payload) must cost
+                // only its own link, not roll back every grant in this
+                // transaction. The reconcile reruns on every broadcast, so a
+                // transiently skipped link self-heals.
                 guard
                     let advertised = desiredActionSnapshot[actionID],
-                    let action = try await KeepTalkingAction.find(
+                    let action = try? await KeepTalkingAction.find(
                         actionID,
                         on: database
                     )
@@ -1094,6 +1098,13 @@ extension KeepTalkingClient {
                         indexDescription: bundle
                             .indexDescription
                     )
+            case .actionCreation(let bundle):
+                payloadSummary =
+                    .actionCreation(
+                        name: bundle.name,
+                        indexDescription: bundle
+                            .indexDescription
+                    )
             case .filesystem(let bundle):
                 payloadSummary = .filesystem(
                     name: bundle.name,
@@ -1154,7 +1165,7 @@ extension KeepTalkingClient {
                             availability = .connecting
                     }
                 }
-            case .skill, .primitive, .filesystem, .semanticRetrieval, .acp:
+            case .skill, .primitive, .filesystem, .semanticRetrieval, .actionCreation, .acp:
                 // Non-MCP payloads have no per-server runtime health: the
                 // action is live whenever this node is reachable. The
                 // user-disabled flag still gates them.

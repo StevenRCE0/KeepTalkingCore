@@ -576,6 +576,35 @@ extension KeepTalkingClient {
         )
     }
 
+    func makeCreateActionTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.createActionToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.createAction,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "intention": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "One short sentence (≤12 words) describing what the requested action should do."
+                        ),
+                    ]),
+                    "node_id": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "Optional target node UUID. Omit to ask this node's own user; set to a peer node ID to ask that peer's user (the peer must have granted action creation in this context)."
+                        ),
+                    ]),
+                ]),
+                "required": .array([.string("intention")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
     func makeEvaluateJSTool() -> KeepTalkingActionToolDefinition {
         .init(
             functionName: Self.evaluateJSToolFunctionName,

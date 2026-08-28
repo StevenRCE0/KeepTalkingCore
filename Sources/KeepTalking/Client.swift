@@ -168,6 +168,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
         KeepTalkingPrimitiveBundle.availablePrimitiveActions
     public typealias MCPHTTPAuthURLHandler =
         @Sendable (UUID, URL, String) async -> KeepTalkingMCPHTTPAuthResult
+    /// Resolves an ACP agent's `auth_required` challenge by picking one of the
+    /// methods it advertised. The ACP counterpart of `MCPHTTPAuthURLHandler`.
+    public typealias ACPAuthHandler =
+        @Sendable (UUID, [KeepTalkingACPAuthMethod]) async -> KeepTalkingACPAuthResult
     public typealias ActionApprovalHandler =
         @Sendable (KeepTalkingActionCallRequest, KeepTalkingAction, KeepTalkingContext) async -> Bool
     public typealias PrimitiveActionPostResultHandler =
@@ -176,6 +180,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// enforcement and lexical retrieval remain SDK-owned.
     public typealias SemanticSearchCallback =
         @Sendable (String, Int) async throws -> [KeepTalkingSemanticSearchResult]
+    /// App-side fulfilment of the built-in `actionCreation` capability: present
+    /// the request (intention, context, caller) to the user for confirmation and
+    /// curation, returning the created action's ID — or nil when the user
+    /// declines or dismisses the flow.
+    public typealias ActionCreationHandler =
+        @Sendable (_ intention: String, _ contextID: UUID?, _ callerNodeID: UUID) async -> UUID?
     /// Callback that performs a web search. Used when the connector is in chat-completions
     /// mode (e.g. OpenRouter) where web search is a client-side function call rather than
     /// a built-in Responses API tool. Parameter: query string. Returns raw result text.
@@ -194,6 +204,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// Fires when a blob changes availability or crosses a visible receive-progress step.
     public var onBlobAvailabilityChange: BlobAvailabilityHandler?
     public var onPeerConnect: PeerConnectHandler?
+    /// Fires on BOTH sides of a completed trust handshake — initiator when the
+    /// accept lands, responder when the complete lands — with the peer node and
+    /// the context the trust was established in. At that instant the local
+    /// relation is `.trusted`, so a grant issued from this callback rides the
+    /// very next node-status broadcast.
+    public var onTrustEstablished: (@Sendable (_ peerNodeID: UUID, _ contextID: UUID) -> Void)?
     public var onContextSync: ContextSyncHandler?
     /// Fires when a context's side notes changed — locally or by merge. The
     /// app uses it to refresh the notes UI and reload the widget timeline.
@@ -279,6 +295,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let livenessState: KeepTalkingContextLivenessState
     let mcpManager: MCPManager
     let mcpCredentialStore: KeepTalkingMCPCredentialStore
+    /// Keychain seam for ACP agent secrets. Cross-platform (unlike `acpManager`)
+    /// so an action authored on iOS still keeps its environment out of the DB.
+    let acpCredentialStore: KeepTalkingACPCredentialStore
     let skillManager: SkillManager
     let primitiveActionManager: PrimitiveActionManager
     let semanticRetrievalActionManager: SemanticRetrievalActionManager
@@ -302,7 +321,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// cwd for skill / provider-side ACT runs); reaped on thread archive/delete.
     let threadWorkspaces: KeepTalkingThreadWorkspaceManager
     private var mcpHTTPAuthURLHandler: MCPHTTPAuthURLHandler?
+    private var acpAuthHandler: ACPAuthHandler?
     var actionApprovalHandler: ActionApprovalHandler?
+    var actionCreationHandler: ActionCreationHandler?
     var primitiveActionPostResultHandler: PrimitiveActionPostResultHandler?
     let primitiveRegistry: KeepTalkingPrimitiveRegistry?
     var semanticSearchCallback: SemanticSearchCallback?
@@ -642,6 +663,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
         )
         let mcpCredentialStore = KeepTalkingMCPCredentialStore(keychain: keychain)
         self.mcpCredentialStore = mcpCredentialStore
+        let acpCredentialStore = KeepTalkingACPCredentialStore(keychain: keychain)
+        self.acpCredentialStore = acpCredentialStore
         self.mcpManager = MCPManager(
             nodeConfig: config,
             stdioTransportLauncher: stdioTransportLauncher,
@@ -688,7 +711,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.pluginHost = KeepTalkingPluginHost.shared(forNode: config.node)
         self.acpManager = ACPManager(
             nodeConfig: config,
-            stdioTransportLauncher: stdioTransportLauncher
+            stdioTransportLauncher: stdioTransportLauncher,
+            credentialStore: acpCredentialStore
         )
         #endif
 
@@ -823,6 +847,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
         actionApprovalHandler = handler
     }
 
+    public func setActionCreationHandler(
+        _ handler: ActionCreationHandler?
+    ) {
+        actionCreationHandler = handler
+    }
+
     public func setPrimitiveActionPostResultHandler(
         _ handler: PrimitiveActionPostResultHandler?
     ) {
@@ -890,6 +920,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
             try ensureCurrentConnect(generation)
 
             await mcpManager.setHTTPAuthURLHandler(mcpHTTPAuthURLHandler)
+            #if os(macOS)
+            await acpManager.setAuthHandler(acpAuthHandler)
+            #endif
             try ensureCurrentConnect(generation)
             _ = try await ensure(config.contextID, for: KeepTalkingContext.self)
             try ensureCurrentConnect(generation)
@@ -956,6 +989,22 @@ public final class KeepTalkingClient: @unchecked Sendable {
         Task { [weak self] in
             await self?.mcpManager.setHTTPAuthURLHandler(handler)
         }
+    }
+
+    /// Installs a callback that resolves ACP `auth_required` challenges by
+    /// choosing one of the agent's advertised auth methods.
+    ///
+    /// Triggered in-band: the agent rejects `session/new` with -32000, this
+    /// handler picks a method, `authenticate` runs and `session/new` is retried —
+    /// the same shape as MCP driving OAuth off a 401/403. The choice is
+    /// remembered in the keychain, so the owner is asked once, not once per call.
+    public func setACPAuthHandler(_ handler: ACPAuthHandler?) {
+        acpAuthHandler = handler
+        #if os(macOS)
+        Task { [weak self] in
+            await self?.acpManager.setAuthHandler(handler)
+        }
+        #endif
     }
 
     /// Installs a factory supplying a per-action `HTTPClientAuthorizer` so the MCP
@@ -1113,5 +1162,47 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// Removes any stored credentials for an HTTP MCP action.
     public func deleteMCPCredentials(actionID: UUID) async throws {
         try await mcpCredentialStore.delete(actionID: actionID)
+    }
+
+    #if os(macOS)
+    /// Runs the ACP `initialize` handshake against a bundle's command without
+    /// saving anything, so the add/edit form can verify the agent when the owner
+    /// clicks Done. Returns the auth methods the agent advertised; throws with
+    /// the agent's stderr when the command is wrong or is not an ACP agent.
+    public func preflightACPAgent(
+        bundle: KeepTalkingACPBundle
+    ) async throws -> [KeepTalkingACPAuthMethod] {
+        try await acpManager.preflightInitialize(bundle: bundle)
+    }
+    #endif
+
+    // MARK: - ACP agent credentials
+
+    /// Persists the keychain-only credentials (secret environment + the auth
+    /// method last used) for an ACP action. Never written to the action's
+    /// database payload, and never synced to peers.
+    public func storeACPCredentials(
+        actionID: UUID,
+        _ credentials: KeepTalkingACPCredentials
+    ) async throws {
+        try await acpCredentialStore.store(credentials, actionID: actionID)
+    }
+
+    /// Reads the stored credentials for an ACP action, or `nil` if none.
+    public func loadACPCredentials(
+        actionID: UUID
+    ) async throws -> KeepTalkingACPCredentials? {
+        try await acpCredentialStore.load(actionID: actionID)
+    }
+
+    /// Forgets the remembered auth method so the next call re-prompts, leaving
+    /// the stored environment intact. The ACP equivalent of signing out.
+    public func clearACPAuthMethod(actionID: UUID) async throws {
+        try await acpCredentialStore.setMethodID(nil, actionID: actionID)
+    }
+
+    /// Removes any stored credentials for an ACP action.
+    public func deleteACPCredentials(actionID: UUID) async throws {
+        try await acpCredentialStore.delete(actionID: actionID)
     }
 }

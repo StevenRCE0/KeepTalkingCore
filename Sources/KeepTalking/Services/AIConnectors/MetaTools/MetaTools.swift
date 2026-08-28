@@ -29,6 +29,9 @@ extension KeepTalkingClient {
         if functionName == Self.searchThreadsToolFunctionName {
             return "search thread memory"
         }
+        if functionName == Self.createActionToolFunctionName {
+            return "request action creation"
+        }
         if functionName == Self.evaluateJSToolFunctionName {
             return "evaluate JavaScript"
         }

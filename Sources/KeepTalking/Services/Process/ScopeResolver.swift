@@ -91,7 +91,7 @@ public enum ScopeResolver {
             case .filesystem(let bundle):
                 return filesystemDescriptor(for: bundle, scope: .all)
 
-            case .acp, .primitive, .semanticRetrieval, .plugin:
+            case .acp, .primitive, .semanticRetrieval, .actionCreation, .plugin:
                 // ACP agents run UNsandboxed by design — containment is advisory
                 // (the session cwd + advertised fs caps), not enforced — so there
                 // is no implicit sandbox descriptor, just like primitives, which

@@ -9,8 +9,6 @@ public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     case askForFile = "ask-for-file"
     case getCurrentlyPlayingMusic = "get-currently-playing-music"
     case runMacOSShortcut = "run-macos-shortcut"
-    /// Prompts the action host's user to create a new action and grant it to the caller.
-    case createAction = "create-action"
     /// Access the user's calendar with read (list events) and write (add event) operations.
     /// Operations are selected by the tool's `operation` argument; per-operation
     /// calendar scope lives on `KeepTalkingPrimitiveBundle.scope` keyed by
@@ -84,13 +82,6 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
             action: .getCurrentlyPlayingMusic
         ),
         KeepTalkingPrimitiveBundle(
-            name: "create-action",
-            indexDescription:
-                "Prompts the user to create a new action and grant it to the caller's context. Keep the proposed action's `description` short (one sentence, ≤12 words) and limited to what the action does — you cannot see the host environment, existing actions, or how the user will discover it, so do not speculate about implementations, detailed scripts, callers, triggers, or surrounding UI. User on the other end would double check and modify the action if necessary before adding it to the system and grant it to you in the current conversation.",
-            action: .createAction,
-            blockingAuthorisation: true
-        ),
-        KeepTalkingPrimitiveBundle(
             name: "access-calendar",
             indexDescription:
                 "Read (list events in a date range) and write (add events) on the user's calendars on the action host.",
@@ -133,7 +124,7 @@ extension KeepTalkingPrimitiveActionKind {
                     ]),
                 ]
             case .openWithURL, .addToReadingList, .askForFile,
-                .getCurrentlyPlayingMusic, .runMacOSShortcut, .createAction:
+                .getCurrentlyPlayingMusic, .runMacOSShortcut:
                 return [:]
         }
     }

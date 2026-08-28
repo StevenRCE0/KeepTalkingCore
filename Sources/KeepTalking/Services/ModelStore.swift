@@ -77,6 +77,10 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
     /// queried.
     public func migrate() async throws {
         try await manager.autoMigrate()
+        let logger = self.logger
+        try await KeepTalkingUndecodableActionSweep.run(on: database) {
+            logger.notice("\($0)")
+        }
     }
 
     /// Drains in-flight queries and releases the event-loop group.
@@ -220,6 +224,7 @@ public final class KeepTalkingInMemoryStore: KeepTalkingLocalStore,
 
     public func migrate() async throws {
         try await manager.autoMigrate()
+        try await KeepTalkingUndecodableActionSweep.run(on: database)
     }
 
     /// See `KeepTalkingModelStore.shutdown()`.

@@ -41,6 +41,7 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
         case mcpBundle(name: String, indexDescription: String)
         case skill(name: String, indexDescription: String)
         case semanticRetrieval(name: String, indexDescription: String)
+        case actionCreation(name: String, indexDescription: String)
         case primitive(
             name: String,
             indexDescription: String,

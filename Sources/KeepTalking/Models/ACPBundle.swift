@@ -21,7 +21,13 @@ public struct KeepTalkingACPBundle: KeepTalkingActionBundle, Equatable {
     /// `["claude", "--acp"]`). The first element is the executable.
     public var command: [String]
 
-    /// Environment variables for the agent subprocess.
+    /// Non-secret environment variables for the agent subprocess.
+    ///
+    /// Secrets do NOT live here: an agent's env is where its API keys go, so
+    /// `saveConstructedAction` relocates this into the keychain via
+    /// `KeepTalkingACPCredentialStore` and persists the bundle with an empty
+    /// environment — the same treatment HTTP MCP request headers get. The
+    /// runtime merges the stored values back in at spawn time.
     public var environment: [String: String]
 
     /// Absolute working directory. Passed to the agent via `session/new` as its
@@ -59,4 +65,56 @@ public struct KeepTalkingACPBundle: KeepTalkingActionBundle, Equatable {
         self.additionalDirectories = additionalDirectories
         self.remoteSystemPrompt = remoteSystemPrompt
     }
+}
+
+/// One authentication method an ACP agent advertised in its `initialize`
+/// response. KeepTalking replays the chosen method's `id` on later spawns via
+/// the keychain-backed `KeepTalkingACPCredentialStore`, so the owner is asked
+/// once rather than once per call.
+///
+/// Cross-platform on purpose (like ``KeepTalkingACPBundle``): the driver that
+/// negotiates auth is macOS-only, but the UI that renders a method picker is not.
+public struct KeepTalkingACPAuthMethod: Sendable, Equatable, Codable, Identifiable {
+    /// Opaque `AuthMethodId` — what `authenticate` takes as `methodId`.
+    public var id: String
+    /// Human-readable label for a picker.
+    public var name: String
+    /// Optional longer explanation from the agent.
+    public var detail: String?
+    /// `"agent"` (the default) or `"terminal"`. A terminal method asks the
+    /// client to run a login command in a terminal; KeepTalking advertises no
+    /// terminal capability, so it cannot drive those — see `isDrivable`.
+    public var type: String
+
+    public init(id: String, name: String, detail: String? = nil, type: String = "agent") {
+        self.id = id
+        self.name = name
+        self.detail = detail
+        self.type = type
+    }
+
+    /// Parses one `AuthMethod` object off the wire. Returns nil for a malformed
+    /// entry so one bad element doesn't poison the whole advertised set.
+    init?(json: [String: Any]) {
+        guard let id = json["id"] as? String, !id.isEmpty else { return nil }
+        self.id = id
+        self.name = json["name"] as? String ?? id
+        self.detail = json["description"] as? String
+        self.type = json["type"] as? String ?? "agent"
+    }
+
+    /// False for `terminal`-type methods, which require running a command in a
+    /// terminal KeepTalking does not offer the agent.
+    public var isDrivable: Bool { type != "terminal" }
+}
+
+/// How the owner answered an ACP authentication prompt. Mirrors
+/// `KeepTalkingMCPHTTPAuthResult`, the equivalent seam on the MCP side.
+public enum KeepTalkingACPAuthResult: Sendable, Equatable {
+    /// Authenticate with this advertised method's `id`.
+    case selected(methodID: String)
+    /// Prompt dismissed without a choice.
+    case cancelled
+    /// Owner refused to authenticate this agent.
+    case declined
 }

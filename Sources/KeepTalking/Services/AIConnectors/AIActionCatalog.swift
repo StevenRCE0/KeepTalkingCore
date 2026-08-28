@@ -38,6 +38,12 @@ struct KeepTalkingSemanticRetrievalCatalogEntry: Sendable {
     let bundle: KeepTalkingSemanticRetrievalBundle
 }
 
+struct KeepTalkingActionCreationCatalogEntry: Sendable {
+    let actionID: UUID
+    let ownerNodeID: UUID
+    let bundle: KeepTalkingActionCreationBundle
+}
+
 /// Mutable class so lazy-registered MCP/skill tools can be appended in-place.
 /// The shared cache holds a reference; mutations are visible across runAI calls
 /// on the same cached instance without requiring a cache invalidation.
@@ -46,6 +52,7 @@ final class KeepTalkingActionRuntimeCatalog: @unchecked Sendable {
     var routesByFunctionName: [String: KeepTalkingAgentToolRoute]
     let actionStubs: [KeepTalkingActionStub]
     let remoteSemanticRetrievalActions: [KeepTalkingSemanticRetrievalCatalogEntry]
+    let remoteActionCreationActions: [KeepTalkingActionCreationCatalogEntry]
     let lazyRegistry: KeepTalkingLazyToolRegistry
 
     init(
@@ -53,12 +60,14 @@ final class KeepTalkingActionRuntimeCatalog: @unchecked Sendable {
         routesByFunctionName: [String: KeepTalkingAgentToolRoute],
         actionStubs: [KeepTalkingActionStub],
         remoteSemanticRetrievalActions: [KeepTalkingSemanticRetrievalCatalogEntry],
+        remoteActionCreationActions: [KeepTalkingActionCreationCatalogEntry],
         lazyRegistry: KeepTalkingLazyToolRegistry
     ) {
         self.catalog = catalog
         self.routesByFunctionName = routesByFunctionName
         self.actionStubs = actionStubs
         self.remoteSemanticRetrievalActions = remoteSemanticRetrievalActions
+        self.remoteActionCreationActions = remoteActionCreationActions
         self.lazyRegistry = lazyRegistry
     }
 
@@ -160,6 +169,7 @@ extension KeepTalkingClient {
         var routesByFunctionName: [String: KeepTalkingAgentToolRoute] = [:]
         var actionStubs: [KeepTalkingActionStub] = []
         var remoteSemanticRetrievalEntries: [KeepTalkingSemanticRetrievalCatalogEntry] = []
+        var remoteActionCreationEntries: [KeepTalkingActionCreationCatalogEntry] = []
         let lazyRegistry = KeepTalkingLazyToolRegistry()
 
         let selfNode = try await ensure(
@@ -376,6 +386,19 @@ extension KeepTalkingClient {
                         )
                     )
 
+                case .actionCreation(let bundle):
+                    // Skip the local node's own action-creation capability; it
+                    // is served transparently by the built-in kt_create_action
+                    // tool (which also fans a targeted request out to peers).
+                    guard !isCurrentNode else { continue }
+                    remoteActionCreationEntries.append(
+                        KeepTalkingActionCreationCatalogEntry(
+                            actionID: actionID,
+                            ownerNodeID: ownerNodeID,
+                            bundle: bundle
+                        )
+                    )
+
                 case .filesystem(let bundle):
                     let description =
                         action.descriptor?.action?.description
@@ -435,6 +458,9 @@ extension KeepTalkingClient {
                 $0.actionID.uuidString < $1.actionID.uuidString
             },
             remoteSemanticRetrievalActions: remoteSemanticRetrievalEntries.sorted {
+                $0.actionID.uuidString < $1.actionID.uuidString
+            },
+            remoteActionCreationActions: remoteActionCreationEntries.sorted {
                 $0.actionID.uuidString < $1.actionID.uuidString
             },
             lazyRegistry: lazyRegistry

@@ -46,7 +46,6 @@ public actor KeepTalkingSkillPlanner {
 
     static let primitiveActionList: String = {
         KeepTalkingPrimitiveBundle.availablePrimitiveActions
-            .filter { $0.action != .createAction }
             .map { primitive -> String in
                 var line = "- \(primitive.action.rawValue): \(primitive.indexDescription)"
                 let schema = primitive.action.scopeSchema

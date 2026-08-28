@@ -220,6 +220,7 @@ extension KeepTalkingClient {
                 case .skill(let b): action.descriptor = Self.defaultDescriptor(for: b)
                 case .primitive(let b): action.descriptor = Self.defaultDescriptor(for: b)
                 case .semanticRetrieval(let b): action.descriptor = Self.defaultDescriptor(for: b)
+                case .actionCreation(let b): action.descriptor = Self.defaultDescriptor(for: b)
                 case .filesystem(let b): action.descriptor = Self.defaultDescriptor(for: b)
                 case .acp(let b): action.descriptor = Self.defaultDescriptor(for: b)
                 case .plugin(let b): action.descriptor = Self.defaultDescriptor(for: b)
@@ -296,6 +297,33 @@ extension KeepTalkingClient {
         action.payload = .mcpBundle(bundle)
     }
 
+    /// Moves an ACP agent's environment out of the action's database payload and
+    /// into the keychain-backed credential store, leaving the persisted bundle
+    /// with an empty environment. An agent's env is where its API keys live
+    /// (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …), so it must never sit in the
+    /// DB or ride a sync envelope to a peer. The exact counterpart of
+    /// `relocateHTTPMCPCredentials`. A bundle whose environment is already empty
+    /// is left untouched, preserving whatever was stored directly via
+    /// `storeACPCredentials`; an existing remembered auth method is preserved
+    /// across the move.
+    private func relocateACPEnvironment(
+        from action: KeepTalkingAction
+    ) async {
+        guard let actionID = action.id,
+            case .acp(var bundle) = action.payload,
+            !bundle.environment.isEmpty
+        else {
+            return
+        }
+        var merged =
+            (try? await acpCredentialStore.load(actionID: actionID))
+            ?? KeepTalkingACPCredentials()
+        merged.environment = bundle.environment
+        try? await acpCredentialStore.store(merged, actionID: actionID)
+        bundle.environment = [:]
+        action.payload = .acp(bundle)
+    }
+
     public func saveConstructedAction(
         _ action: KeepTalkingAction
     ) async throws -> KeepTalkingAction {
@@ -321,6 +349,8 @@ extension KeepTalkingClient {
                     action.descriptor = Self.defaultDescriptor(for: bundle)
                 case .semanticRetrieval(let bundle):
                     action.descriptor = Self.defaultDescriptor(for: bundle)
+                case .actionCreation(let bundle):
+                    action.descriptor = Self.defaultDescriptor(for: bundle)
                 case .filesystem(let bundle):
                     action.descriptor = Self.defaultDescriptor(for: bundle)
                 case .acp(let bundle):
@@ -331,6 +361,7 @@ extension KeepTalkingClient {
         }
 
         await relocateHTTPMCPCredentials(from: action)
+        await relocateACPEnvironment(from: action)
         try await action.save(on: localStore.database)
         // A freshly-saved action with `disabled = true` should not spin up
         // any runtime — register the metadata, then immediately tear down the
@@ -348,6 +379,10 @@ extension KeepTalkingClient {
                 try await primitiveActionManager.registerPrimitiveAction(action)
             case .semanticRetrieval:
                 try await semanticRetrievalActionManager.registerIfNeeded(action)
+            case .actionCreation:
+                // No executor to register: incoming calls route straight to the
+                // app-installed action-creation handler.
+                break
             case .filesystem:
                 try await filesystemActionManager.registerFilesystemAction(action)
             case .acp:
@@ -406,7 +441,7 @@ extension KeepTalkingClient {
                     action.descriptor = Self.defaultDescriptor(for: bundle)
                 case .plugin(let bundle):
                     action.descriptor = Self.defaultDescriptor(for: bundle)
-                case .semanticRetrieval:
+                case .semanticRetrieval, .actionCreation:
                     break
             }
         }
@@ -423,6 +458,7 @@ extension KeepTalkingClient {
         }
 
         await relocateHTTPMCPCredentials(from: action)
+        await relocateACPEnvironment(from: action)
         try await action.save(on: localStore.database)
 
         let isDisabledNow = action.disabled == true
@@ -458,7 +494,7 @@ extension KeepTalkingClient {
                 // lifecycle. `disabled` is honoured at call time by the
                 // normal action gating.
                 break
-            case .semanticRetrieval:
+            case .semanticRetrieval, .actionCreation:
                 break
         }
 
@@ -550,6 +586,23 @@ extension KeepTalkingClient {
         )
         await broadcastLocalNodeState(
             reason: "remove_semantic_retrieval_action action=\(actionID.uuidString.lowercased())"
+        )
+    }
+
+    /// Removes an action-creation action and its grants. No executor to unregister.
+    public func removeActionCreationAction(actionID: UUID) async throws {
+        let node = try await getCurrentNodeInstance()
+        try await Self.removeMCPAction(
+            actionID: actionID,
+            node: node,
+            on: localStore.database,
+            callbackForUnregisteringAction: nil
+        )
+        await invalidateActionToolCatalog(
+            reason: "remove_action_creation_action action=\(actionID.uuidString.lowercased())"
+        )
+        await broadcastLocalNodeState(
+            reason: "remove_action_creation_action action=\(actionID.uuidString.lowercased())"
         )
     }
 
@@ -743,6 +796,15 @@ extension KeepTalkingClient {
                         action.descriptor?.action?.description
                         ?? bundle.indexDescription
                 case .semanticRetrieval(let bundle):
+                    isMCP = false
+                    isSkill = false
+                    isPrimitive = false
+                    isFilesystem = false
+                    name = bundle.name
+                    description =
+                        action.descriptor?.action?.description
+                        ?? bundle.indexDescription
+                case .actionCreation(let bundle):
                     isMCP = false
                     isSkill = false
                     isPrimitive = false
@@ -1414,11 +1476,41 @@ extension KeepTalkingClient {
             let existingDescriptor: KeepTalkingActionDescriptor?
             let existingPayload: KeepTalkingAction.Payload?
 
-            if let existingAction = try await KeepTalkingAction.query(
-                on: localStore.database
-            )
-            .filter(\.$id, .equal, actionID)
-            .first() {
+            let fetchedAction: KeepTalkingAction?
+            do {
+                fetchedAction = try await KeepTalkingAction.query(
+                    on: localStore.database
+                )
+                .filter(\.$id, .equal, actionID)
+                .first()
+            } catch {
+                // A persisted row that no longer decodes (its payload shape was
+                // retired) would abort the merge for every other advertised
+                // action. Sweep the poisoned rows and retry once; if the fetch
+                // still fails, skip just this action — the next broadcast
+                // retries it.
+                let log = onLog
+                log?(
+                    "[node-status] persisted action row unreadable action=\(actionID.uuidString.lowercased()) error=\(error.localizedDescription); sweeping undecodable rows"
+                )
+                try? await KeepTalkingUndecodableActionSweep.run(
+                    on: localStore.database
+                ) { log?($0) }
+                do {
+                    fetchedAction = try await KeepTalkingAction.query(
+                        on: localStore.database
+                    )
+                    .filter(\.$id, .equal, actionID)
+                    .first()
+                } catch {
+                    log?(
+                        "[node-status] skipping advertised action \(actionID.uuidString.lowercased()): row still unreadable"
+                    )
+                    continue
+                }
+            }
+
+            if let existingAction = fetchedAction {
                 persistedAction = existingAction
                 existingDescriptor = existingAction.descriptor
                 existingPayload = existingAction.payload
@@ -1444,6 +1536,7 @@ extension KeepTalkingClient {
                     case .mcpBundle(_, let description),
                         .skill(_, let description),
                         .semanticRetrieval(_, let description),
+                        .actionCreation(_, let description),
                         .filesystem(_, let description),
                         .acp(_, let description),
                         .primitive(_, let description, _),
@@ -1643,6 +1736,15 @@ extension KeepTalkingClient {
                         contextIDs: []
                     )
                 )
+            case .actionCreation(let name, let indexDescription):
+                return .actionCreation(
+                    .init(
+                        id: action.actionID,
+                        name: name,
+                        indexDescription: indexDescription,
+                        contextIDs: []
+                    )
+                )
             case .filesystem(let name, let indexDescription):
                 return .filesystem(
                     KeepTalkingFilesystemBundle(
@@ -1706,6 +1808,18 @@ extension KeepTalkingClient {
 
     private static func defaultDescriptor(
         for bundle: KeepTalkingSemanticRetrievalBundle
+    ) -> KeepTalkingActionDescriptor {
+        KeepTalkingActionDescriptor(
+            subject: nil,
+            action: KeepTalkingActionWithDescription(
+                description: bundle.indexDescription
+            ),
+            object: nil
+        )
+    }
+
+    private static func defaultDescriptor(
+        for bundle: KeepTalkingActionCreationBundle
     ) -> KeepTalkingActionDescriptor {
         KeepTalkingActionDescriptor(
             subject: nil,

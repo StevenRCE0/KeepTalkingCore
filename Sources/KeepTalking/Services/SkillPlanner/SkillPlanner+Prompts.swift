@@ -79,6 +79,26 @@ extension KeepTalkingSkillPlanner {
             (e.g. ['pypi.org', 'files.pythonhosted.org']) — the user permits SETUP access \
             for that command. Hosts the skill calls every time it RUNS go through \
             kt_require_network instead. Don't conflate the two.
+
+            ## Write scripts — wrap commands in atomic, narrow functions
+            When creating a NEW skill, write script files into scripts/ via kt_shell \
+            rather than leaving the runtime agent to improvise command lines. Each \
+            script should expose small, single-purpose functions (or subcommands) that \
+            do ONE thing and exit cleanly:
+            - One function per operation — "validate input", "convert format", \
+            "upload result" — not one monolith that does everything.
+            - Each function checks its own preconditions (file exists, tool on PATH, \
+            required env var set) and exits non-zero with a clear message on failure, \
+            so the runtime agent sees exactly what broke.
+            - Prefer a thin entry-point script (e.g. scripts/run.sh or scripts/run.py) \
+            that calls the atomic functions in sequence. The runtime agent invokes \
+            the entry point; the functions handle the details.
+            - Keep each function short enough to read at a glance — if it scrolls, \
+            split it.
+            - Use the language that fits: shell for file plumbing and CLI orchestration, \
+            Python/Node for anything with logic or parsing.
+            After writing the scripts, run them once in kt_shell with a dry-run or \
+            --help flag to confirm they parse and their dependencies are met.
             """
         #else
         let probeGuidance = ""

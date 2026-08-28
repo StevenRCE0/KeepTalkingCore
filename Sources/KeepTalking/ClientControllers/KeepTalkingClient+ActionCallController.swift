@@ -372,6 +372,11 @@ extension KeepTalkingClient {
                         call: request.call,
                         contextID: request.contextID
                     )
+                case .actionCreation:
+                    callResult = await executeActionCreationActionCall(
+                        action: action,
+                        request: request
+                    )
                 case .acp:
                     #if os(macOS)
                     // The agent runs unsandboxed by design; the scope drives only
@@ -401,6 +406,8 @@ extension KeepTalkingClient {
                         return "filesystem"
                     case .semanticRetrieval:
                         return "semantic_retrieval"
+                    case .actionCreation:
+                        return "action_creation"
                     case .acp:
                         return "acp"
                     case .plugin:
@@ -929,6 +936,7 @@ extension KeepTalkingClient {
                     case .skill: "skill"
                     case .filesystem: "filesystem"
                     case .semanticRetrieval: "semantic_retrieval"
+                    case .actionCreation: "action_creation"
                     case .acp: "acp"
                     case .plugin: "plugin"
                 }

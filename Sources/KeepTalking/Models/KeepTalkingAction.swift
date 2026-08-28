@@ -287,6 +287,10 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
         case skill(KeepTalkingSkillBundle)
         case primitive(KeepTalkingPrimitiveBundle)
         case semanticRetrieval(KeepTalkingSemanticRetrievalBundle)
+        /// Built-in "create action" capability — a peer granted this may ask
+        /// this host's user to create a new action. Like `semanticRetrieval`,
+        /// never a generic primitive and never a per-action tool.
+        case actionCreation(KeepTalkingActionCreationBundle)
         case filesystem(KeepTalkingFilesystemBundle)
         case acp(KeepTalkingACPBundle)
         /// An instance minted from a plugin-provided **Catalogue** kind.
@@ -297,8 +301,18 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
             return false
         }
 
+        public var isActionCreation: Bool {
+            if case .actionCreation = self { return true }
+            return false
+        }
+
         public var semanticRetrievalBundle: KeepTalkingSemanticRetrievalBundle? {
             if case .semanticRetrieval(let bundle) = self { return bundle }
+            return nil
+        }
+
+        public var actionCreationBundle: KeepTalkingActionCreationBundle? {
+            if case .actionCreation(let bundle) = self { return bundle }
             return nil
         }
 
@@ -317,7 +331,7 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
                 case .primitive(let bundle): return !bundle.action.scopeSchema.isEmpty
                 // ACP has no per-grant narrowing UI in v1 (owner grants are
                 // unrestricted; the action's compiled sandbox is the ceiling).
-                case .skill, .semanticRetrieval, .acp: return false
+                case .skill, .semanticRetrieval, .actionCreation, .acp: return false
                 // Narrowing is meaningful whenever the kind exposes sub-tools;
                 // the editor keys off the Catalogue declaration, not the row.
                 case .plugin: return true
@@ -334,6 +348,8 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
                     "Primitive"
                 case .semanticRetrieval:
                     "Memory"
+                case .actionCreation:
+                    "Create"
                 case .filesystem:
                     "File"
                 case .acp:
@@ -358,7 +374,8 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
             switch self {
                 case .plugin:
                     false
-                case .mcpBundle, .skill, .primitive, .semanticRetrieval, .filesystem, .acp:
+                case .mcpBundle, .skill, .primitive, .semanticRetrieval, .actionCreation,
+                    .filesystem, .acp:
                     true
             }
         }
@@ -372,7 +389,8 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
             switch self {
                 case .plugin:
                     true
-                case .mcpBundle, .skill, .primitive, .semanticRetrieval, .filesystem, .acp:
+                case .mcpBundle, .skill, .primitive, .semanticRetrieval, .actionCreation,
+                    .filesystem, .acp:
                     false
             }
         }
@@ -386,7 +404,8 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
             switch self {
                 case .plugin:
                     true
-                case .mcpBundle, .skill, .primitive, .semanticRetrieval, .filesystem, .acp:
+                case .mcpBundle, .skill, .primitive, .semanticRetrieval, .actionCreation,
+                    .filesystem, .acp:
                     false
             }
         }
@@ -394,6 +413,10 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
 
     public var isSemanticRetrieval: Bool {
         payload.isSemanticRetrieval == true
+    }
+
+    public var isActionCreation: Bool {
+        payload.isActionCreation == true
     }
 
     public var actionLabel: String {
@@ -437,7 +460,7 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
                 return true
             case .plugin:
                 return descriptor?.fileObjects(direction: .input).isEmpty == false
-            case .mcpBundle, .primitive, .filesystem, .semanticRetrieval, .acp:
+            case .mcpBundle, .primitive, .filesystem, .semanticRetrieval, .actionCreation, .acp:
                 return false
         }
     }

@@ -269,6 +269,20 @@ public enum AIPromptPresets {
             over guessing when a small program would give the exact answer.
             """
 
+        public static let createAction = """
+            Ask a node's user to create a new action and grant it to you in the \
+            current context. Without `node_id` the request goes to this node's \
+            own user; with a `node_id` it goes to that peer (only nodes that \
+            granted action creation in this context are reachable). Keep \
+            `intention` short (one sentence, ≤12 words) and limited to what the \
+            action should do — you cannot see the host environment, existing \
+            actions, or how the user will discover it, so do not speculate \
+            about implementations, detailed scripts, callers, triggers, or \
+            surrounding UI. The user reviews, may modify, and must confirm \
+            before anything is created and granted; a decline is final — do \
+            not retry the same intention.
+            """
+
         public static let updateSideNote =
             "Create or update a side note in the current context. Key identifies the topic; writing to an existing key replaces it. Active notes are shown at the top of every turn. Use to track plans, open questions, or state that must survive across turns."
 

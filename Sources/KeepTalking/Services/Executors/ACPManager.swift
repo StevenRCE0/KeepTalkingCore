@@ -17,6 +17,26 @@ public enum ACPManagerError: LocalizedError {
     /// The agent subprocess exited before completing the turn. `status` is the
     /// exit code if known; `detail` carries the tail of the agent's stderr.
     case agentExited(status: Int32?, detail: String?)
+    /// The agent answered `initialize` with a protocol version this client does
+    /// not implement. Per the ACP spec the client closes the connection.
+    case protocolVersionUnsupported(agent: Int, client: Int)
+    /// The agent demands authentication (`auth_required`, -32000) and no
+    /// handler resolved it. `methods` are the auth methods it advertised.
+    case authenticationRequired(methods: [KeepTalkingACPAuthMethod])
+    /// The owner dismissed the auth prompt without choosing a method.
+    case authenticationCancelled
+    /// The owner explicitly refused to authenticate this agent.
+    case authenticationDeclined
+    /// `authenticate` itself failed (bad method, agent-side rejection).
+    case authenticationFailed(String)
+    /// The agent reported that ITS OWN credentials are bad or expired, outside
+    /// the ACP auth handshake (`data.errorKind == "authentication_failed"`).
+    /// Not something `authenticate` can fix when the agent advertises no methods.
+    case agentCredentialsRejected(String)
+    /// The chosen method is a `terminal`-type method, which KeepTalking cannot
+    /// drive: it advertises no terminal capability, so the owner must run the
+    /// agent's login command themselves.
+    case authMethodNotDrivable(id: String, name: String)
 
     public var errorDescription: String? {
         switch self {
@@ -43,6 +63,28 @@ public enum ACPManagerError: LocalizedError {
                 let tail = (detail?.isEmpty == false) ? "\n--- agent stderr ---\n\(detail!)" : ""
                 return
                     "The ACP agent exited \(statusText) before completing the turn (check the command and its stderr).\(tail)"
+            case .protocolVersionUnsupported(let agent, let client):
+                return
+                    "The ACP agent speaks protocol version \(agent); KeepTalking implements version \(client)."
+            case .authenticationRequired(let methods):
+                let offered =
+                    methods.isEmpty
+                    ? "the agent advertised no authentication methods"
+                    : "available methods: "
+                        + methods.map { "\($0.name) (\($0.id))" }.joined(separator: ", ")
+                return "The ACP agent requires authentication — \(offered)."
+            case .authenticationCancelled:
+                return "ACP authentication was cancelled."
+            case .authenticationDeclined:
+                return "ACP authentication was declined."
+            case .authenticationFailed(let detail):
+                return "ACP authentication failed: \(detail)"
+            case .agentCredentialsRejected(let detail):
+                return
+                    "The ACP agent could not authenticate with its own credentials: \(detail). KeepTalking cannot log it in — re-authenticate the agent's CLI directly (run its login command), then retry."
+            case .authMethodNotDrivable(let id, let name):
+                return
+                    "ACP auth method '\(name)' (\(id)) runs in a terminal, which KeepTalking cannot drive. Run the agent's login command yourself, then retry."
         }
     }
 }
@@ -108,21 +150,33 @@ public actor ACPManager {
     private let promptGraceSeconds: TimeInterval
     private let promptPollSeconds: TimeInterval
 
+    /// ACP-reserved JSON-RPC error code meaning `auth_required`: the agent will
+    /// not open a session until `authenticate` succeeds.
+    static let authRequiredCode = -32000
+
     private let nodeConfig: KeepTalkingConfig
     private let stdioTransportLauncher: (any MCPStdioTransportLaunching)?
     private var bundlesByActionID: [UUID: KeepTalkingACPBundle] = [:]
     private var onLog: (@Sendable (String) -> Void)?
+    /// Keychain seam for the agent's secret environment and the auth method last
+    /// used. Optional so tests and the CLI can run without a keychain.
+    private let credentialStore: KeepTalkingACPCredentialStore?
+    /// App-installed prompt invoked when an agent answers `auth_required`.
+    /// The ACP counterpart of MCPManager's `onHTTPAuthURL`.
+    private var onAuthRequired: (@Sendable (UUID, [KeepTalkingACPAuthMethod]) async -> KeepTalkingACPAuthResult)?
 
     public init(
         nodeConfig: KeepTalkingConfig,
         stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
             DefaultMCPStdioTransportLauncher.current,
+        credentialStore: KeepTalkingACPCredentialStore? = nil,
         handshakeTimeoutSeconds: TimeInterval = 30,
         promptGraceSeconds: TimeInterval = 10,
         promptPollSeconds: TimeInterval = 5
     ) {
         self.nodeConfig = nodeConfig
         self.stdioTransportLauncher = stdioTransportLauncher
+        self.credentialStore = credentialStore
         self.handshakeTimeoutSeconds = handshakeTimeoutSeconds
         self.promptGraceSeconds = promptGraceSeconds
         self.promptPollSeconds = promptPollSeconds
@@ -130,6 +184,18 @@ public actor ACPManager {
 
     public func setLogHandler(_ handler: (@Sendable (String) -> Void)?) {
         onLog = handler
+    }
+
+    /// Installs the callback that resolves an `auth_required` challenge by
+    /// choosing one of the agent's advertised auth methods. Without a handler,
+    /// a single drivable method is selected automatically and anything more
+    /// ambiguous surfaces as `authenticationRequired`.
+    public func setAuthHandler(
+        _ handler: (
+            @Sendable (UUID, [KeepTalkingACPAuthMethod]) async -> KeepTalkingACPAuthResult
+        )?
+    ) {
+        onAuthRequired = handler
     }
 
     // MARK: - Registration (spawn-per-call; tracking only)
@@ -217,7 +283,14 @@ public actor ACPManager {
                     isDirectory: true)
             ],
             umbrellaAttachmentsDir: nil)
+        // Secrets live in the keychain, never in the synced/DB payload — the
+        // bundle's own `environment` holds only non-secret values after
+        // `relocateACPEnvironment`. Stored values win over the bundle; the
+        // manifest's KT_FS_* handles win over both.
         var environment = bundle.environment
+        for (key, value) in await storedEnvironment(actionID: action.id) {
+            environment[key] = value
+        }
         for (key, value) in manifest.environmentVariables() {
             environment[key] = value
         }
@@ -261,7 +334,7 @@ public actor ACPManager {
             try await session.start()
             // Handshake: fail fast — these must answer promptly, and a hang here
             // means the launched command isn't a conformant ACP agent.
-            try await withTimeout(handshakeTimeoutSeconds, label: "initialize") {
+            let handshake = try await withTimeout(handshakeTimeoutSeconds, label: "initialize") {
                 try await session.initialize(
                     clientName: "KeepTalking:\(self.nodeConfig.node.uuidString)",
                     protocolVersion: Self.protocolVersion,
@@ -269,9 +342,21 @@ public actor ACPManager {
                     fsWrite: scope.allows(.write)
                 )
             }
-            let sessionID = try await withTimeout(handshakeTimeoutSeconds, label: "session/new") {
-                try await session.newSession(cwd: bundle.cwd.path)
+            // The agent echoes our version or names the latest it supports. We
+            // implement exactly one, so anything else is a hard stop — the spec
+            // says close the connection rather than guess at foreign semantics.
+            guard handshake.protocolVersion == Self.protocolVersion else {
+                throw ACPManagerError.protocolVersionUnsupported(
+                    agent: handshake.protocolVersion, client: Self.protocolVersion)
             }
+            let sessionID = try await openSession(
+                session: session,
+                cwd: bundle.cwd.path,
+                actionID: action.id,
+                authMethods: handshake.authMethods,
+                actionLabel: actionLabel,
+                log: log
+            )
             // Preamble = the owner's manual limitation for remote callers (local/
             // owner calls are unconstrained) followed by the resource manifest the
             // agent's environment exposes, both injected ahead of the prompt.
@@ -312,16 +397,35 @@ public actor ACPManager {
             let body = text.isEmpty ? "(agent returned no text)" : text
             return (content: [.text(text: body, annotations: nil, _meta: nil)], isError: false)
         } catch {
+            // Sample the exit status BEFORE teardown: teardown SIGTERMs the
+            // agent, so a status read afterwards races the kill we just issued
+            // and says nothing about why the turn failed. Reading it first keeps
+            // the enrichment honest.
+            let exitStatus = processHandler.terminationStatus()
             await teardown()
             // If the agent process died (wrong command, crash, immediate exit,
             // EOF), surface its exit status + stderr tail instead of the raw
             // "transport closed"/cancellation error, so the failure is actionable.
-            let exitStatus = processHandler.terminationStatus()
             let isClosed: Bool = {
                 if case ACPManagerError.transportClosed = error { return true }
                 return false
             }()
-            if exitStatus != nil || isClosed {
+            // A protocol-level answer (auth_required, a version mismatch, a
+            // refused auth prompt) IS the cause; an agent that exits right after
+            // sending it must not have that diagnosis overwritten by a bare
+            // "agent exited".
+            let isProtocolError: Bool = {
+                guard let acp = error as? ACPManagerError else { return false }
+                switch acp {
+                    case .agentError, .protocolVersionUnsupported, .authenticationRequired,
+                        .authenticationCancelled, .authenticationDeclined, .authenticationFailed,
+                        .authMethodNotDrivable, .agentCredentialsRejected:
+                        return true
+                    default:
+                        return false
+                }
+            }()
+            if !isProtocolError, exitStatus != nil || isClosed {
                 let tail = stderr.tail()
                 let enriched = ACPManagerError.agentExited(
                     status: exitStatus, detail: tail.isEmpty ? nil : tail)
@@ -331,6 +435,195 @@ public actor ACPManager {
             log?("[acp] action=\(actionLabel) failed: \(error.localizedDescription)")
             throw error
         }
+    }
+
+    /// Spawns the agent, completes the `initialize` handshake, and tears it back
+    /// down — the "does this command actually speak ACP?" check the add/edit form
+    /// runs when the owner clicks Done. Returns the auth methods the agent
+    /// advertised.
+    ///
+    /// Deliberately stops before `session/new`. Opening a session is where
+    /// authentication is negotiated, and that belongs to a real call against a
+    /// saved action: the method that worked is remembered per action ID, which a
+    /// not-yet-saved action does not have. What the handshake *does* catch is
+    /// everything worth catching early — a command that does not exist, a binary
+    /// that is not an ACP agent, a protocol version KeepTalking cannot drive —
+    /// each reported with the agent's own stderr rather than surfacing at the
+    /// first real call.
+    public func preflightInitialize(
+        bundle: KeepTalkingACPBundle,
+        scope: KeepTalkingActionScope = .all
+    ) async throws -> [KeepTalkingACPAuthMethod] {
+        guard !bundle.command.isEmpty else {
+            throw ACPManagerError.emptyCommand
+        }
+        guard let launcher = stdioTransportLauncher else {
+            throw ACPManagerError.launcherUnavailable
+        }
+        let log = onLog
+        let stderr = ACPStderrBuffer()
+        let launched = try await launcher.launchTransport(
+            command: bundle.command,
+            environment: bundle.environment,
+            stderrHandler: { data in
+                guard !data.isEmpty else { return }
+                stderr.append(String(decoding: data, as: UTF8.self))
+            },
+            sandboxPolicy: nil
+        )
+        let session = ACPSession(
+            transport: launched.transport, scope: scope, roots: [], onLog: log)
+        func teardown() async {
+            await session.stop()
+            launched.processHandler.terminate()
+        }
+
+        let handshake: ACPHandshake
+        do {
+            try await session.start()
+            handshake = try await withTimeout(handshakeTimeoutSeconds, label: "initialize") {
+                try await session.initialize(
+                    clientName: "KeepTalking:\(self.nodeConfig.node.uuidString)",
+                    protocolVersion: Self.protocolVersion,
+                    fsRead: scope.allows(.read),
+                    fsWrite: scope.allows(.write)
+                )
+            }
+        } catch {
+            // Same ordering rule as callAction: sample the exit status before
+            // teardown kills the agent, so the diagnosis stays honest.
+            let exitStatus = launched.processHandler.terminationStatus()
+            await teardown()
+            let isClosed: Bool = {
+                if case ACPManagerError.transportClosed = error { return true }
+                return false
+            }()
+            if exitStatus != nil || isClosed {
+                let tail = stderr.tail()
+                throw ACPManagerError.agentExited(
+                    status: exitStatus, detail: tail.isEmpty ? nil : tail)
+            }
+            throw error
+        }
+        // Tear down before judging the version: the guard throws, and an agent
+        // left running behind a failed preflight would leak a process per click.
+        await teardown()
+        guard handshake.protocolVersion == Self.protocolVersion else {
+            throw ACPManagerError.protocolVersionUnsupported(
+                agent: handshake.protocolVersion, client: Self.protocolVersion)
+        }
+        return handshake.authMethods
+    }
+
+    /// Reads the keychain-held secret environment for an action, if any.
+    private func storedEnvironment(actionID: UUID?) async -> [String: String] {
+        guard let actionID, let credentialStore else { return [:] }
+        guard let stored = try? await credentialStore.load(actionID: actionID) else { return [:] }
+        return stored.environment
+    }
+
+    /// Opens a session, satisfying an `auth_required` challenge in-band if the
+    /// agent raises one.
+    ///
+    /// This is the ACP analogue of how MCP drives HTTP auth: there, the transport
+    /// reacts to a 401/403 challenge and hands off to the authorizer mid-flight;
+    /// here, `session/new` answers -32000 and we authenticate and retry before the
+    /// caller ever sees a failure. Auth is attempted at most once per spawn — a
+    /// second -32000 means authentication did not actually take, and retrying
+    /// would loop.
+    private func openSession(
+        session: ACPSession,
+        cwd: String,
+        actionID: UUID?,
+        authMethods: [KeepTalkingACPAuthMethod],
+        actionLabel: String,
+        log: (@Sendable (String) -> Void)?
+    ) async throws -> String {
+        do {
+            return try await withTimeout(handshakeTimeoutSeconds, label: "session/new") {
+                try await session.newSession(cwd: cwd)
+            }
+        } catch let error as ACPManagerError {
+            guard case .agentError(let code, _) = error, code == Self.authRequiredCode else {
+                throw error
+            }
+            let methodID = try await resolveAuthMethod(
+                actionID: actionID, methods: authMethods, actionLabel: actionLabel, log: log)
+            log?("[acp] action=\(actionLabel) authenticating method=\(methodID)")
+            do {
+                try await withTimeout(handshakeTimeoutSeconds, label: "authenticate") {
+                    try await session.authenticate(methodID: methodID)
+                }
+            } catch let authError as ACPManagerError {
+                if case .agentError(_, let message) = authError {
+                    throw ACPManagerError.authenticationFailed(message)
+                }
+                throw authError
+            }
+            // Remember the method that worked so the next spawn authenticates
+            // silently — the same reason MCP rehydrates keychain credentials at
+            // connect time instead of re-prompting.
+            if let actionID, let credentialStore {
+                try? await credentialStore.setMethodID(methodID, actionID: actionID)
+            }
+            return try await withTimeout(
+                handshakeTimeoutSeconds, label: "session/new (post-authenticate)"
+            ) {
+                try await session.newSession(cwd: cwd)
+            }
+        }
+    }
+
+    /// Picks the auth method to send to `authenticate`: a previously successful
+    /// one, else the owner's choice, else the only drivable option.
+    private func resolveAuthMethod(
+        actionID: UUID?,
+        methods: [KeepTalkingACPAuthMethod],
+        actionLabel: String,
+        log: (@Sendable (String) -> Void)?
+    ) async throws -> String {
+        let drivable = methods.filter(\.isDrivable)
+        log?(
+            "[acp] action=\(actionLabel) auth_required methods=[\(methods.map(\.id).joined(separator: ","))]"
+        )
+
+        // 1. Replay the method that last worked, without prompting again.
+        if let actionID, let credentialStore,
+            let stored = try? await credentialStore.load(actionID: actionID),
+            let remembered = stored.methodID,
+            drivable.contains(where: { $0.id == remembered })
+        {
+            return remembered
+        }
+
+        // 2. Ask the owner.
+        if let actionID, let onAuthRequired {
+            switch await onAuthRequired(actionID, methods) {
+                case .selected(let chosen):
+                    guard let method = methods.first(where: { $0.id == chosen }) else {
+                        throw ACPManagerError.authenticationFailed(
+                            "the agent did not advertise auth method '\(chosen)'")
+                    }
+                    guard method.isDrivable else {
+                        throw ACPManagerError.authMethodNotDrivable(
+                            id: method.id, name: method.name)
+                    }
+                    return method.id
+                case .cancelled:
+                    throw ACPManagerError.authenticationCancelled
+                case .declined:
+                    throw ACPManagerError.authenticationDeclined
+            }
+        }
+
+        // 3. No handler installed: a lone drivable method is a protocol
+        //    formality (the agent already holds its own on-disk credentials and
+        //    just wants the call made), so take it. Any real choice needs a
+        //    handler — guessing would pick an identity on the owner's behalf.
+        if drivable.count == 1 {
+            return drivable[0].id
+        }
+        throw ACPManagerError.authenticationRequired(methods: methods)
     }
 
     /// Races an operation against a timeout, throwing `ACPManagerError.timedOut`.
@@ -352,6 +645,14 @@ public actor ACPManager {
             return result
         }
     }
+}
+
+/// What the `initialize` handshake told us: the version the agent settled on and
+/// the auth methods it offers. Previously the whole response was discarded, which
+/// is how both version negotiation and authentication went missing.
+private struct ACPHandshake: Sendable {
+    let protocolVersion: Int
+    let authMethods: [KeepTalkingACPAuthMethod]
 }
 
 /// A minimal JSON-RPC 2.0 peer over an ACP stdio transport. Hand-rolled (not the
@@ -422,8 +723,8 @@ private actor ACPSession {
         protocolVersion: Int,
         fsRead: Bool,
         fsWrite: Bool
-    ) async throws {
-        _ = try await request(
+    ) async throws -> ACPHandshake {
+        let result = try await request(
             method: "initialize",
             params: [
                 "protocolVersion": protocolVersion,
@@ -439,6 +740,22 @@ private actor ACPSession {
                 ],
             ]
         )
+        // `protocolVersion` is required by the spec; a non-conformant agent that
+        // omits it is read as agreeing to what we asked for rather than being
+        // failed outright.
+        let negotiated =
+            (result["protocolVersion"] as? NSNumber)?.intValue
+            ?? (result["protocolVersion"] as? Int)
+            ?? protocolVersion
+        let methods = (result["authMethods"] as? [[String: Any]] ?? [])
+            .compactMap(KeepTalkingACPAuthMethod.init(json:))
+        return ACPHandshake(protocolVersion: negotiated, authMethods: methods)
+    }
+
+    /// Satisfies an `auth_required` challenge. `methodId` must be one of the
+    /// methods the agent advertised in its `initialize` response.
+    func authenticate(methodID: String) async throws {
+        _ = try await request(method: "authenticate", params: ["methodId": methodID])
     }
 
     func newSession(cwd: String) async throws -> String {
@@ -540,12 +857,56 @@ private actor ACPSession {
         guard let continuation = pending.removeValue(forKey: id) else { return }
         if let error = message["error"] as? [String: Any] {
             let code = (error["code"] as? NSNumber)?.intValue ?? (error["code"] as? Int) ?? -1
-            let msg = error["message"] as? String ?? "unknown error"
+            let rawMessage = error["message"] as? String ?? "unknown error"
+            var msg = rawMessage
+            // Agents put the actionable part in `data` and leave `message` as the
+            // bare JSON-RPC label — a -32603 reads "Internal error" while `data`
+            // says what actually broke (e.g. "spawn Unknown system error -88").
+            // Dropping it turns every agent-side fault into the same dead end.
+            if let detail = Self.describeErrorData(error["data"]) {
+                msg += " — \(detail)"
+            }
+            // An agent whose own credentials expired reports it as a generic
+            // internal error and flags the real cause in `data.errorKind` — the
+            // Claude agent does exactly this, and advertises no ACP auth methods,
+            // so `authenticate` cannot fix it. Name it for what it is instead of
+            // handing the owner an "internal error" they cannot act on.
+            if let data = error["data"] as? [String: Any],
+                (data["errorKind"] as? String) == "authentication_failed"
+            {
+                continuation.resume(
+                    throwing: ACPManagerError.agentCredentialsRejected(rawMessage))
+                return
+            }
             continuation.resume(throwing: ACPManagerError.agentError(code: code, message: msg))
             return
         }
         // Resume with the raw bytes (Sendable); `request` decodes the result dict.
         continuation.resume(returning: raw)
+    }
+
+    /// Renders a JSON-RPC `error.data` payload as a short diagnostic string.
+    /// Strings pass through; objects are flattened to `key=value` pairs so the
+    /// common `{"details": "..."}` shape reads well without special-casing it.
+    static func describeErrorData(_ data: Any?) -> String? {
+        switch data {
+            case let text as String:
+                return text.isEmpty ? nil : text
+            case let object as [String: Any]:
+                let parts = object.keys.sorted().compactMap { key -> String? in
+                    guard let value = object[key] else { return nil }
+                    if let text = value as? String {
+                        return text.isEmpty ? nil : (object.count == 1 ? text : "\(key)=\(text)")
+                    }
+                    return "\(key)=\(value)"
+                }
+                return parts.isEmpty ? nil : parts.joined(separator: " ")
+            case let value as CustomStringConvertible:
+                let text = value.description
+                return text.isEmpty ? nil : text
+            default:
+                return nil
+        }
     }
 
     private func handleNotification(method: String, message: [String: Any]) {
