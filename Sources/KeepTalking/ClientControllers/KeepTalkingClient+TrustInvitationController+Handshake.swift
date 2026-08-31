@@ -119,7 +119,8 @@ extension KeepTalkingClient {
         let request = KeepTalkingIncomingTrustRequest(
             sessionID: payload.sessionID,
             fromNodeID: payload.from,
-            contextID: payload.contextID
+            contextID: payload.contextID,
+            slotID: payload.slot
         )
 
         let decision = await handler(request)

@@ -8,15 +8,21 @@ public struct KeepTalkingIncomingTrustRequest: Sendable {
     public let sessionID: UUID
     public let fromNodeID: UUID
     public let contextID: UUID
+    /// Workspace-plan peer slot the initiator claims (from a slot invite
+    /// link), when they sent one — lets the host resolve which role to bind
+    /// before deciding, instead of correlating after the handshake.
+    public let slotID: UUID?
 
     public init(
         sessionID: UUID,
         fromNodeID: UUID,
-        contextID: UUID
+        contextID: UUID,
+        slotID: UUID? = nil
     ) {
         self.sessionID = sessionID
         self.fromNodeID = fromNodeID
         self.contextID = contextID
+        self.slotID = slotID
     }
 }
 
@@ -85,10 +91,14 @@ extension KeepTalkingClient {
     /// to trust the initiator at accept time, and the chosen scope flows
     /// back in `.trustAccept`. On success, both sides persist each other's
     /// long-term identity public key under the responder-chosen scope.
+    /// `claimingSlot` names the workspace-plan peer slot this request redeems
+    /// (from a slot invite link); it rides the request payload so the
+    /// responder binds the right role on completion.
     @discardableResult
     public func requestTrust(
         with peerNodeID: UUID,
-        in contextID: UUID
+        in contextID: UUID,
+        claimingSlot slotID: UUID? = nil
     ) async throws -> KeepTalkingTrustOutcome {
         try await ensureContext(contextID)
         guard try await loadGroupChatSecret(for: contextID) != nil else {
@@ -121,7 +131,8 @@ extension KeepTalkingClient {
                 from: config.node,
                 to: peerNodeID,
                 contextID: contextID,
-                initiatorEphemeralPub: ephemeral.publicKeyBytes
+                initiatorEphemeralPub: ephemeral.publicKeyBytes,
+                slot: slotID
             )
 
             do {

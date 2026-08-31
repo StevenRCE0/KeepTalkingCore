@@ -16,8 +16,42 @@ public struct KeepTalkingWorkspacePlanFulfillment: Codable, Sendable {
     public var peerBindings: [UUID: UUID] = [:]
     /// Side-note keys already upserted into the context.
     public var appliedSideNoteKeys: [String] = []
+    /// Peer slot id → when an invite link for that slot was last shared. An
+    /// entry is a standing newcomer invite (the host auto-accepts trust
+    /// requests in the context while any exist); binding the slot clears it.
+    public var slotInvites: [UUID: Date] = [:]
 
     public init() {}
+
+    /// Tolerant decoding: every field falls back to its default so blobs
+    /// written before a field existed keep the progress they recorded. The
+    /// record's `fulfillment` accessor treats a decode failure as a FRESH
+    /// state, so a thrown missing-key error here would silently wipe
+    /// fulfillment. Encoding stays synthesized.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        contextID = try container.decodeIfPresent(UUID.self, forKey: .contextID)
+        actionFulfillments =
+            try container.decodeIfPresent(
+                [UUID: UUID].self,
+                forKey: .actionFulfillments
+            ) ?? [:]
+        peerBindings =
+            try container.decodeIfPresent(
+                [UUID: UUID].self,
+                forKey: .peerBindings
+            ) ?? [:]
+        appliedSideNoteKeys =
+            try container.decodeIfPresent(
+                [String].self,
+                forKey: .appliedSideNoteKeys
+            ) ?? []
+        slotInvites =
+            try container.decodeIfPresent(
+                [UUID: Date].self,
+                forKey: .slotInvites
+            ) ?? [:]
+    }
 }
 
 public enum KeepTalkingWorkspacePlanError: LocalizedError, Sendable {
@@ -194,6 +228,37 @@ extension KeepTalkingWorkspacePlanRecord {
         write(state)
     }
 
+    /// Records that an invite link was shared for a peer slot. The entry is a
+    /// standing newcomer invite; `recordBinding` clears it when the slot
+    /// resolves.
+    public func recordSlotInvite(_ peerID: UUID) throws {
+        guard let plan else { throw KeepTalkingWorkspacePlanError.corruptPlan }
+        guard plan.peers.contains(where: { $0.id == peerID }) else {
+            throw KeepTalkingWorkspacePlanError.unknownPeerSlot(peerID)
+        }
+        var state = fulfillment
+        state.slotInvites[peerID] = Date()
+        write(state)
+    }
+
+    /// Withdraws a slot's standing invite.
+    public func clearSlotInvite(_ peerID: UUID) {
+        var state = fulfillment
+        guard state.slotInvites.removeValue(forKey: peerID) != nil else { return }
+        write(state)
+    }
+
+    /// Shared invites whose slots are still unbound — the ones a newcomer's
+    /// trust request can claim.
+    public var outstandingSlotInvites: [UUID: Date] {
+        let unbound = Set(unboundPeers.map(\.id))
+        return fulfillment.slotInvites.filter { unbound.contains($0.key) }
+    }
+
+    public var hasOutstandingSlotInvites: Bool {
+        !outstandingSlotInvites.isEmpty
+    }
+
     /// Records a realized action against its plan slot. The action may have
     /// come from Auto Curate (create), an existing pick, or a peer grant — the
     /// record doesn't care how it materialized, only that it now exists.
@@ -222,6 +287,7 @@ extension KeepTalkingWorkspacePlanRecord {
 
         var state = fulfillment
         state.peerBindings[peerID] = nodeID
+        state.slotInvites[peerID] = nil
         write(state)
 
         let fulfilled = state.actionFulfillments
@@ -248,6 +314,9 @@ extension KeepTalkingWorkspacePlanRecord {
             actionIDs.contains($0.key)
         }
         state.peerBindings = state.peerBindings.filter {
+            peerIDs.contains($0.key)
+        }
+        state.slotInvites = state.slotInvites.filter {
             peerIDs.contains($0.key)
         }
         state.appliedSideNoteKeys = state.appliedSideNoteKeys.filter {

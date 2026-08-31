@@ -15,19 +15,28 @@ public struct KeepTalkingTrustRequestPayload: Codable, Sendable {
     public let to: UUID
     public let contextID: UUID
     public let initiatorEphemeralPub: Data
+    /// Workspace-plan peer slot the initiator is claiming — carried from a
+    /// slot invite link so the responder can bind the right role the moment
+    /// trust lands. Advisory routing data, deliberately OUTSIDE the handshake
+    /// transcript: it changes which slot the responder's app binds, never
+    /// whether or how trust is established. Absent on links and builds that
+    /// predate it (optional decode).
+    public let slot: UUID?
 
     public init(
         sessionID: UUID,
         from: UUID,
         to: UUID,
         contextID: UUID,
-        initiatorEphemeralPub: Data
+        initiatorEphemeralPub: Data,
+        slot: UUID? = nil
     ) {
         self.sessionID = sessionID
         self.from = from
         self.to = to
         self.contextID = contextID
         self.initiatorEphemeralPub = initiatorEphemeralPub
+        self.slot = slot
     }
 }
 
