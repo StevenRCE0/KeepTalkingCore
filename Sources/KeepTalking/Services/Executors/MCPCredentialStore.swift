@@ -21,6 +21,12 @@ public struct KeepTalkingMCPCredentials: Codable, Sendable, Equatable {
     public var accessTokenExpiresAt: Date?
     /// Refresh token, used to silently renew without re-prompting.
     public var refreshToken: String?
+    /// `redirect_uri` the stored client and tokens were obtained with. A client
+    /// registered against one redirect URI cannot be reused with another, so a
+    /// change of redirect strategy (see `KeepTalkingMCPBundle.requiresRedirectProxy`)
+    /// is detected by comparing against this. Optional: credentials written
+    /// before the field existed simply read as "unknown" and are reused.
+    public var redirectURI: String?
 
     public init(
         headers: [String: String] = [:],
@@ -28,7 +34,8 @@ public struct KeepTalkingMCPCredentials: Codable, Sendable, Equatable {
         clientSecret: String? = nil,
         accessToken: String? = nil,
         accessTokenExpiresAt: Date? = nil,
-        refreshToken: String? = nil
+        refreshToken: String? = nil,
+        redirectURI: String? = nil
     ) {
         self.headers = headers
         self.clientID = clientID
@@ -36,6 +43,7 @@ public struct KeepTalkingMCPCredentials: Codable, Sendable, Equatable {
         self.accessToken = accessToken
         self.accessTokenExpiresAt = accessTokenExpiresAt
         self.refreshToken = refreshToken
+        self.redirectURI = redirectURI
     }
 
     /// True when there is nothing worth persisting — the store deletes the

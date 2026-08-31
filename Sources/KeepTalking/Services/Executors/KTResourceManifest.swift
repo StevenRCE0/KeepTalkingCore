@@ -129,11 +129,14 @@ public struct KTResourceManifest: Sendable {
         return "KT_\(kind.rawValue)_\(token)"
     }
 
-    /// Inverts `agentHandle`: parses `KT_<KIND>_<PAYLOAD>` (a leading `$`
-    /// tolerated) back to its family + concrete id. The payload may be a 6-char
-    /// Code hex (current format) or a legacy 32-char UUID hex. Returns nil when
-    /// the payload is neither — the caller falls back to `resolveAgentHandle`
-    /// or a bare-UUID parse.
+    /// Parses `KT_<KIND>_<PAYLOAD>` (a leading `$` tolerated) back to its family
+    /// + concrete id, for the payloads that CARRY one: a legacy 32-char UUID hex.
+    ///
+    /// This no longer inverts `agentHandle`. The current handle is a friendly
+    /// token over a 24-bit code, which does not contain the id — recovering the
+    /// UUID needs the set of handles that exist, so use
+    /// `resolveAgentHandle(_:among:)` for anything an agent typed. Returns nil
+    /// for a payload that carries no id.
     public static func parseAgentHandle(_ raw: String) -> (kind: Kind, id: UUID)? {
         guard let (kind, payload) = splitHandlePrefix(raw) else { return nil }
         guard let id = uuidFromHex(payload) else { return nil }
@@ -225,9 +228,13 @@ public struct KTResourceManifest: Sendable {
             if matches.count == 1 { return .resolved(matches[0]) }
             if matches.count > 1 { return .ambiguous(matches) }
         }
-        // Bare friendly name (no KT_ prefix).
+        // Friendly name — bare, or the payload of a `KT_<KIND>_` handle.
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let friendlyResult = UUIDFriendlyName.resolve(trimmed, among: candidates)
+        let friendlyToken =
+            splitHandlePrefix(raw)
+            .map { $0.1.lowercased().replacingOccurrences(of: "_", with: "-") }
+            ?? trimmed
+        let friendlyResult = UUIDFriendlyName.resolve(friendlyToken, among: candidates)
         switch friendlyResult {
             case .resolved(let id): return .resolved(id)
             case .corrected(let id, let from, let to): return .corrected(id, from: from, to: to)

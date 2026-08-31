@@ -735,7 +735,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
         )
 
         // Clear any decrypted/ciphertext OTB temp dirs orphaned by a prior run.
-        KeepTalkingClient.pruneStaleOneTimeBlobTempDirs()
+        // Once per process: the sweep deletes shared roots, so a later client
+        // doing it again would delete staged bytes the existing clients own.
+        KeepTalkingClient.pruneStaleOneTimeBlobTempDirsOnce()
         // Reap execution workspaces whose thread was archived/deleted while away.
         Task { [weak self] in await self?.reapOrphanThreadWorkspaces() }
 
@@ -1167,11 +1169,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
     #if os(macOS)
     /// Runs the ACP `initialize` handshake against a bundle's command without
     /// saving anything, so the add/edit form can verify the agent when the owner
-    /// clicks Done. Returns the auth methods the agent advertised; throws with
-    /// the agent's stderr when the command is wrong or is not an ACP agent.
+    /// clicks Done. Throws with the agent's stderr when the command is wrong or
+    /// is not an ACP agent; otherwise reports how the agent authenticates and
+    /// what a session lets you configure (model, effort, …).
     public func preflightACPAgent(
         bundle: KeepTalkingACPBundle
-    ) async throws -> [KeepTalkingACPAuthMethod] {
+    ) async throws -> KeepTalkingACPAgentProbe {
         try await acpManager.preflightInitialize(bundle: bundle)
     }
     #endif

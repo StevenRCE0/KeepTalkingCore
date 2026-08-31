@@ -53,7 +53,7 @@ public enum KeepTalkingPushWakePreviewResolver {
             .filter(\.$deletedAt == nil)
             .all()
         let senderLabel = KeepTalkingAliasLookup(mappings: mappings)
-            .resolve(sender: preview.sender)
+            .resolve(sender: preview.sender, in: envelope.contextID)
             .primary()
         let body =
             if preview.isTruncated, !preview.content.isEmpty {
@@ -79,7 +79,7 @@ public enum KeepTalkingPushWakeActionResolver {
             .filter(\.$deletedAt == nil)
             .all()
         let callerLabel = KeepTalkingAliasLookup(mappings: mappings)
-            .resolve(sender: .node(node: payload.senderNodeID))
+            .resolve(sender: .node(node: payload.senderNodeID), in: payload.contextID)
             .primary()
         var actionDescription =
             try await KeepTalkingAction.query(on: database)

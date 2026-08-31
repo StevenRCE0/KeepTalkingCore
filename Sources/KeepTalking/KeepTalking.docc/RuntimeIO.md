@@ -307,6 +307,48 @@ sensitive in the database or in a sync envelope to a peer. ``KeepTalkingACPBundl
 therefore persists with an empty `environment`, and the runtime rehydrates it at
 spawn time.
 
+Model and effort are the agent's to offer, not KeepTalking's to assume. They arrive
+as `configOptions` on the `session/new` result — not in `initialize` — and are set
+with `session/set_config_option` before the prompt turn. ``KeepTalkingACPBundle``
+stores the owner's picks as an open `configOptions` map keyed by the agent's own
+ids (`model`, `effort`, `fast`, `mode`, … for the Claude agent) rather than named
+fields, because those ids are the agent's vocabulary: another agent names its
+settings differently, and a hardcoded model list goes stale on the agent's next
+release. Applying them is never fatal — a value the agent no longer offers is
+logged and the turn runs on the agent's default, so an action does not start
+failing because a model was renamed. The preflight opens a throwaway session just
+to read these back, which is how the add/edit form offers the agent's real choices.
+
+A collaborating agent does not work in silence. It streams `session/update` while
+it runs, and KeepTalking publishes that feedback into the conversation **as the
+agent's own messages** — sender `.autonomous(name:)` carrying the action's name,
+type `.message`. It goes out through the orchestrator's own `AssistantPublisher`,
+whose payload names the speaker: nil is the assistant itself, a name is a
+collaborator talking. One publisher for both sides, so the turn and context are
+identical either way, and the agent turn comes along in the closure instead of
+being threaded as a scalar through every layer down to the executor. Deliberately not `.thinking`: that type means "the reasoning
+behind *this* assistant's answer" and is dropped from agent-to-agent context
+replay, which is the wrong fate for a collaborator's plan and findings. Speaking
+under its own identity, the agent is simply another participant.
+
+The split is by what an update IS. A thought or a plan is the agent talking, so it
+goes out as a message spoken by the agent. A **tool call is a tool-invocation
+hint** — the thing `.intermediate` already exists for — so it is published through
+the orchestrator's `ToolHintPublisher` instead: it folds under this action's row,
+and its arguments are SEALED to the two ends of the call. That last part matters.
+A tool call's message text is only its label ("Terminal", "Edit"); the command
+line and the file path travel as sealed parameters, because they are the caller's
+and the executor's business, not something to broadcast in the clear to everyone
+in the context.
+
+What is surfaced is what the final result does not already contain:
+`agent_thought_chunk` (coalesced — reasoning streams a token at a time, and one
+context row plus one broadcast envelope per token would be unusable), `plan`
+rendered as a checklist, `tool_call`, and a `tool_call_update` that reports a
+failure. `agent_message_chunk` is not re-published: it IS the turn's result, and
+would otherwise arrive twice. In-progress and completed tool chatter is dropped to
+keep the signal high.
+
 The prompt turn has no deadline — a coding agent may legitimately work for many
 minutes — so liveness is polled instead of counting down, and a dead agent surfaces
 its exit status and stderr tail rather than an opaque "transport closed".
@@ -562,6 +604,9 @@ authentication is macOS-only, but the model a picker renders is not.
 - ``KeepTalkingACPBundle``
 - ``KeepTalkingACPAuthMethod``
 - ``KeepTalkingACPAuthResult``
+- ``KeepTalkingACPUpdate``
+- ``KeepTalkingACPConfigOption``
+- ``KeepTalkingACPAgentProbe``
 - ``KeepTalkingACPCredentials``
 - ``KeepTalkingACPCredentialStore``
 

@@ -55,6 +55,13 @@ public final class KeepTalkingMapping: Model, @unchecked Sendable {
     @OptionalParent(key: "action")
     public var action: KeepTalkingAction?
 
+    /// The context this mapping is scoped to, or nil for a global mapping.
+    /// Orthogonal to the target columns: a `.node`-target alias with a scope
+    /// names that node *within* one context only. Resolution is scoped-first
+    /// with global fallback (see `KeepTalkingAliasLookup`).
+    @OptionalParent(key: "scope_context")
+    public var scopeContext: KeepTalkingContext?
+
     @Field(key: "kind")
     public var kind: KeepTalkingMappingKind
 
@@ -84,6 +91,7 @@ public final class KeepTalkingMapping: Model, @unchecked Sendable {
     public init(
         id: UUID = UUID.v7(),
         target: KeepTalkingMappingTarget,
+        scopeContext: UUID? = nil,
         kind: KeepTalkingMappingKind,
         namespace: String? = nil,
         value: String,
@@ -101,6 +109,7 @@ public final class KeepTalkingMapping: Model, @unchecked Sendable {
             case .action(let action):
                 self.$action.id = action
         }
+        self.$scopeContext.id = scopeContext
         self.kind = kind
         self.namespace = Self.normalizeOptional(namespace)
         self.value = Self.normalizeStoredValue(value)

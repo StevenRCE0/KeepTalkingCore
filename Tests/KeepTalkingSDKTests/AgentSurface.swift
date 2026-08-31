@@ -143,11 +143,24 @@ final class AgentSurface {
     /// lookup the executor performs when the agent passes it as an input.
     /// `nil` means the agent was handed a handle it could not actually use.
     func resolve(_ handle: KTResourceManifest.AgentResource) async -> URL? {
-        guard let parsed = KTResourceManifest.parseAgentHandle(handle.handle) else {
-            return nil
+        // A friendly handle carries a 24-bit code, not the UUID, so it cannot be
+        // parsed back to an id — and a resource decoded from the wire has no
+        // `resourceID` either, since only the handle travels. Resolve it the way
+        // the real executor does: against the handles that actually exist for
+        // this caller.
+        let id: UUID
+        if let known = handle.resourceID {
+            id = known
+        } else {
+            let candidates = await client.stagedFileStore.handles(forCaller: nodeID)
+            guard
+                case .resolved(let resolved) = KTResourceManifest.resolveAgentHandle(
+                    handle.handle, among: candidates)
+            else { return nil }
+            id = resolved
         }
         return await client.stagedFileStore
-            .file(handle: parsed.id, callerNodeID: nodeID)?.url
+            .file(handle: id, callerNodeID: nodeID)?.url
     }
 
     private static func jsonString(_ object: [String: Any]) -> String {

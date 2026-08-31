@@ -29,7 +29,9 @@ extension KeepTalkingClient {
         agentTurnID: UUID? = nil,
         agentIntention: String? = nil,
         inputHandles: [UUID]? = nil,
-        outputHandles: [KeepTalkingActionOutputHandle]? = nil
+        outputHandles: [KeepTalkingActionOutputHandle]? = nil,
+        assistantPublisher: AIOrchestrator.AssistantPublisher? = nil,
+        toolHintPublisher: AIOrchestrator.ToolHintPublisher? = nil
     ) async throws -> [AIOrchestrator.ToolExecution] {
         var executions: [AIOrchestrator.ToolExecution] = []
 
@@ -272,7 +274,9 @@ extension KeepTalkingClient {
                             agentTurnID: agentTurnID,
                             agentIntention: agentIntention,
                             inputHandles: inputHandles,
-                            outputHandles: outputHandles
+                            outputHandles: outputHandles,
+                            assistantPublisher: assistantPublisher,
+                            toolHintPublisher: toolHintPublisher
                         )
                         payload = proxyResult.payload
                         extraInlineMessages = proxyResult.inlineMessages
@@ -363,7 +367,9 @@ extension KeepTalkingClient {
         agentTurnID: UUID? = nil,
         agentIntention: String? = nil,
         inputHandles: [UUID]? = nil,
-        outputHandles: [KeepTalkingActionOutputHandle]? = nil
+        outputHandles: [KeepTalkingActionOutputHandle]? = nil,
+        assistantPublisher: AIOrchestrator.AssistantPublisher? = nil,
+        toolHintPublisher: AIOrchestrator.ToolHintPublisher? = nil
     ) async throws -> AgentToolProxyResult {
         let arguments = try parsedActionCallArguments(
             definition: definition,
@@ -414,7 +420,9 @@ extension KeepTalkingClient {
             actionOwner: definition.ownerNodeID,
             call: actionCall,
             context: context,
-            agentTurnID: agentTurnID
+            agentTurnID: agentTurnID,
+            assistantPublisher: assistantPublisher,
+            toolHintPublisher: toolHintPublisher
         )
         return renderAgentToolPayload(
             functionName: functionName,

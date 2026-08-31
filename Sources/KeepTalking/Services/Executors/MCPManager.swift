@@ -328,6 +328,13 @@ public actor MCPManager {
     /// driven in-protocol (the transport reacts to 401/403 → the authorizer →
     /// discovery/token/retry) instead of a bespoke preflight gate.
     private var authorizerProvider: (@Sendable (UUID, URL) async -> (any HTTPClientAuthorizer)?)?
+    /// The authorizer + endpoint handed to each live HTTP transport, retained per
+    /// action so a *result-level* auth challenge can be routed back into the
+    /// SDK's own `handleChallenge`. `HTTPClientTransport` only reaches the
+    /// authorizer from an HTTP 401/403; a 2025-11-25 server may instead answer
+    /// 200 with `isError: true` and put the challenge in the tool result's
+    /// `_meta["mcp/www_authenticate"]`, which no transport code ever sees.
+    private var httpAuthorizersByActionID: [UUID: (authorizer: any HTTPClientAuthorizer, endpoint: URL)] = [:]
 
     /// Creates an MCP manager for a node runtime.
     public init(
@@ -429,6 +436,7 @@ public actor MCPManager {
         let client = clientsByActionID.removeValue(forKey: actionID)
         let process = stdioProcessesByActionID.removeValue(forKey: actionID)
         virtualToolNamesByActionID.removeValue(forKey: actionID)
+        httpAuthorizersByActionID.removeValue(forKey: actionID)
         healthByActionID.removeValue(forKey: actionID)
         Self.teardownClientDetached(client: client, process: process)
     }
@@ -440,6 +448,7 @@ public actor MCPManager {
         let client = clientsByActionID.removeValue(forKey: actionID)
         let process = stdioProcessesByActionID.removeValue(forKey: actionID)
         virtualToolNamesByActionID.removeValue(forKey: actionID)
+        httpAuthorizersByActionID.removeValue(forKey: actionID)
         healthByActionID[actionID] = .disabled
         Self.teardownClientDetached(client: client, process: process)
     }
@@ -568,16 +577,98 @@ public actor MCPManager {
         }
 
         let log = onLog
-        return try await Self.callToolPatiently(
-            client: client,
-            name: invocation.name,
-            arguments: invocation.arguments as [String: Value]?,
-            meta: call.metadata,
+        let callTool = { [toolCallGraceSeconds, toolCallPollSeconds] in
+            try await Self.callToolPatiently(
+                client: client,
+                name: invocation.name,
+                arguments: invocation.arguments as [String: Value]?,
+                meta: call.metadata,
+                actionID: actionID,
+                graceSeconds: toolCallGraceSeconds,
+                pollSeconds: toolCallPollSeconds,
+                log: log,
+                isAlive: { [weak self] in await self?.isActionExecutorLive(actionID) ?? false }
+            )
+        }
+
+        let result = try await callTool()
+        guard
+            try await handleResultAuthorizationChallenge(
+                actionID: actionID,
+                result: result
+            )
+        else {
+            return (content: result.content, isError: result.isError)
+        }
+        // The authorizer acquired a token and stored it in its own token
+        // storage, which the still-live transport consults per request — so the
+        // retry carries the new bearer without reconnecting.
+        let retried = try await callTool()
+        return (content: retried.content, isError: retried.isError)
+    }
+
+    /// `_meta` key carrying a `WWW-Authenticate` challenge on an MCP *result*
+    /// (MCP 2025-11-25). A server that keeps the HTTP layer at 200 reports "you
+    /// must authorize" here instead — on the `initialize` result for a whole
+    /// connection, or on a tool result for a single call.
+    private static let authorizationChallengeMetadataKey = "mcp/www_authenticate"
+
+    /// Extracts the first `WWW-Authenticate` challenge from result metadata.
+    /// Servers send either a single string or an array of them.
+    private static func authorizationChallenge(in meta: Metadata?) -> String? {
+        guard let value = meta?[authorizationChallengeMetadataKey] else {
+            return nil
+        }
+        if let single = value.stringValue {
+            return single
+        }
+        return value.arrayValue?.compactMap(\.stringValue).first
+    }
+
+    /// Feeds a challenge read out of result metadata into the SDK authorizer,
+    /// exactly as `HTTPClientTransport` does for an HTTP 401 — discovery, PKCE,
+    /// dynamic registration, consent and token exchange all stay inside the SDK.
+    ///
+    /// - Returns: `true` when a token was acquired and the operation that carried
+    ///   the challenge should be retried.
+    private func runAuthorizationChallenge(
+        actionID: UUID,
+        challenge: String,
+        authorizer: any HTTPClientAuthorizer,
+        endpoint: URL,
+        operationKey: String
+    ) async throws -> Bool {
+        log(
+            "[ACT/mcp/auth] action=\(actionID.uuidString.lowercased()) "
+                + "\(operationKey) result carried an authorization challenge; running OAuth"
+        )
+        return try await authorizer.handleChallenge(
+            statusCode: 401,
+            headers: ["WWW-Authenticate": challenge],
+            endpoint: endpoint,
+            operationKey: operationKey,
+            session: .shared
+        )
+    }
+
+    /// Resolves an authorization challenge returned on a failed tool result,
+    /// using the authorizer retained for this action's live transport.
+    private func handleResultAuthorizationChallenge(
+        actionID: UUID,
+        result: CallTool.Result
+    ) async throws -> Bool {
+        guard result.isError == true,
+            let challenge = Self.authorizationChallenge(in: result._meta),
+            let (authorizer, endpoint) = httpAuthorizersByActionID[actionID]
+        else {
+            return false
+        }
+        return try await runAuthorizationChallenge(
             actionID: actionID,
-            graceSeconds: toolCallGraceSeconds,
-            pollSeconds: toolCallPollSeconds,
-            log: log,
-            isAlive: { [weak self] in await self?.isActionExecutorLive(actionID) ?? false }
+            challenge: challenge,
+            authorizer: authorizer,
+            endpoint: endpoint,
+            operationKey: CallTool.name
         )
     }
 
@@ -700,7 +791,7 @@ public actor MCPManager {
         pollSeconds: TimeInterval,
         log: (@Sendable (String) -> Void)?,
         isAlive: @escaping @Sendable () async -> Bool
-    ) async throws -> (content: [Tool.Content], isError: Bool?) {
+    ) async throws -> CallTool.Result {
         try await patientWait(
             label: "mcp tool \(name) action=\(actionID.uuidString.lowercased())",
             graceSeconds: graceSeconds,
@@ -729,15 +820,16 @@ public actor MCPManager {
                     )
                 }
             }
-            return (content: result.content, isError: result.isError)
+            return result
         }
     }
 
+    @discardableResult
     private nonisolated static func connectClient(
         _ client: Client,
         transport: any Transport,
         timeoutSeconds: TimeInterval
-    ) async throws {
+    ) async throws -> Initialize.Result {
         let timeoutNanos = UInt64(max(timeoutSeconds, 1) * 1_000_000_000)
         actor CompletionState {
             private var completed = false
@@ -753,15 +845,15 @@ public actor MCPManager {
 
         let state = CompletionState()
 
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, Error>) in
+        return try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Initialize.Result, Error>) in
             let connectTask = Task {
                 do {
-                    _ = try await client.connect(transport: transport)
+                    let initialization = try await client.connect(transport: transport)
                     guard await state.markCompleted() else {
                         return
                     }
-                    continuation.resume(returning: ())
+                    continuation.resume(returning: initialization)
                 } catch {
                     guard await state.markCompleted() else {
                         return
@@ -860,6 +952,195 @@ public actor MCPManager {
         }
     }
 
+    /// Builds the per-action MCP client. All actions share one identity shape;
+    /// only the name distinguishes a live action client from a preflight probe.
+    private static func makeClient(name: String) -> Client {
+        Client(
+            name: name,
+            version: "1.0.0",
+            title: "KeepTalking",
+            capabilities: .init(
+                elicitation: .init(form: nil, url: .init())
+            ),
+            configuration: .default
+        )
+    }
+
+    /// Builds the HTTP transport for an action, overlaying the stored credential
+    /// headers. When an authorizer owns the bearer it injects the `Authorization`
+    /// header itself (before `requestModifier` runs), so the static-header
+    /// modifier must not re-set it.
+    private func makeHTTPTransport(
+        actionID: UUID,
+        url: URL,
+        bundleHeaders: [String: String],
+        authorizer: (any HTTPClientAuthorizer)?
+    ) async -> HTTPClientTransport {
+        let sanitizedHeaders = await injectedHTTPHeaders(
+            actionID: actionID,
+            bundleHeaders: bundleHeaders,
+            excludingAuthorization: authorizer != nil
+        )
+        return HTTPClientTransport(
+            endpoint: url,
+            configuration: URLSessionConfiguration.default,
+            streaming: true,
+            authorizer: authorizer,
+            requestModifier: { request in
+                var modifiedRequest = request
+                for (key, value) in sanitizedHeaders {
+                    modifiedRequest.setValue(value, forHTTPHeaderField: key)
+                }
+                return modifiedRequest
+            }
+        )
+    }
+
+    /// Resolves an authorization challenge that the server raises only on the
+    /// server-event stream, before the handshake runs.
+    ///
+    /// `HTTPClientTransport` turns an HTTP 401 into an authorizer challenge on
+    /// its POST path only (`send`). Its SSE `GET` throws a plain
+    /// `internalError("HTTP error: 401")`, which the reconnect loop logs and
+    /// retries forever — the authorizer is never consulted. A server that answers
+    /// POSTs `200` and challenges only on the stream therefore never reaches
+    /// OAuth at all. So KT makes that GET itself, and hands anything it finds to
+    /// the SDK authorizer through the same `handleChallenge` entry point the
+    /// transport would have used.
+    ///
+    /// Skipped once the authorizer holds a usable token: expiry is recovered by
+    /// the SDK's own refresh, or by the challenge on a failed tool result.
+    private func resolveStreamAuthorizationChallenge(
+        actionID: UUID,
+        url: URL,
+        bundleHeaders: [String: String],
+        authorizer: any HTTPClientAuthorizer
+    ) async throws {
+        guard authorizer.authorizationHeader(for: url) == nil else {
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = connectTimeoutSeconds
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        for (key, value) in await injectedHTTPHeaders(
+            actionID: actionID,
+            bundleHeaders: bundleHeaders,
+            excludingAuthorization: true
+        ) {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        // `bytes(for:)` resumes as soon as the response head arrives, so a
+        // server that *does* open a stream here doesn't hang the probe — the
+        // task is cancelled the moment the status is known.
+        guard let (stream, response) = try? await URLSession.shared.bytes(for: request)
+        else {
+            return
+        }
+        stream.task.cancel()
+        guard let httpResponse = response as? HTTPURLResponse,
+            httpResponse.statusCode == 401 || httpResponse.statusCode == 403
+        else {
+            return
+        }
+
+        var headers: [String: String] = [:]
+        for (key, value) in httpResponse.allHeaderFields {
+            guard let key = key as? String, let value = value as? String else {
+                continue
+            }
+            headers[key] = value
+        }
+        log(
+            "[ACT/mcp/auth] action=\(actionID.uuidString.lowercased()) "
+                + "event stream challenged with \(httpResponse.statusCode); running OAuth"
+        )
+        _ = try await authorizer.handleChallenge(
+            statusCode: httpResponse.statusCode,
+            headers: headers,
+            endpoint: url,
+            operationKey: "GET",
+            session: .shared
+        )
+    }
+
+    /// Connects an HTTP MCP action, resolving an authorization challenge carried
+    /// in the `initialize` result's `_meta`.
+    ///
+    /// A server may answer the handshake `200 OK` and report "you must authorize"
+    /// in that metadata rather than with a `401`. `HTTPClientTransport` only
+    /// reaches the authorizer from an HTTP status, so it never sees this — KT
+    /// reads the challenge and drives the SDK authorizer itself. Once a token is
+    /// acquired the handshake is redone on a fresh client (the `initialize`
+    /// already happened on the unauthenticated one), reusing the same authorizer
+    /// so it serves the token it just stored.
+    private func connectHTTPAction(
+        actionID: UUID,
+        clientName: String,
+        url: URL,
+        bundleHeaders: [String: String]
+    ) async throws -> Client {
+        let authorizer = await authorizerProvider?(actionID, url)
+        if let authorizer {
+            httpAuthorizersByActionID[actionID] = (authorizer, url)
+        } else {
+            httpAuthorizersByActionID.removeValue(forKey: actionID)
+        }
+
+        if let authorizer {
+            try await resolveStreamAuthorizationChallenge(
+                actionID: actionID,
+                url: url,
+                bundleHeaders: bundleHeaders,
+                authorizer: authorizer
+            )
+        }
+
+        let client = Self.makeClient(name: clientName)
+        let initialization = try await Self.connectClient(
+            client,
+            transport: IncrementingRequestIDTransport(
+                base: await makeHTTPTransport(
+                    actionID: actionID,
+                    url: url,
+                    bundleHeaders: bundleHeaders,
+                    authorizer: authorizer
+                )
+            ),
+            timeoutSeconds: interactiveConnectTimeoutSeconds
+        )
+
+        guard let authorizer,
+            let challenge = Self.authorizationChallenge(in: initialization._meta),
+            try await runAuthorizationChallenge(
+                actionID: actionID,
+                challenge: challenge,
+                authorizer: authorizer,
+                endpoint: url,
+                operationKey: Initialize.name
+            )
+        else {
+            return client
+        }
+
+        await client.disconnect()
+        let authenticatedClient = Self.makeClient(name: clientName)
+        try await Self.connectClient(
+            authenticatedClient,
+            transport: IncrementingRequestIDTransport(
+                base: await makeHTTPTransport(
+                    actionID: actionID,
+                    url: url,
+                    bundleHeaders: bundleHeaders,
+                    authorizer: authorizer
+                )
+            ),
+            timeoutSeconds: interactiveConnectTimeoutSeconds
+        )
+        return authenticatedClient
+    }
+
     private func connectActionClient(
         actionID: UUID,
         action: KeepTalkingAction
@@ -873,57 +1154,27 @@ public actor MCPManager {
 
         healthByActionID[actionID] = .connecting
 
-        let client = Client(
-            name: "KeepTalking:\(nodeConfig.node.uuidString):\(actionID.uuidString)",
-            version: "1.0.0",
-            title: "KeepTalking",
-            capabilities: .init(
-                elicitation: .init(form: nil, url: .init())
-            ),
-            configuration: .default
-        )
+        let clientName =
+            "KeepTalking:\(nodeConfig.node.uuidString):\(actionID.uuidString)"
+        let client: Client
 
         do {
             switch mcpBundle.service {
                 case .stdio(let command, let environment):
+                    let stdioClient = Self.makeClient(name: clientName)
                     try await connectStdioAction(
                         actionID: actionID,
-                        client: client,
+                        client: stdioClient,
                         command: command,
                         environment: environment
                     )
+                    client = stdioClient
                 case .http(let url, _, let headers, _):
-                    let transportConfiguration = URLSessionConfiguration.default
-                    let authorizer = await authorizerProvider?(actionID, url)
-                    // When an authorizer owns the bearer it injects the
-                    // `Authorization` header itself (before requestModifier runs),
-                    // so the static-header modifier must not re-set it.
-                    let sanitizedHeaders = await injectedHTTPHeaders(
+                    client = try await connectHTTPAction(
                         actionID: actionID,
-                        bundleHeaders: headers,
-                        excludingAuthorization: authorizer != nil
-                    )
-
-                    let transport = HTTPClientTransport(
-                        endpoint: url,
-                        configuration: transportConfiguration,
-                        streaming: true,
-                        authorizer: authorizer,
-                        requestModifier: { request in
-                            var modifiedRequest = request
-                            for (key, value) in sanitizedHeaders {
-                                modifiedRequest.setValue(
-                                    value,
-                                    forHTTPHeaderField: key
-                                )
-                            }
-                            return modifiedRequest
-                        }
-                    )
-                    try await Self.connectClient(
-                        client,
-                        transport: IncrementingRequestIDTransport(base: transport),
-                        timeoutSeconds: interactiveConnectTimeoutSeconds
+                        clientName: clientName,
+                        url: url,
+                        bundleHeaders: headers
                     )
             }
         } catch {
@@ -996,6 +1247,14 @@ public actor MCPManager {
         try await registerMCPAction(action)
 
         let authorizer = await authorizerProvider?(actionID, endpoint)
+        if let authorizer {
+            try await resolveStreamAuthorizationChallenge(
+                actionID: actionID,
+                url: endpoint,
+                bundleHeaders: headers,
+                authorizer: authorizer
+            )
+        }
         try await preflightHTTPAuthenticationViaMCP(
             actionID: actionID,
             endpoint: endpoint,
@@ -1063,41 +1322,56 @@ public actor MCPManager {
         headers: [String: String],
         authorizer: (any HTTPClientAuthorizer)? = nil
     ) async throws {
-        let client = Client(
-            name: "KeepTalking:preflight:\(nodeConfig.node.uuidString):\(actionID.uuidString)",
-            version: "1.0.0",
-            title: "KeepTalking",
-            capabilities: .init(
-                elicitation: .init(form: nil, url: .init())
-            ),
-            configuration: .default
-        )
-
-        let transport = HTTPClientTransport(
-            endpoint: endpoint,
-            configuration: .default,
-            streaming: true,
-            authorizer: authorizer,
-            requestModifier: { request in
-                var modifiedRequest = request
-                for (key, value) in headers {
-                    modifiedRequest.setValue(value, forHTTPHeaderField: key)
-                }
-                return modifiedRequest
-            }
-        )
-
-        do {
-            try await Self.connectClient(
-                client,
-                transport: IncrementingRequestIDTransport(base: transport),
-                timeoutSeconds: connectTimeoutSeconds
+        // Two attempts at most: the first handshake may come back 200 with an
+        // authorization challenge in its `_meta`, in which case OAuth runs and
+        // the probe repeats — authenticated — on a fresh client.
+        for attempt in 0..<2 {
+            let client = Self.makeClient(
+                name:
+                    "KeepTalking:preflight:\(nodeConfig.node.uuidString):\(actionID.uuidString)"
             )
-            _ = try await client.listTools()
-            await client.disconnect()
-        } catch {
-            await client.disconnect()
-            throw error
+            let transport = HTTPClientTransport(
+                endpoint: endpoint,
+                configuration: .default,
+                streaming: true,
+                authorizer: authorizer,
+                requestModifier: { request in
+                    var modifiedRequest = request
+                    for (key, value) in headers {
+                        modifiedRequest.setValue(value, forHTTPHeaderField: key)
+                    }
+                    return modifiedRequest
+                }
+            )
+
+            do {
+                let initialization = try await Self.connectClient(
+                    client,
+                    transport: IncrementingRequestIDTransport(base: transport),
+                    timeoutSeconds: connectTimeoutSeconds
+                )
+                if attempt == 0, let authorizer,
+                    let challenge = Self.authorizationChallenge(
+                        in: initialization._meta
+                    ),
+                    try await runAuthorizationChallenge(
+                        actionID: actionID,
+                        challenge: challenge,
+                        authorizer: authorizer,
+                        endpoint: endpoint,
+                        operationKey: Initialize.name
+                    )
+                {
+                    await client.disconnect()
+                    continue
+                }
+                _ = try await client.listTools()
+                await client.disconnect()
+                return
+            } catch {
+                await client.disconnect()
+                throw error
+            }
         }
     }
 

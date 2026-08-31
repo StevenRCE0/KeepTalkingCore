@@ -61,13 +61,24 @@ public struct KeepTalkingMCPBundle: KeepTalkingActionBundle, Equatable {
     /// tools are fetched; remote stubs may carry the latest advertised names.
     public var cachedTools: [String]?
 
+    /// Whether this server's OAuth must run through the HTTPS redirect proxy
+    /// rather than the app's custom-scheme callback. Authorization servers that
+    /// reject non-HTTPS `redirect_uri` values (or that only allow a redirect
+    /// registered up front) need it; the app decides *which* proxy from its own
+    /// configuration, this only declares that one is required.
+    ///
+    /// Optional so bundles persisted before the flag existed keep decoding —
+    /// absent reads as "no proxy", the previous behaviour.
+    public var requiresRedirectProxy: Bool?
+
     public init(
         id: UUID = UUID.v7(),
         name: String,
         indexDescription: String,
         service: KeepTalkingMCPService,
         oauthRegistration: KeepTalkingMCPOAuthRegistration? = nil,
-        cachedTools: [String]? = nil
+        cachedTools: [String]? = nil,
+        requiresRedirectProxy: Bool? = nil
     ) {
         self.id = id
         self.name = name
@@ -75,6 +86,7 @@ public struct KeepTalkingMCPBundle: KeepTalkingActionBundle, Equatable {
         self.service = service
         self.oauthRegistration = oauthRegistration
         self.cachedTools = cachedTools
+        self.requiresRedirectProxy = requiresRedirectProxy
     }
 }
 

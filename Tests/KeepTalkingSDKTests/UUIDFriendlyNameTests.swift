@@ -30,7 +30,10 @@ struct UUIDFriendlyNameTests {
             }
 
             // The property the repair path depends on: no single edit turns one
-            // list word into another, so a typo is always attributable.
+            // list word into another. That makes any single typo DETECTABLE; it
+            // does not make every one correctable, since a mangled word can land
+            // one edit from two words that are two apart (correction would need a
+            // minimum distance of 3). `nearestWord` refuses those ties.
             var offenders: [String] = []
             for i in list.indices {
                 for j in (i + 1)..<list.count

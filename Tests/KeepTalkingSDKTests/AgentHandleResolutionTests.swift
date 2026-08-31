@@ -33,9 +33,14 @@ struct AgentHandleResolutionTests {
                 == .resolved(id))
     }
 
-    @Test("one wrong hex digit is repaired to the only handle it can have meant")
+    @Test("one wrong character is repaired to the only handle it can have meant")
     func singleWrongDigitIsRepaired() throws {
-        let id = UUID()
+        // Fixed, for the same reason as the deletion test: the word lists are
+        // ≥2 edits apart, which detects any single typo but cannot always
+        // CORRECT one — a mangled word can sit exactly one edit from two list
+        // words that are two apart. Measured, that is ~0.4% of substitutions,
+        // enough to make a random id flaky.
+        let id = try #require(UUID(uuidString: "00000000-0000-4000-8000-000000000000"))
         let other = UUID()
         var chars = Array(handle(id))
         // Corrupt the last hex digit the way a model drops one.
@@ -53,9 +58,13 @@ struct AgentHandleResolutionTests {
         #expect(resolved == id)
     }
 
-    @Test("a dropped character is repaired too")
-    func droppedCharacterIsRepaired() {
-        let id = UUID()
+    @Test("a dropped character is repaired when the reading is unambiguous")
+    func droppedCharacterIsRepaired() throws {
+        // A FIXED id, not a random one. Whether a deletion is repairable is a
+        // property of the words it lands between, not of the code path — see the
+        // test below — so a random id makes this one flaky rather than thorough.
+        let id = try #require(UUID(uuidString: "00000000-0000-4000-8000-000000000000"))
+        try #require(handle(id) == "KT_OTB_SHARP_CIVIC_CLOWNFISH")
         let mistyped = String(handle(id).dropLast())
 
         guard
@@ -68,6 +77,21 @@ struct AgentHandleResolutionTests {
         #expect(resolved == id)
     }
 
+    @Test("a dropped character with two readings refuses rather than guessing")
+    func ambiguousDeletionIsRefused() throws {
+        // The word lists are single-typo safe, so a SUBSTITUTION is always
+        // attributable. A DELETION is not: dropping the "e" from `ravine` lands
+        // one edit from `ravine` and one edit from another noun at the same time,
+        // and `nearestWord` refuses a tie. Answering "unknown" is the design
+        // working — guessing would hand the caller a different resource.
+        let id = try #require(UUID(uuidString: "64F402F2-8DCA-4293-858F-5B5D8BE967BA"))
+        try #require(handle(id) == "KT_OTB_SHADOW_INDIGO_RAVINE")
+        let mistyped = String(handle(id).dropLast())
+
+        let outcome = KTResourceManifest.resolveAgentHandle(mistyped, among: [id])
+        #expect(outcome == .unknown, "a tie must not resolve to a guess")
+    }
+
     @Test("a handle for something not offered resolves to nothing")
     func handleOutsideCandidateSetIsUnknown() {
         // Well-formed but not on offer — repairing to *something* would be worse
@@ -77,19 +101,40 @@ struct AgentHandleResolutionTests {
                 == .unknown)
     }
 
+    /// The first pair of ids whose 24-bit codes collide, walked from a fixed
+    /// counter so the pair is identical on every run.
+    ///
+    /// A code collision is the ONLY way two handles can genuinely read the same.
+    /// A mistyped one cannot be ambiguous: the word lists are single-typo safe by
+    /// construction, so at most one list word is ever within one edit of a typo
+    /// (see `UUIDFriendlyNameTests.friendlyNameWordListsAreWellFormed`) — which is
+    /// why this test does not mistype anything.
+    private func collidingIDs(within limit: Int = 60_000) -> (UUID, UUID)? {
+        var seenByCode: [UUIDFriendlyName.Code: UUID] = [:]
+        for i in 0..<limit {
+            guard
+                let id = UUID(
+                    uuidString: String(format: "%08X-0000-4000-8000-000000000000", i))
+            else { continue }
+            let code = id.friendlyNameCode
+            if let previous = seenByCode[code] { return (previous, id) }
+            seenByCode[code] = id
+        }
+        return nil
+    }
+
     @Test("two plausible readings are refused rather than guessed")
     func ambiguityIsRefused() throws {
-        // Two candidates differing only in their final character, and a typed
-        // handle whose final character matches neither — one edit from both.
-        let a = try #require(UUID(uuidString: "AAAAAAAA-AAAA-4AAA-AAAA-AAAAAAAAAAAA"))
-        let b = try #require(UUID(uuidString: "AAAAAAAA-AAAA-4AAA-AAAA-AAAAAAAAAAAB"))
-        let between = String(handle(a).dropLast()) + "C"
+        let (a, b) = try #require(collidingIDs(), "no code collision in the scanned range")
+        try #require(handle(a) == handle(b), "a collision must render the same handle")
 
         guard
             case .ambiguous(let ids) =
-                KTResourceManifest.resolveAgentHandle(between, among: [a, b])
+                KTResourceManifest.resolveAgentHandle(handle(a), among: [a, b])
         else {
-            Issue.record("expected ambiguity, not a guess")
+            Issue.record(
+                "expected ambiguity, got \(KTResourceManifest.resolveAgentHandle(handle(a), among: [a, b]))"
+            )
             return
         }
         #expect(Set(ids) == Set([a, b]))
@@ -107,15 +152,26 @@ struct AgentHandleResolutionTests {
                 "/Users/steven/report.pdf", among: [UUID()]) == .unknown)
     }
 
-    @Test("the canonical handle shape is unchanged, so the wire contract holds")
-    func handleShapeIsUnchanged() throws {
-        // KTPPResourceEntry.handle is this string, and it is canonicalized into
-        // the signed resourcesHash the Python SDK verifies. It must stay
-        // KT_<KIND>_<32 uppercase hex>.
+    @Test("the canonical handle is a stable, parseable token for a given id")
+    func handleShapeIsStable() throws {
+        // `KTPPResourceEntry.handle` is this string, and it is canonicalized into
+        // the signed `resourcesHash`. The SPELLING is not part of that contract:
+        // both ends hash the resources block exactly as transmitted (Swift over
+        // what it sends, the Python SDK over what it receives), and nothing on the
+        // plugin side parses the handle. What must hold is that a given id always
+        // renders the same token, and that the token parses back.
         let id = try #require(UUID(uuidString: "019EBBD5-8D87-7000-946E-76135023BD00"))
-        #expect(handle(id) == "KT_OTB_019EBBD58D877000946E76135023BD00")
-        #expect(KTResourceManifest.parseAgentHandle(handle(id))?.id == id)
-        #expect(KTResourceManifest.parseAgentHandle(handle(id))?.kind == .otb)
+        #expect(handle(id) == "KT_OTB_SHARP_SIMPLE_EAGLERAY")
+        #expect(handle(id) == handle(id), "a handle must be stable for an id")
+        // The kind survives on its own; the id does NOT — a friendly handle
+        // carries a 24-bit code, not the UUID, so it only resolves against the
+        // handles that exist. That is the whole reason resolveAgentHandle takes
+        // a candidate set.
+        #expect(KTResourceManifest.parseAgentHandleCode(handle(id))?.kind == .otb)
+        #expect(KTResourceManifest.parseAgentHandle(handle(id)) == nil)
+        #expect(
+            KTResourceManifest.resolveAgentHandle(handle(id), among: [id, UUID()])
+                == .resolved(id))
     }
 
     // MARK: - The friendly name a resource also carries
@@ -127,8 +183,10 @@ struct AgentHandleResolutionTests {
             kind: .otb, id: id, direction: "read", name: "report.pdf", origin: "produced")
 
         #expect(resource.friendlyName == id.friendlyNameToken)
-        #expect(resource.jsonObject()["friendly"] as? String == id.friendlyNameToken)
-        // The handle is still the canonical identity and is unchanged.
+        // No separate `friendly` key: the handle IS the friendly token now, so a
+        // second field carrying the same words was dropped as redundant.
+        #expect(resource.jsonObject()["friendly"] == nil)
+        // The handle is still the canonical identity.
         #expect(
             resource.jsonObject()["handle"] as? String
                 == KTResourceManifest.agentHandle(kind: .otb, id: id))

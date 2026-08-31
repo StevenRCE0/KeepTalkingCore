@@ -101,13 +101,24 @@ private actor ScriptedACPAgent: Transport {
     /// When set, `session/new` fails with this code plus a `data` payload —
     /// how a real agent reports a fault behind the bare JSON-RPC label.
     private let sessionFailure: (code: Int, data: [String: Any])?
+    /// `session/update` payloads streamed during the prompt turn.
+    private let midTurnUpdates: [[String: Any]]
+    /// Config ids the agent advertises, with their legal values.
+    private let configCatalog: [String: [String]]
+    private var configValues: [String: String] = [:]
+    private(set) var configSets: [(id: String, value: String)] = []
 
     init(
         authMethods: [[String: Any]] = [],
         protocolVersion: Int = 1,
         requiresAuth: Bool = false,
-        sessionFailure: (code: Int, data: [String: Any])? = nil
+        sessionFailure: (code: Int, data: [String: Any])? = nil,
+        configCatalog: [String: [String]] = [:],
+        midTurnUpdates: [[String: Any]] = []
     ) {
+        self.midTurnUpdates = midTurnUpdates
+        self.configCatalog = configCatalog
+        for (id, values) in configCatalog { configValues[id] = values.first ?? "" }
         self.authMethods = authMethods
         self.agentProtocolVersion = protocolVersion
         self.requiresAuth = requiresAuth
@@ -160,14 +171,39 @@ private actor ScriptedACPAgent: Transport {
                 } else if requiresAuth {
                     fail(id: id, code: -32000, message: "Authentication required")
                 } else {
-                    reply(id: id, result: ["sessionId": "session-1"])
+                    reply(
+                        id: id,
+                        result: ["sessionId": "session-1", "configOptions": configPayload()])
                 }
+            case "session/set_config_option":
+                let params = message["params"] as? [String: Any] ?? [:]
+                let configID = params["configId"] as? String ?? ""
+                let value = params["value"] as? String ?? ""
+                guard configCatalog[configID]?.contains(value) == true else {
+                    fail(id: id, code: -32602, message: "no such option \(configID)=\(value)")
+                    return
+                }
+                configSets.append((id: configID, value: value))
+                configValues[configID] = value
+                reply(id: id, result: ["configOptions": configPayload()])
             case "session/prompt":
+                for update in midTurnUpdates { emit(sessionUpdate(update)) }
                 // One streamed chunk, then the turn ends.
                 notify(text: "done")
                 reply(id: id, result: ["stopReason": "end_turn"])
             default:
                 fail(id: id, code: -32601, message: "Method not supported: \(method)")
+        }
+    }
+
+    /// The full option list, which the spec requires on every config response.
+    private func configPayload() -> [[String: Any]] {
+        configCatalog.keys.sorted().map { id in
+            [
+                "id": id, "name": id.capitalized, "type": "select",
+                "currentValue": configValues[id] ?? "",
+                "options": (configCatalog[id] ?? []).map { ["value": $0, "name": $0] },
+            ]
         }
     }
 
@@ -177,6 +213,13 @@ private actor ScriptedACPAgent: Transport {
 
     private func fail(id: Any, code: Int, message: String) {
         emit(["jsonrpc": "2.0", "id": id, "error": ["code": code, "message": message]])
+    }
+
+    private func sessionUpdate(_ update: [String: Any]) -> [String: Any] {
+        [
+            "jsonrpc": "2.0", "method": "session/update",
+            "params": ["sessionId": "session-1", "update": update],
+        ]
     }
 
     private func notify(text: String) {
@@ -237,6 +280,11 @@ private final class EnvironmentBox: @unchecked Sendable {
         defer { lock.unlock() }
         return value
     }
+}
+
+private actor UpdateSink {
+    private(set) var updates: [KeepTalkingACPUpdate] = []
+    func append(_ update: KeepTalkingACPUpdate) { updates.append(update) }
 }
 
 struct ACPAuthFlowTests {
@@ -431,12 +479,14 @@ struct ACPAuthFlowTests {
             name: "agent", command: ["fake-agent"],
             cwd: URL(fileURLWithPath: NSTemporaryDirectory()))
 
-        let methods = try await manager.preflightInitialize(bundle: bundle)
+        let probe = try await manager.preflightInitialize(bundle: bundle)
 
-        #expect(methods.map(\.id) == ["agent-login"])
+        #expect(probe.authMethods.map(\.id) == ["agent-login"])
         // An agent that would demand auth still passes preflight: the handshake
-        // is what is being tested, and auth belongs to a real call.
-        #expect(await agent.receivedMethods == ["initialize"])
+        // is what is being tested, and auth belongs to a real call. The probe
+        // session is attempted for the settings and allowed to fail.
+        #expect(await agent.receivedMethods == ["initialize", "session/new"])
+        #expect(probe.configOptions.isEmpty)
     }
 
     @Test("Preflight fails a foreign protocol version and an empty command")
@@ -512,6 +562,154 @@ struct ACPAuthFlowTests {
         #expect(await agent.authenticatedWith.isEmpty)
         #expect(
             captured?.localizedDescription.contains("re-authenticate the agent's CLI") == true)
+    }
+
+    @Test("Saved model and effort are applied to the session before the prompt")
+    func configOptionsAreApplied() async throws {
+        let agent = ScriptedACPAgent(
+            configCatalog: ["model": ["opus", "sonnet", "haiku"], "effort": ["medium", "high"]])
+        let manager = makeManager(agent: agent)
+        let bundle = KeepTalkingACPBundle(
+            name: "agent", command: ["fake-agent"],
+            cwd: URL(fileURLWithPath: NSTemporaryDirectory()),
+            configOptions: ["model": "sonnet", "effort": "high"])
+        let action = KeepTalkingAction(
+            payload: .acp(bundle), remoteAuthorisable: false, blockingAuthorisation: false)
+        let actionID = UUID.v7()
+        action.id = actionID
+
+        _ = try await manager.callAction(
+            action: action,
+            call: KeepTalkingActionCall(action: actionID, arguments: ["prompt": .string("hi")]),
+            scope: .all,
+            callerIsRemote: false
+        )
+
+        let sets = await agent.configSets
+        #expect(sets.map(\.id).sorted() == ["effort", "model"])
+        #expect(sets.first(where: { $0.id == "model" })?.value == "sonnet")
+        #expect(sets.first(where: { $0.id == "effort" })?.value == "high")
+        // Applied before the turn, never after it.
+        let methods = await agent.receivedMethods
+        let lastSet = methods.lastIndex(of: "session/set_config_option")
+        let prompt = try #require(methods.firstIndex(of: "session/prompt"))
+        #expect((lastSet ?? -1) < prompt)
+    }
+
+    @Test("A setting the agent no longer offers is skipped, not fatal")
+    func staleConfigOptionIsNotFatal() async throws {
+        let agent = ScriptedACPAgent(configCatalog: ["model": ["opus", "sonnet"]])
+        let manager = makeManager(agent: agent)
+        let bundle = KeepTalkingACPBundle(
+            name: "agent", command: ["fake-agent"],
+            cwd: URL(fileURLWithPath: NSTemporaryDirectory()),
+            // `gpt-9` was never offered; `effort` is not advertised at all.
+            configOptions: ["model": "gpt-9", "effort": "max"])
+        let action = KeepTalkingAction(
+            payload: .acp(bundle), remoteAuthorisable: false, blockingAuthorisation: false)
+        let actionID = UUID.v7()
+        action.id = actionID
+
+        let result = try await manager.callAction(
+            action: action,
+            call: KeepTalkingActionCall(action: actionID, arguments: ["prompt": .string("hi")]),
+            scope: .all,
+            callerIsRemote: false
+        )
+
+        // The turn still ran, on the agent's own defaults.
+        #expect(result.isError != true)
+        #expect(await agent.configSets.isEmpty)
+        #expect(await agent.receivedMethods.contains("session/prompt"))
+    }
+
+    @Test("Preflight reports the settings the agent exposes")
+    func preflightReportsConfigOptions() async throws {
+        let agent = ScriptedACPAgent(
+            configCatalog: ["model": ["opus", "sonnet"], "effort": ["low", "high"]])
+        let manager = makeManager(agent: agent)
+
+        let probe = try await manager.preflightInitialize(
+            bundle: KeepTalkingACPBundle(
+                name: "agent", command: ["fake-agent"],
+                cwd: URL(fileURLWithPath: NSTemporaryDirectory())))
+
+        #expect(probe.configOptions.map(\.id) == ["effort", "model"])
+        #expect(
+            probe.configOptions.first(where: { $0.id == "model" })?.choices.map(\.value)
+                == ["opus", "sonnet"])
+    }
+
+    @Test("A collaborating agent's mid-turn feedback is surfaced, coalesced and in order")
+    func midTurnFeedbackIsSurfaced() async throws {
+        let agent = ScriptedACPAgent(midTurnUpdates: [
+            // Reasoning arrives a token at a time — three chunks, one message.
+            ["sessionUpdate": "agent_thought_chunk", "content": ["type": "text", "text": "I should "]],
+            ["sessionUpdate": "agent_thought_chunk", "content": ["type": "text", "text": "read the "]],
+            ["sessionUpdate": "agent_thought_chunk", "content": ["type": "text", "text": "config."]],
+            [
+                "sessionUpdate": "plan",
+                "entries": [
+                    ["content": "Read config", "status": "in_progress"],
+                    ["content": "Patch it", "status": "pending"],
+                ],
+            ],
+            [
+                "sessionUpdate": "tool_call", "toolCallId": "t1", "kind": "execute",
+                "title": "Terminal",
+                "rawInput": ["command": "npm test", "timeout": 120],
+            ],
+            [
+                "sessionUpdate": "tool_call", "toolCallId": "t2", "kind": "read",
+                "title": "Read", "locations": [["path": "/tmp/a.json"]],
+            ],
+            // Progress chatter that must NOT reach the conversation.
+            ["sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "in_progress"],
+            ["sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"],
+            ["sessionUpdate": "usage_update", "used": 10, "size": 200_000],
+            // A failure, which must.
+            [
+                "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "failed",
+                "content": [["content": ["type": "text", "text": "permission denied"]]],
+            ],
+            // Trailing reasoning with nothing after it — must still be flushed.
+            ["sessionUpdate": "agent_thought_chunk", "content": ["type": "text", "text": "Give up."]],
+        ])
+        let manager = makeManager(agent: agent)
+        let (action, actionID) = makeAction()
+        let sink = UpdateSink()
+
+        let result = try await manager.callAction(
+            action: action,
+            call: KeepTalkingActionCall(action: actionID, arguments: ["prompt": .string("hi")]),
+            scope: .all,
+            callerIsRemote: false,
+            onUpdate: { await sink.append($0) }
+        )
+
+        let updates = await sink.updates
+        #expect(
+            updates.map(\.kind) == [.thought, .plan, .toolCall, .toolCall, .toolFailure, .thought])
+        // Three chunks became one message, not three.
+        #expect(updates[0].text == "I should read the config.")
+        #expect(updates[1].text == "[~] Read config\n[ ] Patch it")
+        // A tool call's text is only its label — twenty shell calls would all read
+        // "Terminal", which is why what it is DOING rides in the parameters, where
+        // it gets sealed to the two ends of the call instead of broadcast.
+        #expect(updates[2].text == "Terminal")
+        #expect(updates[2].parameters["command"] == "npm test")
+        #expect(updates[2].parameters["timeout"] == "120")
+        // A path-bearing tool falls back to its declared locations.
+        #expect(updates[3].text == "Read")
+        #expect(updates[3].parameters["path"] == "/tmp/a.json")
+        // A failure names the tool; the detail is a parameter, not message text.
+        #expect(updates[4].text == "Terminal failed")
+        #expect(updates[4].parameters["error"]?.contains("permission denied") == true)
+        // Reasoning with no following update still gets flushed at turn end.
+        #expect(updates[5].text == "Give up.")
+        // The final answer is the tool result, and is NOT re-published as feedback.
+        #expect(!updates.contains { $0.text.contains("done") })
+        #expect(result.isError != true)
     }
 
     @Test("The keychain environment reaches the subprocess and overrides the payload")

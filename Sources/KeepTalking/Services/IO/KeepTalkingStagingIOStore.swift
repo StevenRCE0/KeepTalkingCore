@@ -169,7 +169,14 @@ actor KeepTalkingStagingIOStore {
             return "foreign(owned-by=\(entry.callerNodeID.uuidString.prefix(8)))"
         }
         if !FileManager.default.fileExists(atPath: entry.url.path) {
-            return "bytes-vanished"
+            // An entry that survives while its bytes do not means something
+            // deleted them out of band. Whether the containing directory also
+            // went tells you which kind of deleter: a directory-level sweep, or
+            // something that removed the file alone.
+            let directory = entry.url.deletingLastPathComponent()
+            let directorySurvives = FileManager.default.fileExists(atPath: directory.path)
+            return
+                "bytes-vanished(\(directorySurvives ? "file-only" : "dir-gone") at=\(entry.url.path))"
         }
         return "present(unexpected)"
     }

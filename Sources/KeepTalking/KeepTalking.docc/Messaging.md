@@ -293,6 +293,17 @@ and soft-deletes any extras it finds. Passing `nil` — or a string that trims t
 empty — soft-deletes the alias entirely, returning the target to displaying by
 identifier.
 
+Aliases can additionally be **scoped to a context**. A mapping row's
+`scopeContext` is orthogonal to its target: a `.node`-target alias with a scope
+names that node *within* one context only ("Reviewer" in the paper workspace),
+leaving its global name untouched everywhere else. Every alias operation takes
+an optional `scopeContextID` — `nil` (the default) addresses only global rows,
+a context id only that context's rows, so global and scoped aliases never
+collide in upserts or soft-deletes, and the one-live-alias invariant holds per
+`(target, scope)` pair. Resolution is scoped-first with global fallback (see
+below). Scoped rows are cascade-deleted with their context. Tags currently
+ignore scope and stay global.
+
 **Tags** are many-per-target labels, optionally grouped by a namespace. A tag is
 unique per target within a `(namespace, normalized value)` pair, so adding the same
 tag twice is idempotent and adding one that was previously removed revives it. Tag
@@ -332,9 +343,10 @@ try await client.addTag("archived", to: .thread(threadID))
 try await KeepTalkingClient.addTag("archived", to: .thread(threadID), on: database)
 ```
 
-Reads follow the same pattern. ``KeepTalkingClient/mappings(for:includeDeleted:)``
+Reads follow the same pattern.
+``KeepTalkingClient/mappings(for:scopeContextID:includeDeleted:)``
 returns every live mapping for a target sorted by value,
-``KeepTalkingClient/alias(for:)`` returns just the alias string, and
+``KeepTalkingClient/alias(for:scopeContextID:)`` returns just the alias string, and
 ``KeepTalkingClient/tags(for:namespace:)`` returns the tags in one namespace.
 
 ### Rendering names efficiently
@@ -360,6 +372,16 @@ name joined to the name of the node that ran the agent. The resulting
 UI can show a primary label, an optional secondary identifier, or a combined string,
 and can tell from ``KeepTalkingAliasResolution/isFallback`` whether it is showing a
 real alias or a stand-in.
+
+The lookup buckets context-scoped aliases separately, so one snapshot serves
+every scope. Renderers pinned to a single context call
+``KeepTalkingAliasLookup/scoped(to:)`` once at construction — the returned view
+overlays that context's aliases on the global map, and every downstream
+`alias`/`resolve` call is scope-correct without threading a context id through
+each signature. Code serving several contexts from one cached lookup uses the
+bucketed accessors (`alias(for:in:)`, `resolve(_:in:fallback:)`,
+`resolve(sender:in:fallback:)`) instead; both forms fall back to the global
+alias when the scope has none.
 
 ## Topics
 

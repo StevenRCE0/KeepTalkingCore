@@ -53,3 +53,22 @@ struct AddKeepTalkingMappingActionMigration: AsyncMigration {
             .update()
     }
 }
+
+struct AddKeepTalkingMappingScopeContextMigration: AsyncMigration {
+    func prepare(on database: any Database) async throws {
+        try await database.schema(KeepTalkingMapping.schema)
+            .field(
+                "scope_context",
+                .uuid,
+                .references(KeepTalkingContext.schema, "id", onDelete: .cascade)
+            )
+            .update()
+    }
+
+    func revert(on database: any Database) async throws {
+        try await database
+            .schema(KeepTalkingMapping.schema)
+            .deleteField("scope_context")
+            .update()
+    }
+}

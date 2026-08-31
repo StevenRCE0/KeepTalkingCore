@@ -379,6 +379,7 @@ extension KeepTalkingClient {
             routesByFunctionName: runtimeCatalog.routesByFunctionName
         )
         let aliasLookup = try await aliasLookup()
+            .scoped(to: try persistedContext.requireID())
         let contextTranscript = try await agentContextTranscript(
             persistedContext,
             actionStubs: runtimeCatalog.actionStubs
@@ -439,11 +440,17 @@ extension KeepTalkingClient {
             [AIMessage.system(systemPrompt)] + contextMessages + [userMessage]
 
         let assistantPublisher: AIOrchestrator.AssistantPublisher = { [self] payload in
-            let (assistantText, messageType) = payload
+            let (assistantText, messageType, speaker) = payload
+            // A named speaker is a collaborating agent talking, not this
+            // assistant — so it is not attributed to this assistant's model.
             try await send(
                 assistantText,
                 in: persistedContext,
-                sender: .autonomous(name: roleName, node: config.node, model: model),
+                sender: .autonomous(
+                    name: speaker ?? roleName,
+                    node: config.node,
+                    model: speaker == nil ? model : nil
+                ),
                 type: messageType,
                 agentTurnID: agentTurnID,
                 emitLocalEnvelope: true
@@ -475,7 +482,7 @@ extension KeepTalkingClient {
                     )
                 )
             }
-            try await assistantPublisher((name, sealedType))
+            try await assistantPublisher((name, sealedType, nil))
         }
 
         let actAgent = AIOrchestrator.ACTAgent(
@@ -498,7 +505,9 @@ extension KeepTalkingClient {
                                 actConnector: actConnector,
                                 actModel: actModel ?? activeModel,
                                 publisher: toolHintPublisher,
-                                agentTurnID: agentTurnID
+                                agentTurnID: agentTurnID,
+                                assistantPublisher: assistantPublisher,
+                                toolHintPublisher: toolHintPublisher
                             )
                         )
                     )
@@ -534,7 +543,9 @@ extension KeepTalkingClient {
                         promptMessageID: promptMessageID,
                         context: persistedContext,
                         agentTurnID: agentTurnID,
-                        agentIntention: prompt
+                        agentIntention: prompt,
+                        assistantPublisher: assistantPublisher,
+                        toolHintPublisher: toolHintPublisher
                     )
                 },
                 toolTranscriptAdapter: { [self] executions in

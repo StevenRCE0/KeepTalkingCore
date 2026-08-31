@@ -170,7 +170,9 @@ extension KeepTalkingClient {
         actConnector: any AIConnector,
         actModel: String,
         publisher: AIOrchestrator.ToolHintPublisher,
-        agentTurnID: UUID? = nil
+        agentTurnID: UUID? = nil,
+        assistantPublisher: AIOrchestrator.AssistantPublisher? = nil,
+        toolHintPublisher: AIOrchestrator.ToolHintPublisher? = nil
     ) async throws -> [AIMessage] {
         let args = try decodeToolArguments(rawArguments)
 
@@ -375,7 +377,9 @@ extension KeepTalkingClient {
             agentTurnID: agentTurnID,
             inputHandles: inputHandles.isEmpty ? nil : inputHandles,
             resolvedInputHandles: resolvedInputHandles,
-            outputHandles: outputHandles
+            outputHandles: outputHandles,
+            assistantPublisher: assistantPublisher,
+            toolHintPublisher: toolHintPublisher
         )
     }
 
@@ -394,7 +398,9 @@ extension KeepTalkingClient {
         agentTurnID: UUID? = nil,
         inputHandles: [UUID]? = nil,
         resolvedInputHandles: [(kind: KTResourceManifest.Kind?, id: UUID)] = [],
-        outputHandles: [KeepTalkingActionOutputHandle]? = nil
+        outputHandles: [KeepTalkingActionOutputHandle]? = nil,
+        assistantPublisher: AIOrchestrator.AssistantPublisher? = nil,
+        toolHintPublisher: AIOrchestrator.ToolHintPublisher? = nil
     ) async throws -> [AIMessage] {
         let resolvedAction = try await resolvedACTAction(
             actionID: actionID,
@@ -533,7 +539,9 @@ extension KeepTalkingClient {
                 agentTurnID: agentTurnID,
                 agentIntention: task,
                 inputHandles: inputHandles,
-                outputHandles: outputHandles
+                outputHandles: outputHandles,
+                assistantPublisher: assistantPublisher,
+                toolHintPublisher: toolHintPublisher
             )
             actLog(
                 "action-result action=\(actionID.uuidString.lowercased()) calls=\(turn.toolCalls.map(\.name).joined(separator: ",")) payload=\(actExecutionPreview(executions, source: stub.kind))"

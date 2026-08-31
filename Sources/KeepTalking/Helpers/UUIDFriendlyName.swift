@@ -204,9 +204,14 @@ public enum UUIDFriendlyName {
     }
 
     /// The list word within one edit of `candidate`, when exactly one qualifies.
-    /// Every list word is ≥2 edits from every other, so a single typo always
-    /// lands here — and a two-edit mangling correctly returns nil rather than
-    /// sending the caller to a different object.
+    ///
+    /// Every list word is ≥2 edits from every other. That is enough to DETECT any
+    /// single typo, but not always to correct one: a mangled word can sit one edit
+    /// from two list words that are themselves two apart (correcting every single
+    /// edit would need a minimum distance of 3). Measured on the current lists,
+    /// ~0.4% of single substitutions tie like that. A tie returns nil — refusing,
+    /// rather than sending the caller to a different object — as does a
+    /// two-edit mangling.
     static func nearestWord(to candidate: String, in list: [String]) -> String? {
         if list.contains(candidate) { return candidate }
         var found: String?

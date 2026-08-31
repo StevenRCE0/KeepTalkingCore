@@ -17,11 +17,13 @@ extension KeepTalkingClient {
 
     public static func mappings(
         for target: KeepTalkingMappingTarget,
+        scopeContextID: UUID? = nil,
         includeDeleted: Bool = false,
         on database: any Database
     ) async throws -> [KeepTalkingMapping] {
         try await queryMappings(
             for: target,
+            scopeContextID: scopeContextID,
             includeDeleted: includeDeleted,
             on: database
         )
@@ -31,10 +33,12 @@ extension KeepTalkingClient {
 
     public func mappings(
         for target: KeepTalkingMappingTarget,
+        scopeContextID: UUID? = nil,
         includeDeleted: Bool = false
     ) async throws -> [KeepTalkingMapping] {
         try await Self.mappings(
             for: target,
+            scopeContextID: scopeContextID,
             includeDeleted: includeDeleted,
             on: localStore.database
         )
@@ -42,16 +46,28 @@ extension KeepTalkingClient {
 
     public static func alias(
         for target: KeepTalkingMappingTarget,
+        scopeContextID: UUID? = nil,
         on database: any Database
     ) async throws -> String? {
-        try await queryMappings(for: target, on: database)
-            .filter(\.$kind, .equal, .alias)
-            .first()?
-            .value
+        try await queryMappings(
+            for: target,
+            scopeContextID: scopeContextID,
+            on: database
+        )
+        .filter(\.$kind, .equal, .alias)
+        .first()?
+        .value
     }
 
-    public func alias(for target: KeepTalkingMappingTarget) async throws -> String? {
-        try await Self.alias(for: target, on: localStore.database)
+    public func alias(
+        for target: KeepTalkingMappingTarget,
+        scopeContextID: UUID? = nil
+    ) async throws -> String? {
+        try await Self.alias(
+            for: target,
+            scopeContextID: scopeContextID,
+            on: localStore.database
+        )
     }
 
     public static func tags(
@@ -83,12 +99,18 @@ extension KeepTalkingClient {
     public static func setAlias(
         _ alias: String?,
         for target: KeepTalkingMappingTarget,
+        scopeContextID: UUID? = nil,
         on database: any Database
     ) async throws {
         let value = KeepTalkingMapping.normalizeStoredValue(alias ?? "")
-        let existing = try await queryMappings(for: target, includeDeleted: true, on: database)
-            .filter(\.$kind, .equal, .alias)
-            .all()
+        let existing = try await queryMappings(
+            for: target,
+            scopeContextID: scopeContextID,
+            includeDeleted: true,
+            on: database
+        )
+        .filter(\.$kind, .equal, .alias)
+        .all()
 
         if value.isEmpty {
             try await softDeleteMappings(
@@ -101,6 +123,7 @@ extension KeepTalkingClient {
             existing.first
             ?? KeepTalkingMapping(
                 target: target,
+                scopeContext: scopeContextID,
                 kind: .alias,
                 value: value
             )
@@ -115,11 +138,13 @@ extension KeepTalkingClient {
 
     public func setAlias(
         _ alias: String?,
-        for target: KeepTalkingMappingTarget
+        for target: KeepTalkingMappingTarget,
+        scopeContextID: UUID? = nil
     ) async throws {
         try await Self.setAlias(
             alias,
             for: target,
+            scopeContextID: scopeContextID,
             on: localStore.database
         )
     }
@@ -261,12 +286,18 @@ extension KeepTalkingClient {
         )
     }
 
+    /// `scopeContextID` partitions every read and write: nil addresses only
+    /// global rows (`scope_context IS NULL`), a context id only that context's
+    /// rows — so global and scoped mappings never collide in upserts or
+    /// soft-deletes.
     private static func queryMappings(
         for target: KeepTalkingMappingTarget,
+        scopeContextID: UUID? = nil,
         includeDeleted: Bool = false,
         on database: any Database
     ) -> QueryBuilder<KeepTalkingMapping> {
         let query = KeepTalkingMapping.query(on: database)
+            .filter(\.$scopeContext.$id == scopeContextID)
         let scopedQuery =
             switch target {
                 case .node(let node):

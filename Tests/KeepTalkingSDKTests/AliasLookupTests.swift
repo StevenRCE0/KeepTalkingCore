@@ -74,4 +74,49 @@ struct AliasLookupTests {
                 == "Scheduler"
         )
     }
+
+    @Test("scoped aliases bucket separately and overlay via scoped(to:)")
+    func scopedLookup() {
+        let nodeID = UUID(uuidString: "158010DE-FAF8-4B04-842D-0D0CD022AAB6")!
+        let scopeID = UUID(uuidString: "C115CD0F-6739-4ECC-8F35-C45ADBDCBD42")!
+        let otherScopeID = UUID(uuidString: "0B27B7A2-6E5B-4B47-9BA0-6C2D66A2D9E1")!
+        let mappings = [
+            KeepTalkingMapping(
+                target: .node(nodeID),
+                kind: .alias,
+                value: "Global"
+            ),
+            KeepTalkingMapping(
+                target: .node(nodeID),
+                scopeContext: scopeID,
+                kind: .alias,
+                value: " Reviewer "
+            ),
+        ]
+
+        let lookup = KeepTalkingAliasLookup(mappings: mappings)
+
+        // Scoped rows never leak into the global map.
+        #expect(lookup.alias(for: .node(nodeID)) == "Global")
+
+        // Bucketed accessor: scoped-first, global fallback.
+        #expect(lookup.alias(for: .node(nodeID), in: scopeID) == "Reviewer")
+        #expect(lookup.alias(for: .node(nodeID), in: otherScopeID) == "Global")
+        #expect(lookup.alias(for: .node(nodeID), in: nil) == "Global")
+
+        // Merged view: plain accessors resolve as seen from the scope.
+        let scoped = lookup.scoped(to: scopeID)
+        #expect(scoped.alias(for: .node(nodeID)) == "Reviewer")
+        #expect(scoped.resolve(sender: .node(node: nodeID)).primary() == "Reviewer")
+        #expect(lookup.scoped(to: nil).alias(for: .node(nodeID)) == "Global")
+        #expect(lookup.scoped(to: otherScopeID).alias(for: .node(nodeID)) == "Global")
+
+        // Autonomous sender composition picks up the scoped node name.
+        #expect(
+            lookup.resolve(
+                sender: .autonomous(name: "Scheduler", node: nodeID),
+                in: scopeID
+            ).primary() == "Scheduler · Reviewer"
+        )
+    }
 }

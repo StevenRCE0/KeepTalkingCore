@@ -246,11 +246,15 @@ public actor ACPManager {
     /// - Parameter callerIsRemote: when `true` and the bundle defines a
     ///   `remoteSystemPrompt`, that text is injected ahead of the prompt as the
     ///   owner's manual limitation on remote use. Local/owner calls are unconstrained.
+    /// - Parameter onUpdate: receives the collaborating agent's mid-turn feedback
+    ///   (reasoning, plan, tool calls) as it streams in, so a turn that runs for
+    ///   minutes is not silent until it finishes. Nil skips the rendering work.
     public func callAction(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
         scope: KeepTalkingActionScope,
-        callerIsRemote: Bool
+        callerIsRemote: Bool,
+        onUpdate: (@Sendable (KeepTalkingACPUpdate) async -> Void)? = nil
     ) async throws -> (content: [Tool.Content], isError: Bool?) {
         guard case .acp(let bundle) = action.payload else {
             throw ACPManagerError.invalidAction
@@ -318,7 +322,8 @@ public actor ACPManager {
             transport: launched.transport,
             scope: scope,
             roots: roots,
-            onLog: log
+            onLog: log,
+            onUpdate: onUpdate
         )
 
         func teardown() async {
@@ -349,11 +354,20 @@ public actor ACPManager {
                 throw ACPManagerError.protocolVersionUnsupported(
                     agent: handshake.protocolVersion, client: Self.protocolVersion)
             }
-            let sessionID = try await openSession(
+            let opened = try await openSession(
                 session: session,
                 cwd: bundle.cwd.path,
                 actionID: action.id,
                 authMethods: handshake.authMethods,
+                actionLabel: actionLabel,
+                log: log
+            )
+            let sessionID = opened.id
+            await applyConfigOptions(
+                bundle.configOptions ?? [:],
+                advertised: opened.configOptions,
+                session: session,
+                sessionID: sessionID,
                 actionLabel: actionLabel,
                 log: log
             )
@@ -391,6 +405,9 @@ public actor ACPManager {
                 try await session.prompt(
                     sessionID: sessionID, text: prompt, systemPreamble: systemPreamble)
             }
+            // Reasoning that arrived after the last tool call would otherwise die
+            // in the buffer when the session tears down.
+            await session.flushThought()
             let text = await session.collectedText()
             await teardown()
             log?("[acp] action=\(actionLabel) completed (\(text.count) chars)")
@@ -439,21 +456,24 @@ public actor ACPManager {
 
     /// Spawns the agent, completes the `initialize` handshake, and tears it back
     /// down — the "does this command actually speak ACP?" check the add/edit form
-    /// runs when the owner clicks Done. Returns the auth methods the agent
-    /// advertised.
+    /// runs when the owner clicks Done.
     ///
-    /// Deliberately stops before `session/new`. Opening a session is where
-    /// authentication is negotiated, and that belongs to a real call against a
-    /// saved action: the method that worked is remembered per action ID, which a
-    /// not-yet-saved action does not have. What the handshake *does* catch is
-    /// everything worth catching early — a command that does not exist, a binary
-    /// that is not an ACP agent, a protocol version KeepTalking cannot drive —
-    /// each reported with the agent's own stderr rather than surfacing at the
-    /// first real call.
+    /// The handshake is the part that must succeed: it catches a command that
+    /// does not exist, a binary that is not an ACP agent, and a protocol version
+    /// KeepTalking cannot drive, each reported with the agent's own stderr rather
+    /// than surfacing at the first real call.
+    ///
+    /// Opening a session is then attempted OPPORTUNISTICALLY, only to read back
+    /// the settings the agent exposes (model, effort, …) so the form can offer
+    /// the agent's real choices instead of a blind text field — `configOptions`
+    /// arrive with `session/new` and nowhere earlier. That step is allowed to
+    /// fail: a not-yet-saved action has no ID to remember an auth method under,
+    /// so an agent that demands authentication still passes preflight and simply
+    /// reports no options.
     public func preflightInitialize(
         bundle: KeepTalkingACPBundle,
         scope: KeepTalkingActionScope = .all
-    ) async throws -> [KeepTalkingACPAuthMethod] {
+    ) async throws -> KeepTalkingACPAgentProbe {
         guard !bundle.command.isEmpty else {
             throw ACPManagerError.emptyCommand
         }
@@ -505,14 +525,27 @@ public actor ACPManager {
             }
             throw error
         }
-        // Tear down before judging the version: the guard throws, and an agent
-        // left running behind a failed preflight would leak a process per click.
-        await teardown()
         guard handshake.protocolVersion == Self.protocolVersion else {
+            await teardown()
             throw ACPManagerError.protocolVersionUnsupported(
                 agent: handshake.protocolVersion, client: Self.protocolVersion)
         }
-        return handshake.authMethods
+        // Best-effort: an agent that refuses a session (auth, a bad cwd) still
+        // passed the handshake, which is what preflight promises.
+        let configOptions: [KeepTalkingACPConfigOption]
+        do {
+            configOptions = try await withTimeout(
+                handshakeTimeoutSeconds, label: "session/new (probe)"
+            ) {
+                try await session.newSession(cwd: bundle.cwd.path)
+            }.configOptions
+        } catch {
+            onLog?("[acp] preflight could not read agent settings: \(error.localizedDescription)")
+            configOptions = []
+        }
+        await teardown()
+        return KeepTalkingACPAgentProbe(
+            authMethods: handshake.authMethods, configOptions: configOptions)
     }
 
     /// Reads the keychain-held secret environment for an action, if any.
@@ -538,7 +571,7 @@ public actor ACPManager {
         authMethods: [KeepTalkingACPAuthMethod],
         actionLabel: String,
         log: (@Sendable (String) -> Void)?
-    ) async throws -> String {
+    ) async throws -> ACPOpenedSession {
         do {
             return try await withTimeout(handshakeTimeoutSeconds, label: "session/new") {
                 try await session.newSession(cwd: cwd)
@@ -570,6 +603,61 @@ public actor ACPManager {
                 handshakeTimeoutSeconds, label: "session/new (post-authenticate)"
             ) {
                 try await session.newSession(cwd: cwd)
+            }
+        }
+    }
+
+    /// Applies the owner's saved agent settings (model, effort, …) to a freshly
+    /// opened session, before the prompt turn.
+    ///
+    /// Never fatal. A model list can change under a stale setting between agent
+    /// releases, and an action that worked yesterday should not start failing
+    /// because a value was renamed — the turn falls back to the agent's own
+    /// default and the mismatch is logged. Settings are applied in the order the
+    /// agent listed them, so an agent that ranks `model` ahead of `effort`
+    /// (effort choices depend on the model) gets them in a coherent order.
+    private func applyConfigOptions(
+        _ desired: [String: String],
+        advertised: [KeepTalkingACPConfigOption],
+        session: ACPSession,
+        sessionID: String,
+        actionLabel: String,
+        log: (@Sendable (String) -> Void)?
+    ) async {
+        guard !desired.isEmpty else { return }
+        var current = advertised
+        // Agent order first, then anything the agent did not advertise (so it is
+        // still attempted once — and logged when refused).
+        let advertisedIDs = advertised.map(\.id)
+        let ordered =
+            advertisedIDs.filter { desired[$0] != nil }
+            + desired.keys.filter { !advertisedIDs.contains($0) }.sorted()
+
+        for configID in ordered {
+            guard let value = desired[configID] else { continue }
+            if let option = current.first(where: { $0.id == configID }) {
+                if option.currentValue == value { continue }
+                if !option.choices.isEmpty,
+                    !option.choices.contains(where: { $0.value == value })
+                {
+                    log?(
+                        "[acp] action=\(actionLabel) config \(configID)=\(value) is not offered by this agent — using its default"
+                    )
+                    continue
+                }
+            }
+            do {
+                current = try await withTimeout(
+                    handshakeTimeoutSeconds, label: "session/set_config_option \(configID)"
+                ) {
+                    try await session.setConfigOption(
+                        sessionID: sessionID, configID: configID, value: value)
+                }
+                log?("[acp] action=\(actionLabel) config \(configID)=\(value)")
+            } catch {
+                log?(
+                    "[acp] action=\(actionLabel) config \(configID)=\(value) rejected: \(error.localizedDescription) — using the agent's default"
+                )
             }
         }
     }
@@ -655,11 +743,27 @@ private struct ACPHandshake: Sendable {
     let authMethods: [KeepTalkingACPAuthMethod]
 }
 
+/// What `session/new` handed back: the session id plus the settings the agent
+/// exposes for it (model, effort, …). The options were previously dropped on
+/// the floor along with the rest of the result.
+private struct ACPOpenedSession: Sendable {
+    let id: String
+    let configOptions: [KeepTalkingACPConfigOption]
+}
+
 /// A minimal JSON-RPC 2.0 peer over an ACP stdio transport. Hand-rolled (not the
 /// MCP `Client`, whose methods are MCP-specific) because ACP is bidirectional and
 /// uses its own `session/*`, `fs/*` methods. Messages are newline-framed by the
 /// underlying `MCPPipeTransport`.
 private actor ACPSession {
+    /// Where mid-turn agent feedback goes. Nil means nobody is listening, and
+    /// the rendering work is skipped entirely.
+    private let onUpdate: (@Sendable (KeepTalkingACPUpdate) async -> Void)?
+    /// Reasoning accumulates here between flushes — see `flushThought`.
+    private var thoughtBuffer = ""
+    /// Human-readable tool labels by call id, so a failure reads the same name
+    /// the call did. Kept apart from `toolKindByID`, which the scope gate reads.
+    private var toolLabelByID: [String: String] = [:]
     private let transport: any Transport
     private let scope: KeepTalkingActionScope
     /// Symlink-resolved absolute root paths fs operations are contained to.
@@ -681,12 +785,14 @@ private actor ACPSession {
         transport: any Transport,
         scope: KeepTalkingActionScope,
         roots: [String],
-        onLog: (@Sendable (String) -> Void)?
+        onLog: (@Sendable (String) -> Void)?,
+        onUpdate: (@Sendable (KeepTalkingACPUpdate) async -> Void)? = nil
     ) {
         self.transport = transport
         self.scope = scope
         self.roots = roots
         self.onLog = onLog
+        self.onUpdate = onUpdate
     }
 
     func start() async throws {
@@ -758,7 +864,7 @@ private actor ACPSession {
         _ = try await request(method: "authenticate", params: ["methodId": methodID])
     }
 
-    func newSession(cwd: String) async throws -> String {
+    func newSession(cwd: String) async throws -> ACPOpenedSession {
         let result = try await request(
             method: "session/new",
             params: ["cwd": cwd, "mcpServers": [Any]()]
@@ -767,7 +873,24 @@ private actor ACPSession {
             throw ACPManagerError.sessionFailed("session/new returned no sessionId")
         }
         sessionID = id
-        return id
+        return ACPOpenedSession(
+            id: id, configOptions: Self.parseConfigOptions(result["configOptions"]))
+    }
+
+    /// Changes one agent setting. The agent answers with the COMPLETE option list
+    /// and its current values, which is what gets returned here.
+    func setConfigOption(
+        sessionID: String, configID: String, value: String
+    ) async throws -> [KeepTalkingACPConfigOption] {
+        let result = try await request(
+            method: "session/set_config_option",
+            params: ["sessionId": sessionID, "configId": configID, "value": value]
+        )
+        return Self.parseConfigOptions(result["configOptions"])
+    }
+
+    static func parseConfigOptions(_ raw: Any?) -> [KeepTalkingACPConfigOption] {
+        (raw as? [[String: Any]] ?? []).compactMap(KeepTalkingACPConfigOption.init(json:))
     }
 
     func prompt(sessionID: String, text: String, systemPreamble: String?) async throws {
@@ -845,7 +968,7 @@ private actor ACPSession {
             return
         }
         if let method {
-            handleNotification(method: method, message: message)
+            await handleNotification(method: method, message: message)
             return
         }
         if hasID, let intID = (message["id"] as? NSNumber)?.intValue ?? (message["id"] as? Int) {
@@ -909,7 +1032,7 @@ private actor ACPSession {
         }
     }
 
-    private func handleNotification(method: String, message: [String: Any]) {
+    private func handleNotification(method: String, message: [String: Any]) async {
         guard method == "session/update",
             let params = message["params"] as? [String: Any],
             let update = params["update"] as? [String: Any],
@@ -918,20 +1041,162 @@ private actor ACPSession {
 
         switch kind {
             case "agent_message_chunk":
+                // Already the turn's result; not re-published as feedback, or the
+                // final answer would arrive twice.
                 if let content = update["content"] as? [String: Any],
                     let text = content["text"] as? String
                 {
                     agentText += text
                 }
-            case "tool_call":
-                if let toolCallID = update["toolCallId"] as? String,
-                    let toolKind = update["kind"] as? String
+            case "agent_thought_chunk":
+                // Streamed a token at a time. Buffered rather than published per
+                // chunk — one context row (and one broadcast envelope) per token
+                // would be unusable.
+                if let content = update["content"] as? [String: Any],
+                    let text = content["text"] as? String
                 {
-                    toolKindByID[toolCallID] = toolKind
+                    thoughtBuffer += text
                 }
+            case "plan":
+                await flushThought()
+                if let rendered = Self.renderPlan(update["entries"]) {
+                    await emit(.init(kind: .plan, text: rendered))
+                }
+            case "tool_call":
+                await flushThought()
+                if let toolCallID = update["toolCallId"] as? String {
+                    // The KIND drives the permission auto-policy and must stay the
+                    // agent's own vocabulary; the LABEL is what a human reads, so a
+                    // later failure names the tool the way its call did.
+                    if let toolKind = update["kind"] as? String {
+                        toolKindByID[toolCallID] = toolKind
+                    }
+                    toolLabelByID[toolCallID] = Self.toolLabel(update)
+                }
+                await emit(
+                    .init(
+                        kind: .toolCall,
+                        text: Self.toolLabel(update),
+                        parameters: Self.toolParameters(update)))
+            case "tool_call_update":
+                // Only failures are worth interrupting for; `in_progress` and
+                // `completed` chatter would bury the signal.
+                guard (update["status"] as? String) == "failed" else { break }
+                await flushThought()
+                let toolCallID = update["toolCallId"] as? String
+                let label =
+                    toolCallID.flatMap { toolLabelByID[$0] }
+                    ?? toolCallID.flatMap { toolKindByID[$0] }
+                    ?? "tool"
+                let detail = Self.renderContentBlocks(update["content"])
+                await emit(
+                    .init(
+                        kind: .toolFailure,
+                        text: "\(label) failed",
+                        parameters: detail.isEmpty ? [:] : ["error": detail]))
             default:
                 break
         }
+    }
+
+    /// Publishes whatever reasoning has accumulated and clears the buffer.
+    /// Called before any other kind of update (so ordering is preserved) and at
+    /// the end of the turn.
+    func flushThought() async {
+        let text = thoughtBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        thoughtBuffer = ""
+        guard !text.isEmpty else { return }
+        await emit(.init(kind: .thought, text: text))
+    }
+
+    private func emit(_ update: KeepTalkingACPUpdate) async {
+        guard let onUpdate else { return }
+        await onUpdate(update)
+    }
+
+    /// Renders a `plan` entry list as a checklist.
+    static func renderPlan(_ raw: Any?) -> String? {
+        guard let entries = raw as? [[String: Any]], !entries.isEmpty else { return nil }
+        let lines = entries.compactMap { entry -> String? in
+            guard let content = entry["content"] as? String, !content.isEmpty else { return nil }
+            let box: String
+            switch entry["status"] as? String {
+                case "completed": box = "[x]"
+                case "in_progress": box = "[~]"
+                default: box = "[ ]"
+            }
+            return "\(box) \(content)"
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    /// The tool's human-readable label — "Terminal", "Edit", "Read".
+    static func toolLabel(_ update: [String: Any]) -> String {
+        let title = (update["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kind = (update["kind"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let title, !title.isEmpty { return title }
+        if let kind, !kind.isEmpty { return kind }
+        return "tool call"
+    }
+
+    /// What the tool is acting ON, flattened for the sealed parameter bag: the
+    /// agent's `rawInput` (the command, the file path) plus any paths it declared.
+    ///
+    /// Without this a shell call is just "Terminal" twenty times over — the label
+    /// alone identifies nothing. It does NOT go into the message text: these are
+    /// the caller's and executor's business, and `.intermediate` seals them to
+    /// those two ends while the label stays legible to the whole context.
+    static func toolParameters(_ update: [String: Any]) -> [String: String] {
+        var parameters: [String: String] = [:]
+        if let input = update["rawInput"] as? [String: Any] {
+            for (key, value) in input {
+                guard let rendered = flattenParameter(value) else { continue }
+                parameters[key] = rendered
+            }
+        }
+        let locations = (update["locations"] as? [[String: Any]] ?? [])
+            .compactMap { $0["path"] as? String }
+        if !locations.isEmpty, parameters["path"] == nil, parameters["file_path"] == nil {
+            parameters["path"] = locations.joined(separator: ", ")
+        }
+        return parameters
+    }
+
+    /// Renders one `rawInput` value as a bounded single-line string. Containers
+    /// are JSON-encoded rather than dropped, so a structured argument still says
+    /// something; everything is capped, since a tool input can be a whole file.
+    private static func flattenParameter(_ value: Any) -> String? {
+        let rendered: String
+        switch value {
+            case let text as String:
+                rendered = text
+            case let number as NSNumber:
+                rendered = number.stringValue
+            default:
+                guard JSONSerialization.isValidJSONObject([value]),
+                    let data = try? JSONSerialization.data(withJSONObject: [value]),
+                    let text = String(data: data, encoding: .utf8)
+                else { return nil }
+                rendered = String(text.dropFirst().dropLast())
+        }
+        let flat = rendered.split(whereSeparator: \.isNewline)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        guard !flat.isEmpty else { return nil }
+        return flat.count <= 400 ? flat : String(flat.prefix(399)) + "\u{2026}"
+    }
+
+    /// Flattens ACP content blocks to their text, for failure detail.
+    static func renderContentBlocks(_ raw: Any?) -> String {
+        guard let blocks = raw as? [[String: Any]] else { return "" }
+        return
+            blocks
+            .compactMap { block in
+                (block["content"] as? [String: Any])?["text"] as? String
+                    ?? block["text"] as? String
+            }
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: Incoming agent→client requests

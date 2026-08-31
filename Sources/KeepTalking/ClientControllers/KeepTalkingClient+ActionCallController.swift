@@ -109,7 +109,9 @@ extension KeepTalkingClient {
         context: KeepTalkingContext?,
         onAcknowledgement:
             (@Sendable (KeepTalkingRequestAckState, String?) async -> Void)? =
-            nil
+            nil,
+        assistantPublisher: AIOrchestrator.AssistantPublisher? = nil,
+        toolHintPublisher: AIOrchestrator.ToolHintPublisher? = nil
     ) async -> KeepTalkingActionCallResult {
         #if os(macOS)
         // Built-in file-staging preflight: handled before normal action
@@ -136,7 +138,9 @@ extension KeepTalkingClient {
             await performActionCallRequest(
                 request,
                 context: context,
-                onAcknowledgement: onAcknowledgement
+                onAcknowledgement: onAcknowledgement,
+                assistantPublisher: assistantPublisher,
+                toolHintPublisher: toolHintPublisher
             )
         }
     }
@@ -145,7 +149,9 @@ extension KeepTalkingClient {
         _ request: KeepTalkingActionCallRequest,
         context: KeepTalkingContext?,
         onAcknowledgement:
-            (@Sendable (KeepTalkingRequestAckState, String?) async -> Void)?
+            (@Sendable (KeepTalkingRequestAckState, String?) async -> Void)?,
+        assistantPublisher: AIOrchestrator.AssistantPublisher?,
+        toolHintPublisher: AIOrchestrator.ToolHintPublisher?
     ) async -> KeepTalkingActionCallResult {
         let action: KeepTalkingAction
         let grant: KeepTalkingActionScope
@@ -382,11 +388,55 @@ extension KeepTalkingClient {
                     // The agent runs unsandboxed by design; the scope drives only
                     // advisory containment (advertised fs caps, KT-served fs path
                     // containment, permission auto-policy) inside ACPManager.
+                    //
+                    // Mid-turn feedback is published under the collaborating
+                    // agent's OWN identity, as ordinary messages. It is not
+                    // `.thinking`: that type means "the reasoning behind this
+                    // assistant's answer" and is dropped from agent-to-agent
+                    // context replay — which is exactly the wrong fate for a
+                    // collaborator's plan and findings. Speaking as itself, the
+                    // agent is simply another participant in the conversation.
+                    // The sinks are the orchestrator's own publishers, which know
+                    // the turn and context these belong to. A call with neither (a
+                    // peer invoking this action directly, a CLI run) simply runs
+                    // without narration rather than narrating into a turn it is
+                    // not part of.
+                    //
+                    // The split is by what the update IS. A thought or a plan is
+                    // the agent talking, so it speaks as itself. A tool call is a
+                    // tool-invocation hint — the same thing `.intermediate` exists
+                    // for — so it folds under this action's row and its arguments
+                    // are SEALED to the two ends of the call instead of broadcast
+                    // as message text to everyone in the context.
+                    let agentName = action.actionLabel
+                    let acpActionID = action.id
+                    var onACPUpdate: (@Sendable (KeepTalkingACPUpdate) async -> Void)?
+                    if assistantPublisher != nil || toolHintPublisher != nil {
+                        onACPUpdate = { update in
+                            switch update.kind {
+                                case .toolCall, .toolFailure:
+                                    try? await toolHintPublisher?(
+                                        agentName,
+                                        .intermediate(
+                                            hint: update.text,
+                                            targetNodeID: nil,
+                                            actionID: acpActionID,
+                                            actionName: agentName
+                                        ),
+                                        update.parameters.isEmpty ? nil : update.parameters
+                                    )
+                                case .thought, .plan:
+                                    try? await assistantPublisher?(
+                                        (update.text, .message, agentName))
+                            }
+                        }
+                    }
                     callResult = try await acpManager.callAction(
                         action: action,
                         call: request.call,
                         scope: grant,
-                        callerIsRemote: request.callerNodeID != config.node
+                        callerIsRemote: request.callerNodeID != config.node,
+                        onUpdate: onACPUpdate
                     )
                     #else
                     callResult = (content: [], isError: true)
@@ -810,7 +860,9 @@ extension KeepTalkingClient {
         actionOwner: UUID,
         call: KeepTalkingActionCall,
         context: KeepTalkingContext,
-        agentTurnID: UUID? = nil
+        agentTurnID: UUID? = nil,
+        assistantPublisher: AIOrchestrator.AssistantPublisher? = nil,
+        toolHintPublisher: AIOrchestrator.ToolHintPublisher? = nil
     ) async throws -> KeepTalkingActionCallResult {
         // TODO: This is a bug
         let deliveryNodeID = try await deliveryNodeID(
@@ -830,7 +882,12 @@ extension KeepTalkingClient {
             onLog?(
                 "[action-call/request] executing locally request=\(requestID) action=\(actionID)"
             )
-            let result = await executeActionCallRequest(request, context: context)
+            let result = await executeActionCallRequest(
+                request,
+                context: context,
+                assistantPublisher: assistantPublisher,
+                toolHintPublisher: toolHintPublisher
+            )
             await runPrimitiveActionPostResultHookIfNeeded(
                 actionID: call.action,
                 call: call,

@@ -148,12 +148,29 @@ extension KeepTalkingClient {
 
 extension KeepTalkingClient {
 
-    /// Sweeps leftover OTB temp directories from prior runs (decrypted get-file
+    /// Sweeps leftover OTB temp directories from PRIOR RUNS (decrypted get-file
     /// outputs, put-file input staging, and inbound ciphertext buffers) so a
-    /// crash can't leave decrypted plaintext at rest. Safe at startup — no
-    /// transfers are in flight yet. (Within a run, the get-file output dir
-    /// outlives its dispatch call for transcript injection; this is the backstop
-    /// until run-scoped cleanup lands.)
+    /// crash can't leave decrypted plaintext at rest. (Within a run, the get-file
+    /// output dir outlives its dispatch call for transcript injection; this is
+    /// the backstop until run-scoped cleanup lands.)
+    ///
+    /// Runs exactly ONCE per process, at the first client's construction. The
+    /// sweep deletes whole shared roots — `kt-staged-files` holds every client's
+    /// staged bytes — so running it again when a later client is built wipes
+    /// files the earlier clients are still using: their store entries survive
+    /// while the bytes underneath them vanish. Only the first construction can
+    /// know that everything on disk is genuinely stale, because no client (and
+    /// so no staged file) exists before it.
+    static func pruneStaleOneTimeBlobTempDirsOnce() {
+        _ = pruneOnce
+    }
+
+    /// The once-per-process latch. A `static let` is initialized lazily and
+    /// exactly once, even under concurrent access.
+    private static let pruneOnce: Void = {
+        pruneStaleOneTimeBlobTempDirs()
+    }()
+
     static func pruneStaleOneTimeBlobTempDirs() {
         let fileManager = FileManager.default
         let tempBase = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)

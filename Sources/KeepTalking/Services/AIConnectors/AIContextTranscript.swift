@@ -67,7 +67,9 @@ extension KeepTalkingClient {
         guard let contextID = context.id else {
             return ""
         }
-        let aliasLookup = try await aliasLookup()
+        // Scoped view: this context's per-context aliases overlay the global
+        // ones for every name the transcript renders.
+        let aliasLookup = try await aliasLookup().scoped(to: contextID)
 
         let (_, threadedSegments, selectedMessages) = try await loadContextSelection(
             contextID: contextID
@@ -504,7 +506,7 @@ extension KeepTalkingClient {
         // --- Conversation-derived sections (single load) ---
         // One load feeds thread topics, participant names, and the recent tail —
         // the situational picture the model needs to answer in place.
-        let nameLookup = try? await aliasLookup()
+        let nameLookup = (try? await aliasLookup())?.scoped(to: contextID)
         if let aliasLookup = nameLookup,
             let (allMessages, threadedSegments, _) = try? await loadContextSelection(
                 contextID: contextID)

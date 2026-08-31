@@ -57,8 +57,12 @@ public struct AIOrchestrator {
     public typealias ToolExecutor = @Sendable ([ToolCall]) async throws -> [ToolExecution]
     public typealias ToolTranscriptAdapter =
         ([ToolExecution]) async throws -> [Message]
+    /// Publishes a message into the conversation. The third element names the
+    /// SPEAKER: nil is this assistant itself, a name is a collaborating agent
+    /// (an ACP sub-agent narrating its own work) speaking as itself. One
+    /// publisher for both, so the turn and context it lands in are identical.
     public typealias AssistantPublisher =
-        @Sendable ((String, KeepTalkingContextMessage.MessageType)) async throws ->
+        @Sendable ((String, KeepTalkingContextMessage.MessageType, String?)) async throws ->
         Void
 
     /// Extended publisher that also carries the agent turn ID.
@@ -199,7 +203,7 @@ public struct AIOrchestrator {
             self.toolHintPublisher =
                 toolHintPublisher
                 ?? { name, type, _ in
-                    try await assistantPublisher((name, type))
+                    try await assistantPublisher((name, type, nil))
                 }
             self.toolNameResolver = toolNameResolver
             self.toolHintResolver = toolHintResolver
@@ -271,7 +275,7 @@ public struct AIOrchestrator {
             {
                 try Task.checkCancellation()
                 try await dependencies.assistantPublisher(
-                    (thinking, .thinking)
+                    (thinking, .thinking, nil)
                 )
             }
 
@@ -295,7 +299,7 @@ public struct AIOrchestrator {
                     checkpoint.latestAssistantText = assistantText
                 }
                 try Task.checkCancellation()
-                try await dependencies.assistantPublisher((assistantText, .message))
+                try await dependencies.assistantPublisher((assistantText, .message, nil))
             }
 
             if let (name, messageType, parameters) = Self.toolHint(
