@@ -1,0 +1,92 @@
+name: Documentation
+
+# Builds the DocC catalog and publishes it to the `keeptalking-core-docs`
+# Vercel project.
+#
+# The build has to happen here rather than on Vercel: DocC compiles the target
+# to extract symbol graphs, which needs a Swift toolchain with Apple SDKs, and
+# Package.swift resolves two dependencies by relative path, so the build needs
+# AIProxySwift-MultiPlatform and KeepTalkingSFU checked out as siblings.
+
+on:
+  push:
+    branches: [main]
+    # macOS runners bill at 10x, so only rebuild when the docs could change.
+    paths:
+      - 'Sources/**'
+      - 'Package.swift'
+      - '.github/workflows/documentation.yml'
+  workflow_dispatch:
+
+# A newer push supersedes an in-flight build rather than paying for both.
+concurrency:
+  group: documentation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: macos-latest
+
+    env:
+      # Identifiers, not credentials — the token is what grants access.
+      VERCEL_ORG_ID: team_lT8WXc1m6j5eCS00sk7kpRGQ
+      VERCEL_PROJECT_ID: prj_MYBW4cRhnIPfAwcuc5knZj542a8q
+
+    steps:
+      # The three checkouts must be siblings under $GITHUB_WORKSPACE, and the
+      # two dependency directories must keep these exact names — Package.swift
+      # references them as ../AIProxySwift-MultiPlatform and ../KeepTalkingSFU.
+      - name: Check out KeepTalkingCore
+        uses: actions/checkout@v4
+        with:
+          path: KeepTalkingCore
+
+      - name: Check out AIProxySwift-MultiPlatform
+        uses: actions/checkout@v4
+        with:
+          repository: StevenRCE0/AIProxySwift-MultiPlatform
+          path: AIProxySwift-MultiPlatform
+
+      - name: Check out KeepTalkingSFU
+        uses: actions/checkout@v4
+        with:
+          repository: StevenRCE0/KeepTalkingSFU
+          path: KeepTalkingSFU
+
+      - name: Report toolchain
+        run: swift --version
+
+      # Restores the compiled dependency graph (NIO, Fluent, Crypto, …), which
+      # is the bulk of a cold build. A miss just means a slower run.
+      - name: Cache SwiftPM build
+        uses: actions/cache@v4
+        with:
+          path: KeepTalkingCore/.build
+          key: docc-${{ runner.os }}-${{ hashFiles('KeepTalkingCore/Package.swift') }}-${{ github.sha }}
+          restore-keys: |
+            docc-${{ runner.os }}-${{ hashFiles('KeepTalkingCore/Package.swift') }}-
+            docc-${{ runner.os }}-
+
+      # No --hosting-base-path: Vercel serves the site at the domain root.
+      # --allow-writing-to-directory is required whenever --output-path is used,
+      # or the plugin stops on an interactive permission prompt.
+      - name: Build documentation
+        working-directory: KeepTalkingCore
+        run: |
+          swift package \
+            --allow-writing-to-directory "$GITHUB_WORKSPACE/docs-site" \
+            generate-documentation \
+            --target KeepTalkingSDK \
+            --output-path "$GITHUB_WORKSPACE/docs-site" \
+            --transform-for-static-hosting
+
+      # --archive=tgz uploads one tarball. The site is ~14k files, and
+      # uploading them individually fails with "Upload aborted".
+      - name: Deploy to Vercel
+        working-directory: docs-site
+        run: |
+          npx --yes vercel@59 deploy \
+            --prod --yes --archive=tgz \
+            --token "$VERCEL_TOKEN"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}

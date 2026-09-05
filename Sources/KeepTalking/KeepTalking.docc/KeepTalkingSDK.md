@@ -87,3 +87,9 @@ Transport requires a reachable KeepTalkingSFU signalling server; see <doc:Transp
 - ``KeepTalkingLocalStore``
 - ``KeepTalkingModelStore``
 - ``KeepTalkingKeychainStore``
+
+### The Reference App and Deployment
+
+- <doc:KeepTalkingApp>
+- <doc:Provisioning>
+- ``KeepTalkingProvisionBundle``
