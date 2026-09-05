@@ -80,6 +80,21 @@ jobs:
             --output-path "$GITHUB_WORKSPACE/docs-site" \
             --transform-for-static-hosting
 
+      # Two fixups on the generated output, which is rebuilt from scratch each run.
+      #
+      # vercel.json: DocC only serves pages under /documentation/<module>/, so the
+      # site root answers 200 with the renderer's own "can't be found" screen.
+      # The redirects send / and /documentation to the module landing page.
+      #
+      # The LMDB navigator index feeds Xcode's documentation window, not the web
+      # renderer — which reads index/index.json instead and never requests these.
+      # Dropping them takes the upload from ~87 MB to ~81 MB.
+      - name: Prepare deploy directory
+        run: |
+          cp KeepTalkingCore/.github/vercel.json "$GITHUB_WORKSPACE/docs-site/vercel.json"
+          rm -f "$GITHUB_WORKSPACE/docs-site/index/data.mdb" \
+                "$GITHUB_WORKSPACE/docs-site/index/navigator.index"
+
       # --archive=tgz uploads one tarball. The site is ~14k files, and
       # uploading them individually fails with "Upload aborted".
       - name: Deploy to Vercel
