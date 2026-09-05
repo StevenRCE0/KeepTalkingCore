@@ -952,18 +952,23 @@ extension KeepTalkingClient {
         }
     }
 
-    private func withActionCallActivity<Result>(
+    private func withActionCallActivity(
         for request: KeepTalkingActionCallRequest,
-        operation: () async throws -> Result
-    ) async rethrows -> Result {
+        operation: () async throws -> KeepTalkingActionCallResult
+    ) async rethrows -> KeepTalkingActionCallResult {
         await onActionCallActivity?(.init(request: request, phase: .began))
         do {
             let result = try await operation()
-            await onActionCallActivity?(.init(request: request, phase: .ended))
+            await onActionCallActivity?(
+                .init(
+                    request: request,
+                    phase: .ended(result.isError ? .failure : .success)
+                )
+            )
 
             return result
         } catch {
-            await onActionCallActivity?(.init(request: request, phase: .ended))
+            await onActionCallActivity?(.init(request: request, phase: .ended(.failure)))
             throw error
         }
     }

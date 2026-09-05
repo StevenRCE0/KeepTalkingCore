@@ -1,7 +1,7 @@
 import Foundation
 
 public struct KeepTalkingKeychainKey: Hashable, Sendable {
-    public enum Kind: String, Sendable {
+    public enum Kind: String, Sendable, CaseIterable {
         case groupSecret = "group-secret"
         case nodeIdentityPriv = "node-identity-priv"
         case loginCredential = "login-credential"
@@ -47,6 +47,11 @@ public struct KeepTalkingKeychainKey: Hashable, Sendable {
 
 }
 
+/// Secret storage the SDK is handed by its host.
+///
+/// The SDK never touches a keychain directly: the app supplies a
+/// `SecItem`-backed store (the one platform-specific piece, kept out of the
+/// package), and tests use `KeepTalkingInMemoryKeychainStore`.
 public protocol KeepTalkingKeychainStore: Sendable {
     func get(_ key: KeepTalkingKeychainKey) async throws -> Data?
     func set(_ key: KeepTalkingKeychainKey, value: Data) async throws

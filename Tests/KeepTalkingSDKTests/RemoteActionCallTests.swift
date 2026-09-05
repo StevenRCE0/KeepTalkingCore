@@ -1178,7 +1178,7 @@ struct RemoteActionCallTests {
 
         #expect(storedContext?.id == contextID)
         #expect(
-            await activityRecorder.snapshot().map(\.phase) == [.began, .ended]
+            await activityRecorder.snapshot().map(\.phase.isEnded) == [false, true]
         )
     }
 }

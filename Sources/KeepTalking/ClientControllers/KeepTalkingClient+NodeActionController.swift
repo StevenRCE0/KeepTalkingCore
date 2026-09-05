@@ -930,7 +930,8 @@ extension KeepTalkingClient {
         toNodeID: UUID,
         scope: KeepTalkingActionPermissionScope,
         grantScope: KeepTalkingActionScope? = nil,
-        eligibility: KeepTalkingRelationEligibility = .trustedOnly
+        eligibility: KeepTalkingRelationEligibility = .trustedOnly,
+        lane: KeepTalkingGrantLane = .other
     ) async throws {
         let selfNode = try await ensure(
             config.node,
@@ -950,12 +951,15 @@ extension KeepTalkingClient {
                 await self.broadcastLocalNodeState(reason: $0)
             }
         )
-        let contextID: UUID? = {
-            switch scope {
-                case .all: return nil
-                case .context(let ctx): return ctx.id
-            }
-        }()
+        let contextID = scope.scopedContextID
+        await emitGrantCommits([
+            .init(
+                contextID: contextID,
+                toNodeID: toNodeID,
+                change: .actionGranted(scope: grantScope),
+                lane: lane
+            )
+        ])
         await invalidateActionToolCatalog(
             contextID: contextID,
             reason:
@@ -1020,7 +1024,8 @@ extension KeepTalkingClient {
     }
 
     public func grantActionPermission(
-        transaction: KeepTalkingGrantTransaction
+        transaction: KeepTalkingGrantTransaction,
+        lane: KeepTalkingGrantLane = .other
     ) async throws {
         let selfNode = try await ensure(
             config.node,
@@ -1034,6 +1039,21 @@ extension KeepTalkingClient {
             on: localStore.database,
             callbackForBroadcasting: {
                 await self.broadcastLocalNodeState(reason: $0)
+            }
+        )
+        await emitGrantCommits(
+            transaction.entries.map { entry in
+                let change: KeepTalkingGrantCommit.Change
+                switch entry.change {
+                    case .grant(let scope): change = .actionGranted(scope: scope)
+                    case .revoke: change = .actionRevoked
+                }
+                return KeepTalkingGrantCommit(
+                    contextID: entry.key.contextID,
+                    toNodeID: entry.key.nodeID,
+                    change: change,
+                    lane: lane
+                )
             }
         )
         for contextID in Set(transaction.entries.map(\.key.contextID)) {
@@ -1101,7 +1121,8 @@ extension KeepTalkingClient {
         contextID: UUID,
         actionID: UUID,
         toNodeID: UUID,
-        grantScope: KeepTalkingActionScope? = nil
+        grantScope: KeepTalkingActionScope? = nil,
+        lane: KeepTalkingGrantLane = .other
     ) async throws {
         let selfNode = try await ensure(
             config.node,
@@ -1120,11 +1141,27 @@ extension KeepTalkingClient {
                 await self.broadcastLocalNodeState(reason: $0)
             }
         )
+        await emitGrantCommits([
+            .init(
+                contextID: contextID,
+                toNodeID: toNodeID,
+                change: .actionGranted(scope: grantScope),
+                lane: lane
+            )
+        ])
         await invalidateActionToolCatalog(
             contextID: contextID,
             reason:
                 "stage_action_permission action=\(actionID.uuidString.lowercased()) to=\(toNodeID.uuidString.lowercased())"
         )
+    }
+
+    /// Hands a committed batch to `onGrantCommitted`. Called by every instance
+    /// mutator after its database work returned, so a throwing mutation never
+    /// reports a change that did not land.
+    func emitGrantCommits(_ commits: [KeepTalkingGrantCommit]) async {
+        guard !commits.isEmpty, let onGrantCommitted else { return }
+        await onGrantCommitted(commits)
     }
 
     /// Updates the permission on a specific grant row (identified by its primary key).
@@ -1334,7 +1371,8 @@ extension KeepTalkingClient {
         actionID: UUID,
         fromNodeID: UUID,
         context: KeepTalkingContext? = nil,
-        eligibility: KeepTalkingRelationEligibility = .trustedOnly
+        eligibility: KeepTalkingRelationEligibility = .trustedOnly,
+        lane: KeepTalkingGrantLane = .other
     ) async throws {
         let selfNode = try await ensure(
             config.node,
@@ -1353,11 +1391,22 @@ extension KeepTalkingClient {
                 await self.broadcastLocalNodeState(reason: $0)
             }
         )
+        await emitGrantCommits([
+            .init(
+                contextID: context?.id,
+                toNodeID: fromNodeID,
+                change: .actionRevoked,
+                lane: lane
+            )
+        ])
     }
 
     /// Revokes a single grant row by its primary key, leaving any other
     /// context-scoped grants for the same node intact.
-    public func revokeActionPermissionGrant(grantID: UUID) async throws {
+    public func revokeActionPermissionGrant(
+        grantID: UUID,
+        lane: KeepTalkingGrantLane = .other
+    ) async throws {
         guard
             let row = try await KeepTalkingNodeRelationActionRelation.find(
                 grantID,
@@ -1367,11 +1416,21 @@ extension KeepTalkingClient {
         let actionID = row.$action.id
         let revokedContexts = Self.contexts(of: row.approvingContext)
         let relationID = row.$relation.id
+        // The grantee is only reachable through the relation row, which the
+        // delete below leaves intact — read it first all the same.
+        let grantee = try await row.$relation.get(on: localStore.database).$to.id
         try await row.delete(on: localStore.database)
         try await Self.reconcilePendingTrustInvitations(
             forRelation: relationID,
             in: revokedContexts,
             on: localStore.database
+        )
+        await emitGrantCommits(
+            Self.revokeCommits(
+                toNodeID: grantee,
+                contexts: revokedContexts,
+                lane: lane
+            )
         )
         await broadcastLocalNodeState(
             reason: "revoke-grant grant=\(grantID.uuidString.lowercased()) action=\(actionID.uuidString.lowercased())"
@@ -1380,13 +1439,18 @@ extension KeepTalkingClient {
 
     /// Removes a single context from a `.contexts([...])` grant row.
     /// If it is the last context in the row the entire row is deleted.
-    public func revokeContextFromGrant(grantID: UUID, contextID: UUID) async throws {
+    public func revokeContextFromGrant(
+        grantID: UUID,
+        contextID: UUID,
+        lane: KeepTalkingGrantLane = .other
+    ) async throws {
         guard
             let row = try await KeepTalkingNodeRelationActionRelation.find(
                 grantID,
                 on: localStore.database
             )
         else { return }
+        let grantee = try await row.$relation.get(on: localStore.database).$to.id
 
         guard case .contexts(let contexts) = row.approvingContext else {
             // .all grant — delete the whole row, and sweep every context it
@@ -1397,6 +1461,9 @@ extension KeepTalkingClient {
                 forRelation: relationID,
                 in: nil,
                 on: localStore.database
+            )
+            await emitGrantCommits(
+                Self.revokeCommits(toNodeID: grantee, contexts: nil, lane: lane)
             )
             await broadcastLocalNodeState(
                 reason:
@@ -1417,10 +1484,35 @@ extension KeepTalkingClient {
             in: [KeepTalkingContext(id: contextID)],
             on: localStore.database
         )
+        await emitGrantCommits([
+            .init(
+                contextID: contextID,
+                toNodeID: grantee,
+                change: .actionRevoked,
+                lane: lane
+            )
+        ])
         await broadcastLocalNodeState(
             reason:
                 "revoke-context grant=\(grantID.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"
         )
+    }
+
+    /// One `actionRevoked` commit per context a deleted grant row covered, or
+    /// a single all-contexts commit when the row was unscoped.
+    private static func revokeCommits(
+        toNodeID: UUID,
+        contexts: [KeepTalkingContext]?,
+        lane: KeepTalkingGrantLane
+    ) -> [KeepTalkingGrantCommit] {
+        guard let contexts, !contexts.isEmpty else {
+            return [
+                .init(contextID: nil, toNodeID: toNodeID, change: .actionRevoked, lane: lane)
+            ]
+        }
+        return contexts.map {
+            .init(contextID: $0.id, toNodeID: toNodeID, change: .actionRevoked, lane: lane)
+        }
     }
 
     /// Contexts a grant row applied to, or `nil` for an all-contexts grant —

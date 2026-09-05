@@ -206,7 +206,8 @@ extension KeepTalkingClient {
         contextID: UUID,
         aliasID: UUID,
         toNodeID: UUID,
-        grantScope: KeepTalkingActionScope? = nil
+        grantScope: KeepTalkingActionScope? = nil,
+        lane: KeepTalkingGrantLane = .other
     ) async throws {
         let selfNode = try await ensure(
             config.node,
@@ -225,6 +226,16 @@ extension KeepTalkingClient {
                 await self.broadcastLocalNodeState(reason: $0)
             }
         )
+        await emitGrantCommits([
+            .init(
+                contextID: contextID,
+                toNodeID: toNodeID,
+                change: .aliasGranted(
+                    reachesActionCount: await aliasReachCount(aliasID: aliasID)
+                ),
+                lane: lane
+            )
+        ])
         await invalidateActionToolCatalog(
             contextID: contextID,
             reason:
@@ -237,7 +248,8 @@ extension KeepTalkingClient {
         toNodeID: UUID,
         scope: KeepTalkingActionPermissionScope,
         grantScope: KeepTalkingActionScope? = nil,
-        eligibility: KeepTalkingRelationEligibility = .trustedOnly
+        eligibility: KeepTalkingRelationEligibility = .trustedOnly,
+        lane: KeepTalkingGrantLane = .other
     ) async throws {
         let node = try await ensure(
             config.node,
@@ -256,6 +268,16 @@ extension KeepTalkingClient {
                 await self.broadcastLocalNodeState(reason: $0)
             }
         )
+        await emitGrantCommits([
+            .init(
+                contextID: scope.context?.id,
+                toNodeID: toNodeID,
+                change: .aliasGranted(
+                    reachesActionCount: await aliasReachCount(aliasID: aliasID)
+                ),
+                lane: lane
+            )
+        ])
         await invalidateActionToolCatalog(
             contextID: scope.context?.id,
             reason:
@@ -345,7 +367,8 @@ extension KeepTalkingClient {
         aliasID: UUID,
         fromNodeID: UUID,
         context: KeepTalkingContext? = nil,
-        eligibility: KeepTalkingRelationEligibility = .trustedOnly
+        eligibility: KeepTalkingRelationEligibility = .trustedOnly,
+        lane: KeepTalkingGrantLane = .other
     ) async throws {
         let node = try await ensure(
             config.node,
@@ -363,11 +386,60 @@ extension KeepTalkingClient {
                 await self.broadcastLocalNodeState(reason: $0)
             }
         )
+        await emitGrantCommits([
+            .init(
+                contextID: context?.id,
+                toNodeID: fromNodeID,
+                change: .aliasRevoked,
+                lane: lane
+            )
+        ])
         await invalidateActionToolCatalog(
             contextID: context?.id,
             reason:
                 "revoke_alias_permission alias=\(aliasID.uuidString.lowercased()) from=\(fromNodeID.uuidString.lowercased())"
         )
+    }
+
+    /// How many self-hosted actions a tag grant reaches: the live tag mappings
+    /// sharing the alias's namespace and normalized value — the same match
+    /// `aliasGrants(matching:)` uses — whose target action this node owns.
+    /// Best-effort telemetry input; a lookup failure reads as zero.
+    func aliasReachCount(aliasID: UUID) async -> Int {
+        do {
+            return try await Self.aliasReachCount(
+                aliasID: aliasID,
+                hostNodeID: config.node,
+                on: localStore.database
+            )
+        } catch {
+            return 0
+        }
+    }
+
+    static func aliasReachCount(
+        aliasID: UUID,
+        hostNodeID: UUID,
+        on database: any Database
+    ) async throws -> Int {
+        guard
+            let alias = try await KeepTalkingMapping.find(aliasID, on: database),
+            alias.kind == .tag
+        else { return 0 }
+        let actionIDs = try await KeepTalkingMapping.query(on: database)
+            .filter(\.$kind == .tag)
+            .filter(\.$normalizedValue == alias.normalizedValue)
+            .all()
+            .filter { $0.deletedAt == nil && $0.namespace == alias.namespace }
+            .compactMap { mapping -> UUID? in
+                guard case .action(let actionID)? = mapping.target else { return nil }
+                return actionID
+            }
+        guard !actionIDs.isEmpty else { return 0 }
+        return try await KeepTalkingAction.query(on: database)
+            .filter(\.$id ~~ actionIDs)
+            .filter(\.$node.$id == hostNodeID)
+            .count()
     }
 
     public static func grantedNodeIDs(

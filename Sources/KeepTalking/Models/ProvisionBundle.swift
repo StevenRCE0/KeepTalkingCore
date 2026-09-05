@@ -202,6 +202,9 @@ public nonisolated struct KeepTalkingProvisionBundle: Codable, Sendable, Identif
     public var responseLanguages: ProvisionedValue<[String]>?
     public var maxConnectedContexts: ProvisionedValue<Int>?
     public var attachmentSyncLookbackDays: ProvisionedValue<Int>?
+    /// Opt-in for anonymous usage analytics (FeedbackKit user journeys).
+    /// Mirrors the app's `SelfNode.analyticsEnabled`.
+    public var analyticsEnabled: ProvisionedValue<Bool>?
 
     public init(
         version: Int = 1,
@@ -215,7 +218,8 @@ public nonisolated struct KeepTalkingProvisionBundle: Codable, Sendable, Identif
         voiceWakeKeyword: ProvisionedValue<String>? = nil,
         responseLanguages: ProvisionedValue<[String]>? = nil,
         maxConnectedContexts: ProvisionedValue<Int>? = nil,
-        attachmentSyncLookbackDays: ProvisionedValue<Int>? = nil
+        attachmentSyncLookbackDays: ProvisionedValue<Int>? = nil,
+        analyticsEnabled: ProvisionedValue<Bool>? = nil
     ) {
         self.version = version
         self.security = security
@@ -229,6 +233,7 @@ public nonisolated struct KeepTalkingProvisionBundle: Codable, Sendable, Identif
         self.responseLanguages = responseLanguages
         self.maxConnectedContexts = maxConnectedContexts
         self.attachmentSyncLookbackDays = attachmentSyncLookbackDays
+        self.analyticsEnabled = analyticsEnabled
     }
 
     // MARK: URL encoding

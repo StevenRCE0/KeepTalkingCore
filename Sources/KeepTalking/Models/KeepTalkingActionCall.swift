@@ -106,9 +106,21 @@ public struct KeepTalkingActionCallRequest: Codable, Sendable {
 }
 
 public struct KeepTalkingActionCallActivity: Sendable, Equatable {
+    public enum Outcome: Sendable, Equatable {
+        case success
+        case failure
+    }
+
     public enum Phase: Sendable, Equatable {
         case began
-        case ended
+        /// The call finished. `.failure` covers an error result, a thrown
+        /// delivery error and a cancellation alike.
+        case ended(Outcome)
+
+        public var isEnded: Bool {
+            if case .ended = self { return true }
+            return false
+        }
     }
 
     public let requestID: UUID

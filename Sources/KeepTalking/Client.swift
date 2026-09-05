@@ -210,6 +210,11 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// relation is `.trusted`, so a grant issued from this callback rides the
     /// very next node-status broadcast.
     public var onTrustEstablished: (@Sendable (_ peerNodeID: UUID, _ contextID: UUID) -> Void)?
+    /// Fires once per committed grant mutation batch — after the database work
+    /// returns, before the node-status broadcast — with one commit per peer
+    /// whose access changed. Never fires when the mutation throws. Only the
+    /// instance mutators emit; the static variants (CLI, tests) stay silent.
+    public var onGrantCommitted: (@Sendable ([KeepTalkingGrantCommit]) async -> Void)?
     public var onContextSync: ContextSyncHandler?
     /// Fires when a context's side notes changed — locally or by merge. The
     /// app uses it to refresh the notes UI and reload the widget timeline.

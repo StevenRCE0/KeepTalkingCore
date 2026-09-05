@@ -181,7 +181,7 @@ struct ActionCallActivityTests {
         let activities = await recorder.snapshot()
 
         #expect(cancelledResult.isError)
-        #expect(activities.map(\.phase) == [.began, .ended, .began, .ended])
+        #expect(activities.map(\.phase.isEnded) == [false, true, false, true])
         #expect(Set(activities.map(\.requestID)).count == 2)
         #expect(activities.allSatisfy { $0.actionID == actionID })
     }
@@ -212,7 +212,7 @@ struct ActionCallActivityTests {
         } catch {}
 
         let activities = await recorder.snapshot()
-        #expect(activities.map(\.phase) == [.began, .ended])
+        #expect(activities.map(\.phase) == [.began, .ended(.failure)])
         #expect(activities.first?.callerNodeID == selfNodeID)
         #expect(activities.first?.targetNodeID == remoteNodeID)
     }

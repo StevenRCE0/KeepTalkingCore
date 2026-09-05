@@ -160,7 +160,7 @@ extension KeepTalkingClient {
             transaction.grant(in: contextID, actionID: realActionID, to: nodeID)
         }
         guard !transaction.isEmpty else { return }
-        try await grantActionPermission(transaction: transaction)
+        try await grantActionPermission(transaction: transaction, lane: .plan)
     }
 
     /// Records a realized action against its plan slot, grants it to every
@@ -184,7 +184,7 @@ extension KeepTalkingClient {
                 transaction.grant(in: contextID, actionID: actionID, to: nodeID)
             }
             if !transaction.isEmpty {
-                try? await grantActionPermission(transaction: transaction)
+                try? await grantActionPermission(transaction: transaction, lane: .plan)
             }
         }
         return try await finalizeWorkspacePlanRecordIfComplete(record)
