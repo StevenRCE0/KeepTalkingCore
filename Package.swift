@@ -79,6 +79,14 @@ let package = Package(
             ],
             path: "Sources/KeepTalkingCLI"
         ),
+        // Internal tooling, not a public product: regenerates
+        // Schemas/keeptalking-provision.schema.json from KeepTalkingProvisionBundle.
+        // Run with `swift run GenerateProvisionSchema`.
+        .executableTarget(
+            name: "GenerateProvisionSchema",
+            dependencies: ["KeepTalkingSDK"],
+            path: "Sources/GenerateProvisionSchema"
+        ),
         .testTarget(
             name: "KeepTalkingSDKTests",
             dependencies: [

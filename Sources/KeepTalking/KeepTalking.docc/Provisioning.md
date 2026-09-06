@@ -101,6 +101,25 @@ its own settings model and its own inputs to ``KeepTalkingConfig`` — honoring
 absence as "leave it alone" and a locked policy as "show it, but do not let it
 be edited."
 
+### A generated JSON Schema
+
+A `.ktprovision` file is plain JSON, so a schema is enough to get editor
+validation and autocomplete while hand-writing one — hosted at
+[keeptalking-provision.schema.json](https://docs.keeptalking.dev/schema/keeptalking-provision.schema.json).
+It is not hand-maintained: `GenerateProvisionSchema`, an internal executable
+target in this package, builds one fully-populated ``KeepTalkingProvisionBundle``
+and walks it with `Mirror` to recover each field's shape and — because a
+property's static optionality survives being boxed into `Any` — whether it is
+required, which mirrors exactly what the synthesized decoder itself requires.
+Nothing about it is checked into this repo: the docs-deploy workflow runs the
+generator fresh on every deploy and writes the result straight into the site
+being published, so the hosted copy can never drift from the bundle — there
+is no separate "generate, then remember to commit" step to fall out of sync
+with. Referencing it from an instance document —
+`"$schema": "https://docs.keeptalking.dev/schema/keeptalking-provision.schema.json"`
+— is harmless even though the bundle never declares that field, since the
+decoder ignores unknown keys at every level.
+
 ## How KeepTalkingApp implements the full loop
 
 KeepTalkingApp — see <doc:KeepTalkingApp> — is where this contract becomes a

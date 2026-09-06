@@ -148,7 +148,7 @@ public nonisolated struct ProvisionedWebSearch: Codable, Sendable {
 
 // MARK: - Security
 
-public nonisolated enum ProvisionSecurity: String, Codable, Sendable {
+public nonisolated enum ProvisionSecurity: String, Codable, Sendable, CaseIterable {
     /// Plain JSON — API keys stored in clear text. Treat the file as a secret.
     case none = "none"
     /// Future: payload encrypted, decryption requires SFU/PassKV authentication.

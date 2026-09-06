@@ -15,6 +15,7 @@ on:
     paths:
       - 'Sources/**'
       - 'Package.swift'
+      - '.github/vercel.json'
       - '.github/workflows/documentation.yml'
   workflow_dispatch:
 
@@ -80,7 +81,19 @@ jobs:
             --output-path "$GITHUB_WORKSPACE/docs-site" \
             --transform-for-static-hosting
 
-      # Two fixups on the generated output, which is rebuilt from scratch each run.
+      # Writes straight into the site about to be deployed — nothing about
+      # this schema is checked into the repo, so what's hosted can never
+      # drift from KeepTalkingProvisionBundle: there is no separate
+      # "generate, then remember to commit" step for it to fall out of sync
+      # with. See Sources/GenerateProvisionSchema/main.swift and
+      # <doc:Provisioning>.
+      - name: Generate provisioning schema
+        working-directory: KeepTalkingCore
+        run: |
+          swift run GenerateProvisionSchema \
+            "$GITHUB_WORKSPACE/docs-site/schema/keeptalking-provision.schema.json"
+
+      # Fixups on the generated output, which is rebuilt from scratch each run.
       #
       # vercel.json: DocC only serves pages under /documentation/<module>/, so the
       # site root answers 200 with the renderer's own "can't be found" screen.
