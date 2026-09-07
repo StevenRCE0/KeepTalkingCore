@@ -13,8 +13,8 @@ extension KeepTalkingClient {
     static let ktSkillMetainfoToolFunctionName = "kt_skill_metainfo"
     static let contextAttachmentListingToolFunctionName =
         "kt_list_context_attachments"
-    static let contextAttachmentReadToolFunctionName =
-        "kt_get_context_attachment"
+    static let resourceReadToolFunctionName =
+        "kt_get_resource"
     static let markTurningPointToolFunctionName = "kt_mark_turning_point"
     static let markChitterChatterToolFunctionName = "kt_mark_chitter_chatter"
     static let contextAttachmentUpdateMetadataToolFunctionName =
@@ -346,7 +346,7 @@ extension KeepTalkingClient {
         let webSearchTool = Self.makeWebSearchTool()
         let ktSkillMetainfoTool = makeKtSkillMetainfoTool()
         let attachmentListingTool = makeContextAttachmentListingTool()
-        let attachmentReadTool = makeContextAttachmentReadTool()
+        let attachmentReadTool = makeResourceReadTool()
         let markTurningPointTool = makeMarkTurningPointTool()
         let markChitterChatterTool = makeMarkChitterChatterTool()
         let attachmentUpdateMetadataTool =
@@ -423,7 +423,7 @@ extension KeepTalkingClient {
             ktRunActionToolFunctionName: Self.runActionToolFunctionName,
             ktSkillMetainfoToolFunctionName: Self.ktSkillMetainfoToolFunctionName,
             attachmentListingToolFunctionName: Self.contextAttachmentListingToolFunctionName,
-            attachmentReaderToolFunctionName: Self.contextAttachmentReadToolFunctionName,
+            attachmentReaderToolFunctionName: Self.resourceReadToolFunctionName,
             searchThreadsToolFunctionName: Self.searchThreadsToolFunctionName,
             markTurningPointToolFunctionName: Self.markTurningPointToolFunctionName,
             markChitterChatterToolFunctionName: Self.markChitterChatterToolFunctionName,
@@ -1290,7 +1290,7 @@ extension KeepTalkingClient {
             "[ai/tools] meta_tools=\(Self.runActionToolFunctionName),\(Self.ktSkillMetainfoToolFunctionName)"
         )
         onLog?(
-            "[ai/tools] built_ins=\(Self.contextAttachmentListingToolFunctionName),\(Self.contextAttachmentReadToolFunctionName),\(Self.contextAttachmentUpdateMetadataToolFunctionName),\(Self.searchThreadsToolFunctionName),\(Self.evaluateJSToolFunctionName),web_search_preview,\(Self.markTurningPointToolFunctionName),\(Self.markChitterChatterToolFunctionName)"
+            "[ai/tools] built_ins=\(Self.contextAttachmentListingToolFunctionName),\(Self.resourceReadToolFunctionName),\(Self.contextAttachmentUpdateMetadataToolFunctionName),\(Self.searchThreadsToolFunctionName),\(Self.evaluateJSToolFunctionName),web_search_preview,\(Self.markTurningPointToolFunctionName),\(Self.markChitterChatterToolFunctionName)"
         )
     }
 }

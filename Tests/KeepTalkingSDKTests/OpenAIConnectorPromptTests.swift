@@ -13,7 +13,7 @@ struct OpenAIConnectorPromptTests {
             attachmentListingToolFunctionName:
                 KeepTalkingClient.contextAttachmentListingToolFunctionName,
             attachmentReaderToolFunctionName:
-                KeepTalkingClient.contextAttachmentReadToolFunctionName,
+                KeepTalkingClient.resourceReadToolFunctionName,
             searchThreadsToolFunctionName:
                 KeepTalkingClient.searchThreadsToolFunctionName,
             markTurningPointToolFunctionName:
@@ -51,7 +51,7 @@ struct OpenAIConnectorPromptTests {
             attachmentListingToolFunctionName:
                 KeepTalkingClient.contextAttachmentListingToolFunctionName,
             attachmentReaderToolFunctionName:
-                KeepTalkingClient.contextAttachmentReadToolFunctionName,
+                KeepTalkingClient.resourceReadToolFunctionName,
             searchThreadsToolFunctionName:
                 KeepTalkingClient.searchThreadsToolFunctionName,
             markTurningPointToolFunctionName:
@@ -98,7 +98,7 @@ struct OpenAIConnectorPromptTests {
             attachmentListingToolFunctionName:
                 KeepTalkingClient.contextAttachmentListingToolFunctionName,
             attachmentReaderToolFunctionName:
-                KeepTalkingClient.contextAttachmentReadToolFunctionName,
+                KeepTalkingClient.resourceReadToolFunctionName,
             searchThreadsToolFunctionName:
                 KeepTalkingClient.searchThreadsToolFunctionName,
             markTurningPointToolFunctionName:

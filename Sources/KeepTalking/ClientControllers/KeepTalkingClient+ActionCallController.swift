@@ -176,6 +176,12 @@ extension KeepTalkingClient {
             )
         }
 
+        // Recency stamp. Written here — after authorization passed, before the
+        // executor runs — so a rejected call never counts as a use and a
+        // long-running one still orders as "just used". Rides node-status
+        // advertisements to every peer mirroring this action.
+        await stampActionUse(action)
+
         if let onAcknowledgement {
             await onAcknowledgement(.accepted, "Accepted by target node.")
         }
@@ -204,45 +210,27 @@ extension KeepTalkingClient {
             switch action.payload {
                 case .plugin:
                     #if os(macOS)
-                    // Same IO lifecycle as skills — stage inputs, allocate
-                    // workspace output slots, build the manifest — but the
-                    // manifest rides the KTPP call frame (resources block +
-                    // signed resourcesHash) instead of a subprocess env, and
-                    // no sandbox policy is compiled (KT never launches plugin
-                    // processes). Harvest stays the fail-closed slot scan.
+                    // Same IO lifecycle as skills, but the manifest rides the
+                    // KTPP call frame (resources block + signed resourcesHash)
+                    // instead of a subprocess env, and no sandbox policy is
+                    // compiled (KT never launches plugin processes).
                     await refreshPluginInstanceDescriptorIfStale(action)
-                    let pluginIO = KeepTalkingIOManager(client: self)
-                    let pluginRun = try await pluginIO.prepareActionRun(
-                        action: action, request: request, grant: grant)
-                    defer {
-                        pluginIO.cleanup(
-                            pluginRun, consumedInputHandles: request.call.inputHandles)
-                    }
-                    let pluginOutput = try await pluginHost.callActionDetailed(
-                        action: action,
-                        call: request.call,
-                        scope: grant,
-                        callerNodeID: request.callerNodeID,
-                        contextID: request.contextID,
-                        manifest: pluginRun.manifest
-                    )
+                    let (pluginOutput, produced) = try await KeepTalkingIOManager(client: self)
+                        .withActionRun(action: action, request: request, grant: grant) { run in
+                            try await pluginHost.callActionDetailed(
+                                action: action,
+                                call: request.call,
+                                scope: grant,
+                                callerNodeID: request.callerNodeID,
+                                contextID: request.contextID,
+                                manifest: run.manifest
+                            )
+                        }
                     callResult = (content: pluginOutput.content, isError: pluginOutput.isError)
                     if !pluginOutput.elucidations.isEmpty {
                         elucidations = pluginOutput.elucidations
                     }
-                    let pluginDelivered = await pluginIO.deliverOutputs(
-                        pluginRun.outputSlots,
-                        contextID: request.contextID,
-                        callerNodeID: request.callerNodeID,
-                        actionID: request.call.action)
-                    absorb(pluginDelivered)
-                    let pluginSlotPaths = Set(pluginRun.outputSlots.map(\.path.standardizedFileURL.path))
-                    let pluginHarvested = await pluginIO.harvestWorkspaceOutputs(
-                        workspaceDirectory: pluginRun.workspaceDirectory,
-                        declaredSlotPaths: pluginSlotPaths,
-                        contextID: request.contextID,
-                        callerNodeID: request.callerNodeID)
-                    absorb(pluginHarvested)
+                    absorb(produced)
                     #else
                     callResult = (content: [], isError: true)
                     #endif
@@ -254,35 +242,20 @@ extension KeepTalkingClient {
                     )
                 case .skill:
                     #if os(macOS)
-                    let actionIO = KeepTalkingIOManager(client: self)
-                    let ioRun = try await actionIO.prepareActionRun(
-                        action: action, request: request, grant: grant)
-                    defer {
-                        actionIO.cleanup(
-                            ioRun, consumedInputHandles: request.call.inputHandles)
-                    }
-                    callResult = try await skillManager.callAction(
-                        action: action,
-                        call: request.call,
-                        sandboxPolicy: ioRun.sandboxPolicy,
-                        model: openAIModel ?? "gpt-5-codex",
-                        attachmentsDir: ioRun.attachmentsDir,
-                        manifest: ioRun.manifest,
-                        workspaceDirectory: ioRun.workspaceDirectory
-                    )
-                    let delivered = await actionIO.deliverOutputs(
-                        ioRun.outputSlots,
-                        contextID: request.contextID,
-                        callerNodeID: request.callerNodeID,
-                        actionID: request.call.action)
-                    absorb(delivered)
-                    let slotPaths = Set(ioRun.outputSlots.map(\.path.standardizedFileURL.path))
-                    let harvested = await actionIO.harvestWorkspaceOutputs(
-                        workspaceDirectory: ioRun.workspaceDirectory,
-                        declaredSlotPaths: slotPaths,
-                        contextID: request.contextID,
-                        callerNodeID: request.callerNodeID)
-                    absorb(harvested)
+                    let (skillResult, produced) = try await KeepTalkingIOManager(client: self)
+                        .withActionRun(action: action, request: request, grant: grant) { run in
+                            try await skillManager.callAction(
+                                action: action,
+                                call: request.call,
+                                sandboxPolicy: run.sandboxPolicy,
+                                model: openAIModel ?? "gpt-5-codex",
+                                attachmentsDir: run.attachmentsDir,
+                                manifest: run.manifest,
+                                workspaceDirectory: run.workspaceDirectory
+                            )
+                        }
+                    callResult = skillResult
+                    absorb(produced)
                     #else
                     callResult = (content: [], isError: true)
                     #endif
@@ -498,6 +471,19 @@ extension KeepTalkingClient {
                 content: [],
                 isError: true,
                 errorMessage: error.localizedDescription
+            )
+        }
+    }
+
+    /// Records that this node just ran `action`, for recency-ordered action
+    /// listings. Best-effort: annotating a call must never fail it.
+    private func stampActionUse(_ action: KeepTalkingAction) async {
+        action.lastUsed = .now
+        do {
+            try await action.save(on: localStore.database)
+        } catch {
+            onLog?(
+                "[action-call/last-used] stamp failed action=\(action.id?.uuidString.lowercased() ?? "?") error=\(error.localizedDescription)"
             )
         }
     }

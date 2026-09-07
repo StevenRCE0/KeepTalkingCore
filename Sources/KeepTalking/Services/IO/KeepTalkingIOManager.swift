@@ -17,6 +17,11 @@ final class KeepTalkingIOManager {
     struct DeliveredOutputs {
         var resources: [KTResourceManifest.AgentResource] = []
         var transfers: [KeepTalkingOneTimeBlobRef] = []
+
+        mutating func merge(_ other: DeliveredOutputs) {
+            resources.append(contentsOf: other.resources)
+            transfers.append(contentsOf: other.transfers)
+        }
     }
 
     struct StagedInputResource: Sendable {
@@ -63,6 +68,45 @@ final class KeepTalkingIOManager {
             mimeType: MIMEType.inferredMIMEType(
                 forFileAt: staged.url, filename: displayName),
             byteCount: staged.byteCount)
+    }
+
+    /// Resolves an agent-typed resource handle to a concrete id.
+    ///
+    /// The canonical handle is a friendly word code over a 24-bit hash
+    /// (`KT_OTB_DOWNY_CLEAR_STINGRAY`) and does NOT contain the id, so it only
+    /// becomes one against the handles that actually exist. The candidate set is
+    /// every family the read tool can serve: this context's attachments, its
+    /// voice-call transcripts, and this node's live staged (OTB) files. Legacy
+    /// 32-hex handles and bare UUIDs still resolve without candidates.
+    ///
+    /// Resolving through the candidate-less `KTResourceManifest.resolveAgentHandle(_:)`
+    /// alone is what silently broke both OTB read paths: it is documented to
+    /// return nil for the current word-code format, so every produced OTB was
+    /// reported "unreadable" while its bytes sat staged on disk.
+    func resolveResourceHandle(
+        _ handleText: String,
+        contextID: UUID
+    ) async -> KTResourceManifest.Resolution {
+        // Legacy hex handle / bare UUID: exact, and valid even for a resource
+        // outside the candidate families below.
+        if let direct = KTResourceManifest.resolveAgentHandle(handleText) {
+            return .resolved(direct.id)
+        }
+        var candidates: [UUID] = []
+        if let attachments = try? await client.contextAttachments(in: contextID) {
+            candidates.append(contentsOf: attachments.compactMap(\.id))
+        }
+        if let transcripts = try? await client.voiceTranscriptSessionSummaries(in: contextID) {
+            candidates.append(contentsOf: transcripts.map(\.sessionID))
+        }
+        candidates.append(contentsOf: await staging.allHandles())
+        return KTResourceManifest.resolveAgentHandle(handleText, among: candidates)
+    }
+
+    /// Why a staged handle won't resolve for this node — expired/never-staged,
+    /// foreign (a handle that leaked from another peer), or vanished bytes.
+    func stagedHandleStatus(_ handle: UUID) async -> KeepTalkingStagingIOStore.HandleStatus {
+        await staging.status(handle: handle, callerNodeID: client.config.node)
     }
 
     func deliverProducedOutputFiles(
@@ -397,7 +441,41 @@ final class KeepTalkingIOManager {
     /// payloads skip policy resolution entirely (KT neither launches nor
     /// contains plugin processes — design doc §9; their manifest projects into
     /// the KTPP call frame instead of a subprocess environment).
-    func prepareActionRun(
+    /// Scopes one file-consuming action run around `body`.
+    ///
+    /// Before the body: the call's inputs are staged and its output slots
+    /// allocated (`prepareActionRun`), and the body receives that prepared run —
+    /// its manifest, sandbox policy, and directories. After the body: whatever
+    /// it wrote to the declared slots is delivered per persistence, anything
+    /// else it left in its workspace is harvested, and the scratch state is
+    /// torn down on every exit path, so a throwing body still releases its
+    /// staging. Every executor that consumes files enters through here, which
+    /// is what keeps "stage, run, deliver, harvest, clean up" one sequence
+    /// rather than five calls each branch remembers to make.
+    func withActionRun<T>(
+        action: KeepTalkingAction,
+        request: KeepTalkingActionCallRequest,
+        grant: KeepTalkingActionScope,
+        _ body: (PreparedActionRun) async throws -> T
+    ) async throws -> (result: T, outputs: DeliveredOutputs) {
+        let run = try await prepareActionRun(action: action, request: request, grant: grant)
+        defer { cleanup(run, consumedInputHandles: request.call.inputHandles) }
+        let result = try await body(run)
+        var outputs = await deliverOutputs(
+            run.outputSlots,
+            contextID: request.contextID,
+            callerNodeID: request.callerNodeID,
+            actionID: request.call.action)
+        outputs.merge(
+            await harvestWorkspaceOutputs(
+                workspaceDirectory: run.workspaceDirectory,
+                declaredSlotPaths: Set(run.outputSlots.map(\.path.standardizedFileURL.path)),
+                contextID: request.contextID,
+                callerNodeID: request.callerNodeID))
+        return (result, outputs)
+    }
+
+    private func prepareActionRun(
         action: KeepTalkingAction,
         request: KeepTalkingActionCallRequest,
         grant: KeepTalkingActionScope
@@ -476,7 +554,7 @@ final class KeepTalkingIOManager {
             workspaceRunStarted: workspaceRunStarted)
     }
 
-    func cleanup(_ run: PreparedActionRun, consumedInputHandles: [UUID]?) {
+    private func cleanup(_ run: PreparedActionRun, consumedInputHandles: [UUID]?) {
         if run.workspaceRunStarted, let threadID = run.workspaceThreadID {
             Task { [weak client] in await client?.endThreadWorkspaceRun(threadID) }
         }
@@ -490,7 +568,7 @@ final class KeepTalkingIOManager {
         }
     }
 
-    func deliverOutputs(
+    private func deliverOutputs(
         _ outputSlots: [KTCallBinding.BoundObject],
         contextID: UUID,
         callerNodeID: UUID,
@@ -502,20 +580,19 @@ final class KeepTalkingIOManager {
         let attachmentFiles = producedOutputFiles(
             from: outputSlots.filter { $0.kind == .attachment })
         if !attachmentFiles.isEmpty {
-            let result = await deliverProducedOutputFiles(
-                attachmentFiles, persistence: .attachment,
-                in: contextID, to: callerNodeID)
-            delivered.resources.append(contentsOf: result.resources)
+            delivered.merge(
+                await deliverProducedOutputFiles(
+                    attachmentFiles, persistence: .attachment,
+                    in: contextID, to: callerNodeID))
         }
 
         let otbFiles = producedOutputFiles(
             from: outputSlots.filter { $0.kind != .attachment })
         if !otbFiles.isEmpty {
-            let result = await deliverProducedOutputFiles(
-                otbFiles, persistence: .otb,
-                in: contextID, to: callerNodeID)
-            delivered.resources.append(contentsOf: result.resources)
-            delivered.transfers.append(contentsOf: result.transfers)
+            delivered.merge(
+                await deliverProducedOutputFiles(
+                    otbFiles, persistence: .otb,
+                    in: contextID, to: callerNodeID))
         }
 
         client.onLog?(
@@ -596,7 +673,7 @@ final class KeepTalkingIOManager {
                 + "collections=\(outputSlots.filter { $0.isDirectory }.count)")
     }
 
-    func harvestWorkspaceOutputs(
+    private func harvestWorkspaceOutputs(
         workspaceDirectory: URL?,
         declaredSlotPaths: Set<String>,
         contextID: UUID,

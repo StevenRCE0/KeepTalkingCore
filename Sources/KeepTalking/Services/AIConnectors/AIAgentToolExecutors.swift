@@ -61,12 +61,12 @@ extension KeepTalkingClient {
                     )
                     continue
                 } else if functionName
-                    == Self.contextAttachmentReadToolFunctionName
+                    == Self.resourceReadToolFunctionName
                 {
                     executions.append(
                         .init(
                             toolCall: toolCall,
-                            messages: try await executeContextAttachmentReadToolCall(
+                            messages: try await executeResourceReadToolCall(
                                 toolCallID: toolCallID,
                                 rawArguments: toolCall.argumentsJSON,
                                 context: context

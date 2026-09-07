@@ -105,7 +105,7 @@ extension KeepTalkingClient {
             attachmentSummary = """
                 Context attachments: \(attachmentCount)
                 Recent attachment names: \(preview)
-                Use \(Self.contextAttachmentListingToolFunctionName) for the full inventory and \(Self.contextAttachmentReadToolFunctionName) to inspect one.
+                Use \(Self.contextAttachmentListingToolFunctionName) for the full inventory and \(Self.resourceReadToolFunctionName) to inspect one.
                 """
         } else {
             attachmentSummary = ""
@@ -128,7 +128,7 @@ extension KeepTalkingClient {
             voiceTranscriptSummary = """
                 Voice call transcripts: \(transcriptSessions.count)
                 Recent: \(previewList(Array(names), maxItems: 5))
-                Each is a virtual attachment whose attachment_id is the call's session id — list them with \(Self.contextAttachmentListingToolFunctionName) and read one with \(Self.contextAttachmentReadToolFunctionName) (it resolves the live transcript from the database).
+                Each is a virtual attachment whose attachment_id is the call's session id — list them with \(Self.contextAttachmentListingToolFunctionName) and read one with \(Self.resourceReadToolFunctionName) (it resolves the live transcript from the database).
                 """
         } else {
             voiceTranscriptSummary = ""

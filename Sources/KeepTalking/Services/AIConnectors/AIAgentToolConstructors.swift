@@ -421,20 +421,20 @@ extension KeepTalkingClient {
         )
     }
 
-    func makeContextAttachmentReadTool() -> KeepTalkingActionToolDefinition {
+    func makeResourceReadTool() -> KeepTalkingActionToolDefinition {
         .init(
-            functionName: Self.contextAttachmentReadToolFunctionName,
+            functionName: Self.resourceReadToolFunctionName,
             actionID: UUID(),
             ownerNodeID: UUID(),
             source: .primitive,
-            description: AIPromptPresets.ToolDescriptions.contextAttachmentRead,
+            description: AIPromptPresets.ToolDescriptions.resourceRead,
             parameters: [
                 "type": .string("object"),
                 "properties": .object([
-                    "attachment_id": .object([
+                    "handle": .object([
                         "type": .string("string"),
                         "description": .string(
-                            "The attachment `handle` (KT_ATTACHMENT_<HEX> form) from kt_list_context_attachments. Produced OTB resources are injected automatically; pass their handles to actions instead of fetching them here."
+                            "The resource `handle`, exactly as it was given to you: KT_ATTACHMENT_<...> from kt_list_context_attachments, or KT_OTB_<...> from a call's produced_resources / kt_send_file. Never a filename and never a path — identical filenames are DISTINCT resources, so only the handle identifies one."
                         ),
                     ]),
                     "mode": .object([
@@ -444,7 +444,7 @@ extension KeepTalkingClient {
                             .string("preview_text"),
                             .string("native"),
                         ]),
-                        "description": .string("How to inspect the attachment."),
+                        "description": .string("How to inspect the resource."),
                     ]),
                     "max_characters": .object([
                         "type": .string("integer"),
@@ -453,7 +453,7 @@ extension KeepTalkingClient {
                         ),
                     ]),
                 ]),
-                "required": .array([.string("attachment_id"), .string("mode")]),
+                "required": .array([.string("handle"), .string("mode")]),
                 "additionalProperties": .bool(false),
             ]
         )

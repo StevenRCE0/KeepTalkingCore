@@ -34,14 +34,17 @@ extension KeepTalkingClient {
         ])
     }
 
-    func executeContextAttachmentReadToolCall(
+    func executeResourceReadToolCall(
         toolCallID: String,
         rawArguments: String,
         context: KeepTalkingContext
     ) async throws -> [AIMessage] {
-        let functionName = Self.contextAttachmentReadToolFunctionName
+        let functionName = Self.resourceReadToolFunctionName
         let arguments = try decodeToolArguments(rawArguments)
-        let attachmentIDText = arguments["attachment_id"]?.stringValue?
+        // `handle` is the current name; `attachment_id` is still accepted so a
+        // replayed transcript from before the rename keeps resolving.
+        let attachmentIDText = (arguments["handle"] ?? arguments["attachment_id"])?
+            .stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let modeText = arguments["mode"]?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -61,7 +64,7 @@ extension KeepTalkingClient {
                     payload: jsonString([
                         "ok": false,
                         "function_name": functionName,
-                        "error": "missing_attachment_id",
+                        "error": "missing_handle",
                     ]),
                     toolCallID: toolCallID
                 )
@@ -75,7 +78,7 @@ extension KeepTalkingClient {
                     payload: jsonString([
                         "ok": false,
                         "function_name": functionName,
-                        "attachment_id": attachmentIDText,
+                        "handle": attachmentIDText,
                         "error": "invalid_mode",
                         "error_message":
                             "Mode must be one of metadata, preview_text, or native.",
@@ -101,17 +104,21 @@ extension KeepTalkingClient {
         let functionName = Self.contextAttachmentUpdateMetadataToolFunctionName
         let arguments = try decodeToolArguments(rawArguments)
 
+        // Resolved the same way the read tool resolves: the listing hands out
+        // word-code handles, which the candidate-less resolver cannot invert.
         guard
-            let attachmentIDText = arguments["attachment_id"]?.stringValue?
+            let attachmentIDText = (arguments["handle"] ?? arguments["attachment_id"])?
+                .stringValue?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
             !attachmentIDText.isEmpty,
-            let attachmentID = KTResourceManifest.resolveAgentHandle(attachmentIDText)?.id,
-            let contextID = context.id
+            let contextID = context.id,
+            let attachmentID = await KeepTalkingIOManager(client: self)
+                .resolveResourceHandle(attachmentIDText, contextID: contextID).settledID
         else {
             return jsonString([
                 "ok": false,
                 "function_name": functionName,
-                "error": "invalid_attachment_id",
+                "error": "invalid_handle",
             ])
         }
 

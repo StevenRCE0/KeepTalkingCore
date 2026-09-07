@@ -14,6 +14,9 @@ public enum KeepTalkingGrantLane: String, Sendable, Codable, Hashable {
     case createAction
     /// The mutual create-action grant that follows a trust handshake.
     case trustAutoGrant
+    /// The create-action grant a joiner makes to the inviter named by the
+    /// ktctx link it redeemed, at join — before any handshake completes.
+    case inviteAutoGrant
     /// Anything that did not say — CLI, tests, callers not yet annotated.
     case other
 }

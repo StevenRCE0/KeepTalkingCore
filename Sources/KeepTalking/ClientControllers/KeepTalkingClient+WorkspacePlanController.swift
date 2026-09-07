@@ -261,4 +261,60 @@ extension KeepTalkingClient {
             record.recordSideNoteApplied(note.key)
         }
     }
+
+    /// Asks the node bound to a `.fromPeer` slot's peer to build that action
+    /// on their side — the slot's own auto-curation, run on their device
+    /// through the shared action-creation capability.
+    ///
+    /// `nodeID` names who to ask; hosts pass the slot's bound node, or another
+    /// bound peer the user picked instead. The peer grants the result back, so
+    /// a named action id fulfills the slot outright; without one the label
+    /// sweep still gets a chance. Returns the realized action id when the slot
+    /// fulfilled.
+    @discardableResult
+    public func requestWorkspacePlanPeerAction(
+        _ record: KeepTalkingWorkspacePlanRecord,
+        planActionID: UUID,
+        fromNodeID nodeID: UUID
+    ) async throws -> UUID? {
+        guard let contextID = record.contextID else {
+            throw KeepTalkingWorkspacePlanError.contextNotEstablished
+        }
+        guard
+            let plan = record.plan,
+            let slot = plan.actions.first(where: { $0.id == planActionID })
+        else {
+            throw KeepTalkingWorkspacePlanError.unknownPlanAction(planActionID)
+        }
+        guard
+            let context = try await KeepTalkingContext.find(
+                contextID,
+                on: localStore.database
+            )
+        else {
+            throw KeepTalkingWorkspacePlanError.contextNotConnected(contextID)
+        }
+
+        let intention = [slot.name, slot.description ?? ""]
+            .filter { !$0.isEmpty }
+            .joined(separator: " \u{2014} ")
+        let createdActionID = try await requestActionCreation(
+            onNodeID: nodeID,
+            intention: intention,
+            in: context
+        )
+
+        guard let createdActionID else {
+            // The peer built something but named no id; the label sweep is
+            // the remaining route to a fulfilled slot.
+            _ = try await sweepWorkspacePlanFromPeerSlots(record)
+            return record.fulfillment.actionFulfillments[planActionID]
+        }
+        _ = try await fulfillWorkspacePlanSlot(
+            record,
+            planActionID: planActionID,
+            withActionID: createdActionID
+        )
+        return createdActionID
+    }
 }

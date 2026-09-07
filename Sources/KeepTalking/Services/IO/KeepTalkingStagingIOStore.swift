@@ -23,6 +23,10 @@ actor KeepTalkingStagingIOStore {
         let consumeOnUse: Bool
     }
 
+    /// How long a staged file stays resolvable. Quoted verbatim to the agent
+    /// when an OTB handle has aged out, so "expired" comes with a number.
+    static let defaultTTL: TimeInterval = 600
+
     private let baseDirectory: URL
     private let ttl: TimeInterval
     private let maxEntries: Int
@@ -34,7 +38,7 @@ actor KeepTalkingStagingIOStore {
 
     init(
         baseDirectory: URL? = nil,
-        ttl: TimeInterval = 600,
+        ttl: TimeInterval = KeepTalkingStagingIOStore.defaultTTL,
         maxEntries: Int = 128,
         maxTotalBytes: Int = 1 * 1024 * 1024 * 1024,
         maxBytesPerCaller: Int = 256 * 1024 * 1024
@@ -146,6 +150,17 @@ actor KeepTalkingStagingIOStore {
         return entries.compactMap { $0.value.callerNodeID == callerNodeID ? $0.key : nil }
     }
 
+    /// Every live handle, whatever its owner.
+    ///
+    /// The candidate set for a READ, where `handles(forCaller:)` is the wrong
+    /// set: a handle owned by someone else must resolve and then be REFUSED as
+    /// foreign, not look like it never existed. Resolving grants nothing —
+    /// ownership is still enforced by `file(handle:callerNodeID:)`.
+    func allHandles() -> [UUID] {
+        reap()
+        return Array(entries.keys)
+    }
+
     /// Resolves a caller-owned staged handle to its file + metadata. Caller-scoped:
     /// a foreign or unknown handle (or one whose bytes vanished) returns nil.
     func file(
@@ -158,15 +173,22 @@ actor KeepTalkingStagingIOStore {
         return (entry.url, entry.filename, entry.byteCount)
     }
 
-    /// Diagnostic (logs only): why `handle` won't resolve for `callerNodeID`.
+    /// Why `handle` won't resolve for `callerNodeID`. Drives both the log line
+    /// (`resolutionDiagnosis`) and the agent-facing error the read tool returns,
+    /// so a leaked handle and an expired one never collapse into one message.
     /// `reap()` has already removed TTL-expired entries by the time a resolve
-    /// fails, so "absent" folds expired/discarded/never-staged together.
-    func resolutionDiagnosis(handle: UUID, callerNodeID: UUID) -> String {
-        guard let entry = entries[handle] else {
-            return "absent(never-staged-on-this-node, or expired/discarded)"
-        }
+    /// fails, so `absent` folds expired/discarded/never-staged together.
+    enum HandleStatus: Sendable, Equatable {
+        case present
+        case absent
+        case foreign(owner: UUID)
+        case bytesVanished(directorySurvives: Bool, path: String)
+    }
+
+    func status(handle: UUID, callerNodeID: UUID) -> HandleStatus {
+        guard let entry = entries[handle] else { return .absent }
         if entry.callerNodeID != callerNodeID {
-            return "foreign(owned-by=\(entry.callerNodeID.uuidString.prefix(8)))"
+            return .foreign(owner: entry.callerNodeID)
         }
         if !FileManager.default.fileExists(atPath: entry.url.path) {
             // An entry that survives while its bytes do not means something
@@ -174,11 +196,26 @@ actor KeepTalkingStagingIOStore {
             // went tells you which kind of deleter: a directory-level sweep, or
             // something that removed the file alone.
             let directory = entry.url.deletingLastPathComponent()
-            let directorySurvives = FileManager.default.fileExists(atPath: directory.path)
-            return
-                "bytes-vanished(\(directorySurvives ? "file-only" : "dir-gone") at=\(entry.url.path))"
+            return .bytesVanished(
+                directorySurvives: FileManager.default.fileExists(atPath: directory.path),
+                path: entry.url.path)
         }
-        return "present(unexpected)"
+        return .present
+    }
+
+    /// Diagnostic (logs only): the `status` rendered as a stable log token.
+    func resolutionDiagnosis(handle: UUID, callerNodeID: UUID) -> String {
+        switch status(handle: handle, callerNodeID: callerNodeID) {
+            case .absent:
+                return "absent(never-staged-on-this-node, or expired/discarded)"
+            case .foreign(let owner):
+                return "foreign(owned-by=\(owner.uuidString.prefix(8)))"
+            case .bytesVanished(let directorySurvives, let path):
+                return
+                    "bytes-vanished(\(directorySurvives ? "file-only" : "dir-gone") at=\(path))"
+            case .present:
+                return "present(unexpected)"
+        }
     }
 
     func discard(handle: UUID) {

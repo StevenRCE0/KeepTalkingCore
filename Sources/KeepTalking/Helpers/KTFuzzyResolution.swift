@@ -18,5 +18,18 @@ public enum KTFuzzyResolution<ID> {
     case unknown
 }
 
+extension KTFuzzyResolution {
+    /// The single candidate this token settled on — an exact `resolved` or a
+    /// repaired `corrected`. Nil when it was ambiguous or matched nothing, i.e.
+    /// for every outcome a caller must not silently guess past.
+    public var settledID: ID? {
+        switch self {
+            case .resolved(let id): return id
+            case .corrected(let id, _, _): return id
+            case .ambiguous, .unknown: return nil
+        }
+    }
+}
+
 extension KTFuzzyResolution: Equatable where ID: Equatable {}
 extension KTFuzzyResolution: Sendable where ID: Sendable {}

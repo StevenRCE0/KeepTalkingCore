@@ -42,7 +42,14 @@ final class AgentSurface {
 
     /// Boots a single-node stack: in-memory database, one node, one context,
     /// and the owner identity relation self-calls are authorised through.
-    static func make() async throws -> AgentSurface {
+    ///
+    /// `primitiveRegistry` serves any primitive action mounted later (an
+    /// ask-for-file picker, say); `aiConnector` is the model a skill run's
+    /// inner loop talks to. Both default to absent, as most tests need neither.
+    static func make(
+        primitiveRegistry: KeepTalkingPrimitiveRegistry? = nil,
+        aiConnector: (any AIConnector)? = nil
+    ) async throws -> AgentSurface {
         let store = try await KeepTalkingInMemoryStore.make()
         let node = KeepTalkingNode(id: UUID())
         let context = KeepTalkingContext(id: UUID())
@@ -58,6 +65,8 @@ final class AgentSurface {
                 contextID: try context.requireID(),
                 node: try node.requireID()
             ),
+            aiConnector: aiConnector,
+            primitiveRegistry: primitiveRegistry,
             localStore: store
         )
         return try AgentSurface(
@@ -70,6 +79,24 @@ final class AgentSurface {
 
     // MARK: - Mounting actions
 
+    /// Registers `payload` as an action this node owns and grants this node
+    /// access to it — the two rows every mounted action needs before a call
+    /// through the proxy is authorised.
+    private func mount(
+        _ payload: KeepTalkingAction.Payload,
+        permission: KeepTalkingActionScope? = nil
+    ) async throws -> UUID {
+        let action = try await KeepTalkingClient.registerAction(
+            payload: payload, node: node, on: store.database)
+        let actionID = try action.requireID()
+        var transaction = KeepTalkingGrantTransaction()
+        transaction.grant(
+            in: contextID, actionID: actionID, to: nodeID, permission: permission)
+        try await KeepTalkingClient.grantActionPermission(
+            transaction: transaction, node: node, on: store.database)
+        return actionID
+    }
+
     /// Registers a filesystem action rooted at `root` and grants this node full
     /// access to it, returning the façade a test calls tools through.
     @discardableResult
@@ -78,19 +105,22 @@ final class AgentSurface {
         name: String = "filesystem",
         permission: KeepTalkingActionScope? = nil
     ) async throws -> FilesystemTool {
-        let action = try await KeepTalkingClient.registerAction(
-            payload: .filesystem(
-                KeepTalkingFilesystemBundle(name: name, rootPath: root.path)),
-            node: node,
-            on: store.database
-        )
-        let actionID = try action.requireID()
-        var transaction = KeepTalkingGrantTransaction()
-        transaction.grant(
-            in: contextID, actionID: actionID, to: nodeID, permission: permission)
-        try await KeepTalkingClient.grantActionPermission(
-            transaction: transaction, node: node, on: store.database)
+        let actionID = try await mount(
+            .filesystem(KeepTalkingFilesystemBundle(name: name, rootPath: root.path)),
+            permission: permission)
         return FilesystemTool(surface: self, actionID: actionID, root: root)
+    }
+
+    /// Registers a primitive action, served by the registry the surface was
+    /// booted with, and returns its id.
+    func mountPrimitive(_ bundle: KeepTalkingPrimitiveBundle) async throws -> UUID {
+        try await mount(.primitive(bundle))
+    }
+
+    /// Registers a skill action — `bundle.directory` must hold its SKILL.md —
+    /// and returns its id.
+    func mountSkill(_ bundle: KeepTalkingSkillBundle) async throws -> UUID {
+        try await mount(.skill(bundle))
     }
 
     // MARK: - The model-facing call
@@ -107,6 +137,7 @@ final class AgentSurface {
     ///   - outputPersistence: What the agent asked produced files to become.
     func call(
         actionID: UUID,
+        source: KeepTalkingActionToolDefinition.Source = .filesystem,
         operation: String,
         arguments: [String: Any],
         inputHandles: [UUID]? = nil,
@@ -117,8 +148,10 @@ final class AgentSurface {
             functionName: "kt_test_\(operation.replacingOccurrences(of: "-", with: "_"))",
             actionID: actionID,
             ownerNodeID: nodeID,
-            source: .filesystem,
-            targetName: operation,
+            source: source,
+            // Only a filesystem (or MCP) proxy is enveloped by target name; a
+            // primitive or skill takes its arguments flat.
+            targetName: source == .filesystem ? operation : nil,
             description: "test harness proxy for \(operation)",
             parameters: ["type": .string("object")]
         )
@@ -143,24 +176,57 @@ final class AgentSurface {
     /// lookup the executor performs when the agent passes it as an input.
     /// `nil` means the agent was handed a handle it could not actually use.
     func resolve(_ handle: KTResourceManifest.AgentResource) async -> URL? {
+        guard let id = await stagedID(of: handle) else { return nil }
+        return await client.stagedFileStore
+            .file(handle: id, callerNodeID: nodeID)?.url
+    }
+
+    /// The staged-store id behind a handle the agent was given — what it passes
+    /// in `input_handles` to feed the file into another action.
+    func stagedID(of handle: KTResourceManifest.AgentResource) async -> UUID? {
         // A friendly handle carries a 24-bit code, not the UUID, so it cannot be
         // parsed back to an id — and a resource decoded from the wire has no
         // `resourceID` either, since only the handle travels. Resolve it the way
         // the real executor does: against the handles that actually exist for
         // this caller.
-        let id: UUID
-        if let known = handle.resourceID {
-            id = known
-        } else {
-            let candidates = await client.stagedFileStore.handles(forCaller: nodeID)
-            guard
-                case .resolved(let resolved) = KTResourceManifest.resolveAgentHandle(
-                    handle.handle, among: candidates)
-            else { return nil }
-            id = resolved
-        }
-        return await client.stagedFileStore
-            .file(handle: id, callerNodeID: nodeID)?.url
+        if let known = handle.resourceID { return known }
+        let candidates = await client.stagedFileStore.handles(forCaller: nodeID)
+        return KTResourceManifest.resolveAgentHandle(handle.handle, among: candidates)
+            .settledID
+    }
+
+    // MARK: - The turns after the call
+
+    /// What the model finds at the top of its next turn because of `reply`: the
+    /// produced resources, injected unasked as user messages. This is the
+    /// orchestrator's `toolTranscriptAdapter` seam, fed the same tool payload.
+    func nextTurnInjection(after reply: AgentReply) async -> [AIMessage] {
+        let execution = AIOrchestrator.ToolExecution(
+            toolCall: AIToolCall(id: "call-1", name: "kt_run_action", argumentsJSON: "{}"),
+            messages: [.tool(reply.raw, toolCallID: "call-1")])
+        return await KeepTalkingIOManager(client: client)
+            .transcriptMessagesForProducedResources(from: [execution], context: context)
+    }
+
+    /// Reads a resource back by handle through the agent's read tool, exactly
+    /// as the model calls it in a later turn.
+    func read(_ handle: String, mode: String) async throws -> ResourceRead {
+        let call = AIToolCall(
+            id: "read-1",
+            name: KeepTalkingClient.resourceReadToolFunctionName,
+            argumentsJSON: Self.jsonString(["handle": handle, "mode": mode]))
+        let executions = try await client.executeAgentToolCalls(
+            [call],
+            runtimeCatalog: KeepTalkingActionRuntimeCatalog(
+                catalog: .init(definitions: []),
+                routesByFunctionName: [:],
+                actionStubs: [],
+                remoteSemanticRetrievalActions: [],
+                remoteActionCreationActions: [],
+                lazyRegistry: KeepTalkingLazyToolRegistry()),
+            promptMessageID: nil,
+            context: context)
+        return try ResourceRead(messages: executions.first?.messages ?? [])
     }
 
     private static func jsonString(_ object: [String: Any]) -> String {
@@ -174,30 +240,41 @@ final class AgentSurface {
 // MARK: - Scoped lifecycle
 
 extension AgentSurface {
-    /// Boots a stack with one filesystem action mounted on a throwaway
-    /// directory, runs `body`, and tears both down on every exit path.
+    /// Boots a stack, runs `body`, and shuts the stack down on every exit path.
     ///
     /// Scoped rather than `defer`-based: tearing down needs `await`, and a
     /// `defer { Task { ... } }` would both outlive the test and hand a
     /// non-Sendable surface to another isolation context.
+    static func with<T>(
+        primitiveRegistry: KeepTalkingPrimitiveRegistry? = nil,
+        aiConnector: (any AIConnector)? = nil,
+        _ body: (AgentSurface) async throws -> T
+    ) async throws -> T {
+        let surface = try await AgentSurface.make(
+            primitiveRegistry: primitiveRegistry, aiConnector: aiConnector)
+        do {
+            let value = try await body(surface)
+            await surface.shutdown()
+            return value
+        } catch {
+            await surface.shutdown()
+            throw error
+        }
+    }
+
+    /// Boots a stack with one filesystem action mounted on a throwaway
+    /// directory, runs `body`, and tears both down on every exit path.
     static func withFilesystem<T>(
+        aiConnector: (any AIConnector)? = nil,
         _ body: (AgentSurface, FilesystemTool) async throws -> T
     ) async throws -> T {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("agent-surface-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true)
-        let surface = try await AgentSurface.make()
-        do {
-            let tool = try await surface.mountFilesystem(root: root)
-            let value = try await body(surface, tool)
-            await surface.shutdown()
-            try? FileManager.default.removeItem(at: root)
-            return value
-        } catch {
-            await surface.shutdown()
-            try? FileManager.default.removeItem(at: root)
-            throw error
+        defer { try? FileManager.default.removeItem(at: root) }
+        return try await with(aiConnector: aiConnector) { surface in
+            try await body(surface, try await surface.mountFilesystem(root: root))
         }
     }
 }
@@ -266,6 +343,29 @@ extension AgentSurface {
 }
 
 // MARK: - What the model sees
+
+/// What the model gets back from the read tool: the decoded tool payload, plus
+/// the user message carrying the bytes when the mode asked for them natively.
+struct ResourceRead {
+    let payload: [String: Any]
+    let native: AIMessage?
+
+    init(messages: [AIMessage]) throws {
+        guard let tool = messages.first(where: { $0.role == .tool }),
+            let text = tool.content?.text,
+            let object = try JSONSerialization.jsonObject(with: Data(text.utf8))
+                as? [String: Any]
+        else { throw ReadError.noToolPayload }
+        payload = object
+        native = messages.first { $0.role == .user }
+    }
+
+    var ok: Bool { payload["ok"] as? Bool ?? false }
+    var error: String { payload["error"] as? String ?? "" }
+    var errorMessage: String { payload["error_message"] as? String ?? "" }
+
+    private enum ReadError: Error { case noToolPayload }
+}
 
 /// The decoded tool payload the model receives — the same JSON object
 /// `renderAgentToolPayload` builds, parsed into something a test can assert on.

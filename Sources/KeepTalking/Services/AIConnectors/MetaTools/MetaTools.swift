@@ -12,7 +12,7 @@ extension KeepTalkingClient {
         if functionName == Self.contextAttachmentListingToolFunctionName {
             return "list context files"
         }
-        if functionName == Self.contextAttachmentReadToolFunctionName {
+        if functionName == Self.resourceReadToolFunctionName {
             let arguments = try? decodeToolArguments(toolCall.argumentsJSON)
             switch arguments?["mode"]?.stringValue {
                 case "native":

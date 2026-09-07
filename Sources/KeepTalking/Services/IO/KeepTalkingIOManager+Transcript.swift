@@ -85,14 +85,39 @@ extension KeepTalkingIOManager {
         functionName: String,
         context: KeepTalkingContext
     ) async throws -> [AIMessage] {
-        guard let contextID = context.id,
-            let handle = KTResourceManifest.resolveAgentHandle(handleText)?.id
-        else {
+        guard let contextID = context.id else {
             return failedToolResult(
-                "invalid_attachment_id",
+                "invalid_handle",
                 functionName: functionName,
                 toolCallID: toolCallID,
-                fields: ["attachment_id": handleText])
+                fields: ["handle": handleText])
+        }
+
+        let handle: UUID
+        switch await resolveResourceHandle(handleText, contextID: contextID) {
+            case .resolved(let id):
+                handle = id
+            case .corrected(let id, let from, let to):
+                client.onLog?("[io/read] repaired handle \(from) -> \(to)")
+                handle = id
+            case .ambiguous(let ids):
+                return failedToolResult(
+                    "ambiguous_handle",
+                    functionName: functionName,
+                    toolCallID: toolCallID,
+                    fields: [
+                        "handle": handleText,
+                        "match_count": ids.count,
+                        "error_message":
+                            "That handle matches \(ids.count) live resources. Re-read it from "
+                            + "the attachment listing or from the producing call's "
+                            + "produced_resources and pass it back exactly.",
+                    ])
+            case .unknown:
+                return unresolvedHandleResult(
+                    handleText: handleText,
+                    functionName: functionName,
+                    toolCallID: toolCallID)
         }
 
         guard let attachment = try await client.contextAttachment(handle, in: contextID)
@@ -116,11 +141,11 @@ extension KeepTalkingIOManager {
             ) {
                 return stagedResult
             }
-            return failedToolResult(
-                "attachment_not_found",
+            return await unavailableResourceResult(
+                handle: handle,
+                handleText: handleText,
                 functionName: functionName,
-                toolCallID: toolCallID,
-                fields: ["attachment_id": handleText])
+                toolCallID: toolCallID)
         }
 
         let blobRecord = try await KeepTalkingBlobRecord.query(on: client.localStore.database)
@@ -302,6 +327,108 @@ extension KeepTalkingIOManager {
         }
     }
 
+    /// A handle that matched nothing live.
+    ///
+    /// For an OTB handle that is a NORMAL end of life — private one-time blobs
+    /// are reaped on a short TTL — so name that precisely instead of the generic
+    /// "not found" that sends the agent hunting through the attachment listing
+    /// for something that was never in it.
+    private func unresolvedHandleResult(
+        handleText: String,
+        functionName: String,
+        toolCallID: String
+    ) -> [AIMessage] {
+        let kind = KTResourceManifest.parseAgentHandleCode(handleText)?.kind
+        if kind == .otb {
+            return failedToolResult(
+                "otb_unavailable",
+                functionName: functionName,
+                toolCallID: toolCallID,
+                fields: [
+                    "handle": handleText,
+                    "ttl_seconds": Int(KeepTalkingStagingIOStore.defaultTTL),
+                    "error_message":
+                        "This one-time blob is no longer readable on this node. It expired "
+                        + "(they are kept about \(Int(KeepTalkingStagingIOStore.defaultTTL / 60)) "
+                        + "minutes after they are produced), was never staged here, or belongs "
+                        + "to another peer. Ask for the file again, or re-run the producing "
+                        + "action with outputs[].persistence = \"attachment\" so it lands as a "
+                        + "durable context attachment instead.",
+                ])
+        }
+        // A well-formed attachment handle, or a bare UUID: it named something,
+        // there is just nothing here under it.
+        let trimmed = handleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if kind != nil || UUID(uuidString: trimmed) != nil {
+            return failedToolResult(
+                "attachment_not_found",
+                functionName: functionName,
+                toolCallID: toolCallID,
+                fields: [
+                    "handle": handleText,
+                    "error_message":
+                        "No attachment with that handle in this conversation. "
+                        + "Re-read the handle from the attachment listing.",
+                ])
+        }
+        return failedToolResult(
+            "invalid_handle",
+            functionName: functionName,
+            toolCallID: toolCallID,
+            fields: [
+                "handle": handleText,
+                "error_message":
+                    "Not a resource handle. A handle looks like "
+                    + "KT_ATTACHMENT_<WORD_WORD_WORD> or KT_OTB_<WORD_WORD_WORD> — "
+                    + "never a filename and never a path.",
+            ])
+    }
+
+    /// The handle named something concrete, but nothing here can serve it. The
+    /// staging store knows which of the three it is, so say which — a leaked
+    /// handle from another peer and an expired one are different problems and
+    /// only one of them is worth retrying.
+    private func unavailableResourceResult(
+        handle: UUID,
+        handleText: String,
+        functionName: String,
+        toolCallID: String
+    ) async -> [AIMessage] {
+        switch await stagedHandleStatus(handle) {
+            case .foreign(let owner):
+                return failedToolResult(
+                    "otb_foreign_handle",
+                    functionName: functionName,
+                    toolCallID: toolCallID,
+                    fields: [
+                        "handle": handleText,
+                        "owner_node": owner.uuidString.lowercased(),
+                        "error_message":
+                            "That one-time blob belongs to a different peer and cannot be read "
+                            + "from here. OTB handles are private and point-to-point — having "
+                            + "the handle does not grant access. Ask the peer that holds it to "
+                            + "send the file, or re-run the producing action with "
+                            + "outputs[].persistence = \"attachment\".",
+                    ])
+            case .bytesVanished:
+                return failedToolResult(
+                    "otb_bytes_vanished",
+                    functionName: functionName,
+                    toolCallID: toolCallID,
+                    fields: [
+                        "handle": handleText,
+                        "error_message":
+                            "That one-time blob is registered but its bytes are gone from disk "
+                            + "(cleaned up underneath us). Ask for the file again.",
+                    ])
+            case .absent, .present:
+                return unresolvedHandleResult(
+                    handleText: handleText,
+                    functionName: functionName,
+                    toolCallID: toolCallID)
+        }
+    }
+
     private func stagedFileReadResult(
         handle: UUID,
         mode: ReadMode,
@@ -396,10 +523,19 @@ extension KeepTalkingIOManager {
         for resource: KTResourceManifest.AgentResource,
         contextID: UUID
     ) async -> AIMessage? {
-        guard
-            let handle = resource.resourceID
-                ?? KTResourceManifest.resolveAgentHandle(resource.handle)?.id
-        else { return nil }
+        // `jsonObject()` does not carry resourceID, so a resource parsed back out
+        // of a tool payload (`init(jsonObject:)`) arrives with ONLY its word-code
+        // handle — which the candidate-less resolver is documented to refuse.
+        // Resolving against the live candidate set is what makes a produced OTB
+        // injectable at all; without it every one was logged "unreadable" while
+        // its bytes sat staged on disk.
+        var resolved = resource.resourceID
+        if resolved == nil {
+            resolved = await resolveResourceHandle(
+                resource.handle, contextID: contextID
+            ).settledID
+        }
+        guard let handle = resolved else { return nil }
         let leadText = resource.injectedContentLeadText
 
         switch resource.kind {

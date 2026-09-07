@@ -85,6 +85,23 @@ final class KeepTalkingStagingIOManager {
         await store.file(handle: handle, callerNodeID: callerNodeID)
     }
 
+    /// Every live staged handle, whatever its owner — the candidate set a
+    /// friendly word-code handle must be resolved against (the code is a hash,
+    /// so it only becomes an id among handles that actually exist). See
+    /// `store.allHandles` for why this is not caller-scoped.
+    func allHandles() async -> [UUID] {
+        await store.allHandles()
+    }
+
+    /// Why `handle` won't resolve for `callerNodeID` — distinguishes expired /
+    /// never-staged from a foreign handle and from vanished bytes, so callers
+    /// can tell the agent which of those actually happened.
+    func status(
+        handle: UUID, callerNodeID: UUID
+    ) async -> KeepTalkingStagingIOStore.HandleStatus {
+        await store.status(handle: handle, callerNodeID: callerNodeID)
+    }
+
     /// Stages an already-local file (e.g. a primitive's private `.otb` output)
     /// for re-feeding into a later action call. Defaults to re-feedable
     /// (`consumeOnUse: false`) so A→B chaining keeps the handle alive.

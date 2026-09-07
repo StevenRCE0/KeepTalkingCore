@@ -40,9 +40,9 @@ struct ContextAttachmentAIToolTests {
         let messages = try await fixture.client.executeAgentToolCalls(
             [
                 toolCall(
-                    name: KeepTalkingClient.contextAttachmentReadToolFunctionName,
+                    name: KeepTalkingClient.resourceReadToolFunctionName,
                     arguments: """
-                        {"attachment_id":"\(fixture.hiddenAttachmentID.uuidString.lowercased())","mode":"metadata"}
+                        {"handle":"\(fixture.hiddenAttachmentID.uuidString.lowercased())","mode":"metadata"}
                         """
                 )
             ],
@@ -56,7 +56,7 @@ struct ContextAttachmentAIToolTests {
         #expect(messages.count == 1)
         #expect(payload["ok"] as? Bool == false)
         #expect(payload["error"] as? String == "attachment_not_found")
-        #expect(payload["attachment_id"] as? String == fixture.hiddenAttachmentID.uuidString.lowercased())
+        #expect(payload["handle"] as? String == fixture.hiddenAttachmentID.uuidString.lowercased())
     }
 
     @Test("produced otb resources are injected as native user messages")

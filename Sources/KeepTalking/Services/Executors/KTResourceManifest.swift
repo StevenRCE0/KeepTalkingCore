@@ -115,13 +115,17 @@ public struct KTResourceManifest: Sendable {
 
     // MARK: - Canonical handle (agent token AND skill env-var key)
 
-    /// The ONE canonical token for a resource — `KT_<KIND>_<HEX>` (FULL 32-hex id).
-    /// This is BOTH the handle the orchestrating agent references AND the
-    /// environment-variable key the skill sees as `$KT_<KIND>_<HEX>`: the build
-    /// step assigns it verbatim to each manifest `Entry.envKey`, so the agent's
-    /// handle and the skill's env var are literally identical for the same
-    /// resource. Full hex (not a short suffix) makes it globally unique — no
-    /// collision escalation — and exactly reversible via `parseAgentHandle`.
+    /// The ONE canonical token for a resource — `KT_<KIND>_<WORD_WORD_WORD>`,
+    /// the id's friendly three-word token. This is BOTH the handle the
+    /// orchestrating agent references AND the environment-variable key the
+    /// skill sees as `$KT_<KIND>_…`: the build step assigns it verbatim to each
+    /// manifest `Entry.envKey`, so the agent's handle and the skill's env var are
+    /// literally identical for the same resource.
+    ///
+    /// The token is a 24-bit code, NOT the id: it cannot be parsed back to a
+    /// UUID. Recover the id with `resolveAgentHandle(_:among:)` against the
+    /// handles that exist; the candidate-less `resolveAgentHandle(_:)` returns
+    /// nil for this format by design.
     public static func agentHandle(kind: Kind, id: UUID) -> String {
         let token = id.friendlyNameToken
             .replacingOccurrences(of: "-", with: "_")

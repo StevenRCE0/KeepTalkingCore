@@ -42,7 +42,8 @@ extension KeepTalkingClient {
                 - `KT_ATTACHMENT_<HEX>`: durable, shared context attachment.
                 - `KT_OTB_<HEX>`: private, ephemeral one-time blob (from
                   `kt_send_file` or a prior `produced_resources` entry with
-                  persistence=otb). NOT retrievable via attachment tools.
+                  persistence=otb). Not listable, but readable by handle for
+                  about 10 minutes, and only on the node that produced it.
 
                 To feed a file INTO the action: pass its handle in
                 `input_handles` here. This is the ONLY way an action receives a
@@ -64,8 +65,10 @@ extension KeepTalkingClient {
                 variable for each requested output. After the call returns, its
                 result carries a `produced_resources` array listing each produced
                 file by handle, and the bytes are injected into your next turn
-                automatically — do NOT call any tool to fetch them. The handle is
-                the stable identity to mention or pass to a later action.
+                automatically — so normally do NOT call a tool to fetch them.
+                Read one back by handle only if that injection did not arrive or
+                you need it again later. The handle is the stable identity to
+                mention or pass to a later action.
                 Identify resources by `handle`, not by name: identical filenames
                 across resources are DISTINCT files, never the same one.
                 """,
