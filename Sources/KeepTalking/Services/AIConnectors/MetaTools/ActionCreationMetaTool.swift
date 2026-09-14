@@ -29,11 +29,41 @@ extension KeepTalkingClient {
             ])
         }
 
-        let targetNodeID = args["node_id"]?.stringValue.flatMap {
-            UUID(uuidString: $0)
+        guard
+            let nodeIDString = args["node_id"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !nodeIDString.isEmpty
+        else {
+            return jsonString([
+                "ok": false,
+                "error": "node_id is required.",
+                "hint": "Use a node's name from the action-creation nodes listing.",
+            ])
         }
 
-        guard let targetNodeID, targetNodeID != config.node else {
+        let allCandidates =
+            runtimeCatalog.remoteActionCreationActions.map(\.ownerNodeID)
+            + [config.node]
+        let targetNodeID: UUID
+        switch UUIDFriendlyName.resolve(nodeIDString, among: allCandidates) {
+            case .resolved(let id), .corrected(let id, _, _):
+                targetNodeID = id
+            case .ambiguous(let ids):
+                return jsonString([
+                    "ok": false,
+                    "error": "ambiguous_node_id",
+                    "candidates": ids.map { $0.friendlyNameToken },
+                ])
+            case .unknown:
+                return jsonString([
+                    "ok": false,
+                    "error": "unknown_node_id",
+                    "hint": "Use a node's name exactly as the action-creation nodes listing shows it.",
+                    "available_nodes": allCandidates.map { $0.friendlyNameToken },
+                ])
+        }
+
+        guard targetNodeID != config.node else {
             // Local request: ask this node's own user.
             guard let actionCreationHandler else {
                 return jsonString([

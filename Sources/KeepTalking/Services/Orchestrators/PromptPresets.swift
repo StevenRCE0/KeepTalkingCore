@@ -271,9 +271,9 @@ public enum AIPromptPresets {
 
         public static let createAction = """
             Ask a node's user to create a new action and grant it to you in the \
-            current context. Without `node_id` the request goes to this node's \
-            own user; with a `node_id` it goes to that peer (only nodes that \
-            granted action creation in this context are reachable). Keep \
+            current context. `node_id` is the target node's word-name from the \
+            action-creation nodes listing — use the current node's name to ask \
+            this node's own user, or a peer's name to ask that peer. Keep \
             `intention` short (one sentence, ≤12 words) and limited to what the \
             action should do — you cannot see the host environment, existing \
             actions, or how the user will discover it, so do not speculate \

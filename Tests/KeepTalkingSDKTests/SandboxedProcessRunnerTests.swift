@@ -36,10 +36,12 @@ struct SandboxedProcessRunnerTests {
         defer { try? FileManager.default.removeItem(at: fixture) }
 
         let markerURL = fixture.appendingPathComponent("terminated.txt")
+        let startedURL = fixture.appendingPathComponent("started.txt")
         let scriptURL = fixture.appendingPathComponent("longrunning.sh")
         try """
         #!/bin/zsh
         trap 'print "terminated" > "$1"; exit 0' TERM
+        print "started" > "$2"
         while true; do
           sleep 1
         done
@@ -51,15 +53,21 @@ struct SandboxedProcessRunnerTests {
         // the process and surface a CancellationError.
         let task = Task {
             try await SandboxedProcessRunner.run(
-                command: ["/bin/zsh", scriptURL.path, markerURL.path],
+                command: ["/bin/zsh", scriptURL.path, markerURL.path, startedURL.path],
                 currentDirectory: fixture,
                 actionID: UUID(),
                 graceSeconds: 1
             )
         }
 
-        // Give the script a moment to start, then abort it.
-        try await Task.sleep(nanoseconds: 500_000_000)
+        // Abort only once the script is actually running: a cancellation that
+        // lands before launch (the first spawn in a process also resolves the
+        // login-shell environment) is honoured before the process exists and
+        // would never reach the trap.
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: startedURL.path) {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: startedURL.path))
         task.cancel()
 
         await #expect(throws: CancellationError.self) {

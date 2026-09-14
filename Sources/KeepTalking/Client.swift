@@ -675,6 +675,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
             stdioTransportLauncher: stdioTransportLauncher,
             credentialStore: mcpCredentialStore
         )
+        #if !os(iOS) && !os(tvOS) && !os(watchOS) && !os(visionOS)
+        // Start capturing the login shell's environment (PATH from Homebrew,
+        // nvm, cargo, …) now, off this thread, so the first stdio MCP server,
+        // ACP agent or skill spawn doesn't wait for it. Cached per process.
+        KeepTalkingLoginShellEnvironment.prewarm()
+        #endif
 
         if let aiConnector {
             self.aiConnector = aiConnector

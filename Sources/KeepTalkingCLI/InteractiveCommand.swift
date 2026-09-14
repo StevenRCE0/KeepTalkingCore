@@ -1,4 +1,5 @@
 import Foundation
+import KeepTalkingSDK
 
 enum InteractiveCommand {
     case quit
@@ -95,7 +96,11 @@ enum InteractiveCommand {
         }
 
         if text.hasPrefix("/mcp") {
-            let parts = text.split(whereSeparator: \.isWhitespace).map(String.init)
+            // Shell-style splitting so a quoted argument (a path with spaces)
+            // reaches the server as one token.
+            let parts =
+                (try? ShellWords.split(text))
+                ?? text.split(whereSeparator: \.isWhitespace).map(String.init)
             if parts.count == 1 || parts[1] == "list" {
                 return .mcpList
             }

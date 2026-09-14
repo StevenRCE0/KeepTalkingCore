@@ -7,6 +7,10 @@ enum DefaultProcessExecutionSupport {
         environment overrides: [String: String]
     ) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
+        // The user's login shell knows where their tools live (Homebrew, nvm,
+        // cargo, uv, …); a GUI process launched by launchd does not. Layer it in
+        // first so the action's explicit overrides still win.
+        environment.merge(KeepTalkingLoginShellEnvironment.resolve()) { _, shell in shell }
         environment.merge(overrides) { _, new in new }
         environment["PATH"] = resolvePathEnvironment(
             command: command,

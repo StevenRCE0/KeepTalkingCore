@@ -62,7 +62,8 @@ extension KeepTalkingClient {
     /// Conversation messages are excluded — use `agentContextMessages` for those.
     func agentContextTranscript(
         _ context: KeepTalkingContext,
-        actionStubs: [KeepTalkingActionStub]
+        actionStubs: [KeepTalkingActionStub],
+        remoteActionCreationEntries: [KeepTalkingActionCreationCatalogEntry] = []
     ) async throws -> String {
         guard let contextID = context.id else {
             return ""
@@ -140,10 +141,14 @@ extension KeepTalkingClient {
             aliasLookup: aliasLookup
         )
         let actionNodeSummary = renderActionNodeSummary(actionStubs, aliasLookup: aliasLookup)
+        let actionCreationPeerSummary = renderActionCreationPeerSummary(
+            remoteActionCreationEntries,
+            aliasLookup: aliasLookup
+        )
 
         return [
             threadMapSummary, nodeNameSummary, attachmentSummary,
-            voiceTranscriptSummary, actionNodeSummary,
+            voiceTranscriptSummary, actionNodeSummary, actionCreationPeerSummary,
         ]
         .filter { !$0.isEmpty }
         .joined(separator: "\n\n")
@@ -397,6 +402,28 @@ extension KeepTalkingClient {
             Types: mcp=external server tools · skill=directory-based agent skill · primitive=built-in operation · filesystem=sandboxed file access + context blob bridge · semanticretrieval=remote thread-memory search
             An `objects:` line lists an action's declared inputs/outputs (direction + whether it's a file) so you can plan data flow BETWEEN actions — feed one action's `out` to another's `in`. You never see or pass provider file paths; reference a produced file by the handle the action returns.
             A file `in` is REQUIRED and is never filled implicitly: an action does not see this conversation's attachments. You must pass that file's handle in `input_handles` on \(Self.runActionToolFunctionName) — get it from \(Self.contextAttachmentListingToolFunctionName) for a file already attached here, or from `kt_send_file` for a local file you hold. Calling such an action without a handle fails with "could not resolve its SOURCE".
+            \(lines.joined(separator: "\n"))
+            """
+    }
+
+    func renderActionCreationPeerSummary(
+        _ entries: [KeepTalkingActionCreationCatalogEntry],
+        aliasLookup: KeepTalkingAliasLookup
+    ) -> String {
+        let currentNodeName = config.node.friendlyNameToken
+        let currentAlias = aliasLookup.alias(for: .node(config.node))
+        let currentAliasSuffix = currentAlias.map { "  (\($0))" } ?? ""
+        var lines = ["- node: \(currentNodeName)\(currentAliasSuffix)  (current)"]
+
+        for entry in entries {
+            let name = entry.ownerNodeID.friendlyNameToken
+            let alias = aliasLookup.alias(for: .node(entry.ownerNodeID))
+            let aliasSuffix = alias.map { "  (\($0))" } ?? ""
+            lines.append("- node: \(name)\(aliasSuffix)")
+        }
+
+        return """
+            Action-creation nodes (pass a node's name as `node_id` on \(Self.createActionToolFunctionName)):
             \(lines.joined(separator: "\n"))
             """
     }

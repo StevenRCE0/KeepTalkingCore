@@ -1207,7 +1207,7 @@ extension KeepTalkingClient {
         #endif
     }
 
-    func broadcastLocalNodeState(reason: String) async {
+    public func broadcastLocalNodeState(reason: String) async {
         do {
             let currentContext = try await ensure(
                 config.contextID,

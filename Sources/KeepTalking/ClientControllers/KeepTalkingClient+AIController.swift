@@ -382,7 +382,8 @@ extension KeepTalkingClient {
             .scoped(to: try persistedContext.requireID())
         let contextTranscript = try await agentContextTranscript(
             persistedContext,
-            actionStubs: runtimeCatalog.actionStubs
+            actionStubs: runtimeCatalog.actionStubs,
+            remoteActionCreationEntries: runtimeCatalog.remoteActionCreationActions
         )
         let contextMessages = try await agentContextMessages(
             persistedContext,
@@ -506,6 +507,7 @@ extension KeepTalkingClient {
                                 actModel: actModel ?? activeModel,
                                 publisher: toolHintPublisher,
                                 agentTurnID: agentTurnID,
+                                allowedKinds: [.skill],
                                 assistantPublisher: assistantPublisher,
                                 toolHintPublisher: toolHintPublisher
                             )

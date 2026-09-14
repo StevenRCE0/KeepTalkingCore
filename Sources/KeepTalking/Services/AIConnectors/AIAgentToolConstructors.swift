@@ -595,11 +595,11 @@ extension KeepTalkingClient {
                     "node_id": .object([
                         "type": .string("string"),
                         "description": .string(
-                            "Optional target node UUID. Omit to ask this node's own user; set to a peer node ID to ask that peer's user (the peer must have granted action creation in this context)."
+                            "Target node name (the word-name from the action-creation nodes listing). The node whose user will be asked to create the action."
                         ),
                     ]),
                 ]),
-                "required": .array([.string("intention")]),
+                "required": .array([.string("intention"), .string("node_id")]),
                 "additionalProperties": .bool(false),
             ]
         )
