@@ -165,8 +165,12 @@ extension KeepTalkingClient {
     }
 
     /// Executes a `kt_run_action` tool call by running the ACT agent mini-loop.
-    /// When `allowedKinds` is non-nil, only actions whose stub kind is in the set
-    /// are dispatched; others are rejected with an `action_kind_not_allowed` error.
+    ///
+    /// Every kind the catalog can publish is dispatched here — `resolvedACTAction`
+    /// selects the per-kind resolver, and `actAgentTypeGuidance` the per-kind
+    /// prompt. There is deliberately no kind filter: `kt_run_action` is the ONLY
+    /// route the main loop has to any action (it is given no direct action tools),
+    /// so refusing a kind here strands it with nothing else to call.
     func executeRunActionToolCall(
         toolCallID: String,
         rawArguments: String,
@@ -176,7 +180,6 @@ extension KeepTalkingClient {
         actModel: String,
         publisher: AIOrchestrator.ToolHintPublisher,
         agentTurnID: UUID? = nil,
-        allowedKinds: Set<KeepTalkingActionStub.Kind>? = nil,
         assistantPublisher: AIOrchestrator.AssistantPublisher? = nil,
         toolHintPublisher: AIOrchestrator.ToolHintPublisher? = nil
     ) async throws -> [AIMessage] {
@@ -230,24 +233,6 @@ extension KeepTalkingClient {
             let stub = runtimeCatalog.actionStubs.first(where: { $0.actionID == actionID })
         else {
             return [unknownActionReply(actionToken, toolCallID: toolCallID, in: runtimeCatalog)]
-        }
-
-        if let allowedKinds, !allowedKinds.contains(stub.kind) {
-            return [
-                toolMessage(
-                    payload: jsonString([
-                        "ok": false,
-                        "error": "action_kind_not_allowed",
-                        "action_id": actionToken,
-                        "kind": stub.kind.rawValue,
-                        "allowed_kinds": allowedKinds.map(\.rawValue).sorted(),
-                        "hint":
-                            "This agent can only run \(allowedKinds.map(\.rawValue).sorted().joined(separator: ", ")) actions. "
-                            + "Use the action directly or ask the user to run it.",
-                    ]),
-                    toolCallID: toolCallID
-                )
-            ]
         }
 
         let task = args["task"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

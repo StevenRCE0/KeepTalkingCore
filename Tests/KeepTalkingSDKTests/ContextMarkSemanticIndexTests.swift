@@ -43,10 +43,8 @@ struct ContextMarkSemanticIndexTests {
             config: KeepTalkingConfig(contextID: contextID, node: UUID()),
             localStore: store
         )
-        let probe = ContextIDProbe()
-        client.onSemanticIndexNeedsReconciliation = { contextID in
-            await probe.record(contextID)
-        }
+        let probe = SignalRecorder<UUID>()
+        client.semanticIndexReconciliations.observe { probe.record($0) }
 
         // What a peer's summary carries: the AI threading it derived from its
         // own turning points.
@@ -58,7 +56,9 @@ struct ContextMarkSemanticIndexTests {
             in: contextID
         )
 
-        #expect(await probe.recordedIDs() == [contextID])
+        await probe.waitForCount(1)
+        await probe.settle()
+        #expect(probe.snapshot == [contextID])
         let threads = try await KeepTalkingThread.query(on: store.database)
             .filter(\.$context.$id == contextID)
             .all()
@@ -159,18 +159,6 @@ struct ContextMarkSemanticIndexTests {
             try await KeepTalkingThread.find(failingThreadID, on: store.database)
         )
         #expect(latestThread.semanticDocumentDigest != repairedDigest)
-    }
-}
-
-private actor ContextIDProbe {
-    private var ids: [UUID] = []
-
-    func record(_ id: UUID) {
-        ids.append(id)
-    }
-
-    func recordedIDs() -> [UUID] {
-        ids
     }
 }
 

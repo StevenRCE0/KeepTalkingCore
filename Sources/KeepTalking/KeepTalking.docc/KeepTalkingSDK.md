@@ -32,7 +32,7 @@ A host application observes the client rather than polling it. See
 
 ### Platform Requirements
 
-iOS 17+, macOS 13+, visionOS 1+, Swift 6.1+.
+iOS 17+, macOS 14+, visionOS 1+, Swift 6.1+.
 
 Transport requires a reachable KeepTalkingSFU signalling server; see <doc:Transport>.
 

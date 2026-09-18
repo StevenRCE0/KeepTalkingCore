@@ -246,7 +246,7 @@ extension KeepTalkingClient {
         /// Number of tail messages to keep for a thread with a given decay λ and budget cap.
         /// Uses `ceil(-ln(0.01) / λ)` — the position at which the weight drops below 1 %.
         func tailCount(lambda: Double, cap: Int, available: Int) -> Int {
-            let depth = Int(ceil(-log(0.01) / lambda))  // ~99 % of cumulative weight
+            let depth = Int(ceil(-Foundation.log(0.01) / lambda))  // ~99 % of cumulative weight
             return min(cap, min(depth, available))
         }
 
@@ -555,7 +555,7 @@ extension KeepTalkingClient {
 
         // --- Ongoing voice transcript ---
         if let sessionID,
-            let lines = try? await voiceTranscriptLines(forSession: sessionID),
+            let lines = try? await loadVoiceTranscriptLines(forSession: sessionID),
             !lines.isEmpty
         {
             let recent = lines.suffix(20)

@@ -78,8 +78,15 @@ actor AgentCoordinator {
     /// callback must NOT touch the slot when this set contains its ID.
     private var cancelledRunIDs: Set<UUID> = []
 
-    /// Called on every state transition with the current flat snapshot list.
-    nonisolated(unsafe) var onChanged: (@Sendable ([KeepTalkingAgentRunSnapshot]) -> Void)?
+    /// Republished on every state transition with the current flat snapshot
+    /// list; `current` is the pull-side companion of `currentSnapshots`.
+    /// The client injects its signal box's `agentRuns` so the coordinator only
+    /// writes it; a standalone coordinator (tests) gets its own.
+    nonisolated let runs: KeepTalkingStateSignal<[KeepTalkingAgentRunSnapshot]>
+
+    init(runs: KeepTalkingStateSignal<[KeepTalkingAgentRunSnapshot]> = .init([])) {
+        self.runs = runs
+    }
 
     // MARK: - Interface
 
@@ -545,6 +552,6 @@ actor AgentCoordinator {
     }
 
     private func emit() {
-        onChanged?(makeSnapshots())
+        runs.send(makeSnapshots())
     }
 }

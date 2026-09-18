@@ -39,6 +39,9 @@ final class KeepTalkingSFUJuiceClient: KeepTalkingTransportClient, @unchecked Se
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
     var onBroadcastReady: (@Sendable () -> Void)?
+    /// Protocol requirement only: the broadcast channel reads this client's
+    /// state through the composite, and the orchestrator reports upward.
+    var onTransportStateChange: (@Sendable (BroadcastChannelState, KeepTalkingTransportRoute) -> Void)?
     var onLog: (@Sendable (String) -> Void)?
     var onTransportDegraded: (@Sendable (String) -> Void)?
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider?

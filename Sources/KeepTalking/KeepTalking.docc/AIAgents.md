@@ -170,7 +170,7 @@ Hosts that need a prompt to survive navigation, app switching, or process death 
 
 ### Run lifecycle
 
-Every run the coordinator knows about appears in ``KeepTalkingAgentRunSnapshot``, pushed to `onAgentRunsChanged` on each transition. A run is in exactly one ``KeepTalkingAgentRunSnapshot/State``:
+Every run the coordinator knows about appears in ``KeepTalkingAgentRunSnapshot``, published through `agentRuns` on each transition. A run is in exactly one ``KeepTalkingAgentRunSnapshot/State``:
 
 | State | Meaning |
 |---|---|
@@ -183,11 +183,11 @@ There is no completed state: a run that finishes simply leaves the snapshot list
 
 ### Suspension and resumption
 
-A turn suspends when it needs an answer that cannot come from the model: a remote node must execute something, a user must approve an authorization bubble, someone must pick a file. The SDK writes a continuation message into the conversation, fires `onAgentTurnSuspended` with a ``KeepTalkingAgentTurnSuspension`` naming the turn, the step within it, the kind, and the node that must respond, and then parks.
+A turn suspends when it needs an answer that cannot come from the model: a remote node must execute something, a user must approve an authorization bubble, someone must pick a file. The SDK writes a continuation message into the conversation, emits `agentTurnSuspensions` with a ``KeepTalkingAgentTurnSuspension`` naming the turn, the step within it, the kind, and the node that must respond, and then parks.
 
 One run can suspend more than once — a multi-step turn may need two approvals, or a remote execution and then a file. So a suspension is identified by its own persisted continuation message rather than by the run it belongs to: that ID is the `agentStepID` on both the suspension and the resumption, and it is what a response is matched against. `agentTurnID` still names the outer run, which is what cancellation and reconciliation work in terms of.
 
-Parking releases the context's active slot on purpose. A turn waiting on a human or a remote peer must not hold the conversation hostage, so a queued run may start while this one waits, and the two may briefly overlap when it resumes. When the response arrives, `onAgentTurnResumed` fires with a ``KeepTalkingAgentTurnResumption`` — on rejection as well as fulfilment, since either way the turn is running again. A response that arrives before its continuation has finished parking is stashed against that continuation's ID and picked up the moment it does, so the race is closed rather than lost.
+Parking releases the context's active slot on purpose. A turn waiting on a human or a remote peer must not hold the conversation hostage, so a queued run may start while this one waits, and the two may briefly overlap when it resumes. When the response arrives, `agentTurnResumptions` emits with a ``KeepTalkingAgentTurnResumption`` — on rejection as well as fulfilment, since either way the turn is running again. A response that arrives before its continuation has finished parking is stashed against that continuation's ID and picked up the moment it does, so the race is closed rather than lost.
 
 The responding side calls ``KeepTalkingClient/respondToAgentTurnContinuation(continuationMessageID:agentTurnID:originNodeID:state:resultContent:producedResources:outputTransfers:)``, which encrypts the full result — content plus produced resources plus private output transfers — to the originating node, because a blocking action must deliver everything the direct result path would. When the approval is local, ``KeepTalkingClient/fulfilAgentTurnContinuation(continuationMessageID:)`` executes the original call on this node instead. Cancelling a suspended run resolves its continuation with a cancellation error, and ``KeepTalkingClient/reconcileStaleContinuations()`` cleans up on connect, cancelling pending continuations whose turns are no longer alive.
 

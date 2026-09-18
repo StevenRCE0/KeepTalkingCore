@@ -115,7 +115,7 @@ extension KeepTalkingClient {
             thread.chitterChatter.append(messageID)
         }
         try await thread.save(on: localStore.database)
-        onThreadsChanged?()
+        signals.threadChanges.send(())
     }
 
     /// Explicitly marks or unmarks a message as chitter-chatter, locating its owning thread
@@ -142,7 +142,7 @@ extension KeepTalkingClient {
             thread.chitterChatter.removeAll { $0 == messageID }
         }
         try await thread.save(on: localStore.database)
-        onThreadsChanged?()
+        signals.threadChanges.send(())
         return true
     }
 
@@ -315,11 +315,11 @@ extension KeepTalkingClient {
             }
         }
 
-        onThreadsChanged?()
+        signals.threadChanges.send(())
         // Boundaries just moved, and semantic documents are a derived cache of
         // them. Enqueue only now that the durable state is committed — the
         // reconciler reloads it rather than taking anything from here.
-        await onSemanticIndexNeedsReconciliation?(contextID)
+        signals.semanticIndexReconciliations.send(contextID)
         return true
     }
 
@@ -332,7 +332,7 @@ extension KeepTalkingClient {
         try await thread.save(on: database)
         if let threadID = thread.id {
             try await Self.setAlias(topicName, for: .thread(threadID), on: database)
-            onMappingsChanged?()
+            signals.mappingChanges.send(())
         }
     }
 

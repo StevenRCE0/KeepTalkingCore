@@ -1,6 +1,6 @@
 import Foundation
 
-public struct KeepTalkingRuntimeStats: Sendable {
+public struct KeepTalkingRuntimeStats: Sendable, Equatable {
     public let sent: Int
     public let received: Int
     public let outboundLabel: String?

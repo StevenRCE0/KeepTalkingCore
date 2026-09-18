@@ -116,15 +116,15 @@ final class KeepTalkingCLIController {
             return "[\(senderLabel)] \(message.content)"
         }
 
-        targetClient.onLog = { line in
+        targetClient.log.observe { line in
             print(line)
         }
-        targetClient.onEnvelope = { (envelope: KeepTalkingEnvelope) in
+        targetClient.envelopes.observe { envelope in
             if let message = envelope.message {
                 print(renderMessage(message))
             }
         }
-        targetClient.onRawMessage = { (raw: String) in
+        targetClient.rawMessages.observe { raw in
             print("[remote/raw] \(raw)")
         }
     }

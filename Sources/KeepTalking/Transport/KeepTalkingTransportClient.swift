@@ -15,6 +15,14 @@ protocol KeepTalkingTransportClient: AnyObject, Sendable {
     /// capable of accepting `sendEnvelope`. The outbox controller uses
     /// this to drain queued messages as soon as a route opens.
     var onBroadcastReady: (@Sendable () -> Void)? { get set }
+    /// Fires after every broadcast-backbone state transition and whenever
+    /// the route may have changed (a direct channel became ready or was torn
+    /// down). Carries the post-transition state and route so the client
+    /// never has to re-enter the transport from the callback. This is the
+    /// one hook the client's lifecycle signal hangs on; the channel state
+    /// machines below know nothing about it.
+    var onTransportStateChange: (@Sendable (BroadcastChannelState, KeepTalkingTransportRoute) -> Void)?
+    { get set }
     var onLog: (@Sendable (String) -> Void)? { get set }
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider? { get set }
 

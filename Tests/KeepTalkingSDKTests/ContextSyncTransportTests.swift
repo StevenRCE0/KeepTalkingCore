@@ -43,16 +43,23 @@ struct ContextSyncTransportTests {
                 phase: .completed
             ),
         ]
-        let observed = ContextSyncEventRecorder()
-        client.onContextSync = { event in
-            await observed.append(event)
+        // A `values` stream keeps the SDK's emission order; subscribe before
+        // emitting so nothing is missed, then collect exactly the count sent.
+        let stream = client.contextSyncEvents.values
+        let collected = Task {
+            var events: [KeepTalkingContextSyncEvent] = []
+            for await event in stream {
+                events.append(event)
+                if events.count == expected.count { break }
+            }
+            return events
         }
 
         for event in expected {
             await client.notifyContextSync(event)
         }
 
-        #expect(await observed.events() == expected)
+        #expect(await withTimeout { await collected.value } == expected)
     }
 
     @Test("summary dispatch returns locally maintained context sync metadata")
@@ -1237,18 +1244,6 @@ private final class LockedValue<Value>: @unchecked Sendable {
 
     func get() -> Value {
         queue.sync { value }
-    }
-}
-
-private actor ContextSyncEventRecorder {
-    private var recordedEvents: [KeepTalkingContextSyncEvent] = []
-
-    func append(_ event: KeepTalkingContextSyncEvent) {
-        recordedEvents.append(event)
-    }
-
-    func events() -> [KeepTalkingContextSyncEvent] {
-        recordedEvents
     }
 }
 

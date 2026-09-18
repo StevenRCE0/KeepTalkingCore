@@ -74,6 +74,9 @@ final class AgentSurface {
     }
 
     func shutdown() async {
+        // The client's init-time reap may still be querying; the store cannot
+        // serve it after shutdown.
+        await client.awaitStartupWork()
         await store.shutdown()
     }
 

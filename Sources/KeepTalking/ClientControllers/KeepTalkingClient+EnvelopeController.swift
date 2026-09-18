@@ -19,6 +19,6 @@ extension KeepTalkingClient {
         // A redelivered envelope that changed nothing locally is not published
         // onward — otherwise fan-out's second copy raises a second notification.
         guard applied else { return }
-        onEnvelope?(envelope)
+        signals.envelopes.send(envelope)
     }
 }

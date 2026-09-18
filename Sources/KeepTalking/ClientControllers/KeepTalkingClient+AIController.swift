@@ -129,7 +129,9 @@ extension KeepTalkingClient {
                 Task { [self] in
                     await cancelStaleContinuations(agentTurnID: agentTurnID, in: contextID)
                 }
-                onAgentRunCompleted?(contextID, error)
+                signals.agentRunCompletions.send(
+                    .init(contextID: contextID, errorDescription: error?.localizedDescription)
+                )
             }
         )
     }
@@ -507,7 +509,6 @@ extension KeepTalkingClient {
                                 actModel: actModel ?? activeModel,
                                 publisher: toolHintPublisher,
                                 agentTurnID: agentTurnID,
-                                allowedKinds: [.skill],
                                 assistantPublisher: assistantPublisher,
                                 toolHintPublisher: toolHintPublisher
                             )
@@ -976,10 +977,16 @@ extension KeepTalkingClient {
             context: context
         )
 
-        for action in grantedLocalActions {
+        let total = grantedLocalActions.count
+        for (index, action) in grantedLocalActions.enumerated() {
+            let (source, name) = Self.executorSource(for: action)
+            signals.executorRegistration.send(
+                .registering(source: source, name: name, completed: index, total: total)
+            )
             do {
                 try await registerLocalExecutor(action)
             } catch is CancellationError {
+                signals.executorRegistration.send(.idle)
                 throw CancellationError()
             } catch {
                 onLog?(
@@ -988,9 +995,36 @@ extension KeepTalkingClient {
             }
         }
 
+        signals.executorRegistration.send(.finalizing)
         await invalidateActionToolCatalog(
             reason: "register_local_actions_in_executors"
         )
+        signals.executorRegistration.send(.idle)
+    }
+
+    /// Executor kind and display name of a local action, for the log lines
+    /// and the `executorRegistration` signal.
+    static func executorSource(
+        for action: KeepTalkingAction
+    ) -> (source: String, name: String) {
+        switch action.payload {
+            case .mcpBundle(let bundle):
+                return ("mcp", bundle.name)
+            case .skill(let bundle):
+                return ("skill", bundle.name)
+            case .primitive(let bundle):
+                return ("primitive", bundle.name)
+            case .semanticRetrieval(let bundle):
+                return ("semantic_retrieval", bundle.name)
+            case .actionCreation(let bundle):
+                return ("action_creation", bundle.name)
+            case .filesystem(let bundle):
+                return ("filesystem", bundle.name)
+            case .acp(let bundle):
+                return ("acp", bundle.name)
+            case .plugin(let bundle):
+                return ("plugin", bundle.name)
+        }
     }
 
     private func registerLocalExecutor(_ action: KeepTalkingAction) async throws {
@@ -998,26 +1032,7 @@ extension KeepTalkingClient {
             throw KeepTalkingClientError.missingAction
         }
 
-        let (source, actionName): (String, String) = {
-            switch action.payload {
-                case .mcpBundle(let bundle):
-                    return ("mcp", bundle.name)
-                case .skill(let bundle):
-                    return ("skill", bundle.name)
-                case .primitive(let bundle):
-                    return ("primitive", bundle.name)
-                case .semanticRetrieval(let bundle):
-                    return ("semantic_retrieval", bundle.name)
-                case .actionCreation(let bundle):
-                    return ("action_creation", bundle.name)
-                case .filesystem(let bundle):
-                    return ("filesystem", bundle.name)
-                case .acp(let bundle):
-                    return ("acp", bundle.name)
-                case .plugin(let bundle):
-                    return ("plugin", bundle.name)
-            }
-        }()
+        let (source, actionName) = Self.executorSource(for: action)
 
         do {
             // Patient registration: wait the grace period silently, then poll

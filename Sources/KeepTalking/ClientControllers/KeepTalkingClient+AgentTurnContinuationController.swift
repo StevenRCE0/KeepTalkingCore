@@ -102,7 +102,7 @@ extension KeepTalkingClient {
         // Fire the local envelope sink so the UI refreshes from the updated DB row.
         // Each node updates its own copy independently — we don't broadcast, because
         // the message-sync dedup filter would drop the update on the remote side.
-        onEnvelope?(message)
+        signals.envelopes.send(message)
     }
 
     // MARK: - Stale continuation invalidation
@@ -331,7 +331,7 @@ extension KeepTalkingClient {
         // now parked on an external response, so it can acknowledge and detach
         // instead of waiting out the whole continuation on a possibly-doomed
         // voice session.
-        onAgentTurnSuspended?(
+        signals.agentTurnSuspensions.send(
             KeepTalkingAgentTurnSuspension(
                 agentTurnID: agentTurnID,
                 agentStepID: continuationID,
@@ -347,12 +347,12 @@ extension KeepTalkingClient {
             contextID: contextID
         )
 
-        // Mirror `onAgentTurnSuspended`: the turn is no longer parked — it is
+        // Mirror `agentTurnSuspensions`: the turn is no longer parked — it is
         // running again regardless of whether the continuation was fulfilled or
         // rejected. A detached driver flips its run's UI back to "running" here.
         // (Cancellation throws out of `awaitContinuation` above, so this only
         // fires on a genuine resume — the cancelled task unwinds separately.)
-        onAgentTurnResumed?(
+        signals.agentTurnResumptions.send(
             KeepTalkingAgentTurnResumption(
                 agentTurnID: agentTurnID,
                 agentStepID: continuationID,

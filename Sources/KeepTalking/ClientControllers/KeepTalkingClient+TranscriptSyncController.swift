@@ -85,7 +85,7 @@ extension KeepTalkingClient {
     private func localTranscriptSyncSnapshot(
         session: UUID
     ) async throws -> KeepTalkingVoiceTranscriptSyncSnapshot {
-        let lines = try await voiceTranscriptLines(forSession: session)
+        let lines = try await loadVoiceTranscriptLines(forSession: session)
         return KeepTalkingVoiceTranscriptSyncSnapshot(session: session, lines: lines)
     }
 
@@ -115,7 +115,7 @@ extension KeepTalkingClient {
                 try await dto.makeModel().create(on: localStore.database)
             }
             persisted += 1
-            onVoiceTranscriptLine?(
+            signals.voiceTranscriptLines.send(
                 KeepTalkingVoiceCallTranscriptLinePayload(
                     from: dto.author,
                     contextID: dto.contextID,

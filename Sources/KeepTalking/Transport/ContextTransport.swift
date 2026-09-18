@@ -43,6 +43,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
     var onRawMessage: (@Sendable (String) -> Void)?
     var onPeerConnect: (@Sendable (UUID) -> Void)?
     var onBroadcastReady: (@Sendable () -> Void)?
+    var onTransportStateChange: (@Sendable (BroadcastChannelState, KeepTalkingTransportRoute) -> Void)?
     var onLog: (@Sendable (String) -> Void)?
     var contextSecretProvider: KeepTalkingTransportContextSecretProvider?
 
@@ -351,6 +352,7 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
             onBroadcastReady?()
         }
         debug("broadcast state changed to \(broadcast.state.description)")
+        onTransportStateChange?(broadcast.state, currentRoute())
     }
 
     private func bindBroadcastBlobCallback(generation: UInt64) {
@@ -632,10 +634,11 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
                     generation: generation
                 )
             else { return }
-            // Log for now
             if let direct = self.stateQueue.sync(execute: { self.directChannels[nodeID] }) {
                 self.debug("direct[\(nodeID.uuidString.prefix(8))] state changed isReady=\(direct.isReady)")
             }
+            // The route is derived from direct readiness; report it upward.
+            self.onTransportStateChange?(self.broadcast.state, self.currentRoute())
         }
         direct.onLog = onLog
         direct.contextSecretProvider = contextSecretProvider
@@ -686,6 +689,9 @@ public final class KeepTalkingContextTransport: KeepTalkingTransportClient, @unc
         guard let direct else { return }
         direct.teardown()
         debug("participant left node=\(nodeID.uuidString.prefix(8))")
+        // The channel's own state callback is filtered out once it left
+        // `directChannels`, so the p2p→sfu route flip is reported here.
+        onTransportStateChange?(broadcast.state, currentRoute())
     }
 
     // MARK: - Dual-source liveness

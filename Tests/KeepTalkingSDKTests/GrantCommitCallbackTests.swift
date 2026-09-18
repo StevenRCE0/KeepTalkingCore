@@ -3,23 +3,33 @@ import Testing
 
 @testable import KeepTalkingSDK
 
-actor GrantCommitRecorder {
-    private var batches: [[KeepTalkingGrantCommit]] = []
+/// Lock-based so the signal handler records synchronously, in order.
+final class GrantCommitRecorder: @unchecked Sendable {
+    private let recorder = SignalRecorder<[KeepTalkingGrantCommit]>()
 
     func record(_ batch: [KeepTalkingGrantCommit]) {
-        batches.append(batch)
+        recorder.record(batch)
     }
 
     func snapshot() -> [[KeepTalkingGrantCommit]] {
-        batches
+        recorder.snapshot
     }
 
     var flattened: [KeepTalkingGrantCommit] {
-        batches.flatMap { $0 }
+        recorder.snapshot.flatMap { $0 }
+    }
+
+    /// Delivery is asynchronous: wait for the batches a test expects.
+    func waitForBatches(_ count: Int) async {
+        await recorder.waitForCount(count)
+    }
+
+    func settle() async {
+        await recorder.settle()
     }
 }
 
-/// `onGrantCommitted` is the telemetry seam for every grant mutation an
+/// `grantCommits` is the telemetry seam for every grant mutation an
 /// instance client performs. These tests pin what a consumer can rely on:
 /// one commit per changed peer, the lane the caller passed, nothing on a
 /// throw, and silence from scope-only updates.
@@ -74,7 +84,7 @@ struct GrantCommitCallbackTests {
             localStore: store
         )
         let recorder = GrantCommitRecorder()
-        client.onGrantCommitted = { await recorder.record($0) }
+        client.grantCommits.observe { recorder.record($0) }
 
         return Fixture(
             store: store,
@@ -99,7 +109,8 @@ struct GrantCommitCallbackTests {
         revoke.revoke(in: fixture.contextID, actionID: fixture.actionID, from: fixture.recipientID)
         try await fixture.client.grantActionPermission(transaction: revoke, lane: .workbench)
 
-        let commits = await fixture.recorder.flattened
+        await fixture.recorder.waitForBatches(2)
+        let commits = fixture.recorder.flattened
         #expect(
             commits == [
                 .init(
@@ -116,7 +127,7 @@ struct GrantCommitCallbackTests {
                 ),
             ]
         )
-        #expect(await fixture.recorder.snapshot().count == 2)
+        #expect(fixture.recorder.snapshot().count == 2)
     }
 
     @Test("the lane defaults to .other when a caller does not say")
@@ -130,7 +141,8 @@ struct GrantCommitCallbackTests {
             grantScope: .verbs([])
         )
 
-        let commits = await fixture.recorder.flattened
+        await fixture.recorder.waitForBatches(1)
+        let commits = fixture.recorder.flattened
         #expect(commits.count == 1)
         #expect(commits.first?.lane == .other)
         #expect(commits.first?.contextID == nil)
@@ -154,7 +166,8 @@ struct GrantCommitCallbackTests {
             lane: .chat
         )
 
-        let commits = await fixture.recorder.flattened
+        await fixture.recorder.waitForBatches(2)
+        let commits = fixture.recorder.flattened
         #expect(commits.count == 2)
         #expect(
             commits.last
@@ -206,7 +219,8 @@ struct GrantCommitCallbackTests {
             lane: .workbench
         )
 
-        let commits = await fixture.recorder.flattened
+        await fixture.recorder.waitForBatches(2)
+        let commits = fixture.recorder.flattened
         #expect(
             commits == [
                 .init(
@@ -239,7 +253,8 @@ struct GrantCommitCallbackTests {
             )
         }
 
-        #expect(await fixture.recorder.flattened.isEmpty)
+        await fixture.recorder.settle()
+        #expect(fixture.recorder.flattened.isEmpty)
     }
 
     @Test("scope-only updates stay silent")
@@ -259,6 +274,8 @@ struct GrantCommitCallbackTests {
             grantScope: .verbs([])
         )
 
-        #expect(await fixture.recorder.flattened.count == 1)
+        await fixture.recorder.waitForBatches(1)
+        await fixture.recorder.settle()
+        #expect(fixture.recorder.flattened.count == 1)
     }
 }

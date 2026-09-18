@@ -7,7 +7,7 @@ let package = Package(
     name: "KeepTalking",
     platforms: [
         .iOS(.v17),
-        .macOS(.v13),
+        .macOS(.v14),
         .visionOS(.v1),
     ],
     products: [

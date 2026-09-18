@@ -8,7 +8,7 @@ The KeepTalking SDK is built around one long-lived object: ``KeepTalkingClient``
 
 A client is always scoped to exactly one conversation *context*. The context ID is part of ``KeepTalkingConfig``, which the client captures at construction and never mutates — the channel labels the transport subscribes to are derived from it. Switching contexts therefore means building a new configuration with ``KeepTalkingConfig/withContextID(_:)`` and constructing a second client, not reconfiguring the first. Note that `withContextID(_:)` carries over the context ID, node, P2P attempt timeout, SFU endpoint, and attachment lookback only — if you set `maxDirectMeshSize` or `contextSyncChunkSize` away from their defaults, re-apply them on the derived configuration.
 
-The SDK requires iOS 17+, macOS 13+, or visionOS 1+, and builds with Swift 6.1+. The library product is `KeepTalkingSDK`; import that module name. Transport also expects a reachable KeepTalkingSFU signaling server — the SFU broadcast channel is the always-on backbone, and the optional direct P2P channel is negotiated on top of it.
+The SDK requires iOS 17+, macOS 14+, or visionOS 1+, and builds with Swift 6.1+. The library product is `KeepTalkingSDK`; import that module name. Transport also expects a reachable KeepTalkingSFU signaling server — the SFU broadcast channel is the always-on backbone, and the optional direct P2P channel is negotiated on top of it.
 
 ### Building a configuration
 
@@ -125,7 +125,7 @@ let client = KeepTalkingClient(
     localStore: store,
     keychain: keychain
 )
-client.onLog = { line in print(line) }
+client.log.observe { line in print(line) }
 
 // 4. Bring the transport up.
 try await client.connect()

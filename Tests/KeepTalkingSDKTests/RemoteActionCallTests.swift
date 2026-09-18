@@ -1121,7 +1121,7 @@ struct RemoteActionCallTests {
             localStore: localStore
         )
         let activityRecorder = ActionCallActivityRecorder()
-        client.onActionCallActivity = { await activityRecorder.record($0) }
+        client.actionCallActivities.observe { activityRecorder.record($0) }
 
         let selfNode = KeepTalkingNode(id: selfNodeID)
         let callerNode = KeepTalkingNode(id: callerNodeID)
@@ -1177,8 +1177,9 @@ struct RemoteActionCallTests {
         .first()
 
         #expect(storedContext?.id == contextID)
+        await activityRecorder.waitForCount(2)
         #expect(
-            await activityRecorder.snapshot().map(\.phase.isEnded) == [false, true]
+            activityRecorder.snapshot().map(\.phase.isEnded) == [false, true]
         )
     }
 }

@@ -967,6 +967,117 @@ extension KeepTalkingClient {
         )
     }
 
+    /// Copies the local node's self-hosted action grants to an owned node.
+    ///
+    /// Queries the grants the local node holds from managed-fleet relations in
+    /// the given context, filters to actions hosted by the local node, and
+    /// replicates each grant (preserving `approvingContext` and `permission`)
+    /// to the target owned node.
+    ///
+    /// - Returns: The number of newly created grants.
+    public func copyGrantsToOwnedNode(
+        targetNodeID: UUID,
+        contextID: UUID,
+        lane: KeepTalkingGrantLane = .other
+    ) async throws -> Int {
+        let selfNodeID = config.node
+        let context = KeepTalkingContext(id: contextID)
+        let database = localStore.database
+
+        guard
+            let ownerRelation =
+                try await KeepTalkingNodeRelation
+                .query(on: database)
+                .filter(\.$from.$id == selfNodeID)
+                .filter(\.$to.$id == targetNodeID)
+                .first(),
+            ownerRelation.relationship == .owner
+        else {
+            throw KeepTalkingClientError.relationNotTrustedOrOwned(targetNodeID)
+        }
+
+        var managedNodeIDs = [selfNodeID]
+        let ownedRelations =
+            try await KeepTalkingNodeRelation
+            .query(on: database)
+            .filter(\.$from.$id == selfNodeID)
+            .all()
+            .filter { $0.relationship == .owner }
+        managedNodeIDs.append(contentsOf: ownedRelations.compactMap { $0.$to.id })
+
+        let inboundRelations =
+            try await KeepTalkingNodeRelation
+            .query(on: database)
+            .filter(\.$from.$id ~~ managedNodeIDs)
+            .filter(\.$to.$id == selfNodeID)
+            .all()
+            .filter { $0.relationship.isTrustedOrOwner }
+
+        let relationIDs = inboundRelations.compactMap(\.id)
+        guard !relationIDs.isEmpty else { return 0 }
+
+        let grantRows =
+            try await KeepTalkingNodeRelationActionRelation
+            .query(on: database)
+            .filter(\.$relation.$id ~~ relationIDs)
+            .with(\.$action)
+            .all()
+            .filter { $0.applicable(in: context) }
+        guard !grantRows.isEmpty else { return 0 }
+
+        var grantCount = 0
+        var commits: [KeepTalkingGrantCommit] = []
+
+        for grant in grantRows {
+            let actionID = grant.$action.id
+            guard grant.action.$node.id == selfNodeID else { continue }
+
+            let existing = try await Self.allowedActionScope(
+                node: KeepTalkingNode(id: targetNodeID),
+                action: grant.action,
+                context: context,
+                on: database
+            )
+            if existing != nil { continue }
+
+            let scope: KeepTalkingActionPermissionScope =
+                if case .all = grant.approvingContext { .all } else { .context(context) }
+
+            let selfNode = try await ensure(
+                selfNodeID, for: KeepTalkingNode.self, strict: true
+            )
+            try await Self.grantActionPermission(
+                actionID: actionID,
+                toNodeID: targetNodeID,
+                scope: scope,
+                grantScope: grant.permission,
+                node: selfNode,
+                on: database,
+                callbackForBroadcasting: {
+                    await self.broadcastLocalNodeState(reason: $0)
+                }
+            )
+            commits.append(
+                .init(
+                    contextID: scope.scopedContextID,
+                    toNodeID: targetNodeID,
+                    change: .actionGranted(scope: grant.permission),
+                    lane: lane
+                ))
+            grantCount += 1
+        }
+
+        if !commits.isEmpty {
+            await emitGrantCommits(commits)
+            await invalidateActionToolCatalog(
+                contextID: contextID,
+                reason: "copy_grants_to_owned_node target=\(targetNodeID.uuidString.lowercased()) count=\(grantCount)"
+            )
+        }
+
+        return grantCount
+    }
+
     static public func grantActionPermission(
         transaction: KeepTalkingGrantTransaction,
         node: KeepTalkingNode,
@@ -1156,12 +1267,12 @@ extension KeepTalkingClient {
         )
     }
 
-    /// Hands a committed batch to `onGrantCommitted`. Called by every instance
+    /// Hands a committed batch to `grantCommits`. Called by every instance
     /// mutator after its database work returned, so a throwing mutation never
     /// reports a change that did not land.
     func emitGrantCommits(_ commits: [KeepTalkingGrantCommit]) async {
-        guard !commits.isEmpty, let onGrantCommitted else { return }
-        await onGrantCommitted(commits)
+        guard !commits.isEmpty else { return }
+        signals.grantCommits.send(commits)
     }
 
     /// Updates the permission on a specific grant row (identified by its primary key).

@@ -4,21 +4,25 @@ import Testing
 
 @testable import KeepTalkingSDK
 
-actor ActionCallActivityRecorder {
-    private var activities: [KeepTalkingActionCallActivity] = []
+/// Lock-based (not an actor) so a signal handler can record synchronously
+/// and delivery order is preserved.
+final class ActionCallActivityRecorder: @unchecked Sendable {
+    private let recorder = SignalRecorder<KeepTalkingActionCallActivity>()
 
     func record(_ activity: KeepTalkingActionCallActivity) {
-        activities.append(activity)
+        recorder.record(activity)
     }
 
     func snapshot() -> [KeepTalkingActionCallActivity] {
-        activities
+        recorder.snapshot
     }
 
     func waitForCount(_ count: Int) async {
-        while activities.count < count {
-            await Task.yield()
-        }
+        await recorder.waitForCount(count)
+    }
+
+    func settle() async {
+        await recorder.settle()
     }
 }
 
@@ -133,7 +137,7 @@ struct ActionCallActivityTests {
             on: store.database
         )
         let recorder = ActionCallActivityRecorder()
-        client.onActionCallActivity = { await recorder.record($0) }
+        client.actionCallActivities.observe { recorder.record($0) }
         let actionID = try #require(action.id)
         let nodeID = try #require(node.id)
         let contextID = try #require(context.id)
@@ -178,7 +182,7 @@ struct ActionCallActivityTests {
         await recorder.waitForCount(3)
         task.cancel()
         let cancelledResult = try await task.value
-        let activities = await recorder.snapshot()
+        let activities = recorder.snapshot()
 
         #expect(cancelledResult.isError)
         #expect(activities.map(\.phase.isEnded) == [false, true, false, true])
@@ -199,7 +203,7 @@ struct ActionCallActivityTests {
             localStore: try await KeepTalkingInMemoryStore.make()
         )
         let recorder = ActionCallActivityRecorder()
-        client.onActionCallActivity = { await recorder.record($0) }
+        client.actionCallActivities.observe { recorder.record($0) }
         client.disconnect()
 
         do {
@@ -211,7 +215,8 @@ struct ActionCallActivityTests {
             Issue.record("Expected remote delivery to fail while disconnected")
         } catch {}
 
-        let activities = await recorder.snapshot()
+        await recorder.waitForCount(2)
+        let activities = recorder.snapshot()
         #expect(activities.map(\.phase) == [.began, .ended(.failure)])
         #expect(activities.first?.callerNodeID == selfNodeID)
         #expect(activities.first?.targetNodeID == remoteNodeID)
@@ -226,7 +231,7 @@ struct ActionCallActivityTests {
             localStore: try await KeepTalkingInMemoryStore.make()
         )
         let recorder = ActionCallActivityRecorder()
-        client.onActionCallActivity = { await recorder.record($0) }
+        client.actionCallActivities.observe { recorder.record($0) }
 
         _ = await client.executeActionCallRequest(
             KeepTalkingActionCallRequest(
@@ -249,6 +254,7 @@ struct ActionCallActivityTests {
         )
         #endif
 
-        #expect(await recorder.snapshot().isEmpty)
+        await recorder.settle()
+        #expect(recorder.snapshot().isEmpty)
     }
 }

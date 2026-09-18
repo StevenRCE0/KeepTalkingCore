@@ -62,7 +62,7 @@ extension KeepTalkingClient {
 
             case .nodeOnline(let node):
                 guard node != config.node else { return }
-                onPeerConnect?(node)
+                connection.sweepPresence()
                 rtcClient.debug("peer connected node=\(node.uuidString.lowercased())")
                 await broadcastLocalNodeState(
                     reason: "peer-connect node=\(node.uuidString.lowercased())"

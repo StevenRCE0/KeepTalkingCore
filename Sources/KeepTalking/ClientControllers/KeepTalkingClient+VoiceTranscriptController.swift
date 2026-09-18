@@ -114,7 +114,7 @@ extension KeepTalkingClient {
             onLog?(
                 "[voice-transcript] ~revise line=\(lineID.uuidString.prefix(8)) seq=\(existing.sequence) chars=\(trimmed.count)"
             )
-            onVoiceTranscriptLine?(payload)
+            signals.voiceTranscriptLines.send(payload)
             return lineID
         }
 
@@ -159,7 +159,7 @@ extension KeepTalkingClient {
             onLog?("[voice-transcript] broadcast FAILED (line persisted, will backfill): \(error.localizedDescription)")
         }
 
-        onVoiceTranscriptLine?(payload)
+        signals.voiceTranscriptLines.send(payload)
         return newID
     }
 
@@ -196,7 +196,7 @@ extension KeepTalkingClient {
             onLog?(
                 "[voice-transcript] ←~ revise line=\(payload.lineID.uuidString.prefix(8)) from=\(payload.from.uuidString.prefix(8)): \"\(payload.text.prefix(60))\""
             )
-            onVoiceTranscriptLine?(payload)
+            signals.voiceTranscriptLines.send(payload)
             return true
         }
         ensureVoiceCall(
@@ -236,7 +236,7 @@ extension KeepTalkingClient {
         onLog?(
             "[voice-transcript] ← line session=\(payload.sessionID.uuidString.prefix(8)) from=\(payload.from.uuidString.prefix(8)) seq=\(payload.sequence): \"\(payload.text.prefix(60))\""
         )
-        onVoiceTranscriptLine?(payload)
+        signals.voiceTranscriptLines.send(payload)
         return true
     }
 
@@ -244,7 +244,7 @@ extension KeepTalkingClient {
 
     /// All transcript lines for a session, ordered by time then per-author
     /// sequence (a stable total order across the interleaved authors).
-    public func voiceTranscriptLines(
+    public func loadVoiceTranscriptLines(
         forSession sessionID: UUID
     ) async throws -> [KeepTalkingVoiceTranscriptLine] {
         try await KeepTalkingVoiceTranscriptLine.query(on: voiceDB)
@@ -312,7 +312,7 @@ extension KeepTalkingClient {
         aliasLookup: KeepTalkingAliasLookup,
         maxCharacters: Int? = nil
     ) async throws -> String? {
-        let lines = try await voiceTranscriptLines(forSession: sessionID)
+        let lines = try await loadVoiceTranscriptLines(forSession: sessionID)
             .filter { $0.contextID == contextID }
         guard !lines.isEmpty else { return nil }
 
@@ -477,7 +477,7 @@ extension KeepTalkingClient {
             onLog?("[voice-transcript] seal skipped — already sealed \(sessionID.uuidString.prefix(8))")
             return
         }
-        let lines = try await voiceTranscriptLines(forSession: sessionID)
+        let lines = try await loadVoiceTranscriptLines(forSession: sessionID)
         let now = Date()
 
         guard !lines.isEmpty else {

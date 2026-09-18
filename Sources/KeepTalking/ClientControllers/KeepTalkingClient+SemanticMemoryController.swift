@@ -270,7 +270,7 @@ extension KeepTalkingClient {
                 let count = semanticMemoryOccurrenceCount(of: token, in: text)
                 guard count > 0 else { continue }
                 matchedTokenCount += 1
-                score += Float(1 + log(Double(count)))
+                score += Float(1 + Foundation.log(Double(count)))
             }
             guard matchedTokenCount > 0 else { return nil }
             score *= Float(matchedTokenCount) / Float(tokens.count)

@@ -928,6 +928,46 @@ private func makeActionCallRequestEnvelope(
     )
 }
 
+private struct TransportReport: Equatable {
+    let state: BroadcastChannelState
+    let route: KeepTalkingTransportRoute
+}
+
+struct TransportStateReportTests {
+    @Test("the orchestrator reports backbone state and route transitions upward")
+    func transportStateChangeReportsUpward() async throws {
+        let harness = makeHarness()
+        let reports = SignalRecorder<TransportReport>()
+        harness.transport.onTransportStateChange = { state, route in
+            reports.record(TransportReport(state: state, route: route))
+        }
+
+        try await harness.transport.start().value
+        await reports.waitForCount(1)
+        #expect(reports.snapshot.first == TransportReport(state: .ready, route: .sfu))
+
+        harness.broadcast.simulateState(.reconnecting(attempt: 1))
+        await reports.waitForCount(2)
+        #expect(reports.snapshot.last == TransportReport(state: .reconnecting(attempt: 1), route: .sfu))
+
+        harness.broadcast.simulateState(.ready)
+        await reports.waitForCount(3)
+        #expect(reports.snapshot.last == TransportReport(state: .ready, route: .sfu))
+
+        // A direct channel becoming ready flips the route; its own state
+        // callback is what carries the report.
+        let peer = UUID()
+        let channel = harness.registerPeer(peer, isReady: false)
+        let before = reports.snapshot.count
+        channel.isReady = true
+        channel.onStateChange?()
+        await reports.waitForCount(before + 1)
+        #expect(reports.snapshot.last == TransportReport(state: .ready, route: .p2p))
+
+        harness.transport.stop()
+    }
+}
+
 private func makeHarness(
     maxDirectMeshSize: Int = 4,
     environment: FakeNetworkEnvironment = FakeNetworkEnvironment("net-a")

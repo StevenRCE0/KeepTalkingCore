@@ -117,11 +117,11 @@ extension KeepTalkingClient {
             context.consumedMarks = (context.consumedMarks ?? []) + newlyConsumed
             try await context.save(on: db)
         }
-        onThreadsChanged?()
+        signals.threadChanges.send(())
 
         // Marks mutate persisted thread boundaries and metadata. Semantic
         // documents are a derived cache, so only enqueue reconciliation after
         // the durable state is committed; the reconciler reloads that state.
-        await onSemanticIndexNeedsReconciliation?(contextID)
+        signals.semanticIndexReconciliations.send(contextID)
     }
 }

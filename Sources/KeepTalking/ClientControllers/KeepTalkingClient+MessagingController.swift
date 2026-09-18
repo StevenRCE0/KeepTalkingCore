@@ -197,10 +197,10 @@ extension KeepTalkingClient {
             sender: sender
         )
         if emitLocalEnvelope {
-            onEnvelope?(message)
+            signals.envelopes.send(message)
             for attachment in savedAttachments {
                 if let attachmentDTO = KeepTalkingContextAttachmentDTO(attachment) {
-                    onEnvelope?(attachmentDTO)
+                    signals.envelopes.send(attachmentDTO)
                 }
             }
         }
@@ -1033,7 +1033,7 @@ extension KeepTalkingClient {
                 state: newState
             )
             try? await existing.save(on: localStore.database)
-            onEnvelope?(existing)
+            signals.envelopes.send(existing)
         }
     }
 }

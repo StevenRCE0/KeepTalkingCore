@@ -942,10 +942,10 @@ extension KeepTalkingClient {
         for request: KeepTalkingActionCallRequest,
         operation: () async throws -> KeepTalkingActionCallResult
     ) async rethrows -> KeepTalkingActionCallResult {
-        await onActionCallActivity?(.init(request: request, phase: .began))
+        signals.actionCallActivities.send(.init(request: request, phase: .began))
         do {
             let result = try await operation()
-            await onActionCallActivity?(
+            signals.actionCallActivities.send(
                 .init(
                     request: request,
                     phase: .ended(result.isError ? .failure : .success)
@@ -954,7 +954,7 @@ extension KeepTalkingClient {
 
             return result
         } catch {
-            await onActionCallActivity?(.init(request: request, phase: .ended(.failure)))
+            signals.actionCallActivities.send(.init(request: request, phase: .ended(.failure)))
             throw error
         }
     }

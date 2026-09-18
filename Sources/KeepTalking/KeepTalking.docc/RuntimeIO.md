@@ -39,7 +39,7 @@ is careful not to break.
 A run is observable from outside while it happens.
 ``KeepTalkingActionCallActivity`` brackets a provider-side execution with a
 `began` and an `ended` phase, carrying the request id, the context, the action,
-and both node ids; it is delivered on the client's `onActionCallActivity`
+and both node ids; it is delivered on the client's `actionCallActivities`
 callback, and the `ended` phase fires whether the run returned or threw. The
 bracket wraps *action* execution only — the `stage-file` preflight and the
 cross-node cancellation request are short-circuited before it and raise no

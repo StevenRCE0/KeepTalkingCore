@@ -17,14 +17,17 @@ public final class KeepTalkingVoiceCallPresenceRegistry: @unchecked Sendable {
         }
     }
 
-    /// Fires after every mutation. Argument is the affected contextID;
-    /// callers re-read the current set via `participants(in:)`.
-    public var onChange: (@Sendable (UUID) -> Void)?
+    /// Emits after every mutation with the affected contextID. Owned by the
+    /// client's signal box (`voiceCallPresenceChanges`); the registry only
+    /// writes it, so hosts subscribe on the client, not here.
+    let changes: KeepTalkingSignal<UUID>
 
     private let lock = NSLock()
     private var byContext: [UUID: Set<Participant>] = [:]
 
-    public init() {}
+    public init(changes: KeepTalkingSignal<UUID> = .init()) {
+        self.changes = changes
+    }
 
     /// Current participants in `contextID`. Returns an empty set when
     /// nothing is known.
@@ -51,7 +54,7 @@ public final class KeepTalkingVoiceCallPresenceRegistry: @unchecked Sendable {
         let changed: Bool = lock.withLock {
             byContext[contextID, default: []].insert(participant).inserted
         }
-        if changed { onChange?(contextID) }
+        if changed { changes.send(contextID) }
         return changed
     }
 
@@ -66,7 +69,7 @@ public final class KeepTalkingVoiceCallPresenceRegistry: @unchecked Sendable {
             }
             return true
         }
-        if changed { onChange?(contextID) }
+        if changed { changes.send(contextID) }
         return changed
     }
 
@@ -98,7 +101,7 @@ public final class KeepTalkingVoiceCallPresenceRegistry: @unchecked Sendable {
             }
             return hits
         }
-        for contextID in touched { onChange?(contextID) }
+        for contextID in touched { changes.send(contextID) }
         return touched
     }
 
@@ -120,6 +123,6 @@ public final class KeepTalkingVoiceCallPresenceRegistry: @unchecked Sendable {
             }
             return hits
         }
-        for contextID in touched { onChange?(contextID) }
+        for contextID in touched { changes.send(contextID) }
     }
 }

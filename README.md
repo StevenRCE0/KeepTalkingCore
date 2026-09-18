@@ -11,7 +11,7 @@ Swift package providing the core engine for KeepTalking — a distributed AI con
 
 ## Platforms
 
-iOS 17+, macOS 13+, visionOS 1+ — swift-tools-version 6.1, built with the Swift 6.3.2 toolchain (`.swift-version`).
+iOS 17+, macOS 14+, visionOS 1+ — swift-tools-version 6.1, built with the Swift 6.3.2 toolchain (`.swift-version`).
 
 ## Architecture
 
@@ -163,7 +163,7 @@ The message IR (`AIMessage`, `AIToolCall`, `AIToolChoice`) is multimodal: an `AI
 
 ## Runtime I/O Model
 
-Per-run action and skill I/O is centralized under `Services/IO`; the cross-node staging *call flow* that wraps a remote call sits alongside it in `ClientControllers` (`KeepTalkingClient+StagedFileController`, `KeepTalkingClient+OneTimeBlobController`). All of these types are **internal** — the public surface a host sees is `KTResourceManifest`, the `KeepTalkingActionCall*` models, and the `onActionCallActivity` callback.
+Per-run action and skill I/O is centralized under `Services/IO`; the cross-node staging *call flow* that wraps a remote call sits alongside it in `ClientControllers` (`KeepTalkingClient+StagedFileController`, `KeepTalkingClient+OneTimeBlobController`). All of these types are **internal** — the public surface a host sees is `KTResourceManifest`, the `KeepTalkingActionCall*` models, and the `actionCallActivities` signal.
 
 - The internal `KeepTalkingIOManager` owns the per-run contract: staging inputs, binding an action's declared objects to concrete input paths and workspace-backed output slots (`KTCallBinding`), resolving the sandbox policy with the run's granted directories (`KT_ATTACHMENTS` read-only, `KT_WORKSPACE` read-write), building `KTResourceManifest` from the *already-granted* candidates, harvesting whatever landed in the output slots, delivering the produced resources, and tearing the run's scratch state down. Binding, policy resolution, manifest construction and output harvesting are macOS-only (`#if os(macOS)`); produced-resource delivery and staged-resource lookup are cross-platform.
 - `KeepTalkingStagingIOManager` is the IO manager's staging runtime. It materialises the context's *ready* blob attachments into a scratch directory (hard-linking from the blob store, falling back to a copy), resolves the call's staged OTB input handles into that same directory, tracks which scratch directories the run owns, and removes exactly those on cleanup. Underneath it, `KeepTalkingStagingIOStore` is a TTL- and quota-bounded actor holding files peers preflighted onto this node, keyed by opaque handle — caller-scoped, refused before decryption when over quota, and split into consume-on-use input relays versus produced outputs that survive consumption so an output can be re-fed as a later call's input.
@@ -240,7 +240,7 @@ let client = KeepTalkingClient(
     localStore: store,
     keychain: KeepTalkingSecItemKeychainStore.shared
 )
-client.onLog = { line in print(line) }
+client.log.observe { line in print(line) }
 
 // 4. Bring the transport up, then create a context and send.
 try await client.connect()

@@ -236,7 +236,7 @@ non-loopback interface addresses each beat, counting only the /64 prefix of an I
 so RFC 4941 privacy addressing does not churn the digest on a stationary node; when the
 digest changes, the cap clears and every abandoned or backing-off channel is asked to retry.
 
-The client surfaces this: ``KeepTalkingClient/onPeerConnect`` fires on the edge,
+The client surfaces this: ``KeepTalkingClientSignals/presence`` publishes `online` on the edge,
 ``KeepTalkingClient/isNodeOnline(_:)`` and ``KeepTalkingClient/onlineNodeIDs()`` read the
 current set, and ``KeepTalkingClient/runtimeStats()`` reports counters, channel labels, and
 the physical route currently in use. Health is a pure read of the backbone's self-reported
@@ -295,10 +295,10 @@ rides the backbone.
 
 A reconcile is single-flighted per peer, so the connect edge and the heartbeat cannot run two
 against the same peer at once. Progress is reported as a stream of
-``KeepTalkingContextSyncEvent`` values through ``KeepTalkingClient/onContextSync``: one
+``KeepTalkingContextSyncEvent`` values through ``KeepTalkingClientSignals/contextSyncEvents``: one
 `started`, a `messagesApplied` carrying the ids each persisted page produced, and then
 `completed` or `failed`. All four share a `syncID` so a listener can group them. Side notes
-report separately, through `onSideNotesChanged`, because they also change on local writes and
+report separately, through `sideNoteChanges`, because they also change on local writes and
 inbound pushes rather than only during a reconcile.
 
 ### Blob transfer
@@ -320,7 +320,7 @@ identities, so a file is reachable from any identity holding a record for it.
 ``KeepTalkingBlobReferenceIndex`` answers "which blobs is this database still referencing?"
 against one `Database` handle at a time, so a caller can open each identity, collect, and
 release rather than holding every store open at once. Availability changes are reported
-through ``KeepTalkingClient/onBlobAvailabilityChange``.
+through ``KeepTalkingClientSignals/blobAvailabilityChanges``.
 
 Transfers are demand-driven and resumable. A peer missing attachment bytes sends an
 attachment request naming the hashes it wants, optionally with a per-blob bitmask of the

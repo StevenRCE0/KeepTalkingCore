@@ -298,6 +298,6 @@ extension KeepTalkingClient {
     }
 
     func notifySideNotesChanged(_ contextID: UUID) async {
-        await onSideNotesChanged?(contextID)
+        signals.sideNoteChanges.send(contextID)
     }
 }

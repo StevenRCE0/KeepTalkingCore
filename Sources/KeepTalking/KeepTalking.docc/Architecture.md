@@ -21,7 +21,7 @@ Two cross-cutting directories sit beside the stack rather than inside it: `Crypt
 
 ``KeepTalkingClient`` is the only object a host application constructs. One instance drives one conversation context, fixed at construction by ``KeepTalkingConfig`` — the channel labels the transport subscribes to are derived from the context ID, so moving to another context means building a fresh configuration with ``KeepTalkingConfig/withContextID(_:)`` and a second client rather than mutating the first.
 
-The client owns the long-lived collaborators: the transport, the local store, the keychain, the AI connector, the execution managers, the blob store, and the agent coordinator. It also owns the *push surface* — a set of `@Sendable` callback properties (`onEnvelope`, `onPeerConnect`, `onContextSync`, `onBlobAvailabilityChange`, `onSideNotesChanged`, `onActionCallActivity`, `onAgentRunsChanged`, `onVoiceTranscriptLine`, and others) through which everything asynchronous is reported. Hosts observe the client; they do not poll it.
+The client owns the long-lived collaborators: the transport, the local store, the keychain, the AI connector, the execution managers, the blob store, and the agent coordinator. It also owns the *push surface* — a set of signals (`envelopes`, `lifecycle`, `presence`, `contextSyncEvents`, `blobAvailabilityChanges`, `sideNoteChanges`, `actionCallActivities`, `agentRuns`, `voiceTranscriptLines`, and others; see <doc:Events>) through which everything asynchronous is reported. Hosts observe the client; they do not poll it.
 
 Bringing the transport up and registering local action executors are deliberately separate steps. ``KeepTalkingClient/connect()`` ensures the context row exists, starts the transport, persists this node, and begins the maintenance heartbeat — it does *not* register executors, because a failing executor (an HTTP MCP server needing re-authorization, say) must never block the transport or trigger an auth prompt as a side effect of connecting. Hosts that want executors live call ``KeepTalkingClient/registerLocalActionsInExecutors()`` explicitly.
 
@@ -58,7 +58,7 @@ The envelope layer is the wire contract. ``KeepTalkingEnvelope`` is a `Codable &
 
 Domain models are retrofitted onto this protocol by extensions in `Envelope/Models/`, so ``KeepTalkingContextMessage`` — the persisted row — *is* the wire payload. There is no parallel DTO hierarchy to keep in sync for those types.
 
-``KeepTalkingEnvelopePacket`` performs kind-tagged coding: it writes the kind alongside the payload and, on decode, dispatches on the kind to reconstruct the concrete type behind an existential. Sender identity rides one level lower, on the encrypted packet-transport envelope the channel builds; no sequence number is carried, because nothing downstream dedups on one. Inbound dispatch is table-driven through ``KeepTalkingEnvelopeAsyncHandlers``, which registers one typed handler per kind and downcasts at the boundary. A handler registered through `registerReportingApplied(_:_:)` returns whether the envelope actually changed anything locally, and a `false` suppresses the outward `onEnvelope` publish — that is what keeps fan-out's second copy from raising a second notification.
+``KeepTalkingEnvelopePacket`` performs kind-tagged coding: it writes the kind alongside the payload and, on decode, dispatches on the kind to reconstruct the concrete type behind an existential. Sender identity rides one level lower, on the encrypted packet-transport envelope the channel builds; no sequence number is carried, because nothing downstream dedups on one. Inbound dispatch is table-driven through ``KeepTalkingEnvelopeAsyncHandlers``, which registers one typed handler per kind and downcasts at the boundary. A handler registered through `registerReportingApplied(_:_:)` returns whether the envelope actually changed anything locally, and a `false` suppresses the outward `envelopes` publish — that is what keeps fan-out's second copy from raising a second notification.
 
 ### Models and migrations
 
@@ -100,7 +100,7 @@ let config = KeepTalkingConfig(
 let store = try await KeepTalkingModelStore.make()
 let client = KeepTalkingClient(config: config, localStore: store)
 
-client.onEnvelope = { envelope in
+client.envelopes.observe { envelope in
     print(envelope.kind, envelope.channel)
 }
 
@@ -124,7 +124,7 @@ What that last line sets in motion:
 
 7. **Peer receive.** The remote carrier decrypts, then hands the envelope to its transport. There is no dedup here — a dual-connected peer may well receive both copies, which is safe precisely because only idempotent kinds are allowed to fan out. The transport consumes P2P signaling internally so it never reaches the application, routes trust envelopes to their own handler, and forwards the rest upward.
 
-8. **Dispatch and persist.** The client's envelope controller assembles a ``KeepTalkingEnvelopeAsyncHandlers`` table — messaging, node, context-sync, action-call, action-catalog, voice — and dispatches on kind. The messaging handler filters out rows it already holds, saves what is new, and re-drives any attachments that arrived ahead of their parent. The host's own `onEnvelope` callback fires only if that handler reports it actually applied something, so the second copy of a fanned-out message lands silently.
+8. **Dispatch and persist.** The client's envelope controller assembles a ``KeepTalkingEnvelopeAsyncHandlers`` table — messaging, node, context-sync, action-call, action-catalog, voice — and dispatches on kind. The messaging handler filters out rows it already holds, saves what is new, and re-drives any attachments that arrived ahead of their parent. The host's `envelopes` signal fires only if that handler reports it actually applied something, so the second copy of a fanned-out message lands silently.
 
 9. **Repair, if needed.** If step 5 failed, the outbox drains when the broadcast channel signals ready, and again when a peer comes online — the latter through the context-maintenance dispatcher, which owns the whole node-online task set (presence re-broadcast, context and transcript sync, attachment recovery, outbox drain) rather than scattering it across callbacks. Anything still missing is reconciled by the three-phase context sync — compare per-sender summaries, request the tail past each cursor, then repair any diverging chunk — which runs the same algorithm over messages and voice transcript lines through a shared stream abstraction, one reconcile per peer at a time. Side notes reconcile on a different shape: a digest over `(key, counter, writer, archived)` for the whole set, tombstones included, resolved by a monotonic counter with the writer's ID breaking ties, so two partitioned nodes reach the same answer without agreeing on a clock.
 
