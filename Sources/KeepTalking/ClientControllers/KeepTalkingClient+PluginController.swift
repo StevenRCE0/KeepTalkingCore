@@ -153,30 +153,24 @@ extension KeepTalkingClient {
             systemPrompt += "\n\nProvided resources:\n\(attachmentBlocks.joined(separator: "\n\n"))"
         }
 
-        let configuration = AITurnConfiguration(
-            maxOutputTokens: request.maxOutputTokens,
-            responseFormat: request.expects == "json" ? .jsonObject : nil
-        )
         // Image attachments ride as their own user messages between the
         // system preamble and the task, mirroring the tool-result inlining
         // convention.
-        let turn = try await connector.completeTurn(
-            messages: [.system(systemPrompt)] + imageMessages + [.user(request.task)],
-            tools: [],
-            model: model,
-            toolChoice: nil,
-            stage: .execution,
-            configuration: configuration,
-            toolExecutor: nil
+        let turn = try await AdHocCompletion(connector: connector, model: model).run(
+            instruction: systemPrompt,
+            task: request.task,
+            leadingMessages: imageMessages,
+            maxOutputTokens: request.maxOutputTokens,
+            responseFormat: request.expects == "json" ? .jsonObject : nil
         )
         onLog?(
             "[plugin-act] catalog=\(call.catalogName) kind=\(call.kindName) "
                 + "invocation=\(call.invocationID.prefix(8)) model=\(model) "
-                + "chars=\((turn.assistantText ?? "").count)")
+                + "chars=\(turn.text.count)")
         // Token counts aren't surfaced by AITurnResult yet; the host records
         // request counts regardless, token fields join when connectors do.
         return KTPPActResult(
-            text: turn.assistantText ?? "",
+            text: turn.text,
             thinking: turn.thinking,
             model: model,
             usage: nil

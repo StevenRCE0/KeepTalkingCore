@@ -128,6 +128,14 @@ public struct KeepTalkingAliasLookup: Sendable {
         return aliases[target]
     }
 
+    /// Every context-scoped alias the target carries, keyed by scope context
+    /// id, with no global fallback — what a per-context name editor lists.
+    public func contextAliases(
+        for target: KeepTalkingMappingTarget
+    ) -> [UUID: String] {
+        scopedAliases.compactMapValues { $0[target] }
+    }
+
     public func resolve(
         _ target: KeepTalkingMappingTarget,
         fallback: String? = nil

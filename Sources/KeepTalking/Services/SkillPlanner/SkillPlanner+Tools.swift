@@ -81,14 +81,14 @@ extension KeepTalkingSkillPlanner {
             tool(
                 name: Self.createPrimitiveTool,
                 description:
-                    "Create a companion primitive action (built-in system capability). Some kinds accept a `scope` object that constrains what the action may touch — e.g. `access-calendar` accepts `{\"calendars\": [\"Work\", \"Personal\"]}` to limit reads/writes to those calendar titles. Omit `scope` (or pass an empty object) to leave the action unscoped.",
+                    "Create a companion primitive action (built-in system capability). Some kinds accept a `scope` object that constrains what the action may touch — e.g. `access-calendar` accepts `{\"read\": [\"Work\"], \"write\": [\"Personal\"]}` to limit reads/writes to those calendar titles, and `add-to-reminders` accepts `{\"lists\": [\"Groceries\"]}` to limit which Reminders lists it may add to. Omit `scope` (or pass an empty object) to leave the action unscoped.",
                 properties: [
                     "action_kind": (.string, "One of the available primitive action kinds."),
                     "name": (.string, "Display name for the action."),
                     "description": (.string, "What this action does."),
                     "scope": (
                         .object,
-                        "Optional kind-specific scope. Each value MUST be an array of strings. Keys depend on action_kind; for access-calendar use the key `calendars` with calendar titles."
+                        "Optional kind-specific scope. Each value MUST be an array of strings. Keys depend on action_kind; for access-calendar use `read`/`write` with calendar titles; for add-to-reminders use `lists` with Reminders list titles."
                     ),
                 ],
                 required: ["action_kind", "description"]),

@@ -29,11 +29,9 @@ public actor KeepTalkingWorkspacePlanner {
 
     static let proposeContextTool = "kt_propose_context"
     static let proposeTagsTool = "kt_propose_tags"
-    static let proposeGhostPeerTool = "kt_propose_ghost_peer"
+    static let proposePeerTool = "kt_propose_peer"
     static let useExistingActionTool = "kt_use_existing_action"
     static let proposeNewActionTool = "kt_propose_new_action"
-    static let proposePeerActionTool = "kt_propose_peer_action"
-    static let grantToPeerTool = "kt_grant_to_peer"
     static let proposeSideNoteTool = "kt_propose_side_note"
     static let removeTool = "kt_remove"
     static let askUserTool = "kt_ask_user"

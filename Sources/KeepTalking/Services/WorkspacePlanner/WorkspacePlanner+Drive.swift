@@ -205,17 +205,146 @@ extension KeepTalkingWorkspacePlanner {
                                 + "the topic; otherwise kt_remove them and select existing ones."
                         }
 
-                    case Self.proposeGhostPeerTool:
+                    case Self.proposePeerTool:
                         let alias = (string(args["alias"]) ?? "")
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !alias.isEmpty else {
                             result = "Error: `alias` must not be empty."
                             break
                         }
-                        let capabilities = arrayOfStrings(args["expected_capabilities"])
-                        _ = peerSlot(alias: alias, expectedCapabilities: capabilities)
-                        _ = await onEvent?(.proposingGhostPeer(alias: alias))
-                        result = "Ghost peer slot open: \"\(alias)\""
+                        let isSelf: Bool
+                        if case .bool(let b) = args["self"] { isSelf = b } else { isSelf = false }
+
+                        let rawActions: [[String: MCP.Value]]
+                        if case .array(let arr) = args["actions"] {
+                            rawActions = arr.compactMap {
+                                if case .object(let dict) = $0 { return dict }
+                                return nil
+                            }
+                        } else {
+                            rawActions = []
+                        }
+
+                        if isSelf {
+                            // Self-mode: proposed → CREATE, action_id → slot EXISTING.
+                            var recorded: [String] = []
+                            for item in rawActions {
+                                if let idStr = string(item["action_id"]),
+                                    let actionID = UUID(uuidString: idStr),
+                                    let row = run.existingActions.first(where: {
+                                        $0.id == actionID
+                                    })
+                                {
+                                    upsertAction(
+                                        name: row.name,
+                                        description: row.indexDescription,
+                                        source: .existing(actionID: actionID))
+                                    _ = await onEvent?(
+                                        .proposingAction(name: row.name, kind: "existing"))
+                                    recorded.append(row.name)
+                                } else if let name = string(item["name"]),
+                                    !name.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        .isEmpty
+                                {
+                                    let trimmed = name.trimmingCharacters(
+                                        in: .whitespacesAndNewlines)
+                                    let desc = string(item["description"])
+                                    upsertAction(
+                                        name: trimmed, description: desc, source: .create)
+                                    _ = await onEvent?(
+                                        .proposingAction(name: trimmed, kind: "create"))
+                                    recorded.append(trimmed)
+                                }
+                            }
+                            result =
+                                recorded.isEmpty
+                                ? "Error: no valid actions in the array."
+                                : "Self peer recorded: \(recorded.joined(separator: ", "))"
+                        } else {
+                            // Ghost-peer mode: proposed → fromPeer, action_id → grant.
+                            let slot = peerSlot(alias: alias)
+                            var expectedNames: [String] = []
+                            var grantNames: [String] = []
+                            var errors: [String] = []
+                            for item in rawActions {
+                                if let idStr = string(item["action_id"]) {
+                                    // Grant an existing/create action to this peer.
+                                    guard let actionID = UUID(uuidString: idStr),
+                                        let row = run.existingActions.first(where: {
+                                            $0.id == actionID
+                                        })
+                                    else {
+                                        // Maybe it's a previously-proposed CREATE action
+                                        // referenced by name instead of ID.
+                                        errors.append(
+                                            "'\(idStr)' not found in inventory.")
+                                        continue
+                                    }
+                                    // Slot it first if not already in actions.
+                                    upsertAction(
+                                        name: row.name,
+                                        description: row.indexDescription,
+                                        source: .existing(actionID: actionID))
+                                    if let action = actions.first(where: {
+                                        if case .existing(let id) = $0.source {
+                                            return id == actionID
+                                        }
+                                        return false
+                                    }),
+                                        let idx = peers.firstIndex(where: {
+                                            $0.id == slot.id
+                                        }),
+                                        !peers[idx].grantedActions.contains(action.id)
+                                    {
+                                        peers[idx].grantedActions.append(action.id)
+                                    }
+                                    _ = await onEvent?(
+                                        .grantingAction(
+                                            name: row.name, toPeer: alias))
+                                    grantNames.append(row.name)
+                                } else if let name = string(item["name"]),
+                                    !name.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        .isEmpty
+                                {
+                                    let trimmed = name.trimmingCharacters(
+                                        in: .whitespacesAndNewlines)
+                                    let desc = string(item["description"])
+                                    upsertAction(
+                                        name: trimmed,
+                                        description: desc,
+                                        source: .fromPeer(peerID: slot.id))
+                                    if !slot.expectedCapabilities.contains(trimmed) {
+                                        if let idx = peers.firstIndex(where: {
+                                            $0.id == slot.id
+                                        }) {
+                                            peers[idx].expectedCapabilities.append(
+                                                trimmed)
+                                        }
+                                    }
+                                    _ = await onEvent?(
+                                        .proposingAction(name: trimmed, kind: "peer"))
+                                    expectedNames.append(trimmed)
+                                }
+                            }
+                            _ = await onEvent?(.proposingGhostPeer(alias: alias))
+                            var parts: [String] = [
+                                "Ghost peer \"\(alias)\" recorded."
+                            ]
+                            if !expectedNames.isEmpty {
+                                parts.append(
+                                    "Expects: \(expectedNames.joined(separator: ", "))"
+                                )
+                            }
+                            if !grantNames.isEmpty {
+                                parts.append(
+                                    "Granted: \(grantNames.joined(separator: ", "))")
+                            }
+                            if !errors.isEmpty {
+                                parts.append(
+                                    "Errors: \(errors.joined(separator: "; "))")
+                            }
+                            result = parts.joined(separator: " ")
+                        }
 
                     case Self.useExistingActionTool:
                         let idString = string(args["action_id"]) ?? ""
@@ -249,61 +378,6 @@ extension KeepTalkingWorkspacePlanner {
                         upsertAction(name: name, description: description, source: .create)
                         _ = await onEvent?(.proposingAction(name: name, kind: "create"))
                         result = "Action to create recorded: \(name)"
-
-                    case Self.proposePeerActionTool:
-                        let name = (string(args["name"]) ?? "")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        let description = string(args["description"])
-                        let alias = (string(args["ghost_alias"]) ?? "")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !name.isEmpty, !alias.isEmpty else {
-                            result = "Error: `name` and `ghost_alias` must not be empty."
-                            break
-                        }
-                        let slot = peerSlot(alias: alias)
-                        upsertAction(
-                            name: name,
-                            description: description,
-                            source: .fromPeer(peerID: slot.id)
-                        )
-                        _ = await onEvent?(.proposingAction(name: name, kind: "peer"))
-                        result = "Peer action recorded: \(name) from \"\(alias)\""
-
-                    case Self.grantToPeerTool:
-                        let actionName = (string(args["action_name"]) ?? "")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        let alias = (string(args["ghost_alias"]) ?? "")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !actionName.isEmpty, !alias.isEmpty else {
-                            result = "Error: `action_name` and `ghost_alias` must not be empty."
-                            break
-                        }
-                        guard
-                            let action = actions.first(where: {
-                                $0.name.caseInsensitiveCompare(actionName) == .orderedSame
-                            })
-                        else {
-                            result =
-                                "Error: no action named '\(actionName)'. "
-                                + "Propose it first with kt_use_existing_action or kt_propose_new_action."
-                            break
-                        }
-                        switch action.source {
-                            case .existing, .create:
-                                let slot = peerSlot(alias: alias)
-                                if let idx = peers.firstIndex(where: { $0.id == slot.id }),
-                                    !peers[idx].grantedActions.contains(action.id)
-                                {
-                                    peers[idx].grantedActions.append(action.id)
-                                }
-                                _ = await onEvent?(
-                                    .grantingAction(name: actionName, toPeer: alias))
-                                result = "Granted \"\(actionName)\" to peer \"\(alias)\""
-                            case .fromPeer:
-                                result =
-                                    "Error: cannot grant a peer-sourced action to another peer. "
-                                    + "Only local actions (existing or create) can be granted."
-                        }
 
                     case Self.proposeSideNoteTool:
                         let key = (string(args["key"]) ?? "")
@@ -339,14 +413,13 @@ extension KeepTalkingWorkspacePlanner {
                                     peers[i].grantedActions.removeAll { removedIDs.contains($0) }
                                 }
                                 result = "Removed action: \(identity)"
-                            case "ghost_peer":
+                            case "ghost_peer", "peer":
                                 let removed = peers.filter {
                                     $0.alias.caseInsensitiveCompare(identity) == .orderedSame
                                 }
                                 peers.removeAll {
                                     $0.alias.caseInsensitiveCompare(identity) == .orderedSame
                                 }
-                                // Orphaned peer-action slots go with their ghost.
                                 let removedIDs = Set(removed.map(\.id))
                                 actions.removeAll {
                                     if case .fromPeer(let peerID) = $0.source {
@@ -354,7 +427,7 @@ extension KeepTalkingWorkspacePlanner {
                                     }
                                     return false
                                 }
-                                result = "Removed ghost peer: \(identity)"
+                                result = "Removed peer: \(identity)"
                             case "tag":
                                 tags.removeAll { $0 == identity.lowercased() }
                                 result = "Removed tag: \(identity)"
@@ -363,7 +436,7 @@ extension KeepTalkingWorkspacePlanner {
                                 result = "Removed side note: \(identity)"
                             default:
                                 result =
-                                    "Error: unknown kind '\(kind)'. Valid: action, ghost_peer, tag, side_note."
+                                    "Error: unknown kind '\(kind)'. Valid: action, peer, tag, side_note."
                         }
 
                     case Self.askUserTool:

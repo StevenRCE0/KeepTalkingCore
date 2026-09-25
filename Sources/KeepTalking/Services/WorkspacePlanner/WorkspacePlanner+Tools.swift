@@ -32,18 +32,7 @@ extension KeepTalkingWorkspacePlanner {
                 ],
                 required: ["tags"]),
 
-            tool(
-                name: Self.proposeGhostPeerTool,
-                description:
-                    "Open a ghost peer slot — a placeholder ROLE (not a real person) another node will later be bound to. Use only when the workspace needs a capability someone else's agent must provide. The alias names the role CONCRETELY ('arXiv access provider', not 'Helper'); expected_capabilities are the EXACT action names you propose via kt_propose_peer_action — the binding UI matches candidate nodes against them, so vague entries make every candidate look wrong. Re-proposing the same alias updates its capabilities.",
-                properties: [
-                    "alias": (.string, "Concrete role alias, e.g. 'arXiv access provider'."),
-                    "expected_capabilities": (
-                        .array,
-                        "Exact action names this role provides — each must match a kt_propose_peer_action name, e.g. [\"arXiv Monitor\"]."
-                    ),
-                ],
-                required: ["alias"]),
+            makePeerTool(),
 
             tool(
                 name: Self.useExistingActionTool,
@@ -69,33 +58,6 @@ extension KeepTalkingWorkspacePlanner {
                 required: ["name", "description"]),
 
             tool(
-                name: Self.proposePeerActionTool,
-                description:
-                    "Propose an action expected FROM a ghost peer's agent (created and granted on their side once the slot is bound). The description travels with the invitation and the peer's agent builds from it with NO other context — state precisely what gets created, what it accesses on the peer's side, and what is granted back to this workspace. 'Monitors arXiv cs.LG for new submissions matching the workspace's topic filters and grants this context a fetch action returning title, abstract and PDF link' — never 'shares papers'. Reference the ghost by alias — it is auto-created if you haven't proposed it yet.",
-                properties: [
-                    "name": (.string, "Capability name, e.g. 'arXiv Monitor'."),
-                    "description": (
-                        .string,
-                        "One-sentence spec written FOR the peer's agent: what it creates, what it accesses on their side, what is granted back."
-                    ),
-                    "ghost_alias": (.string, "Alias of the ghost peer slot expected to provide it."),
-                ],
-                required: ["name", "description", "ghost_alias"]),
-
-            tool(
-                name: Self.grantToPeerTool,
-                description:
-                    "Grant one of the workspace's LOCAL actions (existing or to-create) TO a ghost peer — when the slot is bound, the peer's agent can invoke it. Use to share the workspace's capabilities outward: 'I need them to run my PDF Extract'. Only local actions (existing, create) can be granted; peer-sourced actions cannot be re-granted.",
-                properties: [
-                    "action_name": (
-                        .string,
-                        "Name of an action proposed via kt_use_existing_action or kt_propose_new_action."
-                    ),
-                    "ghost_alias": (.string, "Alias of the ghost peer slot to grant it to."),
-                ],
-                required: ["action_name", "ghost_alias"]),
-
-            tool(
                 name: Self.proposeSideNoteTool,
                 description:
                     "Attach an SOP / workflow side note to the context — guidance the agent follows in future turns (cadence, checklist, conventions). Re-proposing the same key replaces its value.",
@@ -110,7 +72,7 @@ extension KeepTalkingWorkspacePlanner {
                 description:
                     "Remove a previously proposed atom when the user asked for it to go. Identity: action name, ghost alias, tag value, or side-note key.",
                 properties: [
-                    "kind": (.string, "One of: \"action\", \"ghost_peer\", \"tag\", \"side_note\"."),
+                    "kind": (.string, "One of: \"action\", \"peer\", \"tag\", \"side_note\"."),
                     "identity": (.string, "The atom's identity (name / alias / value / key)."),
                 ],
                 required: ["kind", "identity"]),
@@ -157,6 +119,87 @@ extension KeepTalkingWorkspacePlanner {
             tools.append(KeepTalkingClient.makeWebSearchTool())
         }
         return tools
+    }
+
+    // MARK: - Peer tool (complex schema — built directly)
+
+    private func makePeerTool() -> KeepTalkingActionToolDefinition {
+        let actionItemSchema: AIProxyJSONValue = .object([
+            "type": .string("object"),
+            "properties": .object([
+                "name": .object([
+                    "type": .string("string"),
+                    "description": .string(
+                        "Capability name for a NEW proposed action, e.g. 'arXiv Monitor'."
+                    ),
+                ]),
+                "description": .object([
+                    "type": .string("string"),
+                    "description": .string(
+                        "One-sentence spec: what the action does, its input, its output/effect. "
+                            + "For a ghost peer this travels with the invitation — the peer's agent "
+                            + "builds from it with no other context. For self this seeds the build flow."
+                    ),
+                ]),
+                "action_id": .object([
+                    "type": .string("string"),
+                    "description": .string(
+                        "UUID of an EXISTING action from the inventory. "
+                            + "For self: slots it into the workspace. "
+                            + "For a ghost peer: grants it to the peer."
+                    ),
+                ]),
+            ]),
+        ])
+        let parameters: [String: AIProxyJSONValue] = [
+            "type": .string("object"),
+            "properties": .object([
+                "alias": .object([
+                    "type": .string("string"),
+                    "description": .string(
+                        "Concrete role name. For a ghost peer, name the ROLE "
+                            + "('arXiv access provider', not 'Helper'). For self, use 'self'."
+                    ),
+                ]),
+                "self": .object([
+                    "type": .string("boolean"),
+                    "description": .string(
+                        "True when the actions should be built/slotted by the LOCAL agent "
+                            + "rather than expected from a ghost peer. Proposed actions become "
+                            + "CREATE slots; existing IDs are slotted directly. Omit or false "
+                            + "for a ghost peer."
+                    ),
+                ]),
+                "actions": .object([
+                    "type": .string("array"),
+                    "description": .string(
+                        "Actions associated with this peer. Each item is EITHER a proposed "
+                            + "action {name, description} OR an existing action {action_id} — "
+                            + "never both in the same item."
+                    ),
+                    "items": actionItemSchema,
+                ]),
+            ]),
+            "required": .array([.string("alias"), .string("actions")]),
+        ]
+        return .init(
+            functionName: Self.proposePeerTool,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description:
+                "Propose a peer and its actions in one call. Two modes: (1) self=true — "
+                + "the LOCAL agent's own capabilities for this workspace; proposed actions "
+                + "become CREATE slots the agent builds afterwards, existing action_ids are "
+                + "slotted from inventory. (2) self omitted or false — a GHOST PEER slot "
+                + "(a role another person's node will be bound to); proposed actions are "
+                + "capabilities that MUST live on the peer's machine (their data, hardware, "
+                + "accounts), and existing action_ids are LOCAL actions GRANTED to the peer. "
+                + "Default to self=true for any work the local agent can do — only open a "
+                + "ghost peer when the capability genuinely requires another person's "
+                + "environment. Re-proposing the same alias updates it.",
+            parameters: parameters
+        )
     }
 
     // MARK: - Tool builder

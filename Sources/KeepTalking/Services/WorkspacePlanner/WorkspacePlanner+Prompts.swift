@@ -58,27 +58,27 @@ extension KeepTalkingWorkspacePlanner {
             another agent builds from without further context — one sentence stating \
             what the action does, what input it takes, and what it produces or \
             affects. "Fetches new arXiv papers matching given topic filters and \
-            returns title, abstract and PDF link" — never "helps with papers". Three \
-            sources:
-              1. EXISTING — an action from the user's inventory below. Always prefer \
-            slotting an existing action over proposing a new one when it covers the need.
-              2. CREATE — a new action the user's own agent will build afterwards \
-            (skills, primitives, MCP connections). The name + description are handed \
-            verbatim to that build flow as its instructions.
-              3. PEER — an action expected from another person's agent. You cannot name \
-            real people: open a GHOST PEER slot instead and reference it by alias. The \
-            description travels with the invitation — the peer's agent builds from it \
-            with no other context, so it must be precise about what is created, what \
-            it accesses on the peer's side, and what gets granted back.
-            - GHOST PEERS: placeholder role slots with two sides: \
-            expected_capabilities — action names the peer PROVIDES (incoming, from your \
-            kt_propose_peer_action calls); and GRANTS — local actions you share WITH \
-            the peer (outgoing, via kt_grant_to_peer). The alias names the ROLE \
-            concretely ("arXiv access provider", not "Helper"); each expected \
-            capability is an exact action name from your peer-action proposals. The \
-            user binds each slot to a real node; binding triggers both the incoming \
-            requests and the outgoing grants. Open one when the workspace needs \
-            another person's capability, or when you need to share yours.
+            returns title, abstract and PDF link" — never "helps with papers". \
+            Standalone actions use kt_use_existing_action / kt_propose_new_action. \
+            Peer-related actions go inside kt_propose_peer (see below).
+            - PEERS (kt_propose_peer): a single tool for ALL peer relationships — \
+            both the local agent ("self") and ghost peers (roles bound to another \
+            person's node later). Each call takes an alias, an optional self flag, \
+            and an actions array. Two modes:
+              • self=true — the LOCAL agent's capabilities for this workspace. Each \
+            action in the array is either a proposed {name, description} (becomes a \
+            CREATE slot the agent builds afterwards) or an existing {action_id} \
+            (slotted from inventory). This is the DEFAULT for most work — even when \
+            another person is involved, if the task can run locally (processing, \
+            formatting, orchestrating), put it on self and share it outward.
+              • self omitted/false — a GHOST PEER slot (a role, not a real person). \
+            Proposed {name, description} items are actions that MUST live on the \
+            peer's machine (their data, hardware, accounts) — the description travels \
+            with the invitation and the peer's agent builds from it with no other \
+            context. Existing {action_id} items are LOCAL actions GRANTED to the peer \
+            so their agent can invoke them. The alias names the ROLE concretely \
+            ("arXiv access provider", not "Helper"). The user binds each slot to a \
+            real node; binding triggers both directions.
             - SIDE NOTES: short SOP / workflow notes attached to the context that guide \
             the agent's future behaviour in it (e.g. a weekly cadence, a review \
             checklist). Key is a short slug; value is the note text.
@@ -116,9 +116,10 @@ extension KeepTalkingWorkspacePlanner {
         \(intent)
 
         Decompose this into a workspace plan. Slot existing actions where they fit, \
-        propose what's missing, open ghost peer slots for capabilities another \
-        person's agent must provide, and attach any SOP the workflow implies. Ask \
-        follow-up questions if something material is unclear, then finalize.
+        propose what's missing via kt_propose_peer (self=true for local work, or a \
+        ghost peer when the capability must live on someone else's machine), and \
+        attach any SOP the workflow implies. Ask follow-up questions if something \
+        material is unclear, then finalize.
         """
     }
 

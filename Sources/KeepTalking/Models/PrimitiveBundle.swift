@@ -16,6 +16,10 @@ public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     /// further narrows which keys the caller may invoke via the grant scope's
     /// `.named(<key>)` tokens (`KeepTalkingActionScope`).
     case accessCalendar = "access-calendar"
+    /// Add a reminder to one of the user's Reminders lists. Write-only; the
+    /// lists it may touch live on `KeepTalkingPrimitiveBundle.scope` under
+    /// `"lists"` (list titles). An empty scope leaves the action unable to add.
+    case addToReminders = "add-to-reminders"
 }
 
 public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
@@ -87,6 +91,12 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
                 "Read (list events in a date range) and write (add events) on the user's calendars on the action host.",
             action: .accessCalendar
         ),
+        KeepTalkingPrimitiveBundle(
+            name: "add-to-reminders",
+            indexDescription:
+                "Add a reminder (title, optional due date, notes, priority) to one of the user's Reminders lists on the action host.",
+            action: .addToReminders
+        ),
     ]
 
     public func assigningNewID() -> KeepTalkingPrimitiveBundle {
@@ -122,6 +132,16 @@ extension KeepTalkingPrimitiveActionKind {
                             "Calendar titles this action may add events to. Empty/omitted disables writing entirely — creating events becomes unavailable. When non-empty, the first listed is the default write target; there is no system-default fallback."
                         ),
                     ]),
+                ]
+            case .addToReminders:
+                return [
+                    "lists": .object([
+                        "type": .string("array"),
+                        "items": .object(["type": .string("string")]),
+                        "description": .string(
+                            "Reminders list titles this action may add reminders to. Empty/omitted disables adding entirely — there is no default-list fallback."
+                        ),
+                    ])
                 ]
             case .openWithURL, .addToReadingList, .askForFile,
                 .getCurrentlyPlayingMusic, .runMacOSShortcut:
