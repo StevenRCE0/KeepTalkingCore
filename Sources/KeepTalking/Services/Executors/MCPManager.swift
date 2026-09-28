@@ -587,7 +587,11 @@ public actor MCPManager {
                 graceSeconds: toolCallGraceSeconds,
                 pollSeconds: toolCallPollSeconds,
                 log: log,
-                isAlive: { [weak self] in await self?.isActionExecutorLive(actionID) ?? false }
+                isAlive: { [weak self = self] in
+                    await self?.isActionExecutorLive(
+                        actionID
+                    ) ?? false
+                }
             )
         }
 

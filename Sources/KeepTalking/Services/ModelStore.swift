@@ -194,6 +194,7 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             DropContextSyncMetadataMigration(),
             AddKeepTalkingMappingScopeContextMigration(),
             CreateKeepTalkingWorkspacePlansMigration(),
+            AddContextDeletedMessagesMigration(),
             to: databaseID
         )
     }

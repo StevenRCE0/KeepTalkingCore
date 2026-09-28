@@ -45,11 +45,6 @@ extension KeepTalkingClient {
             )
             let persistedContextID = try context.requireID()
 
-            // The peer's AI threading arrives with the summary, but its ranges
-            // name messages we may not hold yet — so hold it until the reconcile
-            // below has landed them all.
-            let peerThreadDTOs = KeepTalkingThreadDTOBox()
-
             // Messages: the shared summary→tail→chunk reconcile (see runSyncReconcile).
             try await runSyncReconcile(
                 KeepTalkingSyncReconcile(
@@ -62,15 +57,12 @@ extension KeepTalkingClient {
                             in: context,
                             generation: generation
                         )
-                        if let notes = result.sideNotes,
-                            try await self.mergeSideNotes(
-                                notes, contextID: persistedContextID)
-                        {
-                            await self.notifySideNotesChanged(persistedContextID)
-                        }
-                        if let threadDTOs = result.threadDTOs {
-                            await peerThreadDTOs.set(threadDTOs)
-                        }
+                        // Tombstones first: they delete rows, and the cursors
+                        // below are computed from what is left.
+                        try await self.absorbSummarySets(
+                            result,
+                            pages: .remote(self, generation: generation)
+                        )
                         return result.summary
                     },
                     makeTail: { local, remote in
@@ -122,13 +114,7 @@ extension KeepTalkingClient {
                 throw KeepTalkingClientError.clientDisconnected
             }
 
-            // Every page has landed, so the local message list finally spans the
-            // peer's ranges — the first point at which its threading can be
-            // reproduced here.
-            if let threadDTOs = await peerThreadDTOs.value {
-                try await applyTurningPointMarkThreading(threadDTOs, in: persistedContextID)
-            }
-            try await consumePendingMarks(in: persistedContextID)
+            try await threadAfterSync(in: persistedContextID)
 
             rtcClient.debug(
                 "context sync complete peer=\(node.uuidString.lowercased()) context=\(persistedContextID.uuidString.lowercased())"
@@ -156,6 +142,18 @@ extension KeepTalkingClient {
         }
     }
 
+    /// What a completed sync does to threading.
+    ///
+    /// Every page has landed, so this node now holds every turning point the
+    /// peer holds and every message those name, plus any it marked itself
+    /// that the peer hasn't pulled yet. Re-threading from that is at least as
+    /// informed as the peer's own threading; taking the peer's word instead
+    /// reopened the thread a newer local mark had closed.
+    func threadAfterSync(in contextID: UUID) async throws {
+        try await applyLocalTurningPointMarkThreading(in: contextID)
+        try await consumePendingMarks(in: contextID)
+    }
+
     func handleIncomingContextSyncEnvelope(
         _ envelope: KeepTalkingContextSyncEnvelope
     ) async throws {
@@ -168,6 +166,10 @@ extension KeepTalkingClient {
                 {
                     await notifySideNotesChanged(push.context)
                 }
+            // Tombstone push: broadcast, so ignore our own echo.
+            case .messageDeletionsPush(let push):
+                guard push.origin != config.node else { return }
+                try await mergeMessageDeletions(push.tombstones, contextID: push.context)
 
             // Requests: respond if addressed to us (execute + send wrapped result).
             case .summaryRequest(let request):
@@ -205,6 +207,16 @@ extension KeepTalkingClient {
                     to: request,
                     execute: executeContextSyncTranscriptChunkRequest,
                     wrap: { .transcriptLinesResult($0) })
+            case .sideNotesPageRequest(let request):
+                try await respond(
+                    to: request,
+                    execute: executeSideNotesPageRequest,
+                    wrap: { .sideNotesPageResult($0) })
+            case .messageDeletionsPageRequest(let request):
+                try await respond(
+                    to: request,
+                    execute: executeMessageDeletionsPageRequest,
+                    wrap: { .messageDeletionsPageResult($0) })
 
             // Results: hand off to the matching registry's waiter.
             case .summaryResult(let result):
@@ -219,6 +231,12 @@ extension KeepTalkingClient {
             case .transcriptLinesResult(let result):
                 guard result.requester == config.node else { return }
                 syncTranscriptLines.resolve(result.request, with: result)
+            case .sideNotesPageResult(let result):
+                guard result.requester == config.node else { return }
+                syncSideNotePages.resolve(result.request, with: result)
+            case .messageDeletionsPageResult(let result):
+                guard result.requester == config.node else { return }
+                syncMessageDeletionPages.resolve(result.request, with: result)
             case .failureResult(let result):
                 guard result.requester == config.node else { return }
                 let error = KeepTalkingClientError.contextSyncRemoteFailure(
@@ -231,6 +249,8 @@ extension KeepTalkingClient {
                     syncMessages.fail(result.request, error: error),
                     syncTranscriptSummaries.fail(result.request, error: error),
                     syncTranscriptLines.fail(result.request, error: error),
+                    syncSideNotePages.fail(result.request, error: error),
+                    syncMessageDeletionPages.fail(result.request, error: error),
                 ].contains(true)
                 guard !handled else { return }
                 rtcClient.debug(
@@ -284,8 +304,9 @@ extension KeepTalkingClient {
             requester: config.node,
             recipient: node,
             // Computed here rather than by the caller so no dispatch site can
-            // forget it and silently disable side-note sync.
-            sideNoteDigest: try await sideNoteDigest(in: contextID)
+            // forget them and silently disable side-note or deletion sync.
+            sideNoteDigest: try await sideNoteDigest(in: contextID),
+            messageDeletionDigest: try await messageDeletionDigest(in: contextID)
         )
 
         if node == config.node {
@@ -358,6 +379,8 @@ extension KeepTalkingClient {
         syncMessages.open(generation: generation)
         syncTranscriptSummaries.open(generation: generation)
         syncTranscriptLines.open(generation: generation)
+        syncSideNotePages.open(generation: generation)
+        syncMessageDeletionPages.open(generation: generation)
         contextSyncSingleFlight.open(generation: generation)
     }
 
@@ -368,52 +391,184 @@ extension KeepTalkingClient {
         syncMessages.close(error: error)
         syncTranscriptSummaries.close(error: error)
         syncTranscriptLines.close(error: error)
+        syncSideNotePages.close(error: error)
+        syncMessageDeletionPages.close(error: error)
     }
 
-    private func executeContextSyncSummaryRequest(
+    func executeContextSyncSummaryRequest(
         _ request: KeepTalkingContextSyncSummaryRequest
     ) async throws -> KeepTalkingContextSyncSummaryResult {
         let snapshot = try await contextSyncSnapshot(for: request.context)
-        // Side notes ride the summary exchange: attach our whole set only when
-        // the requester's digest disagrees with ours. Matching digests cost
-        // nothing beyond the 32 bytes already in the request.
-        var sideNotes: [KeepTalkingSideNoteDTO]?
-        let localDigest = try await sideNoteDigest(in: request.context)
-        if request.sideNoteDigest != localDigest {
-            let notes = try await allSideNoteDTOs(in: request.context)
-            let encoded = (try? JSONEncoder().encode(notes))?.count ?? 0
-            if encoded <= KeepTalkingSideNoteLimits.maximumEncodedBytes {
-                sideNotes = notes
-            } else {
-                // Locally-originated writes cannot get here — they are bounded
-                // by value, key and live count, with tombstones pruned to fit.
-                // A peer on different limits can still push us over, though, so
-                // this is a real branch rather than an impossible one, and it
-                // must not assert on what is ultimately external input.
-                //
-                // Refusing still beats pushing the summary result past the
-                // transport limit and breaking MESSAGE sync for this peer too.
-                // But it is worth shouting about: the requester cannot tell "no
-                // notes because we agree" from "no notes because I refused", so
-                // side notes simply stop converging with no other signal.
-                onLog?(
-                    "[sync] BUG: side-note set is \(encoded)B, over the \(KeepTalkingSideNoteLimits.maximumEncodedBytes)B budget; not attaching — side notes will not converge for this peer"
-                )
-            }
+        // Side notes and tombstones ride the summary exchange: send our whole
+        // set only when the requester's digest disagrees with ours, so matching
+        // digests cost nothing beyond the 32 bytes already in the request. The
+        // set goes out paged — the first page here, the rest on request — since
+        // transport never fragments an envelope.
+        var sideNotes: (items: [KeepTalkingSideNoteDTO], nextBefore: KeepTalkingSideNotePageKey?)?
+        if request.sideNoteDigest != (try await sideNoteDigest(in: request.context)) {
+            sideNotes = try await sideNotesPage(in: request.context, before: nil)
         }
-        // The AI-marked threading rides along too. It is small, derived, and
-        // the requester needs it only after its messages land — so it is sent
-        // unconditionally rather than digest-gated like side notes.
-        let threadDTOs = try await turningPointMarkThreading(in: request.context)
+        let deletionDigest = try await messageDeletionDigest(in: request.context)
+        var messageDeletions: (items: [KeepTalkingMessageTombstone], nextBefore: KeepTalkingContextSyncPageKey?)?
+        if request.messageDeletionDigest != deletionDigest {
+            messageDeletions = try await messageDeletionsPage(in: request.context, before: nil)
+        }
         return KeepTalkingContextSyncSummaryResult(
             request: request.request,
             context: request.context,
             requester: request.requester,
             responder: config.node,
             summary: snapshot.summary,
-            sideNotes: sideNotes,
-            threadDTOs: threadDTOs
+            sideNotes: sideNotes?.items,
+            sideNotesNextBefore: sideNotes?.nextBefore,
+            messageDeletions: messageDeletions?.items,
+            messageDeletionsNextBefore: messageDeletions?.nextBefore,
+            messageDeletionDigest: deletionDigest
         )
+    }
+
+    // MARK: - Whole-set pages
+
+    private func sideNotesPage(
+        in contextID: UUID,
+        before: KeepTalkingSideNotePageKey?
+    ) async throws -> (items: [KeepTalkingSideNoteDTO], nextBefore: KeepTalkingSideNotePageKey?) {
+        KeepTalkingContextSyncPage.newestFirst(
+            KeepTalkingSideNoteDigest.canonicallyOrdered(
+                try await allSideNoteDTOs(in: contextID)),
+            before: before,
+            key: KeepTalkingSideNotePageKey.init
+        )
+    }
+
+    private func messageDeletionsPage(
+        in contextID: UUID,
+        before: KeepTalkingContextSyncPageKey?
+    ) async throws -> (items: [KeepTalkingMessageTombstone], nextBefore: KeepTalkingContextSyncPageKey?) {
+        KeepTalkingContextSyncPage.newestFirst(
+            try await messageTombstones(in: contextID).sorted { $0.pageKey < $1.pageKey },
+            before: before,
+            key: \.pageKey
+        )
+    }
+
+    func executeSideNotesPageRequest(
+        _ request: KeepTalkingContextSyncSideNotesPageRequest
+    ) async throws -> KeepTalkingContextSyncSideNotesPageResult {
+        let page = try await sideNotesPage(in: request.context, before: request.before)
+        return .init(
+            request: request.request, context: request.context,
+            requester: request.requester, responder: config.node,
+            items: page.items, nextBefore: page.nextBefore
+        )
+    }
+
+    func executeMessageDeletionsPageRequest(
+        _ request: KeepTalkingContextSyncMessageDeletionsPageRequest
+    ) async throws -> KeepTalkingContextSyncMessageDeletionsPageResult {
+        let page = try await messageDeletionsPage(in: request.context, before: request.before)
+        return .init(
+            request: request.request, context: request.context,
+            requester: request.requester, responder: config.node,
+            items: page.items, nextBefore: page.nextBefore
+        )
+    }
+
+    fileprivate func setPageRequest<Cursor: Codable & Sendable & Comparable>(
+        for result: KeepTalkingContextSyncSummaryResult,
+        before: Cursor
+    ) -> KeepTalkingContextSyncSetPageRequest<Cursor> {
+        KeepTalkingContextSyncSetPageRequest(
+            context: result.context,
+            requester: config.node,
+            recipient: result.responder,
+            before: before
+        )
+    }
+
+    func dispatchSideNotesPageRequest(
+        _ request: KeepTalkingContextSyncSideNotesPageRequest,
+        generation: UInt64? = nil
+    ) async throws -> KeepTalkingContextSyncSideNotesPageResult {
+        try await dispatchSetPageRequest(
+            request, registry: syncSideNotePages, generation: generation,
+            execute: executeSideNotesPageRequest,
+            wrap: { .sideNotesPageRequest($0) })
+    }
+
+    func dispatchMessageDeletionsPageRequest(
+        _ request: KeepTalkingContextSyncMessageDeletionsPageRequest,
+        generation: UInt64? = nil
+    ) async throws -> KeepTalkingContextSyncMessageDeletionsPageResult {
+        try await dispatchSetPageRequest(
+            request, registry: syncMessageDeletionPages, generation: generation,
+            execute: executeMessageDeletionsPageRequest,
+            wrap: { .messageDeletionsPageRequest($0) })
+    }
+
+    private func dispatchSetPageRequest<Cursor, Result: Sendable>(
+        _ request: KeepTalkingContextSyncSetPageRequest<Cursor>,
+        registry: KeepTalkingSyncResponseRegistry<Result>,
+        generation: UInt64?,
+        execute: (KeepTalkingContextSyncSetPageRequest<Cursor>) async throws -> Result,
+        wrap: @escaping @Sendable (KeepTalkingContextSyncSetPageRequest<Cursor>) -> KeepTalkingContextSyncEnvelope
+    ) async throws -> Result {
+        if request.recipient == config.node {
+            return try await execute(request)
+        }
+        guard let generation else {
+            throw KeepTalkingClientError.clientDisconnected
+        }
+        return try await registry.response(
+            for: request.request,
+            timeout: Self.contextSyncResultTimeoutSeconds,
+            generation: generation,
+            send: { [weak self] in
+                try self?.rtcClient.sendEnvelope(wrap(request))
+            }
+        )
+    }
+
+    /// Requester side: reassemble every whole set a summary result carried.
+    ///
+    /// Tombstones and side notes are merged here, each once and whole.
+    func absorbSummarySets(
+        _ result: KeepTalkingContextSyncSummaryResult,
+        pages: KeepTalkingContextSyncSetPages
+    ) async throws {
+        if let firstPage = result.messageDeletions {
+            let remote = try await collectSyncSetPages(
+                firstPage: firstPage,
+                nextBefore: result.messageDeletionsNextBefore,
+                request: { self.setPageRequest(for: result, before: $0) },
+                dispatch: pages.messageDeletions
+            )
+            try await mergeMessageDeletions(remote, contextID: result.context)
+
+            // The responder sent its whole set, so whatever we hold beyond it is
+            // exactly what it lacks. Push that now, so it stops serving those
+            // rows back to us this round rather than one heartbeat later.
+            if let responderDigest = result.messageDeletionDigest,
+                responderDigest != (try await messageDeletionDigest(in: result.context))
+            {
+                let remoteIDs = Set(remote.map(\.messageID))
+                let missing = try await messageTombstones(in: result.context)
+                    .filter { !remoteIDs.contains($0.messageID) }
+                publishMessageDeletions(missing, in: result.context)
+            }
+        }
+
+        if let firstPage = result.sideNotes {
+            let notes = try await collectSyncSetPages(
+                firstPage: firstPage,
+                nextBefore: result.sideNotesNextBefore,
+                request: { self.setPageRequest(for: result, before: $0) },
+                dispatch: pages.sideNotes
+            )
+            if try await mergeSideNotes(notes, contextID: result.context) {
+                await notifySideNotesChanged(result.context)
+            }
+        }
     }
 
     private func executeContextSyncTailRequest(
@@ -520,12 +675,24 @@ extension KeepTalkingClient {
     }
 }
 
-/// Carries the peer's threading out of the summary closure, which runs inside
-/// the reconcile and so cannot hand it back directly.
-private actor KeepTalkingThreadDTOBox {
-    private(set) var value: [KeepTalkingThreadDTO]?
+/// Where a requester fetches the pages after a whole set's first one.
+///
+/// `remote` goes over the transport to the summary's responder; tests point
+/// these straight at another client's page executors instead.
+struct KeepTalkingContextSyncSetPages: Sendable {
+    let sideNotes:
+        @Sendable (KeepTalkingContextSyncSideNotesPageRequest) async throws ->
+            KeepTalkingContextSyncSideNotesPageResult
+    let messageDeletions:
+        @Sendable (KeepTalkingContextSyncMessageDeletionsPageRequest) async throws ->
+            KeepTalkingContextSyncMessageDeletionsPageResult
 
-    func set(_ threadDTOs: [KeepTalkingThreadDTO]) {
-        value = threadDTOs
+    static func remote(_ client: KeepTalkingClient, generation: UInt64?) -> Self {
+        Self(
+            sideNotes: { try await client.dispatchSideNotesPageRequest($0, generation: generation) },
+            messageDeletions: {
+                try await client.dispatchMessageDeletionsPageRequest($0, generation: generation)
+            }
+        )
     }
 }

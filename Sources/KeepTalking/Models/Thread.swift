@@ -10,13 +10,14 @@ public enum KeepTalkingThreadState: String, Codable, Sendable, CaseIterable {
     case archived
 }
 
-/// A thread as it travels between nodes.
+/// A thread as the turning points derive it.
 ///
-/// Thread rows are local and directly editable, and their UUIDs, chitter-chatter
-/// flags and semantic digests are all local concerns — so what syncs is this
-/// projection: where a thread starts, where it ends, and what it is called.
-/// A `nil` `endMessageID` is what marks the live thread, which is why state is
-/// not carried separately.
+/// Turning-point marks are what syncs; every node derives this from the marks
+/// it holds and makes its thread rows match. Row UUIDs, chitter-chatter flags,
+/// archiving and semantic digests are local concerns, so the derivation says
+/// only where a thread starts, where it ends, and what it is called. A `nil`
+/// `endMessageID` is what marks the live thread, which is why state is not
+/// carried separately.
 public struct KeepTalkingThreadDTO: Codable, Sendable, Hashable {
     public var startMessageID: UUID
     public var endMessageID: UUID?

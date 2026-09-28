@@ -82,7 +82,7 @@ The package builds with Swift 6.1 under strict concurrency, so every type that c
 
 **Teardown is deliberately detached.** Stopping the transport synchronously joins carrier worker threads and can block for hundreds of milliseconds, so `disconnect()` does the cheap bookkeeping inline (failing pending continuations, cancelling the maintenance loop) and dispatches the real stop to a detached task. ``KeepTalkingClient/connect()`` awaits any in-flight teardown before restarting, so a tight disconnect-then-connect sequence still serialises correctly.
 
-**Agent runs are coordinated, not merely queued.** A context's local turns are serialised — at most one active, the rest queued and started automatically — but a turn that suspends to await an out-of-band continuation frees its slot so the next can begin, and delegated runs (work this node performs on behalf of a caller) share the same coordinator.
+**Agent runs are coordinated, not merely queued.** A context's local turns are serialised — at most one active, the rest queued and started automatically — but a turn that suspends to await an out-of-band continuation frees its slot so the next can begin, and delegated runs (a skill this node executes on behalf of a remote caller) share the same coordinator.
 
 **Channel state machines are pure values.** ``BroadcastChannelStateMachine`` and ``DirectChannelStateMachine`` are `Sendable` structs that take an event and return a new state plus an effect to execute. They perform no I/O and never probe a carrier; readiness is a signal *pushed* by the carrier, which makes the reconnect and backoff logic fully testable in isolation.
 

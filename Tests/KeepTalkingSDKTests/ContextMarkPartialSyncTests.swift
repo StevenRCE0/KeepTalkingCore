@@ -4,11 +4,11 @@ import Testing
 
 @testable import KeepTalkingSDK
 
-/// Turning points are the source of truth and the only thing stored; a
-/// `KeepTalkingThreadDTO` projection of them rides the sync summary so a peer
-/// reproduces the same AI threading. Sync pages arrive newest-first, so until a
-/// sync completes a peer holds only a *suffix* of the context — these cover that
-/// window, and the derive→apply round trip between two nodes.
+/// Turning points are the source of truth and the only thing stored or synced;
+/// every node derives `KeepTalkingThreadDTO`s from the marks it holds and makes
+/// its rows match. Sync pages arrive newest-first, so until a sync completes a
+/// node holds only a *suffix* of the context — these cover that window, and the
+/// derive→apply round trip between two nodes.
 struct ContextMarkPartialSyncTests {
     private struct Fixture {
         let store: KeepTalkingInMemoryStore
@@ -216,10 +216,10 @@ struct ContextMarkPartialSyncTests {
         #expect(live.first?.$endMessage.id == nil)
     }
 
-    @Test("a peer reproduces the marking node's threading exactly")
+    @Test("a peer holding the same marks derives the marking node's threading exactly")
     func peerReproducesThreading() async throws {
-        // Node A marks; node B holds the same messages and applies A's
-        // projection, arriving over the sync summary.
+        // Node A marks; node B holds the same messages and, once its sync has
+        // landed them, the same marks.
         let contextID = UUID()
         let messageIDs = (0..<10).map { _ in UUID() }
         let nodeA = try await makeFixture(
@@ -227,15 +227,17 @@ struct ContextMarkPartialSyncTests {
         let nodeB = try await makeFixture(
             total: 10, present: 0..<10, contextID: contextID, messageIDs: messageIDs)
 
-        try await markTurningPoint(
-            nodeA, at: 3, previousTopicName: "First", currentTopicName: "Middle", timestamp: 100)
-        try await markTurningPoint(
-            nodeA, at: 8, previousTopicName: "Middle", currentTopicName: "Last", timestamp: 200)
-
-        let projection = try await nodeA.client.turningPointMarkThreading(in: contextID)
-        #expect(try await nodeB.client.applyTurningPointMarkThreading(projection, in: contextID))
+        for node in [nodeA, nodeB] {
+            try await markTurningPoint(
+                node, at: 3, previousTopicName: "First", currentTopicName: "Middle", timestamp: 100)
+            try await markTurningPoint(
+                node, at: 8, previousTopicName: "Middle", currentTopicName: "Last", timestamp: 200)
+        }
+        try await nodeA.client.applyLocalTurningPointMarkThreading(in: contextID)
+        try await nodeB.client.applyLocalTurningPointMarkThreading(in: contextID)
 
         #expect(try await resolvedRanges(nodeB) == [0...2, 3...7, 8...9])
+        #expect(try await resolvedRanges(nodeB) == (try await resolvedRanges(nodeA)))
         #expect(try await topicNames(nodeB) == ["First", "Middle", "Last"])
         #expect(try await threads(nodeB).filter { $0.state == .contextMain }.count == 1)
     }
@@ -273,10 +275,11 @@ struct ContextMarkPartialSyncTests {
         #expect(rows.map(\.name) == [nil, "Considered", "Latest"])
     }
 
-    @Test("threads the projection doesn't name are left alone")
-    func unnamedThreadsSurvive() async throws {
+    @Test("a row no turning point places is retired rather than left overlapping")
+    func unplacedRowsAreRetired() async throws {
         let fixture = try await makeFixture(total: 10, present: 0..<10)
-        // A hand-made thread the AI knows nothing about.
+        // A row the turning points know nothing about — split by hand before
+        // hand-made turning points were marks.
         let local = KeepTalkingThread(
             context: fixture.context,
             startMessage: nil,
@@ -293,10 +296,10 @@ struct ContextMarkPartialSyncTests {
         let threadDTOs = try await fixture.client.turningPointMarkThreading(in: fixture.contextID)
         #expect(try await fixture.client.applyTurningPointMarkThreading(threadDTOs, in: fixture.contextID))
 
-        // Local memory is not the AI's to restate.
-        let survivor = try await threads(fixture).first { $0.id == local.id }
-        #expect(survivor?.summary == "Mine")
-        #expect(survivor?.$endMessage.id == fixture.messageIDs[7])
+        // The partition covers the whole context, so the stray row could only
+        // ever sit on top of a thread it does place.
+        #expect(try await threads(fixture).contains { $0.id == local.id } == false)
+        #expect(try await resolvedRanges(fixture) == [0...2, 3...9])
     }
 
     @Test("a context with no turning points derives a single open thread")

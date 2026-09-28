@@ -1,4 +1,5 @@
 import Foundation
+import NIOConcurrencyHelpers
 
 /// Durable progress for one queued agent run. `messages` contains only the
 /// model/tool transcript produced after the original prompt, keeping restore
@@ -28,9 +29,21 @@ public struct AIAgentCheckpoint: Codable, Sendable, Equatable {
     }
 }
 
-public struct AIOrchestrator {
+/// `@unchecked Sendable`: the orchestrator's closures are only ever invoked
+/// from inside one `run(...)` await chain — including the native-execution
+/// executor it hands a connector, which the connector calls while `run` is
+/// suspended on that same turn — so nothing observes `dependencies`
+/// concurrently. The annotation lets that executor capture `self` without
+/// forcing every host-supplied resolver closure to become `@Sendable`.
+public struct AIOrchestrator: @unchecked Sendable {
     public typealias ToolCall = AIToolCall
     public typealias Message = AIMessage
+    /// Runs the model's tool calls inside a connector's own loop and returns
+    /// the `.tool` messages the model should see, one per call. Passed to the
+    /// turn runner only when the connector `executesToolsNatively`.
+    public typealias NativeToolExecutor =
+        @Sendable ([ToolCall]) async throws -> [Message]
+
     public typealias TurnRunner =
         (
             [Message],
@@ -38,7 +51,8 @@ public struct AIOrchestrator {
             String,
             AIToolChoice?,
             AIStage,
-            AITurnConfiguration?
+            AITurnConfiguration?,
+            NativeToolExecutor?
         ) async throws -> AITurnResult
     public typealias AssistantMessageBuilder =
         (AITurnResult) -> Message?
@@ -177,7 +191,7 @@ public struct AIOrchestrator {
             self.aiConnector = aiConnector
             self.turnRunner =
                 turnRunner
-                ?? { messages, tools, model, toolChoice, stage, configuration in
+                ?? { messages, tools, model, toolChoice, stage, configuration, nativeExecutor in
                     return try await aiConnector.completeTurn(
                         messages: messages,
                         tools: tools,
@@ -185,13 +199,7 @@ public struct AIOrchestrator {
                         toolChoice: toolChoice,
                         stage: stage,
                         configuration: configuration,
-                        toolExecutor: { calls in
-                            let executions = try await toolExecutor(calls)
-                            // Pass through only the tool-result messages (one per call).
-                            return executions.flatMap(\.messages).filter { msg in
-                                msg.role == .tool
-                            }
-                        }
+                        toolExecutor: nativeExecutor
                     )
                 }
             self.assistantMessageBuilder = assistantMessageBuilder
@@ -259,14 +267,65 @@ public struct AIOrchestrator {
         for _ in checkpoint.completedTurnCount..<configuration.maxTurns {
             try Task.checkCancellation()
 
+            // A connector that runs its own tool loop gets an executor that
+            // routes through the same ACT-aware batching as the outer loop and
+            // records every execution, so the results it fed the model can be
+            // written into the transcript afterwards without running twice.
+            let nativeExecutions = NIOLockedValueBox<[ToolExecution]>([])
+            var nativeExecutor: NativeToolExecutor? = nil
+            if dependencies.aiConnector.capabilities.executesToolsNatively {
+                nativeExecutor = { [self, model] (calls: [ToolCall]) async throws -> [Message] in
+                    try await publishToolHint(for: calls)
+                    let executions = try await executeWithRetry(
+                        toolCalls: calls,
+                        model: model,
+                        maxRetries: configuration.maxToolRetries
+                    )
+                    nativeExecutions.withLockedValue { $0.append(contentsOf: executions) }
+                    return executions.flatMap(\.messages).filter { $0.role == .tool }
+                }
+            }
+
             let turn = try await dependencies.turnRunner(
                 transcript,
                 initialTools,
                 model,
                 toolChoice,
                 .execution,
-                turnConfiguration
+                turnConfiguration,
+                nativeExecutor
             )
+
+            if turn.toolsExecutedNatively {
+                // The connector already ran the calls and answered on top of
+                // their results: persist assistant + tool rows in the order the
+                // model saw them, publish the text, and finish the run.
+                let executions = nativeExecutions.withLockedValue { $0 }
+                if let assistantMessage = dependencies.assistantMessageBuilder(turn) {
+                    transcript.append(assistantMessage)
+                    checkpoint.messages.append(assistantMessage)
+                }
+                let adapted = try await dependencies.toolTranscriptAdapter(executions)
+                let toolMessages = executions.flatMap(\.messages) + adapted
+                transcript.append(contentsOf: toolMessages)
+                checkpoint.messages.append(contentsOf: toolMessages)
+                if let thinking = turn.thinking?.trimmingCharacters(in: .whitespacesAndNewlines),
+                    !thinking.isEmpty
+                {
+                    try await dependencies.assistantPublisher((thinking, .thinking, nil))
+                }
+                if let assistantText = turn.assistantText?.trimmingCharacters(in: .whitespacesAndNewlines),
+                    !assistantText.isEmpty
+                {
+                    checkpoint.latestAssistantText = assistantText
+                    try Task.checkCancellation()
+                    try await dependencies.assistantPublisher((assistantText, .message, nil))
+                }
+                checkpoint.completedTurnCount += 1
+                checkpoint.isComplete = true
+                try await onCheckpoint?(checkpoint)
+                break
+            }
 
             // Publish reasoning content first (if surfaced by the connector) so
             // the UI can render the model's thinking before the answer lands.
@@ -340,6 +399,18 @@ public struct AIOrchestrator {
         }
 
         return checkpoint.latestAssistantText
+    }
+
+    private func publishToolHint(for toolCalls: [ToolCall]) async throws {
+        guard
+            let (name, messageType, parameters) = Self.toolHint(
+                for: toolCalls,
+                stage: .execution,
+                toolNameResolver: dependencies.toolNameResolver,
+                toolHintResolver: dependencies.toolHintResolver
+            )
+        else { return }
+        try await dependencies.toolHintPublisher(name, messageType, parameters)
     }
 
     private func executePendingToolCalls(
@@ -442,14 +513,28 @@ public struct AIOrchestrator {
         toolNameResolver: ToolNameResolver,
         toolHintResolver: ToolHintResolver
     ) -> (String, KeepTalkingContextMessage.MessageType, [String: String]?)? {
-        guard !turn.toolCalls.isEmpty else {
+        toolHint(
+            for: turn.toolCalls,
+            stage: stage,
+            toolNameResolver: toolNameResolver,
+            toolHintResolver: toolHintResolver
+        )
+    }
+
+    static func toolHint(
+        for toolCalls: [ToolCall],
+        stage: AIStage,
+        toolNameResolver: ToolNameResolver,
+        toolHintResolver: ToolHintResolver
+    ) -> (String, KeepTalkingContextMessage.MessageType, [String: String]?)? {
+        guard !toolCalls.isEmpty else {
             return nil
         }
         let toolNames = orderedUniqueToolNames(
-            turn.toolCalls.map(toolNameResolver)
+            toolCalls.map(toolNameResolver)
         )
 
-        let contexts = turn.toolCalls.compactMap { toolHintResolver($0, stage) }
+        let contexts = toolCalls.compactMap { toolHintResolver($0, stage) }
         guard !contexts.isEmpty else {
             return nil
         }

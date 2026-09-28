@@ -1,5 +1,6 @@
 import AIProxy
 import Foundation
+import NIOConcurrencyHelpers
 
 // MARK: - ACT (Action-Calling-Turn) Agent
 //
@@ -502,13 +503,38 @@ extension KeepTalkingClient {
         var stepIndex = 0
 
         for _ in 0..<maxACTTurns {
+            // A connector that runs its own tool loop (Apple Intelligence)
+            // executes the action calls inside the turn; record them here so the
+            // per-step trace below works from the same executions instead of
+            // running the action a second time.
+            let nativeExecutions = NIOLockedValueBox<[AIOrchestrator.ToolExecution]>([])
+            var nativeExecutor: (@Sendable ([AIToolCall]) async throws -> [AIMessage])? = nil
+            if actConnector.capabilities.executesToolsNatively {
+                nativeExecutor = { [self] (calls: [AIToolCall]) async throws -> [AIMessage] in
+                    let executions = try await executeAgentToolCalls(
+                        calls,
+                        runtimeCatalog: runtimeCatalog,
+                        promptMessageID: nil,
+                        context: context,
+                        agentTurnID: agentTurnID,
+                        agentIntention: task,
+                        inputHandles: inputHandles,
+                        outputHandles: outputHandles,
+                        assistantPublisher: assistantPublisher,
+                        toolHintPublisher: toolHintPublisher
+                    )
+                    nativeExecutions.withLockedValue { $0.append(contentsOf: executions) }
+                    return executions.flatMap(\.messages).filter { $0.role == .tool }
+                }
+            }
+
             let turn = try await actConnector.completeTurn(
                 messages: actTranscript,
                 tools: actionTools,
                 model: actModel,
                 toolChoice: .auto,
                 stage: .planning,
-                toolExecutor: nil
+                toolExecutor: nativeExecutor
             )
 
             if let assistantMsg = assistantMessage(from: turn) {
@@ -540,18 +566,22 @@ extension KeepTalkingClient {
             // Execute the action tool calls directly (no recursive ACT invocation).
             // Any staged-file handles the orchestrator relayed for this
             // delegation ride along on every proxy call this loop makes.
-            let executions = try await executeAgentToolCalls(
-                turn.toolCalls,
-                runtimeCatalog: runtimeCatalog,
-                promptMessageID: nil,
-                context: context,
-                agentTurnID: agentTurnID,
-                agentIntention: task,
-                inputHandles: inputHandles,
-                outputHandles: outputHandles,
-                assistantPublisher: assistantPublisher,
-                toolHintPublisher: toolHintPublisher
-            )
+            // When the connector already ran them natively, reuse those results.
+            let executions: [AIOrchestrator.ToolExecution] =
+                turn.toolsExecutedNatively
+                ? nativeExecutions.withLockedValue { $0 }
+                : try await executeAgentToolCalls(
+                    turn.toolCalls,
+                    runtimeCatalog: runtimeCatalog,
+                    promptMessageID: nil,
+                    context: context,
+                    agentTurnID: agentTurnID,
+                    agentIntention: task,
+                    inputHandles: inputHandles,
+                    outputHandles: outputHandles,
+                    assistantPublisher: assistantPublisher,
+                    toolHintPublisher: toolHintPublisher
+                )
             actLog(
                 "action-result action=\(actionID.uuidString.lowercased()) calls=\(turn.toolCalls.map(\.name).joined(separator: ",")) payload=\(actExecutionPreview(executions, source: stub.kind))"
             )
@@ -598,6 +628,19 @@ extension KeepTalkingClient {
                     parentActionName: stub.name,
                     params: params
                 )
+            }
+
+            if turn.toolsExecutedNatively {
+                // The native loop already answered on top of these results;
+                // another turn would only re-run the same calls.
+                if !summary.isEmpty {
+                    try await publishACTTraceUpdate(
+                        publisher: publisher,
+                        parentActionName: stub.name,
+                        params: ["summary": summary]
+                    )
+                }
+                break
             }
         }
 

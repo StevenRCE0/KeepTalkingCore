@@ -666,13 +666,13 @@ extension KeepTalkingClient {
                             }
                         )
                     }
-                    // A genuinely DELEGATED (remote-caller) execution runs as a
-                    // cancel-only run in the agent coordinator: visible, serialized
-                    // per context, and stoppable via the queue or a cross-node
-                    // cancel. A local self-call runs inline — it is already nested
-                    // under the caller's own run, so re-entering the per-context
-                    // queue would deadlock behind the slot that very run holds.
-                    if request.callerNodeID != self.config.node {
+                    // Only a remote caller's SKILL call is delegated work; every
+                    // other kind runs inline — the caller's ACT loop owns it. A
+                    // local self-call also runs inline: re-entering the context
+                    // queue would deadlock behind the caller's own run.
+                    if request.callerNodeID != self.config.node,
+                        await self.isSkillAction(request.call.action)
+                    {
                         do {
                             return try await self.delegationCoordinator.runDelegatedSync(
                                 contextID: request.contextID,
@@ -713,6 +713,17 @@ extension KeepTalkingClient {
             call: request.call,
             result: result
         )
+    }
+
+    private func isSkillAction(_ actionID: UUID) async -> Bool {
+        guard
+            let action = try? await KeepTalkingAction.find(
+                actionID,
+                on: localStore.database
+            ),
+            case .skill = action.payload
+        else { return false }
+        return true
     }
 
     private static func actionCallErrorResult(

@@ -36,7 +36,8 @@ public actor OpenAIConnector: AIConnector {
         contextTranscript: String,
         currentDate: String,
         platform: String,
-        responseLanguages: [String] = []
+        responseLanguages: [String] = [],
+        modelProfile: AIModelProfile? = nil
     ) -> String {
         AIPromptPresets.systemPrompt(
             ktRunActionToolFunctionName: ktRunActionToolFunctionName,
@@ -52,7 +53,8 @@ public actor OpenAIConnector: AIConnector {
             contextTranscript: contextTranscript,
             currentDate: currentDate,
             platform: platform,
-            responseLanguages: responseLanguages
+            responseLanguages: responseLanguages,
+            modelProfile: modelProfile
         )
     }
 

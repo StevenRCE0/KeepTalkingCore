@@ -34,6 +34,9 @@ public final class KeepTalkingClientSignals: Sendable {
     public let contextSyncEvents = KeepTalkingSignal<KeepTalkingContextSyncEvent>()
     /// A context's side notes changed — locally or by merge.
     public let sideNoteChanges = KeepTalkingSignal<UUID>()
+    /// Messages were deleted from a context — locally or by merge. Message
+    /// pages only ever add rows, so a message cache must re-read on this.
+    public let messageDeletions = KeepTalkingSignal<KeepTalkingMessageDeletion>()
     /// Invalidation ping: the threads table moved; re-read.
     public let threadChanges = KeepTalkingSignal<Void>()
     /// The derived semantic index for a context needs reconciling. Enqueue

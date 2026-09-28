@@ -40,10 +40,8 @@ extension KeepTalkingClient {
         guard !trimmedKey.isEmpty else {
             throw KeepTalkingClientError.invalidSideNote("key must not be empty")
         }
-        // Sync sends the whole set at once, so every write has to keep that set
-        // inside the transport budget. Refusing here is what makes the budget
-        // unreachable — the alternative is a write that succeeds locally and
-        // then silently stops the context's side notes from syncing at all.
+        // Refused here rather than at sync: a note that cannot fit a sync page
+        // would be skipped by the pager and never converge.
         guard trimmedKey.utf8.count <= KeepTalkingSideNoteLimits.maximumKeyBytes else {
             throw KeepTalkingClientError.invalidSideNote(
                 "key is \(trimmedKey.utf8.count) bytes, over the \(KeepTalkingSideNoteLimits.maximumKeyBytes)-byte limit"
@@ -125,9 +123,8 @@ extension KeepTalkingClient {
     ///
     /// Tombstones are what let a peer tell "deleted" from "never seen", so they
     /// have to outlive the delete — but not forever. Kept forever they are a
-    /// monotonically growing share of a fixed transport budget, and the context
-    /// eventually cannot sync side notes at all. Oldest-first by version
-    /// counter, which is the context's write order.
+    /// monotonically growing share of every digest-mismatch exchange. Oldest-first
+    /// by version counter, which is the context's write order.
     private func pruneTombstones(in contextID: UUID) async throws {
         let tombstones = try await KeepTalkingSideNote.query(on: localStore.database)
             .filter(\.$context.$id == contextID)
@@ -144,7 +141,7 @@ extension KeepTalkingClient {
             try await tombstone.delete(on: localStore.database)
         }
         onLog?(
-            "[side-note] pruned \(expired.count) tombstone(s) in context=\(contextID.uuidString.lowercased()) to stay inside the sync budget"
+            "[side-note] pruned \(expired.count) tombstone(s) in context=\(contextID.uuidString.lowercased())"
         )
     }
 

@@ -41,12 +41,13 @@ extension KeepTalkingClient {
     /// Not per sync page: a mark can only land once a thread owns its message,
     /// and mid-sync the local message list is a suffix of the context.
     ///
-    /// Threading itself does not come through here — it rides the sync summary
-    /// as a `KeepTalkingThreadDTO` projection and is applied by the sync driver.
-    /// Runs behind a per-context gate so two syncs completing together cannot
-    /// interleave a read of what is unconsumed with the other's write of it.
+    /// Threading itself does not come through here — every node re-threads
+    /// from the turning points it holds (`applyLocalTurningPointMarkThreading`).
+    /// Runs behind the per-context threading gate so two syncs completing
+    /// together cannot interleave a read of what is unconsumed with the other's
+    /// write of it, nor a re-threading with the flags it moves.
     func consumePendingMarks(in contextID: UUID) async throws {
-        try await markConsumptionGate.run(for: contextID) { [self] in
+        try await threadingGate.run(for: contextID) { [self] in
             try await consumeMarks(in: contextID)
         }
     }

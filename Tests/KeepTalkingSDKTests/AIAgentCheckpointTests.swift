@@ -57,7 +57,7 @@ struct AIAgentCheckpointTests {
         AIOrchestrator(
             dependencies: .init(
                 aiConnector: StubConnector(),
-                turnRunner: { _, _, _, _, _, _ in
+                turnRunner: { _, _, _, _, _, _, _ in
                     await probe.nextTurn()
                 },
                 assistantMessageBuilder: { turn in

@@ -221,11 +221,17 @@ working context.
   caller and the executor. The row itself replicates to every member of the
   context, so the hint stays legible to everyone while the arguments open only for
   those two ends; `openSealedCallParameters` returns `nil` for anyone else.
-- `.threads` and `.markChitterChatter` — annotations an agent stores to
-  name the live thread, signal a topic shift, or flag a message as noise. They are
-  ordinary messages, so they replicate through normal sync; each node applies them
-  locally once and records them in the context's consumed-marks list, which is not
-  itself propagated.
+- `.markTurningPoint` and `.markChitterChatter` — annotations that signal a
+  topic shift (naming the thread it closes and the one it opens) or flag a message
+  as noise. They are ordinary messages, so they replicate through normal sync.
+  Turning points are the whole of a context's threading: the agent marks them, and
+  a person does too through ``KeepTalkingClient/markTurningPoint(at:previousTopicName:currentTopicName:in:)``,
+  ``KeepTalkingClient/removeTurningPoint(at:in:)`` and
+  ``KeepTalkingClient/moveTurningPoint(from:to:in:)``. After storing or deleting one,
+  and after every completed sync, a node re-derives its threads from the turning
+  points it holds, so its thread rows always partition the context with exactly
+  one live thread. Chitter-chatter marks are applied once and recorded in the
+  context's consumed-marks list, which is not itself propagated.
 - `.agentTurnContinuation` — a suspended agent turn waiting on a remote user, with
   its tool call ID, the action and target node, a continuation kind, an
   asymmetrically encrypted payload, and an

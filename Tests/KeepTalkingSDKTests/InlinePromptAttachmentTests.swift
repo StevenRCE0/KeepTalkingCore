@@ -83,9 +83,11 @@ struct InlinePromptAttachmentTests {
         let localStore = try await KeepTalkingInMemoryStore.make()
         let client = makeClient(localStore: localStore)
         let contextID = UUID(uuidString: "F0000000-0000-0000-0000-000000000031")!
+        let agentTurnID = UUID()
 
         await client.publishAgentRunFailure(
             contextID: contextID,
+            agentTurnID: agentTurnID,
             roleName: "ai",
             model: "gpt-5-codex",
             message: "Attachment preparation failed."
@@ -105,6 +107,8 @@ struct InlinePromptAttachmentTests {
         // localized message, not through the conversation transcript.
         #expect(message.content == "AI error")
         #expect(message.type == .haywire(reason: .failed))
+        // Part of the turn it ends, so deleting that turn takes it along.
+        #expect(message.agentTurnID == agentTurnID)
         if case .autonomous(let name, _, let model) = message.sender {
             #expect(name == "ai")
             #expect(model == "gpt-5-codex")

@@ -115,7 +115,9 @@ public struct KeepTalkingContextSyncSnapshot: Sendable, KeepTalkingContextSyncSt
     }
 }
 
-private func messagePageKey(
+/// A persisted message's canonical `(timestamp, id)` position — shared by sync
+/// paging, the turning-point derivation and tombstone placement.
+func messagePageKey(
     _ message: KeepTalkingContextMessage
 ) -> KeepTalkingContextSyncPageKey {
     KeepTalkingContextSyncPageKey(

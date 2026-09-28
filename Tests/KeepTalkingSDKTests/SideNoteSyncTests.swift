@@ -3,9 +3,8 @@ import Testing
 
 @testable import KeepTalkingSDK
 
-/// The whole-set exchange is only correct while the set stays small. These
-/// cover the bounds that make that true, and the version/merge rules the
-/// exchange rests on — which had no coverage at all.
+/// The whole-set exchange, the bounds on what one note and one context may
+/// hold, and the version/merge rules the exchange rests on.
 struct SideNoteSyncTests {
     private func makeClient() async throws -> (KeepTalkingClient, UUID) {
         let store = try await KeepTalkingInMemoryStore.make()
@@ -21,11 +20,11 @@ struct SideNoteSyncTests {
 
     // MARK: - Bounds
 
-    @Test("a full context's side notes still encode under the sync budget")
-    func sideNoteSetFitsItsBudgetWhenFull() throws {
-        // The arithmetic the bounds rest on. If someone raises a limit without
-        // re-checking the budget, the whole-set exchange starts silently
-        // refusing to attach — this is what catches that at desk time.
+    @Test("a full context's side notes page across envelopes and reassemble whole")
+    func fullSideNoteSetPagesAndReassembles() async throws {
+        // A full set is well past one sync page, so it must be split — and the
+        // requester must get back exactly the canonical set, in order, with
+        // nothing skipped or doubled at a page boundary.
         let key = String(
             repeating: "k",
             count: KeepTalkingSideNoteLimits.maximumKeyBytes
@@ -58,8 +57,42 @@ struct SideNoteSyncTests {
             )
         }
 
-        let encoded = try JSONEncoder().encode(live + tombstones)
-        #expect(encoded.count <= KeepTalkingSideNoteLimits.maximumEncodedBytes)
+        let canonical = KeepTalkingSideNoteDigest.canonicallyOrdered(live + tombstones)
+        func page(before: KeepTalkingSideNotePageKey?) -> KeepTalkingContextSyncSideNotesPageResult {
+            let page = KeepTalkingContextSyncPage.newestFirst(
+                canonical,
+                before: before,
+                key: KeepTalkingSideNotePageKey.init
+            )
+            return .init(
+                request: UUID(), context: UUID(), requester: UUID(), responder: UUID(),
+                items: page.items, nextBefore: page.nextBefore
+            )
+        }
+
+        let first = page(before: nil)
+        var requests = 0
+        let reassembled = try await collectSyncSetPages(
+            firstPage: first.items,
+            nextBefore: first.nextBefore,
+            request: {
+                KeepTalkingContextSyncSideNotesPageRequest(
+                    context: UUID(), requester: UUID(), recipient: UUID(), before: $0)
+            },
+            dispatch: { request in
+                requests += 1
+                return page(before: request.before)
+            }
+        )
+
+        #expect(first.nextBefore != nil)
+        #expect(requests >= 1)
+        #expect(first.items.count < canonical.count)
+        #expect(reassembled == canonical)
+        #expect(
+            KeepTalkingSideNoteDigest.digest(of: reassembled)
+                == KeepTalkingSideNoteDigest.digest(of: live + tombstones)
+        )
     }
 
     @Test("an oversized value is refused instead of breaking sync later")

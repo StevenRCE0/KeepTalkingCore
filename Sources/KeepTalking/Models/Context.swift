@@ -62,6 +62,12 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     @OptionalField(key: "consumed_marks")
     public var consumedMarks: [UUID]?
 
+    /// Messages deleted from this context, by any node. Grow-only and merged
+    /// by union across peers — see `KeepTalkingMessageTombstone`. Travels on
+    /// the sync exchange, never in this model's `Codable` form.
+    @OptionalField(key: "deleted_messages")
+    public var deletedMessages: [KeepTalkingMessageTombstone]?
+
     @Children(for: \.$context)
     public var messages: [KeepTalkingContextMessage]
 

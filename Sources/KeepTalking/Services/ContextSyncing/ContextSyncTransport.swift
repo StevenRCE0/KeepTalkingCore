@@ -69,22 +69,26 @@ public struct KeepTalkingContextSyncSummaryRequest: Codable, Sendable,
     public let requester: UUID
     public let recipient: UUID
     /// Our side-note digest. The responder compares it against its own and
-    /// attaches its whole set only when they differ — so the steady state costs
+    /// sends its whole set only when they differ — so the steady state costs
     /// 32 bytes up and nothing back, instead of re-pulling every note.
     public let sideNoteDigest: Data?
+    /// Our message-tombstone digest, compared the same way.
+    public let messageDeletionDigest: Data?
 
     public init(
         request: UUID = UUID(),
         context: UUID,
         requester: UUID,
         recipient: UUID,
-        sideNoteDigest: Data? = nil
+        sideNoteDigest: Data? = nil,
+        messageDeletionDigest: Data? = nil
     ) {
         self.request = request
         self.context = context
         self.requester = requester
         self.recipient = recipient
         self.sideNoteDigest = sideNoteDigest
+        self.messageDeletionDigest = messageDeletionDigest
     }
 }
 
@@ -96,15 +100,21 @@ public struct KeepTalkingContextSyncSummaryResult: Codable, Sendable,
     public let requester: UUID
     public let responder: UUID
     public let summary: KeepTalkingContextSyncMetadata
+
+    // Whole-set exchanges. Each carries the *first page* of its set; a non-nil
+    // `…NextBefore` means more pages follow, pulled with the matching
+    // `…PageRequest` (see `collectSyncSetPages`). A peer predating paging sends
+    // the whole set with no cursor, which reads as a single complete page.
+
     /// Present only when the requester's side-note digest disagreed with ours.
     public let sideNotes: [KeepTalkingSideNoteDTO]?
-    /// The responder's AI-marked threading, derived from its turning points.
-    ///
-    /// Threads are local rows and never sync as such; this projection of the
-    /// AI's marking rides the summary exchange so a peer can reproduce the same
-    /// threading. Applied only once the requester's message sync completes,
-    /// since the ranges name messages it may not hold yet.
-    public let threadDTOs: [KeepTalkingThreadDTO]?
+    public let sideNotesNextBefore: KeepTalkingSideNotePageKey?
+    /// Present only when the requester's tombstone digest disagreed with ours.
+    public let messageDeletions: [KeepTalkingMessageTombstone]?
+    public let messageDeletionsNextBefore: KeepTalkingContextSyncPageKey?
+    /// Our tombstone digest, so a requester holding tombstones we lack can
+    /// push them back in the same round.
+    public let messageDeletionDigest: Data?
 
     public init(
         request: UUID,
@@ -113,7 +123,10 @@ public struct KeepTalkingContextSyncSummaryResult: Codable, Sendable,
         responder: UUID,
         summary: KeepTalkingContextSyncMetadata,
         sideNotes: [KeepTalkingSideNoteDTO]? = nil,
-        threadDTOs: [KeepTalkingThreadDTO]? = nil
+        sideNotesNextBefore: KeepTalkingSideNotePageKey? = nil,
+        messageDeletions: [KeepTalkingMessageTombstone]? = nil,
+        messageDeletionsNextBefore: KeepTalkingContextSyncPageKey? = nil,
+        messageDeletionDigest: Data? = nil
     ) {
         self.request = request
         self.context = context
@@ -121,7 +134,10 @@ public struct KeepTalkingContextSyncSummaryResult: Codable, Sendable,
         self.responder = responder
         self.summary = summary
         self.sideNotes = sideNotes
-        self.threadDTOs = threadDTOs
+        self.sideNotesNextBefore = sideNotesNextBefore
+        self.messageDeletions = messageDeletions
+        self.messageDeletionsNextBefore = messageDeletionsNextBefore
+        self.messageDeletionDigest = messageDeletionDigest
     }
 }
 
@@ -145,6 +161,96 @@ public struct KeepTalkingContextSyncSideNotesPush: Codable, Sendable, Equatable 
         self.sideNotes = sideNotes
     }
 }
+
+/// A fire-and-forget push of message tombstones this node just learned of.
+///
+/// Broadcast like `KeepTalkingContextSyncSideNotesPush`; the tombstone digest
+/// on the next summary exchange is the catch-up. A large delete is split into
+/// several pushes by the sync pager, since transport never fragments.
+public struct KeepTalkingContextSyncMessageDeletionsPush: Codable, Sendable, Equatable {
+    public let context: UUID
+    public let origin: UUID
+    public let tombstones: [KeepTalkingMessageTombstone]
+
+    public init(
+        context: UUID,
+        origin: UUID,
+        tombstones: [KeepTalkingMessageTombstone]
+    ) {
+        self.context = context
+        self.origin = origin
+        self.tombstones = tombstones
+    }
+}
+
+/// Pulls the next page of a whole set whose first page rode a summary result.
+public struct KeepTalkingContextSyncSetPageRequest<Cursor>: Codable, Sendable, Equatable
+where Cursor: Codable & Sendable & Comparable {
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let recipient: UUID
+    public let before: Cursor?
+
+    public init(
+        request: UUID = UUID(),
+        context: UUID,
+        requester: UUID,
+        recipient: UUID,
+        before: Cursor?
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.recipient = recipient
+        self.before = before
+    }
+
+    func continuing(before: Cursor) -> Self {
+        Self(
+            context: context,
+            requester: requester,
+            recipient: recipient,
+            before: before
+        )
+    }
+}
+
+/// One page of a whole set, answering `KeepTalkingContextSyncSetPageRequest`.
+public struct KeepTalkingContextSyncSetPageResult<Item, Cursor>: Codable, Sendable
+where Item: Codable & Sendable, Cursor: Codable & Sendable & Comparable {
+    public let request: UUID
+    public let context: UUID
+    public let requester: UUID
+    public let responder: UUID
+    public let items: [Item]
+    public let nextBefore: Cursor?
+
+    public init(
+        request: UUID,
+        context: UUID,
+        requester: UUID,
+        responder: UUID,
+        items: [Item],
+        nextBefore: Cursor?
+    ) {
+        self.request = request
+        self.context = context
+        self.requester = requester
+        self.responder = responder
+        self.items = items
+        self.nextBefore = nextBefore
+    }
+}
+
+public typealias KeepTalkingContextSyncSideNotesPageRequest =
+    KeepTalkingContextSyncSetPageRequest<KeepTalkingSideNotePageKey>
+public typealias KeepTalkingContextSyncSideNotesPageResult =
+    KeepTalkingContextSyncSetPageResult<KeepTalkingSideNoteDTO, KeepTalkingSideNotePageKey>
+public typealias KeepTalkingContextSyncMessageDeletionsPageRequest =
+    KeepTalkingContextSyncSetPageRequest<KeepTalkingContextSyncPageKey>
+public typealias KeepTalkingContextSyncMessageDeletionsPageResult =
+    KeepTalkingContextSyncSetPageResult<KeepTalkingMessageTombstone, KeepTalkingContextSyncPageKey>
 
 public struct KeepTalkingContextSyncTailRequest: Codable, Sendable,
     Equatable
@@ -740,6 +846,9 @@ extension KeepTalkingContextSyncTranscriptTailRequest:
 extension KeepTalkingContextSyncTranscriptChunkRequest:
     KeepTalkingContextSyncDirectedRequest
 {}
+extension KeepTalkingContextSyncSetPageRequest:
+    KeepTalkingContextSyncDirectedRequest
+{}
 
 public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
     // Message sync (contextSyncing): summary → tail → chunk, both phases answered
@@ -780,6 +889,15 @@ public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
     /// Side notes that just changed on the sender. Broadcast; the digest on the
     /// summary exchange is the catch-up path.
     case sideNotesPush(KeepTalkingContextSyncSideNotesPush)
+    /// Message tombstones the sender just learned of. Broadcast; the tombstone
+    /// digest on the summary exchange is the catch-up path.
+    case messageDeletionsPush(KeepTalkingContextSyncMessageDeletionsPush)
+
+    // Whole-set pages: the rest of a set whose first page rode `summaryResult`.
+    case sideNotesPageRequest(KeepTalkingContextSyncSideNotesPageRequest)
+    case sideNotesPageResult(KeepTalkingContextSyncSideNotesPageResult)
+    case messageDeletionsPageRequest(KeepTalkingContextSyncMessageDeletionsPageRequest)
+    case messageDeletionsPageResult(KeepTalkingContextSyncMessageDeletionsPageResult)
 
     /// Terminal failure answering any directed context-sync request.
     case failureResult(KeepTalkingContextSyncFailureResult)

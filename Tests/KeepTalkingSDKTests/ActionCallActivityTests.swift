@@ -136,8 +136,9 @@ struct ActionCallActivityTests {
             node: node,
             on: store.database
         )
-        let recorder = ActionCallActivityRecorder()
-        client.actionCallActivities.observe { recorder.record($0) }
+        // A `values` stream keeps the SDK's emission order and misses nothing
+        // sent after it exists, so subscribe before the first call.
+        let activityStream = client.actionCallActivities.values
         let actionID = try #require(action.id)
         let nodeID = try #require(node.id)
         let contextID = try #require(context.id)
@@ -179,10 +180,20 @@ struct ActionCallActivityTests {
                 context: context
             )
         }
-        await recorder.waitForCount(3)
-        task.cancel()
+        // Driven by the stream itself: the third activity is the second call
+        // beginning, which is when to cancel it, and the fourth is that call
+        // ending. Nothing is sampled before it has been delivered.
+        let collected = await withTimeout {
+            var activities: [KeepTalkingActionCallActivity] = []
+            for await activity in activityStream {
+                activities.append(activity)
+                if activities.count == 3 { task.cancel() }
+                if activities.count == 4 { break }
+            }
+            return activities
+        }
+        let activities = try #require(collected)
         let cancelledResult = try await task.value
-        let activities = recorder.snapshot()
 
         #expect(cancelledResult.isError)
         #expect(activities.map(\.phase.isEnded) == [false, true, false, true])

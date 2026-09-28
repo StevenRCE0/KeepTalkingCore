@@ -276,6 +276,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let primitiveRegistry: KeepTalkingPrimitiveRegistry?
     var semanticSearchCallback: SemanticSearchCallback?
     var webSearchProvider: WebSearchProvider?
+    /// Looks up what the main agent's model can do (see `AIModelProfile`).
+    /// `nil`, or a resolver returning `nil`, keeps the loop's default
+    /// assumptions: tools, attachments, fixed message budgets, any effort.
+    var modelProfileResolver: ModelProfileResolver?
     var jsRuntime: (any KeepTalkingJSRuntime)?
     /// Background work `init` started against the store (the orphan-workspace
     /// reap). A host that shuts the store down under a live client awaits it
@@ -326,11 +330,20 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let syncMessages = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncMessagesResult>()
     let syncTranscriptSummaries = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncTranscriptSummaryResult>()
     let syncTranscriptLines = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncTranscriptLinesResult>()
+    let syncSideNotePages = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncSideNotesPageResult>()
+    let syncMessageDeletionPages = KeepTalkingSyncResponseRegistry<KeepTalkingContextSyncMessageDeletionsPageResult>()
     let contextSyncSingleFlight = KeepTalkingContextSyncSingleFlight()
 
-    /// Serialises mark consumption per context, so two syncs completing at
-    /// once cannot both apply the same projection.
-    let markConsumptionGate = KeepTalkingSerialGate()
+    /// Serialises every rewrite of a context's thread rows — re-threading from
+    /// turning points, chitter-chatter consumption, the boundary shrink a
+    /// deletion makes — so two syncs completing at once, or a sync and a local
+    /// mark, never both place the same thread and write it twice.
+    let threadingGate = KeepTalkingSerialGate()
+
+    /// Serialises tombstone merges per context. The set is read, unioned and
+    /// written back, so a push and a summary merging at once would otherwise
+    /// each drop the other's tombstones.
+    let messageDeletionGate = KeepTalkingSerialGate()
 
     // MARK: Trust handshake properties
     let trustQueue = DispatchQueue(
@@ -675,6 +688,15 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     public func setWebSearchProvider(_ provider: WebSearchProvider?) {
         webSearchProvider = provider
+    }
+
+    /// Resolves a model id to its `AIModelProfile`, consulted at the start of
+    /// every main-agent run. The host typically closes over a
+    /// `KeepTalkingModelCatalog` and the main provider's models.dev id.
+    public typealias ModelProfileResolver = @Sendable (_ model: String) -> AIModelProfile?
+
+    public func setModelProfileResolver(_ resolver: ModelProfileResolver?) {
+        modelProfileResolver = resolver
     }
 
     /// Installs (or removes) the JavaScript runtime that backs the

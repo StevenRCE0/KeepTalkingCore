@@ -31,17 +31,25 @@ public struct AITurnResult: Sendable {
     /// Audio output from audio-capable models. Present when the turn was
     /// configured with `modalities: ["audio"]` and the model produced audio.
     public let audioOutput: AIAudioOutput?
+    /// `true` when the connector already ran `toolCalls` through the
+    /// `toolExecutor` it was handed, inside this turn, and `assistantText` is
+    /// the answer the model produced *after* seeing those results. The caller
+    /// must record the calls and their results but never execute them again.
+    /// Only connectors whose capabilities report `executesToolsNatively` set it.
+    public let toolsExecutedNatively: Bool
 
     public init(
         assistantText: String?,
         thinking: String? = nil,
         toolCalls: [AIToolCall],
-        audioOutput: AIAudioOutput? = nil
+        audioOutput: AIAudioOutput? = nil,
+        toolsExecutedNatively: Bool = false
     ) {
         self.assistantText = assistantText
         self.thinking = thinking
         self.toolCalls = toolCalls
         self.audioOutput = audioOutput
+        self.toolsExecutedNatively = toolsExecutedNatively
     }
 }
 
@@ -58,9 +66,24 @@ public struct AIConnectorCapabilities: Sendable {
     /// model is requested.
     public let supportsThinking: Bool
 
-    public init(supportsNativeToolCalling: Bool, supportsThinking: Bool = false) {
+    /// Whether this connector runs the tool loop itself: when handed a
+    /// `toolExecutor`, it executes the model's calls inside `completeTurn`,
+    /// feeds the results back to the model, and returns the final answer with
+    /// `AITurnResult.toolsExecutedNatively` set. Apple's on-device session is
+    /// the canonical case — its tool calls happen inside one `respond(to:)`.
+    /// Callers that can execute tools should pass an executor to such a
+    /// connector; callers that can't may pass `nil`, and the connector then
+    /// returns the requested calls unexecuted like any other provider.
+    public let executesToolsNatively: Bool
+
+    public init(
+        supportsNativeToolCalling: Bool,
+        supportsThinking: Bool = false,
+        executesToolsNatively: Bool = false
+    ) {
         self.supportsNativeToolCalling = supportsNativeToolCalling
         self.supportsThinking = supportsThinking
+        self.executesToolsNatively = executesToolsNatively
     }
 }
 

@@ -46,12 +46,12 @@ enum KeepTalkingContextSyncPage {
     /// Pages a canonically oldest-first stream from its newest end. `before`
     /// is the oldest item delivered by the preceding page. Pages arrive
     /// newest-to-oldest while their contents remain in canonical display order.
-    static func newestFirst<Item: Encodable>(
+    static func newestFirst<Item: Encodable, Key: Comparable>(
         _ orderedItems: [Item],
-        before: KeepTalkingContextSyncPageKey? = nil,
-        key: (Item) -> KeepTalkingContextSyncPageKey,
+        before: Key? = nil,
+        key: (Item) -> Key,
         limit: Int = maximumItemCount
-    ) -> (items: [Item], nextBefore: KeepTalkingContextSyncPageKey?) {
+    ) -> (items: [Item], nextBefore: Key?) {
         let candidates = orderedItems.filter { item in
             guard let before else { return true }
             return key(item) < before
@@ -104,9 +104,15 @@ enum KeepTalkingSyncReconcileError: LocalizedError {
     }
 }
 
+/// A request for one bounded page, continued by cursor.
+///
+/// `Cursor` is whatever totally orders the stream: `KeepTalkingContextSyncPageKey`
+/// for messages, transcript lines, tombstones and the thread projection;
+/// `KeepTalkingSideNotePageKey` for side notes, which have no timestamp/id pair.
 protocol KeepTalkingSyncPageRequest {
-    var before: KeepTalkingContextSyncPageKey? { get }
-    func continuing(before: KeepTalkingContextSyncPageKey) -> Self
+    associatedtype Cursor: Comparable
+    var before: Cursor? { get }
+    func continuing(before: Cursor) -> Self
 }
 
 extension KeepTalkingContextSyncTailRequest: KeepTalkingSyncPageRequest {}
@@ -115,11 +121,22 @@ extension KeepTalkingContextSyncTranscriptTailRequest: KeepTalkingSyncPageReques
 extension KeepTalkingContextSyncTranscriptChunkRequest: KeepTalkingSyncPageRequest {}
 
 protocol KeepTalkingSyncPageResult {
-    var nextBefore: KeepTalkingContextSyncPageKey? { get }
+    associatedtype Cursor: Comparable
+    var nextBefore: Cursor? { get }
 }
 
 extension KeepTalkingContextSyncMessagesResult: KeepTalkingSyncPageResult {}
 extension KeepTalkingContextSyncTranscriptLinesResult: KeepTalkingSyncPageResult {}
+
+/// A page of a whole set rather than of a stream: the items themselves are
+/// what the requester reassembles.
+protocol KeepTalkingSyncSetPageResult: KeepTalkingSyncPageResult {
+    associatedtype Item
+    var items: [Item] { get }
+}
+
+extension KeepTalkingContextSyncSetPageRequest: KeepTalkingSyncPageRequest {}
+extension KeepTalkingContextSyncSetPageResult: KeepTalkingSyncSetPageResult {}
 
 /// The requester-side three-phase reconcile, parameterized over a stream's
 /// request/result types. Both message sync and transcript-line sync build one of
@@ -167,7 +184,7 @@ struct KeepTalkingSyncReconcile<
 func runSyncReconcile<T, C, R>(
     _ steps: KeepTalkingSyncReconcile<T, C, R>,
     maximumChunkRepairRounds: Int = 8
-) async throws {
+) async throws where T.Cursor == R.Cursor, C.Cursor == R.Cursor {
     let remote = try await steps.remoteSummary()
     var local = try await steps.localSummary()
 
@@ -220,7 +237,10 @@ private func continueSyncPage<Request, Result>(
     result: Result,
     persist: (Result) async throws -> Void
 ) async throws -> Request?
-where Request: KeepTalkingSyncPageRequest, Result: KeepTalkingSyncPageResult {
+where
+    Request: KeepTalkingSyncPageRequest, Result: KeepTalkingSyncPageResult,
+    Request.Cursor == Result.Cursor
+{
     try await persist(result)
     guard let nextBefore = result.nextBefore else { return nil }
     if let before = request.before {
@@ -231,4 +251,39 @@ where Request: KeepTalkingSyncPageRequest, Result: KeepTalkingSyncPageResult {
         }
     }
     return request.continuing(before: nextBefore)
+}
+
+/// Reassembles a whole set that a responder paged out.
+///
+/// Whole-set exchanges (side notes, message tombstones, the thread projection)
+/// ride the summary result, but transport never fragments an envelope — so a
+/// set that outgrows one is split with the same pager messages use. The summary
+/// result carries the first page; this pulls the rest through
+/// `continueSyncPage`, keeping its strictly-decreasing-cursor guard.
+///
+/// Returns the set in canonical (oldest-first) order: pages arrive newest-first
+/// while each page's contents stay in canonical order, so every later page is
+/// prepended. Callers merge the complete set once — tombstone pruning and the
+/// thread projection's all-or-nothing apply both need the whole thing.
+func collectSyncSetPages<Request, Result>(
+    firstPage: [Result.Item],
+    nextBefore: Request.Cursor?,
+    request: (Request.Cursor) -> Request,
+    dispatch: (Request) async throws -> Result
+) async throws -> [Result.Item]
+where
+    Request: KeepTalkingSyncPageRequest, Result: KeepTalkingSyncSetPageResult,
+    Request.Cursor == Result.Cursor
+{
+    var items = firstPage
+    var current = nextBefore.map(request)
+    while let page = current {
+        let result = try await dispatch(page)
+        current = try await continueSyncPage(
+            page,
+            result: result,
+            persist: { items = $0.items + items }
+        )
+    }
+    return items
 }

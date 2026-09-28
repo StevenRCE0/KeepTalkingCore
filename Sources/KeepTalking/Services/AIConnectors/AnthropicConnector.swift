@@ -150,7 +150,10 @@ public actor AnthropicConnector: AIConnector {
     ) async throws -> AITurnResult {
         let (system, anthropicMessages) = Self.translateMessages(messages)
         let anthropicTools = tools.map(Self.translateTool(_:))
-        let anthropicToolChoice = toolChoice.map(Self.translateToolChoice(_:))
+        // Anthropic rejects `tool_choice` without `tools` (a tool-less model's
+        // run still carries the orchestrator's `.auto`).
+        let anthropicToolChoice =
+            anthropicTools.isEmpty ? nil : toolChoice.map(Self.translateToolChoice(_:))
 
         let body = AnthropicMessageRequestBody(
             maxTokens: configuration?.maxOutputTokens ?? Self.defaultMaxTokens,

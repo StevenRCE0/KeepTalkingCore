@@ -319,7 +319,12 @@ extension KeepTalkingClient {
         // otherwise drop it as a duplicate).
         await replaceContinuationStatesIfNeeded(messages)
 
-        let newMessages = try await filterNewMessages(messages)
+        // A tombstoned id stays out for good — otherwise any peer still holding
+        // the row would sync it straight back.
+        let deleted = try await deletedMessageIDs(in: contextID)
+        let newMessages = try await filterNewMessages(messages).filter { message in
+            message.id.map { !deleted.contains($0) } ?? true
+        }
         guard !newMessages.isEmpty else {
             return false
         }
@@ -373,7 +378,16 @@ extension KeepTalkingClient {
             return []
         }
 
-        let newAttachments = try await filterNewAttachmentDTOs(attachments)
+        var deletedByContext: [UUID: Set<UUID>] = [:]
+        for contextID in Set(attachments.map(\.contextID)) {
+            deletedByContext[contextID] = try await deletedMessageIDs(in: contextID)
+        }
+        // Checked before orphan parking: an attachment of a deleted message
+        // would otherwise wait forever for a parent that is never coming.
+        let newAttachments = try await filterNewAttachmentDTOs(attachments).filter { attachment in
+            guard let parentMessageID = attachment.parentMessageID else { return true }
+            return deletedByContext[attachment.contextID]?.contains(parentMessageID) != true
+        }
         guard !newAttachments.isEmpty else {
             return []
         }
@@ -520,6 +534,15 @@ extension KeepTalkingClient {
         guard !parked.contains(where: { $0.id == attachment.id }) else { return }
         parked.append(attachment)
         orphanAttachmentsByParentMessageID[parentMessageID] = parked
+    }
+
+    /// Drop parked attachment DTOs whose parent message was just deleted.
+    func discardOrphanAttachments(forParentMessageIDs parentMessageIDs: [UUID]) {
+        orphanAttachmentLock.lock()
+        defer { orphanAttachmentLock.unlock() }
+        for parentMessageID in parentMessageIDs {
+            orphanAttachmentsByParentMessageID.removeValue(forKey: parentMessageID)
+        }
     }
 
     /// Re-drive any attachment DTOs parked for `parentMessageID` now that the

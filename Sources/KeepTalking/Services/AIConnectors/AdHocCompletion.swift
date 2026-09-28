@@ -22,7 +22,9 @@
 //  their configuration lives and hand it over.
 //
 
+import AIProxy
 import Foundation
+import NIOConcurrencyHelpers
 
 public struct AdHocCompletion: Sendable {
     /// What a single run produced. `thinking` is present only for connectors
@@ -92,20 +94,46 @@ public struct AdHocCompletion: Sendable {
         temperature: Double? = nil,
         responseFormat: AIResponseFormat? = nil
     ) async throws -> Result {
-        let turn = try await connector.completeTurn(
-            messages: [.system(instruction)] + leadingMessages + [.user(task)],
-            tools: tools,
-            model: model,
-            toolChoice: toolChoice,
-            stage: tools.isEmpty ? .execution : .planning,
-            configuration: AITurnConfiguration(
-                reasoning: reasoning,
-                temperature: temperature,
-                maxOutputTokens: maxOutputTokens,
-                responseFormat: responseFormat
-            ),
-            toolExecutor: toolExecutor
-        )
+        func attempt(_ reasoning: AIReasoning?) async throws -> AITurnResult {
+            try await connector.completeTurn(
+                messages: [.system(instruction)] + leadingMessages + [.user(task)],
+                tools: tools,
+                model: model,
+                toolChoice: toolChoice,
+                stage: tools.isEmpty ? .execution : .planning,
+                configuration: AITurnConfiguration(
+                    reasoning: reasoning,
+                    temperature: temperature,
+                    maxOutputTokens: maxOutputTokens,
+                    responseFormat: responseFormat
+                ),
+                toolExecutor: toolExecutor
+            )
+        }
+
+        // `.noReasoning` is a preference, not a requirement: some models
+        // reason unconditionally — Gemini's Pro tiers most visibly — and their
+        // endpoints reject the request rather than ignore the knob. Step down
+        // to the cheapest effort every reasoning model accepts, and remember
+        // the model so later calls skip the refused round trip.
+        var fallback = reasoning ?? AIReasoning()
+        fallback.effort = .low
+        let wantsNoReasoning = reasoning?.effort == .noReasoning
+        let knownToRefuse = Self.modelsRequiringReasoning.withLockedValue { $0.contains(model) }
+
+        let turn: AITurnResult
+        if wantsNoReasoning && knownToRefuse {
+            turn = try await attempt(fallback)
+        } else {
+            do {
+                turn = try await attempt(reasoning)
+            } catch let error as AIProxyError
+                where wantsNoReasoning && Self.refusesToSkipReasoning(error)
+            {
+                Self.modelsRequiringReasoning.withLockedValue { _ = $0.insert(model) }
+                turn = try await attempt(fallback)
+            }
+        }
         return Result(
             text: turn.assistantText ?? "",
             thinking: turn.thinking,
@@ -113,9 +141,23 @@ public struct AdHocCompletion: Sendable {
         )
     }
 
+    /// Models whose endpoint refused `.noReasoning` this launch. Process-wide
+    /// because the refusal belongs to the model, not to one caller's instance.
+    private static let modelsRequiringReasoning = NIOLockedValueBox<Set<String>>([])
+
+    /// A 400 whose body is about reasoning — OpenRouter's "Reasoning is
+    /// mandatory for this endpoint", OpenAI's "does not support 'none' with
+    /// this model". Both name the thing they refused, which is all we match on.
+    private static func refusesToSkipReasoning(_ error: AIProxyError) -> Bool {
+        guard case .unsuccessfulRequest(let statusCode, let body) = error, statusCode == 400
+        else { return false }
+        return body.localizedCaseInsensitiveContains("reasoning")
+    }
+
     /// The common case: one trimmed string back, no tools, and nothing else to
-    /// unpack. Defaults to no reasoning — a caller wanting deliberation should
-    /// use `run` and say so.
+    /// unpack. Defaults to no reasoning (stepping down to low effort on models
+    /// that refuse to skip it) — a caller wanting deliberation should use `run`
+    /// and say so.
     public func text(
         instruction: String,
         task: String,

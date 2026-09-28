@@ -35,12 +35,13 @@ extension KeepTalkingClient {
             .filter(\.$context.$id, .equal, contextID)
             .all()
 
+        // Ranges resolve by position, so read in the order threads are cut in.
         let allMessages = try await KeepTalkingContextMessage.query(
             on: localStore.database
         )
         .filter(\.$context.$id, .equal, contextID)
-        .sort(\.$timestamp, .ascending)
         .all()
+        .sortedForSync()
 
         let threadedSegments = buildThreadedSegments(
             threads: threads,
@@ -389,7 +390,7 @@ extension KeepTalkingClient {
             let desc = stub.description.trimmingCharacters(in: .whitespacesAndNewlines)
             let descSuffix = desc.isEmpty ? "" : "  description: \(desc)"
             var line =
-                "- action: \(stub.actionID.friendlyNameToken)  name: \(stub.name)  type: \(stub.kind.rawValue)  node: \(nodeTag)\(descSuffix)"
+                "\(AIPromptPresets.actionCatalogEntryPrefix)\(stub.actionID.friendlyNameToken)  name: \(stub.name)  type: \(stub.kind.rawValue)  node: \(nodeTag)\(descSuffix)"
             if !stub.objectContracts.isEmpty {
                 line += "\n    objects: \(Self.renderObjectContracts(stub.objectContracts))"
             }
@@ -397,7 +398,7 @@ extension KeepTalkingClient {
         }
 
         return """
-            Available actions (use \(Self.runActionToolFunctionName) to execute, \(Self.ktSkillMetainfoToolFunctionName) to inspect skill manifests):
+            \(AIPromptPresets.actionCatalogHeading) (use \(Self.runActionToolFunctionName) to execute, \(Self.ktSkillMetainfoToolFunctionName) to inspect skill manifests):
             Pass an action's `action:` word-name as `action_id` — copy it exactly. It is three words because words survive copying: a mistyped word is caught and corrected, whereas a mistyped hex digit silently becomes a valid-looking id for nothing.
             Types: mcp=external server tools · skill=directory-based agent skill · primitive=built-in operation · filesystem=sandboxed file access + context blob bridge · semanticretrieval=remote thread-memory search
             An `objects:` line lists an action's declared inputs/outputs (direction + whether it's a file) so you can plan data flow BETWEEN actions — feed one action's `out` to another's `in`. You never see or pass provider file paths; reference a produced file by the handle the action returns.

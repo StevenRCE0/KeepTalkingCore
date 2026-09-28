@@ -4,10 +4,10 @@ import Foundation
 /// ON BEHALF OF a caller. Deliberately general so the whole roadmap funnels
 /// through one seam:
 ///
-/// - **Provider-side ACT (today):** a caller's `kt_run_action` arrives over the
-///   wire and this node executes the action's agent loop. The execution is
-///   registered cancel-only in the run queue so it is visible, serialized per
-///   context, and stoppable.
+/// - **Provider-side skill runs (today):** a remote caller's SKILL call arrives
+///   over the wire and this node executes it. The execution is registered
+///   cancel-only in the run queue so it is visible, serialized per context, and
+///   stoppable.
 /// - **Task delegation (roadmap):** a weak device hands a whole TASK to a stronger
 ///   node; that node `summonMainOrchestrator(...)`s a full orchestrator turn as
 ///   the delegated work — not just a single action.

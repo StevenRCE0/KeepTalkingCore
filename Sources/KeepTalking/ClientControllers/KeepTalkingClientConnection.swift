@@ -23,12 +23,16 @@ import NIOConcurrencyHelpers
 /// comment.
 final class KeepTalkingClientConnection: Sendable {
     unowned let client: KeepTalkingClient
+    // Held strongly, not reached through `client`: the detached teardown
+    // publishes `.idle` after `rtcClient.stop()` returns, which can be after
+    // the client that scheduled it was already released (settings restarts
+    // drop the whole client dictionary). The signal box outliving the client
+    // is harmless; an unowned hop through a dead client is a crash.
+    private let signals: KeepTalkingClientSignals
 
-    // The connection drives these three but the client's signal box owns
-    // them, so they read as the client's state, not a hook on the connection.
-    var lifecycle: KeepTalkingStateSignal<KeepTalkingClientLifecycle> { client.signals.lifecycle }
-    var presence: KeepTalkingStateSignal<KeepTalkingClientPresence> { client.signals.presence }
-    var transportStats: KeepTalkingStateSignal<KeepTalkingRuntimeStats> { client.signals.transportStats }
+    var lifecycle: KeepTalkingStateSignal<KeepTalkingClientLifecycle> { signals.lifecycle }
+    var presence: KeepTalkingStateSignal<KeepTalkingClientPresence> { signals.presence }
+    var transportStats: KeepTalkingStateSignal<KeepTalkingRuntimeStats> { signals.transportStats }
 
     private static let presenceSweepSeconds: TimeInterval = 10
     private static let statsSampleSeconds: TimeInterval = 1
@@ -91,6 +95,7 @@ final class KeepTalkingClientConnection: Sendable {
 
     init(client: KeepTalkingClient) {
         self.client = client
+        self.signals = client.signals
     }
 
     // MARK: - Transport binding
@@ -606,18 +611,21 @@ final class KeepTalkingClientConnection: Sendable {
     private func makePostConnectTask(generation: UInt64) -> Task<Void, Never> {
         Task { [weak self] in
             guard let self, self.isConnectionActive(generation) else { return }
-            await self.client.dispatchMaintenance(
+
+            let client = self.client
+            await client.dispatchMaintenance(
                 .connected,
                 generation: generation
             )
             guard !Task.isCancelled,
                 self.isConnectionActive(generation),
-                self.client.kvService != nil
+                client.kvService != nil
             else { return }
             do {
-                try await self.client.registerCurrentNodeID()
+                try await client.registerCurrentNodeID()
             } catch {
-                self.client.debug("[kv] KV registration failed: \(error)")
+                guard !Task.isCancelled else { return }
+                client.debug("[kv] KV registration failed: \(error)")
             }
         }
     }

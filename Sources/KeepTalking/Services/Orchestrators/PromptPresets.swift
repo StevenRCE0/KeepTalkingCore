@@ -29,8 +29,24 @@ public enum AIPromptPresets {
         contextTranscript: String,
         currentDate: String,
         platform: String,
-        responseLanguages: [String] = []
+        responseLanguages: [String] = [],
+        modelProfile: AIModelProfile? = nil
     ) -> String {
+        if let modelProfile, !modelProfile.supportsToolCalling {
+            return conversationOnlySystemPrompt(
+                modelProfile: modelProfile,
+                sideNotes: sideNotes,
+                contextTranscript: contextTranscript,
+                currentDate: currentDate,
+                platform: platform,
+                responseLanguages: responseLanguages
+            )
+        }
+        let capabilityNotes = modelCapabilitySection(
+            modelProfile,
+            attachmentReaderToolFunctionName: attachmentReaderToolFunctionName,
+            searchThreadsToolFunctionName: searchThreadsToolFunctionName
+        )
         let currentPromptGuidance: String
         if currentPromptIncludesAttachments {
             currentPromptGuidance =
@@ -68,7 +84,7 @@ public enum AIPromptPresets {
 
             Privacy and confidentiality: Do not disclose, summarize, or infer the user's environment in user-facing answers, including local machine or system state, filesystem paths, connected devices or nodes, credentials or configuration, screen contents, network details, or other ambient context. This applies especially to ACT agents, which may encounter such context while executing actions. You may disclose only information contained in explicitly provided or returned resources, information necessary to complete or accurately report the requested action, or information the node owner or action description explicitly authorizes or asks you to disclose.
 
-            § Methodology — How to Get Things Done
+            \(capabilityNotes)§ Methodology — How to Get Things Done
             Every turn, you operate as a contributor in a multi-party collaboration. Follow this loop:
             1. Orient — Before acting, understand what's actually needed. Know who's in the session — each node's alias, capabilities, and role inferred from their actions and participation. Search thread memory if prior context might matter. Read intent behind the literal words. Check side notes for open plans, conventions, and who owns what.
             2. Act — Take the work as far as you can. Prefer tool calls over prose plans. Chain actions: one output feeds the next input. Make routine decisions yourself. Work across nodes when the capability pool allows it.
@@ -184,6 +200,92 @@ public enum AIPromptPresets {
             """
     }
 
+    // MARK: - Model capabilities
+
+    /// What the running model can't do, stated up front so the agent neither
+    /// promises nor attempts it. Empty for a model with no known limits.
+    /// Tool-less models never reach this — they get
+    /// `conversationOnlySystemPrompt` instead.
+    static func modelCapabilitySection(
+        _ profile: AIModelProfile?,
+        attachmentReaderToolFunctionName: String,
+        searchThreadsToolFunctionName: String
+    ) -> String {
+        guard let profile else { return "" }
+        var lines: [String] = []
+        if !profile.supportsAttachments {
+            lines.append(
+                """
+                No attachments: the model you are running on cannot read attachments. Images, PDFs, and other files never reach you — you see only a placeholder naming the file. This overrides the file-access guidance below wherever it assumes you can see a file natively. Do not guess at a file's contents. When the user asks about one, tell them plainly that this model can't read attachments and suggest switching the main agent to a model that can; \(attachmentReaderToolFunctionName) can still return a plain-text preview of a text file, and that is the only file content you can use.
+                """
+            )
+        } else if !profile.acceptsImages {
+            lines.append(
+                """
+                No images: the model you are running on cannot view images. Image attachments reach you only as a placeholder naming the file — do not describe or guess at their contents; say you can't see images when asked.
+                """
+            )
+        }
+        if let window = profile.contextWindow {
+            lines.append(
+                "Context window: about \(tokenCountDescription(window)) tokens. Older conversation history may be trimmed to fit it — call \(searchThreadsToolFunctionName) rather than guessing at anything that is no longer in view."
+            )
+        }
+        guard !lines.isEmpty else { return "" }
+        return "§ Model capabilities\n" + lines.joined(separator: "\n") + "\n\n"
+    }
+
+    /// The system prompt for a model that cannot call tools. Nearly everything
+    /// the full prompt describes — actions, memory search, attachments, side
+    /// notes, thread annotation — is a tool, so rather than hand the model a
+    /// manual it can't use, this says plainly what's left: the conversation.
+    static func conversationOnlySystemPrompt(
+        modelProfile: AIModelProfile,
+        sideNotes: [KeepTalkingSideNoteDTO],
+        contextTranscript: String,
+        currentDate: String,
+        platform: String,
+        responseLanguages: [String]
+    ) -> String {
+        let languageGuidance = responseLanguageGuidance(responseLanguages)
+        let attachmentLine =
+            modelProfile.supportsAttachments
+            ? ""
+            : "It also cannot read attachments: images, PDFs, and other files never reach you, only a placeholder naming the file. Do not guess at their contents.\n"
+        let windowLine =
+            modelProfile.contextWindow.map {
+                "Your context window is about \(tokenCountDescription($0)) tokens; older conversation history may have been trimmed to fit.\n"
+            } ?? ""
+        return """
+            You are a KeepTalking participant in a group chat.
+            Current date and time: \(currentDate). Platform: \(platform).
+
+            § Conversation only
+            The model you are running on cannot call tools. In KeepTalking that is a big loss: you cannot run actions on any node, search thread memory, list or read attachments, search the web, update side notes, or annotate threads. All you can do is take part in the conversation itself.
+            \(attachmentLine)\(windowLine)Help by talking: answer, explain, reason things through, draft, and review what is already in the conversation. Be concise and technically direct — a peer, not a servant.
+            When a request needs an action, a file, a search, or anything else only a tool can do, say plainly that the current model can't do it and suggest switching the main agent to a tool-capable model in the AI Providers settings. Never claim to have run anything, and never write out tool calls or invented tool results as text.
+            The conversation context below may list actions and nodes. It is there so you understand the session — you cannot invoke any of it.
+            \(languageGuidance)
+
+            \(privacyConfidentialityPolicy)
+
+            \(sideNotesSection(sideNotes))Conversation context:
+            \(contextTranscript)
+            """
+    }
+
+    /// `8192` → "8k", `1000000` → "1M" — how people say window sizes.
+    static func tokenCountDescription(_ tokens: Int) -> String {
+        if tokens >= 1_000_000, tokens % 100_000 == 0 {
+            let millions = Double(tokens) / 1_000_000
+            return millions == millions.rounded() ? "\(Int(millions))M" : String(format: "%.1fM", millions)
+        }
+        if tokens >= 1_000 {
+            return "\(Int((Double(tokens) / 1_000).rounded()))k"
+        }
+        return "\(tokens)"
+    }
+
     static func responseLanguageGuidance(_ languages: [String]) -> String {
         let cleaned = languages.reduce(into: [String]()) { result, language in
             let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -217,18 +319,97 @@ public enum AIPromptPresets {
 
     /// A compact system prompt for the on-device `SystemLanguageModel`
     /// (Apple `FoundationModels`, available only on Apple platforms).
+    /// The heading that opens the action catalog block inside the cloud
+    /// system prompt. `compactActionCatalog(fromSystemPrompt:)` keys on it, so
+    /// the renderer and the parser can never drift apart.
+    public static let actionCatalogHeading = "Available actions"
+
+    /// The prefix of one catalog entry line under `actionCatalogHeading`.
+    public static let actionCatalogEntryPrefix = "- action: "
+
+    /// Purpose-built instructions for a small on-device model. `actionCatalogLines`
+    /// are compact entries from `compactActionCatalog(fromSystemPrompt:)`; when
+    /// present, the prompt tells the model how to pick and run one.
     public static func onDeviceSystemPrompt(
         currentDate: String,
-        platform: String
+        platform: String,
+        actionCatalogLines: [String] = []
     ) -> String {
-        """
-        You are a KeepTalking participant in a group chat.
-        Current date: \(currentDate). Platform: \(platform).
-            Privacy and confidentiality: Do not disclose, summarize, or infer the user's environment in user-facing answers, including local machine or system state, filesystem paths, connected devices or nodes, credentials or configuration, screen contents, network details, or other ambient context. This applies especially to ACT agents, which may encounter such context while executing actions. You may disclose only information contained in explicitly provided or returned resources, information necessary to complete or accurately report the requested action, or information the node owner or action description explicitly authorizes or asks you to disclose.
-        Be concise and direct. Use tools only when clearly needed.
-        Call the listing tool first if you are unsure which action to use.
-        Summarise tool results briefly in your reply.
-        """
+        var prompt = """
+            You are a KeepTalking participant in a group chat.
+            Current date: \(currentDate). Platform: \(platform).
+            Privacy and confidentiality: Do not disclose, summarize, or infer the user's environment in user-facing answers, including local machine or system state, filesystem paths, connected devices or nodes, credentials or configuration, screen contents, network details, or other ambient context. You may disclose only information contained in explicitly provided or returned resources, information necessary to complete or accurately report the requested action, or information the node owner or action description explicitly authorizes or asks you to disclose.
+            Be concise and direct. Use a tool only when the user's request needs it; otherwise answer directly.
+            Summarise tool results briefly in your reply.
+            """
+        if !actionCatalogLines.isEmpty {
+            prompt += """
+
+
+                \(actionCatalogHeading). To run one, call kt_run_action with `action_id` set to the action's three-word name copied exactly as written below, and `task` set to what it should do in plain language. Never invent an action that is not listed.
+                \(actionCatalogLines.joined(separator: "\n"))
+                """
+        }
+        return prompt
+    }
+
+    /// Extracts the action catalog from a full cloud system prompt and renders
+    /// it as one short line per action — `- action: <words>  name: <name>
+    /// description: <first sentence>` — dropping the type, node, object
+    /// contracts and the explanatory paragraphs the cloud prompt carries.
+    /// Returns an empty array when the prompt has no catalog.
+    public static func compactActionCatalog(
+        fromSystemPrompt systemPrompt: String,
+        maxDescriptionCharacters: Int = 140
+    ) -> [String] {
+        let lines = systemPrompt.components(separatedBy: "\n")
+        guard
+            let headingIndex = lines.firstIndex(where: {
+                $0.trimmingCharacters(in: .whitespaces).hasPrefix(actionCatalogHeading)
+            })
+        else { return [] }
+
+        var entries: [String] = []
+        var sawEntry = false
+        for line in lines[(headingIndex + 1)...] {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix(actionCatalogEntryPrefix) {
+                sawEntry = true
+                entries.append(compactCatalogEntry(trimmed, maxDescriptionCharacters: maxDescriptionCharacters))
+            } else if sawEntry, !trimmed.hasPrefix("objects:") {
+                // The block ends at the first line that is neither an entry nor
+                // an entry's object-contract continuation.
+                if trimmed.isEmpty { break }
+                break
+            }
+        }
+        return entries
+    }
+
+    private static func compactCatalogEntry(_ line: String, maxDescriptionCharacters: Int) -> String {
+        // Fields are separated by two spaces: "action: X  name: Y  type: Z  node: N  description: D".
+        func field(_ label: String) -> String? {
+            guard let range = line.range(of: label + ": ") else { return nil }
+            let rest = line[range.upperBound...]
+            let end = rest.range(of: "  ")?.lowerBound ?? rest.endIndex
+            return String(rest[..<end]).trimmingCharacters(in: .whitespaces)
+        }
+        let action = field("- action") ?? field("action") ?? ""
+        let name = field("name") ?? ""
+        var description = ""
+        if let range = line.range(of: "description: ") {
+            description = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+            if let sentenceEnd = description.firstIndex(where: { $0 == "." || $0 == "。" }) {
+                description = String(description[...sentenceEnd])
+            }
+            if description.count > maxDescriptionCharacters {
+                description =
+                    String(description.prefix(maxDescriptionCharacters)).trimmingCharacters(in: .whitespaces) + "…"
+            }
+        }
+        var entry = "\(actionCatalogEntryPrefix)\(action)  name: \(name)"
+        if !description.isEmpty { entry += "  description: \(description)" }
+        return entry
     }
 
     // MARK: - Built-in tool descriptions

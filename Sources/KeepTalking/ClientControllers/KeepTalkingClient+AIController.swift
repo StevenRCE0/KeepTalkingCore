@@ -119,6 +119,7 @@ extension KeepTalkingClient {
                     Task { [self] in
                         await publishAgentRunFailure(
                             contextID: contextID,
+                            agentTurnID: agentTurnID,
                             roleName: roleName,
                             model: model,
                             message: errorMessage
@@ -144,11 +145,13 @@ extension KeepTalkingClient {
         Task { [self] in
             // Resolve the contextID from the current snapshots BEFORE
             // cancelling — once we cancel, the run vanishes from snapshots.
-            let snapshots = await agentCoordinator.currentSnapshots
-            let contextID = snapshots.first { $0.id == runID }?.contextID
+            let snapshot = await agentCoordinator.currentSnapshots.first { $0.id == runID }
             await agentCoordinator.cancel(runID: runID)
-            if let contextID {
-                await publishAgentRunCancellation(contextID: contextID)
+            if let snapshot {
+                await publishAgentRunCancellation(
+                    contextID: snapshot.contextID,
+                    agentTurnID: snapshot.agentTurnID
+                )
             }
         }
     }
@@ -319,6 +322,18 @@ extension KeepTalkingClient {
 
         await ensureMCPToolChangeObserverInstalled()
 
+        // What the main model can do, when the host knows. `nil` keeps every
+        // default: tools on, attachments inlined, fixed message budgets.
+        let modelProfile = modelProfileResolver?(model)
+        let modelTakesTools = modelProfile?.supportsToolCalling ?? true
+        let modelTakesAttachments = modelProfile?.supportsAttachments ?? true
+        let modelTakesImages = modelProfile?.acceptsImages ?? true
+        if let modelProfile {
+            onLog?(
+                "[ai] model \(model): tools=\(modelTakesTools) attachments=\(modelTakesAttachments) images=\(modelTakesImages) window=\(modelProfile.contextWindow.map(String.init) ?? "?")"
+            )
+        }
+
         let persistedContext = try await upsertContext(context)
 
         // Snapshot the latest message ID now (= user's prompt) before the AI
@@ -361,22 +376,28 @@ extension KeepTalkingClient {
         // kt_run_action is always available — the ACT agent handles action execution
         // end-to-end (tool discovery, argument construction, execution, distillation).
         // The primary loop does not receive direct action tools.
-        let allTools: [KeepTalkingActionToolDefinition] = [
-            Self.makeRunActionTool(),
-            ktSkillMetainfoTool,
-            attachmentListingTool,
-            attachmentReadTool,
-            attachmentUpdateMetadataTool,
-            searchThreadsTool,
-            createActionTool,
-            evaluateJSTool,
-            webSearchTool,
-            markTurningPointTool,
-            markChitterChatterTool,
-            makeUpdateSideNoteTool(),
-            makeArchiveSideNoteTool(),
-            makeSendFileTool(),
-        ]
+        // A model without tool calling gets none: sending a tool list is a
+        // hard error on most providers (OpenRouter 404s "no endpoints support
+        // tool use"), and the prompt tells it the conversation is all it has.
+        let allTools: [KeepTalkingActionToolDefinition] =
+            !modelTakesTools
+            ? []
+            : [
+                Self.makeRunActionTool(),
+                ktSkillMetainfoTool,
+                attachmentListingTool,
+                attachmentReadTool,
+                attachmentUpdateMetadataTool,
+                searchThreadsTool,
+                createActionTool,
+                evaluateJSTool,
+                webSearchTool,
+                markTurningPointTool,
+                markChitterChatterTool,
+                makeUpdateSideNoteTool(),
+                makeArchiveSideNoteTool(),
+                makeSendFileTool(),
+            ]
         let skillNameByActionID = skillNamesByActionID(
             routesByFunctionName: runtimeCatalog.routesByFunctionName
         )
@@ -387,19 +408,23 @@ extension KeepTalkingClient {
             actionStubs: runtimeCatalog.actionStubs,
             remoteActionCreationEntries: runtimeCatalog.remoteActionCreationActions
         )
-        let contextMessages = try await agentContextMessages(
+        var contextMessages = try await agentContextMessages(
             persistedContext,
             excludingMessageID: promptMessageID,
             excludingAgentTurnID: checkpoint == nil ? nil : agentTurnID
         )
-        let hasCurrentPromptAttachments = !preparedPromptAttachments.isEmpty
+        // Attachments this model can't read become placeholders, so the turn
+        // no longer "includes" them as far as the prompt is concerned.
+        let hasCurrentPromptAttachments =
+            !preparedPromptAttachments.isEmpty && modelTakesAttachments
         let allowAutomaticToolUse = Self.shouldAllowAutomaticToolUse(
             prompt: prompt,
             hasCurrentPromptAttachments: hasCurrentPromptAttachments
         )
         let userMessage = try await currentPromptUserMessage(
             prompt: prompt,
-            attachments: preparedPromptAttachments
+            attachments: preparedPromptAttachments,
+            includeAttachmentContents: modelTakesAttachments
         )
 
         logInjectedAITools(
@@ -437,8 +462,26 @@ extension KeepTalkingClient {
             contextTranscript: contextTranscript,
             currentDate: currentDate,
             platform: platform,
-            responseLanguages: responseLanguages
+            responseLanguages: responseLanguages,
+            modelProfile: modelProfile
         )
+        // Fit the decay-selected history into the model's window: whatever the
+        // system prompt and this turn's message leave over, minus a fifth of
+        // the input budget held back for tool rounds within the run. The
+        // decay caps still bound a large window; this only ever trims.
+        if let inputBudget = modelProfile?.inputTokenBudget {
+            let fixedCost =
+                AIMessage.system(systemPrompt).approximateTokenCount
+                + userMessage.approximateTokenCount
+            let historyBudget = max(0, inputBudget - fixedCost - inputBudget / 5)
+            let trimmed = contextMessages.trimmedToTokenBudget(historyBudget)
+            if trimmed.droppedCount > 0 {
+                onLog?(
+                    "[ai] trimmed \(trimmed.droppedCount) of \(contextMessages.count) history message(s) to fit \(inputBudget)-token input budget"
+                )
+            }
+            contextMessages = trimmed.messages
+        }
         let messages: [AIMessage] =
             [AIMessage.system(systemPrompt)] + contextMessages + [userMessage]
 
@@ -519,21 +562,39 @@ extension KeepTalkingClient {
             }
         )
 
+        // Snap the requested effort onto one the model accepts (or drop it
+        // for a model that can't be steered) instead of letting the provider
+        // reject the turn.
+        let effectiveEffort =
+            modelProfile.map { $0.resolvedEffort(reasoningEffort) } ?? reasoningEffort
         let turnConfiguration = AITurnConfiguration(
-            reasoning: reasoningEffort.map { AIReasoning(effort: $0) }
+            reasoning: effectiveEffort.map { AIReasoning(effort: $0) }
         )
         let orchestrator = AIOrchestrator(
             dependencies: .init(
                 aiConnector: aiConnector,
-                turnRunner: { [aiConnector] messages, tools, model, toolChoice, stage, configuration in
-                    try await aiConnector.completeTurn(
+                turnRunner: { [aiConnector] messages, tools, model, toolChoice, stage, configuration, nativeExecutor in
+                    // One choke point for every image the run could carry —
+                    // the prompt's own, a natively read attachment, a produced
+                    // resource injected after an action — so a text-only model
+                    // never receives one.
+                    let messages =
+                        modelTakesImages
+                        ? messages
+                        : messages.map {
+                            $0.replacingImageParts(with: Self.unreadableImagePlaceholder)
+                        }
+                    // `nativeExecutor` is non-nil only for connectors that run
+                    // their own tool loop (Apple Intelligence); every other
+                    // provider returns its calls for the orchestrator to run.
+                    return try await aiConnector.completeTurn(
                         messages: messages,
                         tools: tools,
                         model: model,
                         toolChoice: toolChoice,
                         stage: stage,
                         configuration: configuration,
-                        toolExecutor: nil
+                        toolExecutor: nativeExecutor
                     )
                 },
                 assistantMessageBuilder: { [self] turn in
@@ -792,12 +853,24 @@ extension KeepTalkingClient {
         }
     }
 
+    /// Stands in for an image part when the model can't read images.
+    static let unreadableImagePlaceholder =
+        "[An image was attached here, but the current model cannot read images.]"
+
     func currentPromptUserMessage(
         prompt: String,
-        attachments: [KeepTalkingPreparedAttachment]
+        attachments: [KeepTalkingPreparedAttachment],
+        includeAttachmentContents: Bool = true
     ) async throws -> AIMessage {
         guard !attachments.isEmpty else {
             return .user(prompt)
+        }
+        guard includeAttachmentContents else {
+            let names = attachments.map { "'\($0.filename)' (\($0.mimeType))" }
+            return .user(
+                prompt
+                    + "\n\n[Attached: \(names.joined(separator: ", ")). The current model cannot read attachments, so their contents were not included.]"
+            )
         }
 
         var contentParts: [AIMessage.Part] = []
@@ -1216,8 +1289,11 @@ extension KeepTalkingClient {
         )
     }
 
+    /// The status row is part of the turn it ends, so it carries that turn's
+    /// id — deleting the turn takes it along.
     func publishAgentRunFailure(
         contextID: UUID,
+        agentTurnID: UUID?,
         roleName: String,
         model: String,
         message: String
@@ -1228,6 +1304,7 @@ extension KeepTalkingClient {
                 in: contextID,
                 sender: .autonomous(name: roleName, node: config.node, model: model),
                 type: .haywire(reason: .failed),
+                agentTurnID: agentTurnID,
                 emitLocalEnvelope: true
             )
         } catch {
@@ -1242,13 +1319,14 @@ extension KeepTalkingClient {
         )
     }
 
-    func publishAgentRunCancellation(contextID: UUID) async {
+    func publishAgentRunCancellation(contextID: UUID, agentTurnID: UUID?) async {
         do {
             try await send(
                 "Cancelled",
                 in: contextID,
                 sender: .autonomous(name: "ai", node: config.node, model: ""),
                 type: .haywire(reason: .cancelled),
+                agentTurnID: agentTurnID,
                 emitLocalEnvelope: true
             )
         } catch {
