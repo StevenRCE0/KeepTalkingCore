@@ -1,47 +1,57 @@
 import Foundation
 
-/// Wire format of the presence protocol spoken with the Rust `kt-sfu` hub
-/// (ALPN `keeptalking/presence/1`, see `KeepTalkingSFU` branch `iroh-sfu`,
+/// Wire format of the hub protocol spoken with the Rust `kt-sfu`
+/// (ALPN `keeptalking/hub/1`; `KeepTalkingSFU` branch `iroh-sfu`,
 /// `src/proto.rs`). The client opens one bidirectional stream and speaks
 /// first; both directions carry `[u32 BE length = 1 + body][u8 tag][body]`.
 ///
-/// Context ids travel in RFC 4122 byte order (`UUID.uuid`); member ids are
-/// 32-byte ed25519 endpoint ids. Blobs are opaque to the hub — clients put
-/// their context-sealed presence there (`KeepTalkingIrohPresenceSeal`).
-enum KeepTalkingIrohPresenceFrame {
-    static let alpn = Data("keeptalking/presence/1".utf8)
-    static let maxFrameLength = 256 * 1024
-    static let maxPresenceLength = 16 * 1024
+/// Rooms are keyed by a 32-byte topic derived from the context secret
+/// (`KeepTalkingIrohTopic`), so the hub never sees a context id. Member ids
+/// are 32-byte ed25519 endpoint ids. Announced blobs and published payloads
+/// are opaque to the hub.
+enum KeepTalkingIrohHubFrame {
+    static let alpn = Data("keeptalking/hub/1".utf8)
+    static let maxPublishLength = 1 << 20
+    static let maxFrameLength = maxPublishLength + 64 * 1024
+    static let maxAnnounceLength = 16 * 1024
+    static let topicLength = 32
     static let endpointIDLength = 32
 
     enum Tag {
-        static let join: UInt8 = 0x11
-        static let leave: UInt8 = 0x12
-        static let publish: UInt8 = 0x13
-        static let snapshot: UInt8 = 0x14
-        static let joined: UInt8 = 0x15
-        static let left: UInt8 = 0x16
-        static let presence: UInt8 = 0x17
+        static let subscribe: UInt8 = 0x21
+        static let unsubscribe: UInt8 = 0x22
+        static let announce: UInt8 = 0x23
+        static let publish: UInt8 = 0x24
+        static let snapshot: UInt8 = 0x31
+        static let joined: UInt8 = 0x32
+        static let left: UInt8 = 0x33
+        static let presence: UInt8 = 0x34
+        static let deliver: UInt8 = 0x35
         static let error: UInt8 = 0x3F
     }
 
     struct Member: Equatable, Sendable {
         let endpointID: Data
-        /// Empty until the member has published.
+        /// Empty until the member has announced.
         let blob: Data
     }
 
     enum Client: Equatable, Sendable {
-        case join(context: UUID)
-        case leave(context: UUID)
-        case publish(context: UUID, blob: Data)
+        case subscribe(topic: Data)
+        case unsubscribe(topic: Data)
+        case announce(topic: Data, blob: Data)
+        /// Reliable fan-out: the hub sends it to every other subscriber.
+        case publish(topic: Data, payload: Data)
     }
 
     enum Server: Equatable, Sendable {
-        case snapshot(context: UUID, members: [Member])
-        case joined(context: UUID, endpointID: Data)
-        case left(context: UUID, endpointID: Data)
-        case presence(context: UUID, endpointID: Data, blob: Data)
+        case snapshot(topic: Data, members: [Member])
+        case joined(topic: Data, endpointID: Data)
+        case left(topic: Data, endpointID: Data)
+        case presence(topic: Data, endpointID: Data, blob: Data)
+        /// A payload another subscriber published; the hub doesn't name the
+        /// sender (the sealed payload does).
+        case deliver(topic: Data, payload: Data)
         case error(reason: String)
     }
 
@@ -57,15 +67,19 @@ enum KeepTalkingIrohPresenceFrame {
         var body = Data()
         let tag: UInt8
         switch frame {
-            case .join(let context):
-                body.append(context.rfc4122Bytes)
-                tag = Tag.join
-            case .leave(let context):
-                body.append(context.rfc4122Bytes)
-                tag = Tag.leave
-            case .publish(let context, let blob):
-                body.append(context.rfc4122Bytes)
+            case .subscribe(let topic):
+                body.append(topic)
+                tag = Tag.subscribe
+            case .unsubscribe(let topic):
+                body.append(topic)
+                tag = Tag.unsubscribe
+            case .announce(let topic, let blob):
+                body.append(topic)
                 body.append(blob)
+                tag = Tag.announce
+            case .publish(let topic, let payload):
+                body.append(topic)
+                body.append(payload)
                 tag = Tag.publish
         }
         return framed(tag: tag, body: body)
@@ -76,8 +90,8 @@ enum KeepTalkingIrohPresenceFrame {
         var body = Data()
         let tag: UInt8
         switch frame {
-            case .snapshot(let context, let members):
-                body.append(context.rfc4122Bytes)
+            case .snapshot(let topic, let members):
+                body.append(topic)
                 body.appendBigEndian(UInt16(members.count))
                 for member in members {
                     body.append(member.endpointID)
@@ -85,19 +99,23 @@ enum KeepTalkingIrohPresenceFrame {
                     body.append(member.blob)
                 }
                 tag = Tag.snapshot
-            case .joined(let context, let endpointID):
-                body.append(context.rfc4122Bytes)
+            case .joined(let topic, let endpointID):
+                body.append(topic)
                 body.append(endpointID)
                 tag = Tag.joined
-            case .left(let context, let endpointID):
-                body.append(context.rfc4122Bytes)
+            case .left(let topic, let endpointID):
+                body.append(topic)
                 body.append(endpointID)
                 tag = Tag.left
-            case .presence(let context, let endpointID, let blob):
-                body.append(context.rfc4122Bytes)
+            case .presence(let topic, let endpointID, let blob):
+                body.append(topic)
                 body.append(endpointID)
                 body.append(blob)
                 tag = Tag.presence
+            case .deliver(let topic, let payload):
+                body.append(topic)
+                body.append(payload)
+                tag = Tag.deliver
             case .error(let reason):
                 body.append(Data(reason.utf8))
                 tag = Tag.error
@@ -111,6 +129,19 @@ enum KeepTalkingIrohPresenceFrame {
         out.append(tag)
         out.append(body)
         return out
+    }
+
+    /// A hub datagram: `topic ‖ payload`, forwarded as-is to the room.
+    static func datagram(topic: Data, payload: Data) -> Data {
+        var out = Data(capacity: topic.count + payload.count)
+        out.append(topic)
+        out.append(payload)
+        return out
+    }
+
+    static func splitDatagram(_ datagram: Data) -> (topic: Data, payload: Data)? {
+        guard datagram.count >= topicLength else { return nil }
+        return (Data(datagram.prefix(topicLength)), Data(datagram.dropFirst(topicLength)))
     }
 
     // MARK: - Decode
@@ -131,7 +162,7 @@ enum KeepTalkingIrohPresenceFrame {
         let tag = try reader.byte()
         switch tag {
             case Tag.snapshot:
-                let context = try reader.uuid()
+                let topic = try reader.bytes(topicLength)
                 let count = Int(try reader.uint16())
                 var members: [Member] = []
                 members.reserveCapacity(count)
@@ -140,23 +171,25 @@ enum KeepTalkingIrohPresenceFrame {
                     let length = Int(try reader.uint32())
                     members.append(Member(endpointID: id, blob: try reader.bytes(length)))
                 }
-                return .snapshot(context: context, members: members)
+                return .snapshot(topic: topic, members: members)
             case Tag.joined:
                 return .joined(
-                    context: try reader.uuid(),
+                    topic: try reader.bytes(topicLength),
                     endpointID: try reader.bytes(endpointIDLength)
                 )
             case Tag.left:
                 return .left(
-                    context: try reader.uuid(),
+                    topic: try reader.bytes(topicLength),
                     endpointID: try reader.bytes(endpointIDLength)
                 )
             case Tag.presence:
                 return .presence(
-                    context: try reader.uuid(),
+                    topic: try reader.bytes(topicLength),
                     endpointID: try reader.bytes(endpointIDLength),
                     blob: reader.rest()
                 )
+            case Tag.deliver:
+                return .deliver(topic: try reader.bytes(topicLength), payload: reader.rest())
             case Tag.error:
                 return .error(reason: String(decoding: reader.rest(), as: UTF8.self))
             default:
@@ -191,10 +224,6 @@ enum KeepTalkingIrohPresenceFrame {
         mutating func uint32() throws -> UInt32 {
             let raw = try bytes(4)
             return raw.readBigEndianUInt32(at: raw.startIndex)
-        }
-
-        mutating func uuid() throws -> UUID {
-            UUID(rfc4122Bytes: try bytes(16))
         }
 
         mutating func rest() -> Data {

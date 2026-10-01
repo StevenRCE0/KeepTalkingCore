@@ -7,6 +7,8 @@ import Foundation
 public struct KeepTalkingIrohInstruments: Sendable {
     public struct Hub: Sendable {
         public var status: String
+        /// Configured, or looked up at `<relay>/kt/hub`; nil until known.
+        public var hubID: String?
         /// Connect attempts so far, including the current one.
         public var attempts: Int
         public var connectLatencyMs: Double?
@@ -22,11 +24,23 @@ public struct KeepTalkingIrohInstruments: Sendable {
 
     public struct Context: Sendable, Identifiable {
         public var id: UUID
+        /// The routing key (hex) derived from the context secret.
+        public var topic: String
         public var nodeID: UUID
-        /// The hub's snapshot for this context has arrived.
+        /// The hub's snapshot for this topic has arrived.
         public var joined: Bool
         /// Members whose sealed presence opened with the context secret.
         public var members: [Member]
+        /// Publishes sent over the mesh / through the hub.
+        public var meshPublished: Int
+        public var hubPublished: Int
+        /// Frames received from peer links / delivered by the hub.
+        public var meshReceived: Int
+        public var hubReceived: Int
+        public var hubDatagramsSent: Int
+        public var hubDatagramsReceived: Int
+
+        public var shortTopic: String { String(topic.prefix(10)) }
     }
 
     public struct Path: Sendable, Hashable {
@@ -69,11 +83,12 @@ public struct KeepTalkingIrohInstruments: Sendable {
 
     public var endpointID: String?
     public var boundSockets: [String]
+    /// Human-readable `DeliveryPolicy`.
+    public var policy: String
     public var hub: Hub
     public var contexts: [Context]
     public var peers: [Peer]
-    /// Peer frames dropped because the sender is not a sealed member of the
-    /// frame's context.
+    /// Peer frames dropped because no attached context has their topic.
     public var droppedFrames: Int
     public var events: [Event]
 }

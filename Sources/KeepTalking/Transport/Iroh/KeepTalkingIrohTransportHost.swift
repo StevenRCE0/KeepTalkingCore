@@ -8,35 +8,58 @@ import NIOConcurrencyHelpers
 /// The host owns the connection machinery that `ContextTransport` used to
 /// spread over the SFU client, libjuice and the HTTP/2 direct channels:
 ///
-/// - **Presence** rides one connection to the Rust `kt-sfu` hub
-///   (`keeptalking/presence/1`). Each attached context is JOINed there and
-///   gets a context-sealed blob carrying our node id and endpoint id.
-/// - **Peers** are iroh connections (`keeptalking/peer/1`), one per remote
-///   endpoint no matter how many contexts we share. They start on the hub's
-///   embedded relay and upgrade to a direct path when hole punching works.
-///   The lower endpoint id dials; the other side accepts.
-/// - **Trust** comes from the seal, never the hub: a peer's frames reach a
-///   context only if its endpoint id was announced in that context's sealed
-///   presence.
+/// - **Hub** — one connection to the Rust `kt-sfu` hub
+///   (`keeptalking/hub/1`). Each attached context subscribes to its *topic*
+///   (`KeepTalkingIrohTopic`, derived from the context secret) and announces
+///   a sealed blob carrying our node id and endpoint id. The hub also fans
+///   publishes and datagrams out to the topic, so a sender uploads once.
+/// - **Mesh** — iroh connections (`keeptalking/peer/1`), one per remote
+///   endpoint however many topics we share. They start on the relay and go
+///   direct when hole punching works. The lower endpoint id dials.
+/// - **Delivery** — each publish goes through the hub or the mesh, chosen
+///   per publish by `DeliveryPolicy`. Receivers take both; KeepTalking
+///   absorbs duplicates by row id.
 ///
-/// The key is ephemeral (fresh per host), discovery is off (minimal preset,
-/// our relay only). Per-context clients talk to the host through
-/// `KeepTalkingIrohContextTransport` attachments.
+/// Frames for an attached topic are delivered whoever sent them: content is
+/// sealed with the topic's key, so only members can produce anything that
+/// opens. Endpoint ids to dial still come only from sealed presence, never
+/// from the hub. The key is ephemeral; discovery is off (minimal preset, our
+/// relay only); the hub id comes from configuration or `<relay>/kt/hub`.
 @_spi(TransportLab)
 public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     public struct Configuration: Sendable, Hashable {
-        /// Hub endpoint id (hex) printed by `kt-sfu`. Clients pin it.
-        public var hubEndpointID: String
         /// Relay URL, e.g. `https://signal.rcex.live/`.
         public var relayURL: String
-        /// QUIC address-discovery port of the relay; nil disables QAD.
+        /// Hub endpoint id (hex). Nil looks it up at `<relay>/kt/hub`.
+        public var hubEndpointID: String?
+        /// QUIC address-discovery port of the relay. Nil takes it from
+        /// `/kt/hub` (and disables QAD if the hub id is configured by hand).
         public var relayQUICPort: UInt16?
 
-        public init(hubEndpointID: String, relayURL: String, relayQUICPort: UInt16? = nil) {
-            self.hubEndpointID = hubEndpointID
+        public init(relayURL: String, hubEndpointID: String? = nil, relayQUICPort: UInt16? = nil) {
             self.relayURL = relayURL
+            self.hubEndpointID = hubEndpointID
             self.relayQUICPort = relayQUICPort
         }
+    }
+
+    /// Where a publish goes. Receivers accept both routes, so senders never
+    /// have to agree on a mode.
+    public enum DeliveryPolicy: Sendable, Hashable {
+        /// The hub once the room has at least `hubAtMembers` other members,
+        /// the mesh below that; whichever route is up when the other isn't.
+        case automatic(hubAtMembers: Int)
+        /// Mesh; the hub only while no member is connected.
+        case preferMesh
+        /// Hub; the mesh only while the hub is down.
+        case preferHub
+
+        public static let standard = DeliveryPolicy.automatic(hubAtMembers: 4)
+    }
+
+    public enum Route: String, Sendable {
+        case mesh
+        case hub
     }
 
     enum FrameKind: UInt8, Sendable {
@@ -48,15 +71,18 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     enum HostError: LocalizedError {
         case stopped
-        case noConnectedPeers(UUID)
+        case notAttached
+        case noRoute
         case frameTooLarge(Int)
+        case hubInfo(String)
 
         var errorDescription: String? {
             switch self {
                 case .stopped: return "The iroh transport host is stopped."
-                case .noConnectedPeers(let context):
-                    return "No peer of context \(context) is connected."
-                case .frameTooLarge(let length): return "Peer frame of \(length) bytes is too large."
+                case .notAttached: return "The context is not attached to the iroh host."
+                case .noRoute: return "Neither the hub nor any member is reachable."
+                case .frameTooLarge(let length): return "Frame of \(length) bytes is too large."
+                case .hubInfo(let reason): return "Hub lookup failed: \(reason)"
             }
         }
     }
@@ -68,8 +94,9 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     public let configuration: Configuration
     private let state = NIOLockedValueBox(State())
 
-    public init(configuration: Configuration) {
+    public init(configuration: Configuration, policy: DeliveryPolicy = .standard) {
         self.configuration = configuration
+        state.withLockedValue { $0.policy = policy }
     }
 
     // MARK: - Lifecycle
@@ -90,7 +117,8 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         let (endpoint, tasks, connections, writers) = state.withLockedValue { state in
             state.isShutDown = true
             let tasks = state.tasks + state.links.values.flatMap(\.tasks)
-            let connections = state.links.values.compactMap(\.connection) + [state.hub.connection].compactMap { $0 }
+            let connections =
+                state.links.values.compactMap(\.connection) + [state.hub.connection].compactMap { $0 }
             let writers = state.links.values.compactMap(\.writer) + [state.hub.writer].compactMap { $0 }
             state.tasks = []
             state.links = [:]
@@ -104,6 +132,22 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         }
         try? await endpoint?.close()
         log("host shut down")
+    }
+
+    public var deliveryPolicy: DeliveryPolicy {
+        get { state.withLockedValue { $0.policy } }
+        set { state.withLockedValue { $0.policy = newValue } }
+    }
+
+    /// Lab switch: drop the hub session and keep it down until resumed, so
+    /// the rest of the host runs as if the hub were unreachable.
+    public func setHubSuspended(_ suspended: Bool) {
+        let connection = state.withLockedValue { state -> Connection? in
+            state.hub.suspended = suspended
+            return suspended ? state.hub.connection : nil
+        }
+        try? connection?.close(errorCode: 0, reason: Data("suspended".utf8))
+        log(suspended ? "hub suspended" : "hub resumed")
     }
 
     private func bindEndpoint() async throws -> Endpoint {
@@ -134,11 +178,11 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     // MARK: - Attachments
 
-    /// Registers a context: JOINs it at the hub and publishes our sealed
-    /// presence. The endpoint must be bound (`start()`).
+    /// Registers a context: subscribes to its topic at the hub and announces
+    /// our sealed presence. The endpoint must be bound (`start()`).
     func attach(
         _ sink: KeepTalkingIrohContextTransport,
-        contextID: UUID,
+        topic: KeepTalkingIrohTopic,
         nodeID: UUID,
         secret: Data
     ) throws {
@@ -149,14 +193,15 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         let blob = try KeepTalkingIrohPresenceSeal.seal(
             nodeID: nodeID,
             endpointID: myID,
-            contextID: contextID,
+            contextID: topic.contextID,
             secret: secret
         )
         // Insert and read the hub writer in one critical section: the hub
-        // loop publishes its writer and collects contexts to re-join in one
-        // too, so either it sees this context or we see its writer.
+        // loop publishes its writer and collects topics to re-subscribe in
+        // one too, so either it sees this topic or we see its writer.
         let writer = state.withLockedValue { state -> AsyncStream<Data>.Continuation? in
-            state.contexts[contextID] = ContextEntry(
+            state.contexts[topic.topic] = ContextEntry(
+                topic: topic,
                 nodeID: nodeID,
                 sink: WeakSink(sink),
                 secret: secret,
@@ -164,76 +209,98 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             )
             return state.hub.writer
         }
-        writer?.yield(KeepTalkingIrohPresenceFrame.encode(.join(context: contextID)))
-        writer?.yield(KeepTalkingIrohPresenceFrame.encode(.publish(context: contextID, blob: blob)))
-        log("ctx \(contextID.uuidString.prefix(8)) attached as node \(nodeID.uuidString.prefix(8))")
+        writer?.yield(KeepTalkingIrohHubFrame.encode(.subscribe(topic: topic.topic)))
+        writer?.yield(KeepTalkingIrohHubFrame.encode(.announce(topic: topic.topic, blob: blob)))
+        log("ctx \(topic.contextID.uuidString.prefix(8)) attached on topic \(Self.hex(topic.topic).prefix(10))")
     }
 
-    func detach(contextID: UUID) {
+    func detach(topic: Data) {
         let (writer, orphans) = state.withLockedValue { state -> (AsyncStream<Data>.Continuation?, [Connection]) in
-            guard let removed = state.contexts.removeValue(forKey: contextID) else { return (nil, []) }
+            guard let removed = state.contexts.removeValue(forKey: topic) else { return (nil, []) }
             return (state.hub.writer, state.dropUnneededLinks(among: Array(removed.members.keys)))
         }
-        writer?.yield(KeepTalkingIrohPresenceFrame.encode(.leave(context: contextID)))
+        writer?.yield(KeepTalkingIrohHubFrame.encode(.unsubscribe(topic: topic)))
         for connection in orphans {
             try? connection.close(errorCode: 0, reason: Data("left".utf8))
         }
-        log("ctx \(contextID.uuidString.prefix(8)) detached")
+        log("topic \(Self.hex(topic).prefix(10)) detached")
     }
 
     // MARK: - Sending
 
-    /// Queues one frame per connected member of `context` (only `target` when
-    /// it is connected). Throws when nobody is connected, so callers such as
-    /// the outbox keep the payload for a later drain.
+    /// Publishes one frame to `topic`. A directed frame goes straight to its
+    /// target when that member is connected; everything else goes through
+    /// the hub or the mesh per `DeliveryPolicy`. Throws when neither route
+    /// is up, so callers such as the outbox keep the payload.
     @discardableResult
-    func send(_ kind: FrameKind, context: UUID, payload: Data, to target: UUID?) throws -> Int {
-        let frame = Self.peerFrame(kind, context: context, payload: payload)
-        guard frame.count - 4 <= Self.maxPeerFrameLength else {
-            throw HostError.frameTooLarge(frame.count)
+    func publish(_ kind: FrameKind, topic: Data, payload: Data, to target: UUID?) throws -> Route {
+        var body = Data(capacity: 1 + payload.count)
+        body.append(kind.rawValue)
+        body.append(payload)
+        guard body.count <= KeepTalkingIrohHubFrame.maxPublishLength else {
+            throw HostError.frameTooLarge(body.count)
         }
-        let writers = try state.withLockedValue { state -> [AsyncStream<Data>.Continuation] in
+        let (route, writers) = try state.withLockedValue { state -> (Route, [AsyncStream<Data>.Continuation]) in
             guard !state.isShutDown else { throw HostError.stopped }
-            var recipients = state.connectedMembers(of: context)
-            if let target, let only = recipients.first(where: { $0.nodeID == target }) {
-                recipients = [only]
+            guard state.contexts[topic] != nil else { throw HostError.notAttached }
+            let members = state.connectedMembers(of: topic)
+            if let target, let member = members.first(where: { $0.nodeID == target }),
+                let writer = state.links[member.endpointID]?.writer
+            {
+                state.countMesh(topic: topic, endpointIDs: [member.endpointID], bytes: body.count + 36)
+                return (.mesh, [writer])
             }
-            var writers: [AsyncStream<Data>.Continuation] = []
-            for recipient in recipients {
-                guard let writer = state.links[recipient.endpointID]?.writer else { continue }
-                state.links[recipient.endpointID]?.framesSent += 1
-                state.links[recipient.endpointID]?.bytesSent += frame.count
-                writers.append(writer)
+            switch state.route(for: topic, connectedMembers: members.count) {
+                case .hub?:
+                    guard let writer = state.hub.writer else { throw HostError.noRoute }
+                    state.contexts[topic]?.hubPublished += 1
+                    return (.hub, [writer])
+                case .mesh?:
+                    let ids = members.map(\.endpointID)
+                    state.countMesh(topic: topic, endpointIDs: ids, bytes: body.count + 36)
+                    return (.mesh, ids.compactMap { state.links[$0]?.writer })
+                case nil:
+                    throw HostError.noRoute
             }
-            return writers
         }
-        guard !writers.isEmpty else { throw HostError.noConnectedPeers(context) }
-        writers.forEach { $0.yield(frame) }
-        return writers.count
+        switch route {
+            case .hub:
+                writers.forEach {
+                    $0.yield(KeepTalkingIrohHubFrame.encode(.publish(topic: topic, payload: body)))
+                }
+            case .mesh:
+                let frame = Self.peerFrame(topic: topic, body: body)
+                writers.forEach { $0.yield(frame) }
+        }
+        return route
     }
 
-    /// Unreliable realtime bytes (voice) to every connected member.
-    func sendDatagram(context: UUID, payload: Data) throws {
-        var datagram = context.rfc4122Bytes
-        datagram.append(payload)
+    /// Unreliable realtime bytes (voice), routed like a publish.
+    func sendDatagram(topic: Data, payload: Data) throws {
+        let datagram = KeepTalkingIrohHubFrame.datagram(topic: topic, payload: payload)
         let connections = try state.withLockedValue { state -> [Connection] in
             guard !state.isShutDown else { throw HostError.stopped }
-            return state.connectedMembers(of: context).compactMap { member in
-                state.links[member.endpointID]?.datagramsSent += 1
-                return state.links[member.endpointID]?.connection
+            let members = state.connectedMembers(of: topic)
+            switch state.route(for: topic, connectedMembers: members.count) {
+                case .hub?:
+                    state.contexts[topic]?.hubDatagramsSent += 1
+                    return [state.hub.connection].compactMap { $0 }
+                case .mesh?:
+                    return members.compactMap { member in
+                        state.links[member.endpointID]?.datagramsSent += 1
+                        return state.links[member.endpointID]?.connection
+                    }
+                case nil:
+                    throw HostError.noRoute
             }
         }
-        guard !connections.isEmpty else { throw HostError.noConnectedPeers(context) }
+        guard !connections.isEmpty else { throw HostError.noRoute }
         for connection in connections {
             try? connection.sendDatagram(data: datagram)
         }
     }
 
     // MARK: - Reads for attachments
-
-    var isHubReady: Bool {
-        state.withLockedValue { $0.hub.status == .ready }
-    }
 
     func hubChannelState() -> BroadcastChannelState {
         state.withLockedValue { state in
@@ -245,14 +312,21 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         }
     }
 
-    func connectedMemberNodes(of context: UUID) -> [UUID] {
-        state.withLockedValue { $0.connectedMembers(of: context).map(\.nodeID) }
+    func connectedMemberNodes(of topic: Data) -> [UUID] {
+        state.withLockedValue { $0.connectedMembers(of: topic).map(\.nodeID) }
     }
 
-    /// True when some connected member of `context` talks over a direct path.
-    func hasDirectMember(in context: UUID) -> Bool {
+    /// True when the hub or some member can take a publish for `topic`.
+    func canDeliver(to topic: Data) -> Bool {
+        state.withLockedValue { state in
+            state.route(for: topic, connectedMembers: state.connectedMembers(of: topic).count) != nil
+        }
+    }
+
+    /// True when some connected member of `topic` talks over a direct path.
+    func hasDirectMember(in topic: Data) -> Bool {
         let connections = state.withLockedValue { state in
-            state.connectedMembers(of: context).compactMap { state.links[$0.endpointID]?.connection }
+            state.connectedMembers(of: topic).compactMap { state.links[$0.endpointID]?.connection }
         }
         return connections.contains { connection in
             connection.paths().contains { $0.isSelected && $0.isIp }
@@ -264,13 +338,21 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     private func hubLoop(_ endpoint: Endpoint) async {
         var attempt = 0
         while !Task.isCancelled, !state.withLockedValue({ $0.isShutDown }) {
+            if state.withLockedValue({ $0.hub.suspended }) {
+                try? await Task.sleep(for: .milliseconds(300))
+                continue
+            }
             setHubStatus(.connecting(attempt: attempt))
             let started = ContinuousClock.now
             do {
-                let hubID = try EndpointId.fromString(s: configuration.hubEndpointID)
+                let hubID = try await resolveHub(endpoint)
                 let connection = try await endpoint.connect(
-                    addr: EndpointAddr(id: hubID, relayUrl: configuration.relayURL, addresses: []),
-                    alpn: KeepTalkingIrohPresenceFrame.alpn
+                    addr: EndpointAddr(
+                        id: try EndpointId.fromString(s: hubID),
+                        relayUrl: configuration.relayURL,
+                        addresses: []
+                    ),
+                    alpn: KeepTalkingIrohHubFrame.alpn
                 )
                 let stream = try await connection.openBi()
                 let (frames, writer) = AsyncStream.makeStream(of: Data.self)
@@ -280,23 +362,22 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                         do { try await send.writeAll(buf: frame) } catch { break }
                     }
                 }
+                let datagramTask = Task { await self.hubDatagramLoop(connection) }
                 let latency = ContinuousClock.now - started
-                let rejoin = state.withLockedValue { state -> [Data] in
+                let resubscribe = state.withLockedValue { state -> [Data] in
                     state.hub.connection = connection
                     state.hub.writer = writer
                     state.hub.connectLatency = latency
                     state.hub.connectedSince = Date()
                     state.hub.status = .ready
                     var frames: [Data] = []
-                    for (context, entry) in state.contexts {
-                        frames.append(KeepTalkingIrohPresenceFrame.encode(.join(context: context)))
-                        frames.append(
-                            KeepTalkingIrohPresenceFrame.encode(.publish(context: context, blob: entry.blob))
-                        )
+                    for (topic, entry) in state.contexts {
+                        frames.append(KeepTalkingIrohHubFrame.encode(.subscribe(topic: topic)))
+                        frames.append(KeepTalkingIrohHubFrame.encode(.announce(topic: topic, blob: entry.blob)))
                     }
                     return frames
                 }
-                rejoin.forEach { writer.yield($0) }
+                resubscribe.forEach { writer.yield($0) }
                 attempt = 0
                 log("hub connected in \(Self.ms(latency))")
                 notifyAllContexts { $0.hubStateChanged() }
@@ -304,13 +385,16 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 let recv = stream.recv()
                 while !Task.isCancelled {
                     let prefix = try await recv.readExact(size: 4)
-                    let length = try KeepTalkingIrohPresenceFrame.frameLength(fromPrefix: prefix)
+                    let length = try KeepTalkingIrohHubFrame.frameLength(fromPrefix: prefix)
                     let body = try await recv.readExact(size: UInt32(length))
-                    handleHubFrame(try KeepTalkingIrohPresenceFrame.decodeServer(body))
+                    handleHubFrame(try KeepTalkingIrohHubFrame.decodeServer(body))
                 }
                 writerTask.cancel()
+                datagramTask.cancel()
             } catch {
-                log("hub: \(error.localizedDescription)")
+                if !state.withLockedValue({ $0.hub.suspended }) {
+                    log("hub: \(error.localizedDescription)")
+                }
             }
             let connection = state.withLockedValue { state -> Connection? in
                 let connection = state.hub.connection
@@ -318,13 +402,67 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 state.hub.writer = nil
                 state.hub.connection = nil
                 state.hub.connectedSince = nil
+                state.hub.status = .connecting(attempt: attempt + 1)
                 for key in state.contexts.keys { state.contexts[key]?.joined = false }
                 return connection
             }
             try? connection?.close(errorCode: 0, reason: Data("reconnect".utf8))
             attempt += 1
             notifyAllContexts { $0.hubStateChanged() }
-            try? await Task.sleep(for: .seconds(min(1 << min(attempt - 1, 3), 8)))
+            if !state.withLockedValue({ $0.hub.suspended }) {
+                try? await Task.sleep(for: .seconds(min(1 << min(attempt - 1, 3), 8)))
+            }
+        }
+    }
+
+    /// The hub id from configuration or `<relay>/kt/hub`, cached. A looked-up
+    /// QAD port is applied to the relay the first time.
+    private func resolveHub(_ endpoint: Endpoint) async throws -> String {
+        if let configured = configuration.hubEndpointID, !configured.isEmpty { return configured }
+        if let cached = state.withLockedValue({ $0.hub.resolvedID }) { return cached }
+        guard let base = URL(string: configuration.relayURL) else {
+            throw HostError.hubInfo("bad relay URL \(configuration.relayURL)")
+        }
+        let url = base.appendingPathComponent("kt").appendingPathComponent("hub")
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw HostError.hubInfo("\(url) answered \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+        }
+        let info = try JSONDecoder().decode(HubInfo.self, from: data)
+        guard info.alpn == nil || info.alpn.map { Data($0.utf8) } == KeepTalkingIrohHubFrame.alpn else {
+            throw HostError.hubInfo("hub speaks \(info.alpn ?? "?")")
+        }
+        if configuration.relayQUICPort == nil, let port = info.qadPort {
+            try? await endpoint.insertRelay(
+                config: RelayConfig(url: configuration.relayURL, quicPort: port, authToken: nil)
+            )
+        }
+        state.withLockedValue { $0.hub.resolvedID = info.hub }
+        log("hub id \(info.hub.prefix(10)) from \(url.host() ?? "relay")")
+        return info.hub
+    }
+
+    private struct HubInfo: Decodable {
+        let hub: String
+        let alpn: String?
+        let qadPort: UInt16?
+
+        enum CodingKeys: String, CodingKey {
+            case hub, alpn
+            case qadPort = "qad_port"
+        }
+    }
+
+    private func hubDatagramLoop(_ connection: Connection) async {
+        while !Task.isCancelled {
+            guard let datagram = try? await connection.readDatagram() else { return }
+            guard let split = KeepTalkingIrohHubFrame.splitDatagram(datagram) else { continue }
+            let (topic, payload) = split
+            let sink = state.withLockedValue { state -> KeepTalkingIrohContextTransport? in
+                state.contexts[topic]?.hubDatagramsReceived += 1
+                return state.contexts[topic]?.sink.value
+            }
+            sink?.deliverRealtime(payload, from: nil)
         }
     }
 
@@ -335,56 +473,71 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         }
     }
 
-    private func handleHubFrame(_ frame: KeepTalkingIrohPresenceFrame.Server) {
+    private func handleHubFrame(_ frame: KeepTalkingIrohHubFrame.Server) {
         switch frame {
-            case .snapshot(let context, let members):
+            case .snapshot(let topic, let members):
                 // A snapshot is the whole room: forget members that left while
                 // the hub session was down, then learn the current ones.
                 let present = Set(members.map(\.endpointID))
                 let (sink, orphans) = state.withLockedValue { state in
-                    state.contexts[context]?.joined = true
-                    let previous = state.contexts[context]?.members ?? [:]
-                    state.contexts[context]?.members = previous.filter { present.contains($0.key) }
+                    state.contexts[topic]?.joined = true
+                    let previous = state.contexts[topic]?.members ?? [:]
+                    state.contexts[topic]?.members = previous.filter { present.contains($0.key) }
                     let gone = previous.keys.filter { !present.contains($0) }
-                    return (state.contexts[context]?.sink.value, state.dropUnneededLinks(among: gone))
+                    return (state.contexts[topic]?.sink.value, state.dropUnneededLinks(among: gone))
                 }
                 for connection in orphans {
                     try? connection.close(errorCode: 0, reason: Data("left".utf8))
                 }
-                log("ctx \(context.uuidString.prefix(8)) snapshot: \(members.count) other member(s)")
+                log("topic \(Self.hex(topic).prefix(10)) snapshot: \(members.count) other member(s)")
                 for member in members where !member.blob.isEmpty {
-                    learn(context: context, reportedID: member.endpointID, blob: member.blob)
+                    learn(topic: topic, reportedID: member.endpointID, blob: member.blob)
                 }
                 sink?.hubJoined()
-            case .joined(let context, let endpointID):
-                log("ctx \(context.uuidString.prefix(8)) joined by \(Self.hex(endpointID).prefix(10))")
-            case .presence(let context, let endpointID, let blob):
-                learn(context: context, reportedID: endpointID, blob: blob)
-            case .left(let context, let endpointID):
+            case .joined(let topic, let endpointID):
+                log("topic \(Self.hex(topic).prefix(10)) joined by \(Self.hex(endpointID).prefix(10))")
+            case .presence(let topic, let endpointID, let blob):
+                learn(topic: topic, reportedID: endpointID, blob: blob)
+            case .left(let topic, let endpointID):
                 let (sink, nodeID, orphans) = state.withLockedValue { state in
-                    let nodeID = state.contexts[context]?.members.removeValue(forKey: endpointID)
-                    return (state.contexts[context]?.sink.value, nodeID, state.dropUnneededLinks(among: [endpointID]))
+                    let nodeID = state.contexts[topic]?.members.removeValue(forKey: endpointID)
+                    return (
+                        state.contexts[topic]?.sink.value, nodeID,
+                        state.dropUnneededLinks(among: [endpointID])
+                    )
                 }
                 for connection in orphans {
                     try? connection.close(errorCode: 0, reason: Data("left".utf8))
                 }
-                log("ctx \(context.uuidString.prefix(8)) left by \(Self.hex(endpointID).prefix(10))")
+                log("topic \(Self.hex(topic).prefix(10)) left by \(Self.hex(endpointID).prefix(10))")
                 if let nodeID { sink?.memberLeft(nodeID) }
+            case .deliver(let topic, let body):
+                guard let first = body.first, let kind = FrameKind(rawValue: first) else { return }
+                let sink = state.withLockedValue { state -> KeepTalkingIrohContextTransport? in
+                    state.contexts[topic]?.hubReceived += 1
+                    return state.contexts[topic]?.sink.value
+                }
+                sink?.deliver(kind, payload: Data(body.dropFirst()), from: nil, route: .hub)
             case .error(let reason):
                 log("hub error: \(reason)")
         }
     }
 
     /// Opens a member's sealed presence. Only a blob this context's secret
-    /// opens, carrying the very id the hub reported, makes it a member.
-    private func learn(context: UUID, reportedID: Data, blob: Data) {
+    /// opens, carrying the very id the hub reported, gives us a key to dial.
+    private func learn(topic: Data, reportedID: Data, blob: Data) {
         let outcome = state.withLockedValue { state -> LearnOutcome in
-            guard let entry = state.contexts[context] else { return .ignored }
-            guard let presence = KeepTalkingIrohPresenceSeal.open(blob, contextID: context, secret: entry.secret)
+            guard let entry = state.contexts[topic] else { return .ignored }
+            guard
+                let presence = KeepTalkingIrohPresenceSeal.open(
+                    blob,
+                    contextID: entry.topic.contextID,
+                    secret: entry.secret
+                )
             else { return .unreadable }
             guard presence.endpointID == reportedID else { return .mismatch }
             guard presence.endpointID != state.myEndpointID else { return .ignored }
-            state.contexts[context]?.members[presence.endpointID] = presence.nodeID
+            state.contexts[topic]?.members[presence.endpointID] = presence.nodeID
             let isConnected = state.links[presence.endpointID]?.connection != nil
             return .member(presence.nodeID, isConnected: isConnected, sink: entry.sink.value)
         }
@@ -392,17 +545,11 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             case .ignored:
                 return
             case .unreadable:
-                log(
-                    "ctx \(context.uuidString.prefix(8)) presence from \(Self.hex(reportedID).prefix(10)) does not open"
-                )
+                log("presence from \(Self.hex(reportedID).prefix(10)) does not open")
             case .mismatch:
-                log(
-                    "ctx \(context.uuidString.prefix(8)) presence id != hub id for \(Self.hex(reportedID).prefix(10)); dropped"
-                )
+                log("presence id != hub id for \(Self.hex(reportedID).prefix(10)); dropped")
             case .member(let nodeID, let isConnected, let sink):
-                log(
-                    "ctx \(context.uuidString.prefix(8)) member \(nodeID.uuidString.prefix(8)) @ \(Self.hex(reportedID).prefix(10))"
-                )
+                log("member \(nodeID.uuidString.prefix(8)) @ \(Self.hex(reportedID).prefix(10))")
                 if isConnected {
                     sink?.peerLinkUp(nodeID)
                 } else {
@@ -545,11 +692,11 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             while !Task.isCancelled {
                 let prefix = try await recv.readExact(size: 4)
                 let length = Int(prefix.readBigEndianUInt32(at: prefix.startIndex))
-                guard (17...Self.maxPeerFrameLength).contains(length) else {
+                guard (33...Self.maxPeerFrameLength).contains(length) else {
                     throw HostError.frameTooLarge(length)
                 }
                 let body = try await recv.readExact(size: UInt32(length))
-                handlePeerFrame(body, from: endpointID, connection: connection)
+                handlePeerFrame(body, from: endpointID)
             }
         } catch {
             if connection.closeReason() == nil {
@@ -561,19 +708,15 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     private func datagramLoop(_ connection: Connection, endpointID: Data) async {
         while !Task.isCancelled {
             guard let datagram = try? await connection.readDatagram() else { return }
-            guard datagram.count >= 16 else { continue }
-            let context = UUID(rfc4122Bytes: Data(datagram.prefix(16)))
-            let route = state.withLockedValue { state -> (KeepTalkingIrohContextTransport, UUID)? in
+            guard let split = KeepTalkingIrohHubFrame.splitDatagram(datagram) else { continue }
+            let (topic, payload) = split
+            let route = state.withLockedValue { state -> (KeepTalkingIrohContextTransport, UUID?)? in
                 state.links[endpointID]?.datagramsReceived += 1
-                guard
-                    let entry = state.contexts[context],
-                    let nodeID = entry.members[endpointID],
-                    let sink = entry.sink.value
-                else { return nil }
-                return (sink, nodeID)
+                guard let entry = state.contexts[topic], let sink = entry.sink.value else { return nil }
+                return (sink, entry.members[endpointID])
             }
             if let route {
-                route.0.deliverRealtime(Data(datagram.dropFirst(16)), from: route.1)
+                route.0.deliverRealtime(payload, from: route.1)
             }
         }
     }
@@ -594,35 +737,24 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         if redial { ensureLink(to: endpointID) }
     }
 
-    private func handlePeerFrame(_ body: Data, from endpointID: Data, connection: Connection) {
+    /// `[kind][topic(32)][payload]`. Delivered for any attached topic: the
+    /// payload only opens for holders of the topic's key.
+    private func handlePeerFrame(_ body: Data, from endpointID: Data) {
         guard let kind = FrameKind(rawValue: body[body.startIndex]) else { return }
-        let context = UUID(rfc4122Bytes: Data(body[(body.startIndex + 1)..<(body.startIndex + 17)]))
-        let payload = Data(body.dropFirst(17))
-        let route = state.withLockedValue {
-            state -> (KeepTalkingIrohContextTransport, UUID, AsyncStream<Data>.Continuation?)? in
+        let topic = Data(body[(body.startIndex + 1)..<(body.startIndex + 33)])
+        let payload = Data(body.dropFirst(33))
+        let route = state.withLockedValue { state -> (KeepTalkingIrohContextTransport, UUID?)? in
             state.links[endpointID]?.framesReceived += 1
             state.links[endpointID]?.bytesReceived += body.count + 4
-            guard
-                let entry = state.contexts[context],
-                let nodeID = entry.members[endpointID],
-                let sink = entry.sink.value
-            else {
+            guard let entry = state.contexts[topic], let sink = entry.sink.value else {
                 state.droppedFrames += 1
                 return nil
             }
-            return (sink, nodeID, state.links[endpointID]?.writer)
+            state.contexts[topic]?.meshReceived += 1
+            return (sink, entry.members[endpointID])
         }
         guard let route else { return }
-        let (sink, nodeID, writer) = route
-        switch kind {
-            case .ping:
-                writer?.yield(Self.peerFrame(.pong, context: context, payload: payload))
-                sink.peerHeard(nodeID)
-            case .pong:
-                sink.peerHeard(nodeID)
-            case .envelope, .blob:
-                sink.deliver(kind, payload: payload, from: nodeID)
-        }
+        route.0.deliver(kind, payload: payload, from: route.1, route: .mesh)
     }
 
     fileprivate func pathEvent(_ event: PathEvent, endpointID: Data, stableID: UInt64) {
@@ -678,13 +810,13 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     public func instruments() -> KeepTalkingIrohInstruments {
         let snapshot = state.withLockedValue { $0 }
         let hubConnection = snapshot.hub.connection
-        let hubPath = hubConnection.map(Self.selectedPath)
         var hubStatus: String
         switch snapshot.hub.status {
             case .idle: hubStatus = "idle"
             case .connecting(let attempt): hubStatus = attempt == 0 ? "connecting" : "reconnecting #\(attempt)"
             case .ready: hubStatus = "ready"
         }
+        if snapshot.hub.suspended { hubStatus = "suspended" }
         if snapshot.isShutDown { hubStatus = "shut down" }
 
         let nodeByEndpoint = snapshot.contexts.values.reduce(into: [Data: Set<UUID>]()) { result, entry in
@@ -726,22 +858,31 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         return KeepTalkingIrohInstruments(
             endpointID: snapshot.myEndpointID.map(Self.hex),
             boundSockets: snapshot.endpoint?.boundSockets() ?? [],
+            policy: Self.describe(snapshot.policy),
             hub: KeepTalkingIrohInstruments.Hub(
                 status: hubStatus,
+                hubID: configuration.hubEndpointID ?? snapshot.hub.resolvedID,
                 attempts: snapshot.hub.attempts,
                 connectLatencyMs: snapshot.hub.connectLatency.map(Self.milliseconds),
                 connectedSince: snapshot.hub.connectedSince,
-                selectedPath: hubPath,
+                selectedPath: hubConnection.map(Self.selectedPath),
                 rttMs: hubConnection?.rtt()
             ),
-            contexts: snapshot.contexts.map { contextID, entry in
+            contexts: snapshot.contexts.map { topic, entry in
                 KeepTalkingIrohInstruments.Context(
-                    id: contextID,
+                    id: entry.topic.contextID,
+                    topic: Self.hex(topic),
                     nodeID: entry.nodeID,
                     joined: entry.joined,
                     members: entry.members.map { endpointID, nodeID in
                         KeepTalkingIrohInstruments.Member(nodeID: nodeID, endpointID: Self.hex(endpointID))
-                    }
+                    },
+                    meshPublished: entry.meshPublished,
+                    hubPublished: entry.hubPublished,
+                    meshReceived: entry.meshReceived,
+                    hubReceived: entry.hubReceived,
+                    hubDatagramsSent: entry.hubDatagramsSent,
+                    hubDatagramsReceived: entry.hubDatagramsReceived
                 )
             },
             peers: peers.sorted { $0.id < $1.id },
@@ -762,17 +903,26 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     // MARK: - Helpers
 
-    static func peerFrame(_ kind: FrameKind, context: UUID, payload: Data) -> Data {
-        var frame = Data(capacity: 21 + payload.count)
-        frame.appendBigEndian(UInt32(17 + payload.count))
-        frame.append(kind.rawValue)
-        frame.append(context.rfc4122Bytes)
-        frame.append(payload)
+    /// `[u32 len][kind][topic(32)][payload]`, where `body` is `[kind][payload]`.
+    static func peerFrame(topic: Data, body: Data) -> Data {
+        var frame = Data(capacity: 36 + body.count)
+        frame.appendBigEndian(UInt32(topic.count + body.count))
+        frame.append(body[body.startIndex])
+        frame.append(topic)
+        frame.append(body.dropFirst())
         return frame
     }
 
     static func hex(_ bytes: Data) -> String {
         bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func describe(_ policy: DeliveryPolicy) -> String {
+        switch policy {
+            case .automatic(let threshold): return "automatic (hub at ≥\(threshold) members)"
+            case .preferMesh: return "prefer mesh"
+            case .preferHub: return "prefer hub"
+        }
     }
 
     private static func selectedPath(_ connection: Connection) -> String {
@@ -803,6 +953,8 @@ extension KeepTalkingIrohTransportHost {
         var status: HubStatus = .idle
         var connection: Connection?
         var writer: AsyncStream<Data>.Continuation?
+        var suspended = false
+        var resolvedID: String?
         var attempts = 0
         var connectLatency: Duration?
         var connectedSince: Date?
@@ -814,14 +966,30 @@ extension KeepTalkingIrohTransportHost {
     }
 
     fileprivate struct ContextEntry {
+        let topic: KeepTalkingIrohTopic
         let nodeID: UUID
         let sink: WeakSink
         let secret: Data
         let blob: Data
-        /// True once the hub's snapshot for this context arrived.
+        /// True once the hub's snapshot for this topic arrived.
         var joined = false
-        /// Endpoint id → node id, from sealed presence only.
+        /// Endpoint id → node id, from sealed presence only. These are the
+        /// endpoints we dial and count as members for routing.
         var members: [Data: UUID] = [:]
+        var meshPublished = 0
+        var hubPublished = 0
+        var meshReceived = 0
+        var hubReceived = 0
+        var hubDatagramsSent = 0
+        var hubDatagramsReceived = 0
+
+        init(topic: KeepTalkingIrohTopic, nodeID: UUID, sink: WeakSink, secret: Data, blob: Data) {
+            self.topic = topic
+            self.nodeID = nodeID
+            self.sink = sink
+            self.secret = secret
+            self.blob = blob
+        }
     }
 
     fileprivate struct PeerLink {
@@ -860,17 +1028,48 @@ extension KeepTalkingIrohTransportHost {
         var myEndpointID: Data?
         var tasks: [Task<Void, Never>] = []
         var hub = HubState()
-        var contexts: [UUID: ContextEntry] = [:]
+        var policy = DeliveryPolicy.standard
+        var contexts: [Data: ContextEntry] = [:]
         var links: [Data: PeerLink] = [:]
         var droppedFrames = 0
         var events: [KeepTalkingIrohInstruments.Event] = []
         var nextEventID = 0
 
-        /// Members of `context` whose link is connected.
-        func connectedMembers(of context: UUID) -> [(endpointID: Data, nodeID: UUID)] {
-            guard let members = contexts[context]?.members else { return [] }
+        var isHubUsable: Bool {
+            hub.status == .ready && hub.writer != nil && !hub.suspended
+        }
+
+        /// Members of `topic` whose link is connected.
+        func connectedMembers(of topic: Data) -> [(endpointID: Data, nodeID: UUID)] {
+            guard let members = contexts[topic]?.members else { return [] }
             return members.compactMap { endpointID, nodeID in
                 links[endpointID]?.connection == nil ? nil : (endpointID, nodeID)
+            }
+        }
+
+        /// The policy's pick for a broadcast on `topic`, falling back to
+        /// whichever route is up. Nil when neither is.
+        func route(for topic: Data, connectedMembers: Int) -> Route? {
+            let hub = isHubUsable
+            let mesh = connectedMembers > 0
+            let preferHub: Bool
+            switch policy {
+                case .automatic(let threshold):
+                    preferHub = (contexts[topic]?.members.count ?? 0) >= threshold
+                case .preferMesh:
+                    preferHub = false
+                case .preferHub:
+                    preferHub = true
+            }
+            if preferHub { return hub ? .hub : (mesh ? .mesh : nil) }
+            return mesh ? .mesh : (hub ? .hub : nil)
+        }
+
+        mutating func countMesh(topic: Data, endpointIDs: [Data], bytes: Int) {
+            contexts[topic]?.meshPublished += 1
+            for endpointID in endpointIDs {
+                links[endpointID]?.framesSent += 1
+                links[endpointID]?.bytesSent += bytes
             }
         }
 

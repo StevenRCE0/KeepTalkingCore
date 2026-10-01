@@ -51,7 +51,7 @@ enum KeepTalkingIrohPresenceSeal {
                 authenticating: aad
             ),
             plaintext.count
-                == magic.count + 16 + KeepTalkingIrohPresenceFrame.endpointIDLength,
+                == magic.count + 16 + KeepTalkingIrohHubFrame.endpointIDLength,
             plaintext.prefix(magic.count) == magic
         else { return nil }
         let body = plaintext.dropFirst(magic.count)

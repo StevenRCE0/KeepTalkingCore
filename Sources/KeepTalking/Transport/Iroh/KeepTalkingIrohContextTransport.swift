@@ -5,17 +5,21 @@ import NIOConcurrencyHelpers
 /// One context's view of a shared `KeepTalkingIrohTransportHost`, shaped as
 /// the `KeepTalkingTransportClient` a `KeepTalkingClient` already speaks.
 ///
-/// Mapping onto the old two-route model:
-/// - **Broadcast** fans out to every connected member (there is no server
-///   path for payloads any more); a directed envelope goes to its target
-///   when that peer is connected, otherwise to everyone as before.
-/// - **Backbone state** is the hub session, but a context with a connected
-///   member counts as ready even while the hub reconnects.
-/// - **Route** is `.p2p` when some member talks over a direct path, `.sfu`
-///   while everything rides the relay.
-/// - **Liveness** feeds the client's `KeepTalkingContextLivenessState` from
-///   link-up events, inbound frames and a 13 s heartbeat over connected
-///   members, so `onPeerConnect` fires on real edges.
+/// - **Topic** — the context publishes to its topic (derived from the
+///   secret). Every payload is sealed with the topic's key: envelopes as a
+///   `KeepTalkingEnvelopePacket`, blob frames as-is. No context or sender id
+///   travels in the clear.
+/// - **Delivery** — the host picks hub or mesh per publish; a directed
+///   envelope goes straight to its target when that member is connected.
+///   Inbound frames arrive from either route and are accepted if they open.
+/// - **Backbone state** — the hub session, but a context with a connected
+///   member counts as ready while the hub reconnects.
+/// - **Route** — `.p2p` when some member talks over a direct path, `.sfu`
+///   while everything rides the relay or the hub.
+/// - **Liveness** — the KeepTalking heartbeat (`p2pPresence`) is published
+///   to the topic every 13 s, as the old backbone did; inbound heartbeats
+///   and link-up events feed the client's `KeepTalkingContextLivenessState`,
+///   so `onPeerConnect` fires on real edges whichever route carried them.
 final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
     KeepTalkingLivenessBindableTransport, @unchecked Sendable
 {
@@ -27,7 +31,7 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
             switch self {
                 case .notStarted: return "The iroh context transport is not started."
                 case .missingContextSecret(let context):
-                    return "No group secret for context \(context); cannot seal presence."
+                    return "No group secret for context \(context); cannot derive its topic."
             }
         }
     }
@@ -50,6 +54,7 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
     private struct State {
         var generation: UInt64 = 0
         var isActive = false
+        var topic: KeepTalkingIrohTopic?
         var liveness: KeepTalkingContextLivenessState?
         var heartbeat: Task<Void, Never>?
         var sent = 0
@@ -130,16 +135,18 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
                 let provider = contextSecretProvider,
                 let secret = try await provider(contextID)
             else { throw TransportError.missingContextSecret(contextID) }
+            let topic = KeepTalkingIrohTopic(contextID: contextID, secret: secret)
             // Check-and-attach under our lock so a concurrent stop() either
             // runs first (we bail) or after (it detaches what we attached).
             try state.withLockedValue { state in
                 guard state.isActive, state.generation == generation else {
                     throw CancellationError()
                 }
-                try host.attach(self, contextID: contextID, nodeID: nodeID, secret: secret)
+                try host.attach(self, topic: topic, nodeID: nodeID, secret: secret)
+                state.topic = topic
                 state.heartbeat = Task { [weak self] in await self?.heartbeatLoop(generation) }
             }
-            debug("attached to iroh host")
+            debug("attached to iroh host on topic \(KeepTalkingIrohTransportHost.hex(topic.topic).prefix(10))")
             reportState()
         }
     }
@@ -148,7 +155,8 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
         let heartbeat = state.withLockedValue { state -> Task<Void, Never>? in
             state.generation &+= 1
             state.isActive = false
-            host.detach(contextID: contextID)
+            if let topic = state.topic { host.detach(topic: topic.topic) }
+            state.topic = nil
             defer { state.heartbeat = nil }
             return state.heartbeat
         }
@@ -156,34 +164,41 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
         debug("detached from iroh host")
     }
 
-    private var isActive: Bool { state.withLockedValue { $0.isActive } }
+    private var activeTopic: KeepTalkingIrohTopic? {
+        state.withLockedValue { $0.isActive ? $0.topic : nil }
+    }
 
+    /// The KeepTalking heartbeat, published to the topic like the old
+    /// backbone's; it's what tells hub-only peers we're here.
     private func heartbeatLoop(_ generation: UInt64) async {
         while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(Self.heartbeatSeconds))
             guard state.withLockedValue({ $0.isActive && $0.generation == generation }) else { return }
-            for node in host.connectedMemberNodes(of: contextID) {
-                observe(node)
-            }
+            sendHeartbeat()
+            try? await Task.sleep(for: .seconds(Self.heartbeatSeconds))
         }
+    }
+
+    private func sendHeartbeat() {
+        try? sendEnvelope(KeepTalkingP2PPresencePayload(node: nodeID))
     }
 
     // MARK: - Sending
 
     func sendEnvelope(_ envelope: any KeepTalkingEnvelope) throws {
-        guard isActive else { throw TransportError.notStarted }
-        let payload = try KeepTalkingPacketTransportCrypto.outboundPayload(
-            for: envelope,
-            localNodeID: nodeID,
-            contextSecretProvider: contextSecretProvider
+        guard let topic = activeTopic else { throw TransportError.notStarted }
+        let packet = try JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope))
+        try host.publish(
+            .envelope,
+            topic: topic.topic,
+            payload: try topic.seal(packet),
+            to: envelope.targetPeerNodeID
         )
-        try host.send(.envelope, context: contextID, payload: payload, to: envelope.targetPeerNodeID)
         state.withLockedValue { $0.sent += 1 }
     }
 
     func sendBlobData(_ data: Data, targetPeerNodeID: UUID?) throws {
-        guard isActive else { throw TransportError.notStarted }
-        try host.send(.blob, context: contextID, payload: data, to: targetPeerNodeID)
+        guard let topic = activeTopic else { throw TransportError.notStarted }
+        try host.publish(.blob, topic: topic.topic, payload: try topic.seal(data), to: targetPeerNodeID)
         state.withLockedValue { $0.sent += 1 }
     }
 
@@ -191,25 +206,28 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
         try sendBlobData(data, targetPeerNodeID: nil)
     }
 
+    /// Voice frames are already sealed with the call's key; they go out as
+    /// datagrams through the hub or the mesh like any publish.
     func sendRealtimeDataViaBroadcast(_ data: Data) throws {
-        guard isActive else { throw TransportError.notStarted }
-        try host.sendDatagram(context: contextID, payload: data)
+        guard let topic = activeTopic else { throw TransportError.notStarted }
+        try host.sendDatagram(topic: topic.topic, payload: data)
     }
 
     // MARK: - State reads
 
     func currentRoute() -> KeepTalkingTransportRoute {
-        host.hasDirectMember(in: contextID) ? .p2p : .sfu
+        guard let topic = activeTopic else { return .sfu }
+        return host.hasDirectMember(in: topic.topic) ? .p2p : .sfu
     }
 
     func broadcastState() -> BroadcastChannelState {
-        if !host.connectedMemberNodes(of: contextID).isEmpty { return .ready }
+        if let topic = activeTopic, !host.connectedMemberNodes(of: topic.topic).isEmpty { return .ready }
         return host.hubChannelState()
     }
 
     func runtimeStats() -> KeepTalkingRuntimeStats {
         let (sent, received) = state.withLockedValue { ($0.sent, $0.received) }
-        let isOpen = broadcastState() == .ready
+        let isOpen = activeTopic.map { host.canDeliver(to: $0.topic) } ?? false
         return KeepTalkingRuntimeStats(
             sent: sent,
             received: received,
@@ -217,15 +235,16 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
             outboundState: isOpen ? 1 : 0,
             inboundLabel: "iroh",
             inboundState: isOpen ? 1 : 0,
-            retainedChannels: host.connectedMemberNodes(of: contextID).count,
+            retainedChannels: activeTopic.map { host.connectedMemberNodes(of: $0.topic).count } ?? 0,
             route: currentRoute().rawValue
         )
     }
 
-    /// Pings every connected member; pongs advance `received`, which is what
+    /// Pings the topic; pongs advance `received`, which is what
     /// `KeepTalkingClient.probeTransport()` watches.
     func sendLivenessProbe() {
-        _ = try? host.send(.ping, context: contextID, payload: Data(), to: nil)
+        guard let topic = activeTopic else { return }
+        _ = try? host.publish(.ping, topic: topic.topic, payload: Data(), to: nil)
     }
 
     /// Path upgrades are iroh's job; nothing to trial.
@@ -243,18 +262,21 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
 
     func hubJoined() {
         debug("hub snapshot received")
+        sendHeartbeat()
         onBroadcastReady?()
         reportState()
     }
 
     func hubStateChanged() {
+        // A hub that came back can take what the outbox holds.
+        if host.hubChannelState() == .ready { onBroadcastReady?() }
         reportState()
     }
 
     func peerLinkUp(_ node: UUID) {
-        guard isActive else { return }
+        guard activeTopic != nil else { return }
         observe(node)
-        // A new member is reachable: let the outbox drain to it.
+        // A new member is reachable directly: let the outbox drain to it.
         onBroadcastReady?()
         reportState()
     }
@@ -273,43 +295,56 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
         reportState()
     }
 
-    func peerHeard(_ node: UUID) {
-        guard isActive else { return }
-        state.withLockedValue { $0.received += 1 }
-        observe(node)
-    }
-
-    func deliver(_ kind: KeepTalkingIrohTransportHost.FrameKind, payload: Data, from node: UUID) {
-        guard isActive else { return }
-        state.withLockedValue { $0.received += 1 }
-        observe(node)
+    func deliver(
+        _ kind: KeepTalkingIrohTransportHost.FrameKind,
+        payload: Data,
+        from node: UUID?,
+        route: KeepTalkingIrohTransportHost.Route
+    ) {
+        guard let topic = activeTopic else { return }
         switch kind {
+            case .ping:
+                state.withLockedValue { $0.received += 1 }
+                _ = try? host.publish(.pong, topic: topic.topic, payload: Data(), to: node)
+            case .pong:
+                state.withLockedValue { $0.received += 1 }
+                if let node { observe(node) }
             case .blob:
-                onBlobData?(payload)
+                guard let opened = topic.open(payload) else { return }
+                state.withLockedValue { $0.received += 1 }
+                if let node { observe(node) }
+                onBlobData?(opened)
             case .envelope:
-                deliverEnvelope(payload, from: node)
-            case .ping, .pong:
-                break
+                guard let opened = topic.open(payload) else {
+                    debug("unopenable envelope via \(route.rawValue)")
+                    return
+                }
+                state.withLockedValue { $0.received += 1 }
+                if let node { observe(node) }
+                deliverEnvelope(opened)
         }
     }
 
-    func deliverRealtime(_ payload: Data, from node: UUID) {
-        guard isActive else { return }
+    func deliverRealtime(_ payload: Data, from node: UUID?) {
+        guard activeTopic != nil else { return }
         onRealtimeData?(payload)
     }
 
-    private func deliverEnvelope(_ payload: Data, from node: UUID) {
-        let envelope: (any KeepTalkingEnvelope)?
-        do {
-            envelope = try KeepTalkingPacketTransportCrypto.inboundEnvelope(
-                from: payload,
-                contextSecretProvider: contextSecretProvider
-            )
-        } catch {
-            debug("undecodable envelope from \(node.uuidString.prefix(8)): \(error.localizedDescription)")
+    private func deliverEnvelope(_ packet: Data) {
+        guard
+            let decoded = try? JSONDecoder().decode(KeepTalkingEnvelopePacket.self, from: packet)
+        else {
+            debug("undecodable envelope packet")
             return
         }
-        guard let envelope else { return }
+        let envelope = decoded.envelope
+        if let inner = envelope.transportContextID, inner != contextID {
+            debug("dropped envelope for another context")
+            return
+        }
+        if let presence = envelope as? KeepTalkingP2PPresencePayload {
+            observe(presence.node, announce: false)
+        }
         guard envelope.channel == .signaling else {
             onEnvelope?(envelope)
             return
@@ -326,15 +361,16 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
     }
 
     /// Feeds the client's liveness state; on an offline→online edge tells the
-    /// client the way `ContextTransport` does — a connect callback plus the
-    /// presence envelope its node handlers turn into discovery.
-    private func observe(_ node: UUID) {
+    /// client the way `ContextTransport` does — a connect callback, plus the
+    /// presence envelope its node handlers turn into discovery (unless that
+    /// envelope is itself what we're handling).
+    private func observe(_ node: UUID, announce: Bool = true) {
         guard node != nodeID, let liveness = state.withLockedValue({ $0.liveness }) else { return }
         let observation = liveness.observePresence(from: node, echoCooldown: 1)
         guard observation.isNewConnection else { return }
         debug("peer \(node.uuidString.prefix(8)) reachable")
         onPeerConnect?(node)
-        onEnvelope?(KeepTalkingP2PPresencePayload(node: node))
+        if announce { onEnvelope?(KeepTalkingP2PPresencePayload(node: node)) }
     }
 
     private func reportState() {
