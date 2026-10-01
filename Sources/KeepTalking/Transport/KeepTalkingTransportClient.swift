@@ -55,6 +55,13 @@ protocol KeepTalkingTransportClient: AnyObject, Sendable {
     func debug(_ message: String)
 }
 
+/// A transport that reports peer liveness straight into the client's
+/// `KeepTalkingContextLivenessState`. The client hands its state over at
+/// init; `ContextTransport` receives it through its own initializer instead.
+protocol KeepTalkingLivenessBindableTransport: AnyObject {
+    func bindLiveness(_ liveness: KeepTalkingContextLivenessState)
+}
+
 extension KeepTalkingTransportClient {
     /// Default: falls back to `sendBlobData` with no target peer.
     /// `ContextTransport` overrides to go straight to the SFU broadcast

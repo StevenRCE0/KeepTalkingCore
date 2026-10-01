@@ -437,6 +437,36 @@ public final class KeepTalkingClient: @unchecked Sendable {
         )
     }
 
+    #if canImport(IrohLib)
+    /// Lab-only: a client whose transport is this context's attachment on a
+    /// shared iroh host (presence through the Rust `kt-sfu` hub, payloads
+    /// over iroh peer connections). Not a supported production path yet.
+    @_spi(TransportLab)
+    public convenience init(
+        config: KeepTalkingConfig,
+        kvService: (any KeepTalkingKVService)? = nil,
+        primitiveRegistry: KeepTalkingPrimitiveRegistry? = nil,
+        logon: UUID = UUID(),
+        localStore: any KeepTalkingLocalStore,
+        keychain: any KeepTalkingKeychainStore = KeepTalkingInMemoryKeychainStore(),
+        irohHost: KeepTalkingIrohTransportHost
+    ) {
+        self.init(
+            config: config,
+            kvService: kvService,
+            primitiveRegistry: primitiveRegistry,
+            logon: logon,
+            localStore: localStore,
+            keychain: keychain,
+            transport: KeepTalkingIrohContextTransport(
+                host: irohHost,
+                contextID: config.contextID,
+                nodeID: config.node
+            )
+        )
+    }
+    #endif
+
     /// Designated initializer with the transport seam: `nil` builds the
     /// production `KeepTalkingContextTransport`; tests inject a fake.
     init(
@@ -471,6 +501,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
                 livenessState: livenessState
             )
         self.rtcClient = rtcClient
+        (rtcClient as? any KeepTalkingLivenessBindableTransport)?.bindLiveness(livenessState)
         // The box needs the transport's first stats sample, so it is built
         // right after the transport and before anything that logs.
         let signals = KeepTalkingClientSignals(initialTransportStats: rtcClient.runtimeStats())

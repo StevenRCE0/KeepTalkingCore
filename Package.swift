@@ -6,8 +6,9 @@ import PackageDescription
 let package = Package(
     name: "KeepTalking",
     platforms: [
-        .iOS(.v17),
-        .macOS(.v14),
+        // 17.5 / 14.5 are the vendored iroh xcframework's floors (IrohLib).
+        .iOS("17.5"),
+        .macOS("14.5"),
         .visionOS(.v1),
     ],
     products: [
@@ -33,6 +34,10 @@ let package = Package(
         ),
         .package(path: "../AIProxySwift-MultiPlatform"),
         .package(path: "../KeepTalkingSFU"),
+        // Vendored iroh-ffi (branch `keeptalking`): Swift bindings plus a
+        // locally built xcframework (`RUSTUP_TOOLCHAIN=stable ./make_swift.sh`).
+        // Apple-only, so the SDK takes it conditionally; see Transport/Iroh.
+        .package(path: "../iroh-ffi"),
         .package(url: "https://github.com/StevenRCE0/swift-libjuice.git", from: "1.7.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/apple/swift-nio-http2.git", from: "1.30.0"),
@@ -63,6 +68,11 @@ let package = Package(
                 .product(name: "KeepTalkingSFUClient", package: "KeepTalkingSFU"),
                 .product(name: "KeepTalkingSFUProtocol", package: "KeepTalkingSFU"),
                 .product(name: "SwiftJUICE", package: "swift-libjuice"),
+                .product(
+                    name: "IrohLib",
+                    package: "iroh-ffi",
+                    condition: .when(platforms: [.iOS, .macOS])
+                ),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
