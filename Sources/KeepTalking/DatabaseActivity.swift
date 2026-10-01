@@ -100,13 +100,26 @@ struct ActivityReportingDatabase: Database, SQLDatabase {
     func transaction<T>(
         _ closure: @escaping @Sendable (any Database) -> EventLoopFuture<T>
     ) -> EventLoopFuture<T> {
-        gated(isWrite: true) { base.transaction(closure) }
+        gated(isWrite: true) { base.transaction(Self.holdingPermit(closure)) }
     }
 
     func withConnection<T>(
         _ closure: @escaping @Sendable (any Database) -> EventLoopFuture<T>
     ) -> EventLoopFuture<T> {
-        gated(isWrite: true) { base.withConnection(closure) }
+        gated(isWrite: true) { base.withConnection(Self.holdingPermit(closure)) }
+    }
+
+    /// `closure`, marked as running on the held permit wherever the driver
+    /// calls it. The SQLite driver calls a block from an event-loop callback
+    /// once `BEGIN` lands, outside the task that took the permit, so the mark
+    /// is bound again at that call. FluentKit's async `transaction` starts its
+    /// task inside the block, so that task inherits the mark too.
+    private static func holdingPermit<T>(
+        _ closure: @escaping @Sendable (any Database) -> EventLoopFuture<T>
+    ) -> @Sendable (any Database) -> EventLoopFuture<T> {
+        { database in
+            DatabaseGateContext.$isHoldingPermit.withValue(true) { closure(database) }
+        }
     }
 
     // MARK: SQLDatabase

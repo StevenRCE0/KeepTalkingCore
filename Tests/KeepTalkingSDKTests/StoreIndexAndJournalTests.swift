@@ -40,6 +40,36 @@ struct StoreIndexAndJournalTests {
         await store.shutdown()
     }
 
+    @Test("a keyed page and a thread count seek the index to their cuts")
+    func keyedReadsSeekTheIndex() async throws {
+        let store = try await KeepTalkingInMemoryStore.make()
+        let sql = try #require(store.database as? any SQLDatabase)
+        let contextID = UUID()
+        let start = KeepTalkingMessageKey(timestamp: 10, id: UUID())
+        let end = KeepTalkingMessageKey(timestamp: 20, id: UUID())
+
+        // The next older page above a window's head, and a stored thread's rows.
+        let page = MessageRangeReader.keysStatement(
+            in: contextID, range: .before(end), direction: .backward, limit: 51
+        )
+        let count = MessageRangeReader.countStatement(
+            in: contextID, range: .thread(start: start, end: end)
+        )
+        for statement in [page, count] {
+            let plan = try await sql.raw("EXPLAIN QUERY PLAN " + statement)
+                .all()
+                .map { try $0.decode(column: "detail", as: String.self) }
+                .joined(separator: "\n")
+            // A seek bounded by the row value, not a scan of the context's
+            // whole index segment filtered row by row.
+            #expect(
+                plan.contains("kt_context_messages_context_timestamp_id (context=? AND (timestamp,id)"),
+                Comment(rawValue: plan))
+            #expect(!plan.contains("TEMP B-TREE"), Comment(rawValue: plan))
+        }
+        await store.shutdown()
+    }
+
     @Test("a file store switches to WAL once and stays there when reopened")
     func fileStoreUsesWAL() async throws {
         let directory = FileManager.default.temporaryDirectory

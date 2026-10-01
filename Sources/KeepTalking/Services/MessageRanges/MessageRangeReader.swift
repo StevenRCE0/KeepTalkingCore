@@ -47,6 +47,16 @@ enum MessageRangeReader {
         on sql: any SQLDatabase
     ) async throws -> [KeepTalkingMessageKey] {
         guard limit > 0 else { return [] }
+        let statement = keysStatement(in: contextID, range: range, direction: direction, limit: limit)
+        return try await sql.raw(statement).all().map(decodeKey)
+    }
+
+    static func keysStatement(
+        in contextID: UUID,
+        range: KeepTalkingMessageRange,
+        direction: KeepTalkingMessagePageDirection,
+        limit: Int
+    ) -> SQLQueryString {
         var statement: SQLQueryString = "SELECT id, timestamp FROM \(ident: table) WHERE "
         appendPredicate(contextID: contextID, range: range, to: &statement)
         switch direction {
@@ -54,7 +64,7 @@ enum MessageRangeReader {
             case .backward: statement.appendLiteral(" ORDER BY timestamp DESC, id DESC")
         }
         statement.appendLiteral(" LIMIT \(limit)")
-        return try await sql.raw(statement).all().map(decodeKey)
+        return statement
     }
 
     static func count(
@@ -62,10 +72,14 @@ enum MessageRangeReader {
         range: KeepTalkingMessageRange,
         on sql: any SQLDatabase
     ) async throws -> Int {
+        guard let row = try await sql.raw(countStatement(in: contextID, range: range)).first() else { return 0 }
+        return try row.decode(column: "n", as: Int.self)
+    }
+
+    static func countStatement(in contextID: UUID, range: KeepTalkingMessageRange) -> SQLQueryString {
         var statement: SQLQueryString = "SELECT COUNT(*) AS n FROM \(ident: table) WHERE "
         appendPredicate(contextID: contextID, range: range, to: &statement)
-        guard let row = try await sql.raw(statement).first() else { return 0 }
-        return try row.decode(column: "n", as: Int.self)
+        return statement
     }
 
     static func key(
@@ -160,21 +174,21 @@ enum MessageRangeReader {
         }
     }
 
-    /// `(timestamp ⋈ t OR (timestamp = t AND id ⋈ i))`, with `⋈=` when the
-    /// cut's own row is inside.
+    /// `(timestamp, id) ⋈ (t, i)`, with `⋈=` when the cut's own row is
+    /// inside. A row value, not the equivalent `timestamp ⋈ t OR (timestamp = t
+    /// AND id ⋈ i)`: SQLite seeks the `(context, timestamp, id)` index to a
+    /// row-value bound, where the OR form scans everything past the cut first.
     private static func appendCut(
         _ key: KeepTalkingMessageKey,
         comparison: String,
         orEqual: Bool,
         to statement: inout SQLQueryString
     ) {
-        statement.appendLiteral(" AND (timestamp \(comparison) ")
+        statement.appendLiteral(" AND (timestamp, id) \(comparison)\(orEqual ? "=" : "") (")
         statement.appendInterpolation(bind: key.timestamp)
-        statement.appendLiteral(" OR (timestamp = ")
-        statement.appendInterpolation(bind: key.timestamp)
-        statement.appendLiteral(" AND id \(comparison)\(orEqual ? "=" : "") ")
+        statement.appendLiteral(", ")
         statement.appendInterpolation(bind: key.id.uuidString)
-        statement.appendLiteral("))")
+        statement.appendLiteral(")")
     }
 
     private static func decodeKey(_ row: any SQLRow) throws -> KeepTalkingMessageKey {

@@ -157,6 +157,28 @@ struct DatabaseGateTests {
         #expect(harness.gate.snapshot() == .init(running: [0, 0, 0], waiting: 0, writerHeld: false))
     }
 
+    @Test("a transaction block the driver runs later still holds its permit")
+    func deferredTransactionIsReentrant() async throws {
+        let harness = try Harness(connections: 1, defersBlocks: true)
+        defer { harness.tearDown() }
+        let database = harness.database
+        // As SQLite runs it: the block is called from an event-loop callback,
+        // and, as FluentKit's async `transaction` does, it starts a task.
+        let result = try await database.transaction { db -> EventLoopFuture<Int> in
+            db.eventLoop.makeFutureWithTask {
+                // Width 1: an inner query that queued behind the block would
+                // deadlock, so a missing mark fails here instead.
+                guard DatabaseGateContext.isHoldingPermit else { return -1 }
+                let inner: EventLoopFuture<Void> = database.execute(query: harness.readQuery, onOutput: { _ in })
+                harness.finishAll()
+                try await inner.get()
+                return 7
+            }
+        }.get()
+        #expect(result == 7)
+        #expect(harness.gate.snapshot() == .init(running: [0, 0, 0], waiting: 0, writerHeld: false))
+    }
+
     @Test("the lane follows the task's priority unless set explicitly")
     func laneFromPriority() async throws {
         // Observed without awaiting the task, which would escalate it.
@@ -255,9 +277,11 @@ private final class Harness: @unchecked Sendable {
         return query
     }
 
-    init(connections: Int, aging: Duration = .zero) throws {
+    /// - Parameter defersBlocks: run transaction and connection blocks from a
+    ///   later event-loop tick, as the SQLite driver does, rather than inline.
+    init(connections: Int, aging: Duration = .zero, defersBlocks: Bool = false) throws {
         group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        manual = ManualDatabase(eventLoop: group.next())
+        manual = ManualDatabase(eventLoop: group.next(), defersBlocks: defersBlocks)
         gate = DatabaseGate(
             configuration: .init(aging: aging),
             connections: connections,
@@ -339,10 +363,13 @@ private final class ManualDatabase: Database, SQLDatabase, @unchecked Sendable {
     let eventLoop: any EventLoop
     let context: DatabaseContext
     let inTransaction = false
+    /// Run blocks from a later event-loop tick, as SQLite does after `BEGIN`.
+    let defersBlocks: Bool
     private let promises = NIOLockedValueBox<[EventLoopPromise<Void>]>([])
 
-    init(eventLoop: any EventLoop) {
+    init(eventLoop: any EventLoop, defersBlocks: Bool = false) {
         self.eventLoop = eventLoop
+        self.defersBlocks = defersBlocks
         self.context = DatabaseContext(
             configuration: ManualConfiguration(),
             logger: Logger(label: "manual"),
@@ -389,10 +416,14 @@ private final class ManualDatabase: Database, SQLDatabase, @unchecked Sendable {
     func execute(schema: DatabaseSchema) -> EventLoopFuture<Void> { pendingFuture() }
     func execute(enum: DatabaseEnum) -> EventLoopFuture<Void> { pendingFuture() }
     func transaction<T>(_ closure: @escaping @Sendable (any Database) -> EventLoopFuture<T>) -> EventLoopFuture<T> {
-        closure(self)
+        run(closure)
     }
     func withConnection<T>(_ closure: @escaping @Sendable (any Database) -> EventLoopFuture<T>) -> EventLoopFuture<T> {
-        closure(self)
+        run(closure)
+    }
+    private func run<T>(_ closure: @escaping @Sendable (any Database) -> EventLoopFuture<T>) -> EventLoopFuture<T> {
+        guard defersBlocks else { return closure(self) }
+        return eventLoop.flatSubmit { closure(self) }
     }
 
     // SQLDatabase

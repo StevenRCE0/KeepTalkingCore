@@ -79,7 +79,11 @@ extension KeepTalkingClient {
                     sealing: KeepTalkingPushWakeRevocation(messageIDs: batch)
                 )
             else {
-                return
+                // One batch failing to seal is no reason to drop the rest.
+                onLog?(
+                    "[push-wake][revoke] failed to seal context=\(contextID.uuidString.lowercased()) batch=\(start / Self.maxPushWakeRevocationMessageIDs)"
+                )
+                continue
             }
             for (nodeID, handle) in handles {
                 do {

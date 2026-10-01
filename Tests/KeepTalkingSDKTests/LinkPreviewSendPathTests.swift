@@ -191,8 +191,11 @@ struct LinkPreviewSendPathTests {
         ("https://8.8.8.8/", true),
         ("https://[2001:4860:4860::8888]/", true),
     ])
-    func fetchesOnlyPubliclyRoutableHosts(url: String, allowed: Bool) throws {
-        #expect(LinkPreviewAddressPolicy.allows(try #require(URL(string: url))) == allowed)
+    func fetchesOnlyPubliclyRoutableHosts(url: String, allowed: Bool) async throws {
+        let url = try #require(URL(string: url))
+        #expect(LinkPreviewAddressPolicy.allows(url) == allowed)
+        // The async path the fetcher takes gives the same answer.
+        #expect(await LinkPreviewAddressPolicy.admits(url) == allowed)
     }
 
     private func makeClient(localStore: any KeepTalkingLocalStore) -> KeepTalkingClient {

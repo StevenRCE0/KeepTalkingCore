@@ -96,7 +96,7 @@ public final class KeepTalkingLinkPreviewFetcher: KeepTalkingLinkPreviewFetching
     }
 
     public func preview(for url: URL) async -> KeepTalkingFetchedLinkPreview? {
-        guard LinkPreviewAddressPolicy.allows(url) else { return nil }
+        guard await LinkPreviewAddressPolicy.admits(url) else { return nil }
         var request = URLRequest(url: url)
         request.setValue("text/html,application/xhtml+xml;q=0.9,*/*;q=0.1", forHTTPHeaderField: "Accept")
         guard
@@ -124,7 +124,7 @@ public final class KeepTalkingLinkPreviewFetcher: KeepTalkingLinkPreviewFetching
     }
 
     private func fetchImage(_ declared: KeepTalkingLinkMetadata.Image) async -> KeepTalkingFetchedLinkPreview.Image? {
-        guard LinkPreviewAddressPolicy.allows(declared.url) else { return nil }
+        guard await LinkPreviewAddressPolicy.admits(declared.url) else { return nil }
         var request = URLRequest(url: declared.url)
         request.setValue("image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8", forHTTPHeaderField: "Accept")
         guard
@@ -248,6 +248,22 @@ enum LinkPreviewAddressPolicy {
         guard let addresses = resolvedAddresses(of: host), !addresses.isEmpty else { return false }
         return addresses.allSatisfy(isPubliclyRoutable)
     }
+
+    /// `allows(_:)` for async callers, run on a queue of its own:
+    /// `getaddrinfo` blocks for as long as the lookup takes and can't be
+    /// cancelled, and a Swift concurrency thread pinned by a slow resolver
+    /// stalls every task queued behind it.
+    static func admits(_ url: URL) async -> Bool {
+        await withCheckedContinuation { continuation in
+            resolverQueue.async { continuation.resume(returning: allows(url)) }
+        }
+    }
+
+    private static let resolverQueue = DispatchQueue(
+        label: "KeepTalking.LinkPreview.resolver",
+        qos: .utility,
+        attributes: .concurrent
+    )
 
     /// Every IPv4 (4-byte) and IPv6 (16-byte) address `host` resolves to — a
     /// literal resolves to itself. Nil where the platform offers no resolver
