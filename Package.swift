@@ -34,7 +34,7 @@ let package = Package(
         ),
         .package(path: "../AIProxySwift-MultiPlatform"),
         .package(path: "../KeepTalkingSFU"),
-        // Vendored iroh-ffi (branch `keeptalking`): Swift bindings plus a
+        // Vendored iroh-ffi (fork StevenRCE0/iroh-ffi, main): Swift bindings plus a
         // locally built xcframework (`RUSTUP_TOOLCHAIN=stable ./make_swift.sh`).
         // Apple-only, so the SDK takes it conditionally; see Transport/Iroh.
         .package(path: "../iroh-ffi"),
