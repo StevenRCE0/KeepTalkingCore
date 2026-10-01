@@ -20,11 +20,12 @@ struct LinkPreviewSendPathTests {
     }
 
     static let postURL = URL(string: "https://example.com/post")!
-    static let image = KeepTalkingFetchedLinkPreview.Image(
+    static let image = KeepTalkingLinkPreview.Image(
         data: Data([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]),
         mimeType: "image/jpeg",
         width: 480,
-        height: 252
+        height: 252,
+        alt: "Cover"
     )
     static let postPreview = KeepTalkingFetchedLinkPreview(
         metadata: KeepTalkingLinkMetadata(
@@ -62,6 +63,16 @@ struct LinkPreviewSendPathTests {
                 "https://a.example", "https://b.example", "https://c.example",
             ]
         ),
+        // A fence closes only on its own character, at least as long, alone.
+        ("````\n```\nhttps://example.com/inside\n````\nhttps://example.com/after", ["https://example.com/after"]),
+        ("```swift\nhttps://example.com/a\n```swift\nhttps://example.com/b\n```", []),
+        // Four spaces in is indented code, not a fence.
+        ("    ```\nhttps://example.com/unfenced", ["https://example.com/unfenced"]),
+        // Two links are a sentence, not a link line; a label may nest brackets.
+        ("[a](https://example.com/x) and [b](https://example.com/y)", []),
+        ("[see [docs]](https://example.com/docs)", ["https://example.com/docs"]),
+        ("<https://example.com/a b>\n<https://example.com/c>", ["https://example.com/c"]),
+        ("Look:\r\nhttps://example.com/crlf\r\n", ["https://example.com/crlf"]),
     ])
     func findsLinksStandingOnTheirOwnLines(text: String, expected: [String]) {
         #expect(KeepTalkingLinkPreview.candidateURLs(in: text) == expected)

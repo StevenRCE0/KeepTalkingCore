@@ -65,65 +65,79 @@ extension KeepTalkingLinkPreview {
     /// a preview block; a link inside a sentence, list item or quote stays an
     /// ordinary link and is not fetched.
     ///
-    /// A bare URL ending in punctuation GFM leaves out of autolinks (`.`, `,`,
-    /// `)` without its `(` …) doesn't qualify: the renderer would read that
-    /// line as a link plus text.
+    /// The rules are `LinkLine`'s patterns, written the same way as ChatCanvas's
+    /// `segmentMarkdown` (src/lib/linkLines.ts) so the card lands where the
+    /// sender found the link. Change one, change both.
     public static func candidateURLs(in text: String) -> [String] {
+        let rules = LinkLine()
         var urls: [String] = []
-        var openFence: String?
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        var openFence: Substring?
+        for line in text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r\n" }) {
             if let fence = openFence {
-                if line.hasPrefix(fence) { openFence = nil }
+                if rules.closes(fence, line) { openFence = nil }
                 continue
             }
-            if let fence = ["```", "~~~"].first(where: { line.hasPrefix($0) }) {
-                openFence = fence
+            if let opened = line.wholeMatch(of: rules.fenceOpener) {
+                openFence = opened.output.1 ?? opened.output.2
                 continue
             }
-            let indentation = rawLine.prefix(while: { $0 == " " || $0 == "\t" })
-            guard indentation.count < 4, !indentation.contains("\t"),
-                let url = standaloneURL(in: line), !urls.contains(url)
-            else { continue }
+            guard let url = rules.standaloneURL(in: line), !urls.contains(url) else { continue }
             urls.append(url)
             if urls.count == maximumPerMessage { break }
         }
         return urls
     }
+}
 
-    private static func standaloneURL(in line: String) -> String? {
-        if line.hasPrefix("<"), line.hasSuffix(">") {
-            return webURLString(line.dropFirst().dropLast())
-        }
-        if line.hasPrefix("["), line.hasSuffix(")"),
-            let split = line.range(of: "](", options: .backwards)
-        {
-            var destination = line[split.upperBound..<line.index(before: line.endIndex)]
-                .trimmingCharacters(in: .whitespaces)[...]
-            if let space = destination.firstIndex(where: \.isWhitespace) {
-                let title = destination[space...].trimmingCharacters(in: .whitespaces)
-                guard title.count >= 2, let quote = title.first, quote == "\"" || quote == "'",
-                    title.last == quote
-                else { return nil }
-                destination = destination[..<space]
-            }
-            if destination.hasPrefix("<"), destination.hasSuffix(">") {
-                destination = destination.dropFirst().dropLast()
-            }
-            return webURLString(destination)
-        }
-        guard !line.contains(where: \.isWhitespace), let last = line.last, !"?!.,:*_~'\"".contains(last),
-            line.filter({ $0 == "(" }).count == line.filter({ $0 == ")" }).count
-        else { return nil }
-        return webURLString(line[...])
+/// One line of a message, read by CommonMark's rules as far as previews care.
+///
+/// Built once per message rather than kept in statics: `Regex` isn't
+/// `Sendable`.
+private struct LinkLine {
+    /// A code fence: three or more backticks (whose info string holds no
+    /// backtick) or tildes, indented at most three spaces.
+    let fenceOpener = #/ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)/#
+    /// A fence that closes: the opener's character, at least as many times,
+    /// and nothing after it.
+    let fenceCloser = #/ {0,3}(`+|~+)[ \t]*/#
+    /// The text of a line that isn't indented code: at most three spaces in.
+    let content = #/ {0,3}(\S(?:.*\S)?)\s*/#
+    /// `<https://…>`, an autolink.
+    let autolink = #/<((?i:https?)://[^\s<>]+)>/#
+    /// `[label](destination "title")` and nothing else; the label may hold one
+    /// level of balanced brackets, the destination may be `<…>`.
+    let inlineLink =
+        #/\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\(\s*(?:<([^<>\s]+)>|(\S+))(?:\s+(?:"[^"]*"|'[^']*'))?\s*\)/#
+    /// A bare URL, minus any that end in punctuation GFM leaves out of an
+    /// autolink — the renderer would read that line as a link plus text.
+    let bareURL = #/(?i:https?)://\S*[^\s?!.,:*_~'"]/#
+    /// An http(s) URL with no whitespace; `webURL(_:)` then wants a host.
+    let httpURL = #/(?i:https?)://\S+/#
+
+    func closes(_ opener: Substring, _ line: Substring) -> Bool {
+        guard let fence = line.wholeMatch(of: fenceCloser)?.output.1 else { return false }
+        return fence.first == opener.first && fence.count >= opener.count
     }
 
-    private static func webURLString(_ candidate: Substring) -> String? {
-        let lowered = candidate.lowercased()
-        guard lowered.hasPrefix("https://") || lowered.hasPrefix("http://"),
-            !candidate.contains(where: \.isWhitespace),
-            let components = URLComponents(string: String(candidate)),
-            let host = components.host, !host.isEmpty
+    func standaloneURL(in line: Substring) -> String? {
+        guard let text = line.wholeMatch(of: content)?.output.1 else { return nil }
+        if let link = text.wholeMatch(of: autolink) {
+            return webURL(link.output.1)
+        }
+        if let link = text.wholeMatch(of: inlineLink) {
+            return (link.output.2 ?? link.output.3).flatMap(webURL)
+        }
+        // GFM keeps a closing parenthesis only when it has an opening one.
+        guard text.wholeMatch(of: bareURL) != nil,
+            text.filter({ $0 == "(" }).count == text.filter({ $0 == ")" }).count
+        else { return nil }
+        return webURL(text)
+    }
+
+    /// `candidate` when it is an http(s) URL with a host.
+    private func webURL(_ candidate: Substring) -> String? {
+        guard candidate.wholeMatch(of: httpURL) != nil,
+            let host = URLComponents(string: String(candidate))?.host, !host.isEmpty
         else { return nil }
         return String(candidate)
     }

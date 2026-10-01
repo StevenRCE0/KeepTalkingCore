@@ -3,35 +3,14 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-#if canImport(Darwin)
-import Darwin
-#elseif canImport(Glibc)
-import Glibc
-#elseif canImport(Musl)
-import Musl
-#endif
 
 /// What a fetcher found at a link: the page's metadata and, when it names one,
 /// the preview image ready to ship.
 public struct KeepTalkingFetchedLinkPreview: Sendable {
-    public struct Image: Sendable {
-        public var data: Data
-        public var mimeType: String
-        public var width: Int?
-        public var height: Int?
-
-        public init(data: Data, mimeType: String, width: Int? = nil, height: Int? = nil) {
-            self.data = data
-            self.mimeType = mimeType
-            self.width = width
-            self.height = height
-        }
-    }
-
     public var metadata: KeepTalkingLinkMetadata
-    public var image: Image?
+    public var image: KeepTalkingLinkPreview.Image?
 
-    public init(metadata: KeepTalkingLinkMetadata, image: Image? = nil) {
+    public init(metadata: KeepTalkingLinkMetadata, image: KeepTalkingLinkPreview.Image? = nil) {
         self.metadata = metadata
         self.image = image
     }
@@ -55,7 +34,7 @@ public protocol KeepTalkingLinkPreviewFetching: Sendable {
 /// refused unless all of its host's addresses are publicly routable. Requests
 /// carry no cookies and nothing is cached.
 public final class KeepTalkingLinkPreviewFetcher: KeepTalkingLinkPreviewFetching {
-    /// Pages read at most this much; the parser stops at `</head>` anyway.
+    /// Pages read at most this much; reading also stops at the end of `<head>`.
     static let pageByteLimit = KeepTalkingLinkMetadata.headByteLimit
     /// Images larger than this are skipped rather than downloaded.
     static let imageDownloadByteLimit = 5 * 1024 * 1024
@@ -82,12 +61,10 @@ public final class KeepTalkingLinkPreviewFetcher: KeepTalkingLinkPreviewFetching
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = 6
         configuration.timeoutIntervalForResource = 10
-        var headers: [AnyHashable: Any] = ["User-Agent": Self.userAgent]
-        let languages = Locale.preferredLanguages.prefix(3)
-        if !languages.isEmpty {
-            headers["Accept-Language"] = languages.joined(separator: ",")
-        }
-        configuration.httpAdditionalHeaders = headers
+        configuration.httpAdditionalHeaders = [
+            "User-Agent": Self.userAgent,
+            "Accept-Language": Locale.preferredLanguages.prefix(3).joined(separator: ","),
+        ]
         session = URLSession(configuration: configuration, delegate: RedirectGuard(), delegateQueue: nil)
     }
 
@@ -96,122 +73,98 @@ public final class KeepTalkingLinkPreviewFetcher: KeepTalkingLinkPreviewFetching
     }
 
     public func preview(for url: URL) async -> KeepTalkingFetchedLinkPreview? {
-        guard await LinkPreviewAddressPolicy.admits(url) else { return nil }
-        var request = URLRequest(url: url)
-        request.setValue("text/html,application/xhtml+xml;q=0.9,*/*;q=0.1", forHTTPHeaderField: "Accept")
         guard
-            let page = try? await read(
-                request,
+            let page = await read(
+                url,
+                accepting: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
                 limit: Self.pageByteLimit,
                 stopsAtHeadEnd: true,
-                accepts: { Self.isHTML($0.mimeType) }
+                typeMatches: { $0 == "text/html" || $0 == "application/xhtml+xml" }
             )
         else { return nil }
-        let (body, response) = page
-
         let metadata = KeepTalkingLinkMetadata.parse(
-            html: body,
-            pageURL: response.url ?? url,
-            contentType: response.value(forHTTPHeaderField: "Content-Type")
+            html: page.body,
+            pageURL: page.response.url ?? url,
+            contentType: page.response.value(forHTTPHeaderField: "Content-Type")
         )
         guard !metadata.isEmpty else { return nil }
-
-        var image: KeepTalkingFetchedLinkPreview.Image?
-        if let declared = metadata.image {
-            image = await fetchImage(declared)
-        }
-        return KeepTalkingFetchedLinkPreview(metadata: metadata, image: image)
+        return KeepTalkingFetchedLinkPreview(metadata: metadata, image: await image(metadata.image))
     }
 
-    private func fetchImage(_ declared: KeepTalkingLinkMetadata.Image) async -> KeepTalkingFetchedLinkPreview.Image? {
-        guard await LinkPreviewAddressPolicy.admits(declared.url) else { return nil }
-        var request = URLRequest(url: declared.url)
-        request.setValue("image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8", forHTTPHeaderField: "Accept")
-        guard
-            let download = try? await read(
-                request,
+    /// The declared image, downscaled until it fits inline in a message.
+    private func image(_ declared: KeepTalkingLinkMetadata.Image?) async -> KeepTalkingLinkPreview.Image? {
+        guard let declared,
+            // One byte over the limit tells a large image from one that fits.
+            let download = await read(
+                declared.url,
+                accepting: "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8",
                 limit: Self.imageDownloadByteLimit + 1,
-                stopsAtHeadEnd: false,
-                accepts: { Self.isRasterImage($0.mimeType) }
+                // SVG can't be rasterised everywhere, and it can script.
+                typeMatches: { $0.hasPrefix("image/") && !$0.contains("svg") }
             ),
-            download.0.count <= Self.imageDownloadByteLimit,
-            let mimeType = download.1.mimeType
+            download.body.count <= Self.imageDownloadByteLimit,
+            let mimeType = download.response.mimeType,
+            let scaled = Self.imagePixelSizes.lazy
+                .map({
+                    KeepTalkingImageDownscaler.downscaledIfNeeded(download.body, mimeType: mimeType, maxPixelSize: $0)
+                })
+                .first(where: { $0.data.count <= Self.shippedImageByteLimit })
         else { return nil }
-        let body = download.0
-
-        let candidates = Self.imagePixelSizes.lazy.map {
-            KeepTalkingImageDownscaler.downscaledIfNeeded(body, mimeType: mimeType, maxPixelSize: $0)
-        }
-        guard let scaled = candidates.first(where: { $0.data.count <= Self.shippedImageByteLimit }) else {
-            return nil
-        }
         // The declared size describes the original; it keeps the right aspect
         // ratio when the host can't measure the shipped bytes.
         let size = KeepTalkingImageDownscaler.pixelSize(of: scaled.data)
-        return KeepTalkingFetchedLinkPreview.Image(
+        return KeepTalkingLinkPreview.Image(
             data: scaled.data,
             mimeType: scaled.mimeType,
             width: size?.width ?? declared.width,
-            height: size?.height ?? declared.height
+            height: size?.height ?? declared.height,
+            alt: declared.alt
         )
     }
 
-    /// Reads a 2xx response body up to `limit` bytes, bailing out before the
-    /// body when `accepts` rejects the response.
+    /// Up to `limit` bytes of a 2xx response whose MIME type matches, or nil
+    /// — for a refused host, an error, or any other response.
     private func read(
-        _ request: URLRequest,
+        _ url: URL,
+        accepting accept: String,
         limit: Int,
-        stopsAtHeadEnd: Bool,
-        accepts: (HTTPURLResponse) -> Bool
-    ) async throws -> (Data, HTTPURLResponse) {
-        #if canImport(FoundationNetworking)
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode), accepts(http)
-        else { throw URLError(.badServerResponse) }
-        return (data.prefix(limit), http)
-        #else
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode), accepts(http)
-        else { throw URLError(.badServerResponse) }
-        var data = Data()
-        data.reserveCapacity(min(limit, 64 * 1024))
-        var nextHeadCheck = 4096
-        for try await byte in bytes {
-            data.append(byte)
-            if data.count >= limit { break }
-            if stopsAtHeadEnd, data.count >= nextHeadCheck {
-                if Self.containsHeadEnd(data, from: nextHeadCheck - 4096) { break }
-                nextHeadCheck += 4096
+        stopsAtHeadEnd: Bool = false,
+        typeMatches: (String) -> Bool
+    ) async -> (body: Data, response: HTTPURLResponse)? {
+        guard await LinkPreviewAddressPolicy.admits(url) else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue(accept, forHTTPHeaderField: "Accept")
+        guard let (bytes, response) = try? await session.bytes(for: request) else { return nil }
+        defer { bytes.task.cancel() }
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+            let mimeType = http.mimeType?.lowercased(), typeMatches(mimeType)
+        else { return nil }
+
+        var body = Data()
+        do {
+            for try await byte in bytes {
+                body.append(byte)
+                if body.count >= limit { break }
+                if stopsAtHeadEnd, byte == UInt8(ascii: ">"), Self.closesHead(body) { break }
             }
+        } catch {
+            return nil
         }
-        return (data, http)
-        #endif
+        return (body, http)
     }
 
-    /// Whether `</head` or `<body` appears at or after `start` (the few bytes
-    /// before it are rechecked so a split marker is still found).
-    private static func containsHeadEnd(_ data: Data, from start: Int) -> Bool {
-        let markers: [[UInt8]] = [Array("</head".utf8), Array("<body".utf8)]
-        let lower = max(0, start - 6)
-        let window = data[(data.startIndex + lower)...].map { (0x41...0x5A).contains($0) ? $0 | 0x20 : $0 }
-        return markers.contains { marker in
-            window.indices.contains { window[$0...].starts(with: marker) }
-        }
-    }
-
-    private static func isHTML(_ mimeType: String?) -> Bool {
-        guard let mimeType = mimeType?.lowercased() else { return false }
-        return mimeType == "text/html" || mimeType == "application/xhtml+xml"
-    }
-
-    /// SVG is excluded: it can't be rasterised everywhere, and it can script.
-    private static func isRasterImage(_ mimeType: String?) -> Bool {
-        guard let mimeType = mimeType?.lowercased() else { return false }
-        return mimeType.hasPrefix("image/") && !mimeType.contains("svg")
+    /// Whether the tag that ends `body` is `</head …>` or `<body …>`: what
+    /// the metadata needs has all arrived.
+    private static func closesHead(_ body: Data) -> Bool {
+        guard let open = body.lastIndex(of: UInt8(ascii: "<")) else { return false }
+        let tag = String(decoding: body[open...].prefix(6), as: UTF8.self).lowercased()
+        return tag.hasPrefix("</head") || tag.hasPrefix("<body")
     }
 }
 
 /// Refuses a redirect that leads somewhere the fetcher wouldn't go directly.
+/// URLSession calls it on its own delegate queue, where blocking on a host
+/// lookup is no harm.
 private final class RedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(
         _ session: URLSession,
@@ -220,39 +173,35 @@ private final class RedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked 
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
-        guard let url = request.url, LinkPreviewAddressPolicy.allows(url) else {
-            completionHandler(nil)
-            return
-        }
-        completionHandler(request)
+        let allowed = request.url.map(LinkPreviewAddressPolicy.allows) ?? false
+        completionHandler(allowed ? request : nil)
     }
 }
 
-/// Which hosts a link preview may be fetched from.
+/// Which hosts a link preview may be fetched from: http(s) only, to a host
+/// every resolved address of which is publicly routable. Resolving here and
+/// again when connecting leaves a window for DNS rebinding; the bar is keeping
+/// ordinary intranet names and literals out, not defeating a determined
+/// resolver.
 enum LinkPreviewAddressPolicy {
     private static let privateSuffixes = [
         ".localhost", ".local", ".internal", ".intranet", ".lan", ".home", ".corp", ".home.arpa",
     ]
 
-    /// Http(s) only, to a host every resolved address of which is publicly
-    /// routable. Resolving here and again when connecting leaves a window for
-    /// DNS rebinding; the bar is keeping ordinary intranet names and literals
-    /// out, not defeating a determined resolver.
+    /// Blocks for the host lookup; async code calls `admits(_:)` instead.
     static func allows(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
-            let rawHost = URLComponents(url: url, resolvingAgainstBaseURL: true)?.host
+            let host = URLComponents(url: url, resolvingAgainstBaseURL: true)?.host?
+                .lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[].")),
+            !host.isEmpty, host != "localhost", !privateSuffixes.contains(where: { host.hasSuffix($0) })
         else { return false }
-        let host = rawHost.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]."))
-        guard !host.isEmpty, host != "localhost", !privateSuffixes.contains(where: { host.hasSuffix($0) })
-        else { return false }
-        guard let addresses = resolvedAddresses(of: host), !addresses.isEmpty else { return false }
-        return addresses.allSatisfy(isPubliclyRoutable)
+        let addresses = resolvedAddresses(of: host)
+        return !addresses.isEmpty && addresses.allSatisfy(isPubliclyRoutable)
     }
 
-    /// `allows(_:)` for async callers, run on a queue of its own:
-    /// `getaddrinfo` blocks for as long as the lookup takes and can't be
-    /// cancelled, and a Swift concurrency thread pinned by a slow resolver
-    /// stalls every task queued behind it.
+    /// `allows(_:)` on a queue of its own: `getaddrinfo` blocks for as long as
+    /// the lookup takes and can't be cancelled, and a Swift concurrency thread
+    /// pinned by a slow resolver stalls every task queued behind it.
     static func admits(_ url: URL) async -> Bool {
         await withCheckedContinuation { continuation in
             resolverQueue.async { continuation.resume(returning: allows(url)) }
@@ -266,36 +215,28 @@ enum LinkPreviewAddressPolicy {
     )
 
     /// Every IPv4 (4-byte) and IPv6 (16-byte) address `host` resolves to — a
-    /// literal resolves to itself. Nil where the platform offers no resolver
-    /// this can call, which refuses the fetch.
-    static func resolvedAddresses(of host: String) -> [[UInt8]]? {
-        #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
+    /// literal resolves to itself. Empty when it doesn't resolve.
+    static func resolvedAddresses(of host: String) -> [[UInt8]] {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
         var result: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, nil, &hints, &result) == 0, let first = result else { return nil }
+        guard getaddrinfo(host, nil, &hints, &result) == 0, let first = result else { return [] }
         defer { freeaddrinfo(first) }
-
-        var addresses: [[UInt8]] = []
-        for info in sequence(first: first, next: { $0.pointee.ai_next }) {
-            guard let address = info.pointee.ai_addr else { continue }
+        return sequence(first: first, next: { $0.pointee.ai_next }).compactMap { info in
+            guard let address = info.pointee.ai_addr else { return nil }
             switch Int32(address.pointee.sa_family) {
                 case AF_INET:
-                    address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { ipv4 in
-                        withUnsafeBytes(of: ipv4.pointee.sin_addr) { addresses.append(Array($0)) }
+                    return address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                        withUnsafeBytes(of: $0.pointee.sin_addr) { Array($0) }
                     }
                 case AF_INET6:
-                    address.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { ipv6 in
-                        withUnsafeBytes(of: ipv6.pointee.sin6_addr) { addresses.append(Array($0)) }
+                    return address.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) {
+                        withUnsafeBytes(of: $0.pointee.sin6_addr) { Array($0) }
                     }
                 default:
-                    continue
+                    return nil
             }
         }
-        return addresses
-        #else
-        return nil
-        #endif
     }
 
     static func isPubliclyRoutable(_ address: [UInt8]) -> Bool {

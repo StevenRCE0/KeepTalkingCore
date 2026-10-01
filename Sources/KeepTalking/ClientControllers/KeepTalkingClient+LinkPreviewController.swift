@@ -26,15 +26,7 @@ extension KeepTalkingClient {
                 title: result.metadata.title,
                 summary: result.metadata.summary,
                 siteName: result.metadata.siteName,
-                image: result.image.map {
-                    KeepTalkingLinkPreview.Image(
-                        data: $0.data,
-                        mimeType: $0.mimeType,
-                        width: $0.width,
-                        height: $0.height,
-                        alt: result.metadata.image?.alt
-                    )
-                }
+                image: result.image
             )
         }
         let fitting = Self.linkPreviews(previews, fittingAlongside: text.utf8.count)
