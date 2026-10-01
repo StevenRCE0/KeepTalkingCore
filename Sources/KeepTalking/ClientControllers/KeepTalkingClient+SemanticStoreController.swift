@@ -399,25 +399,27 @@ extension KeepTalkingClient {
         for thread: KeepTalkingThread,
         on database: any Database
     ) async throws -> String {
-        let db = database
         let contextID = thread.$context.id
         let topic = normalizedDocumentSummary(for: thread)
 
-        let messages = try await KeepTalkingContextMessage.query(on: db)
-            .filter(\.$context.$id == contextID)
-            .sort(\.$timestamp)
-            .all()
-
-        let chitterSet = Set(thread.chitterChatter)
-
+        // The thread's rows by key: read in pages from its newest edge, never
+        // the whole context — the reconciler calls this once per thread.
+        let boundaryIDs = [thread.$startMessage.id, thread.$endMessage.id].compactMap { $0 }
+        let keys = try await messageKeys(for: boundaryIDs, in: contextID, on: database)
         guard
-            let range = thread.resolvedMessageRange(in: messages)
+            let threadID = thread.id,
+            let range = KeepTalkingThreadBoundary(
+                threadID: threadID,
+                state: thread.state,
+                createdAt: thread.createdAt,
+                start: thread.$startMessage.id.flatMap { keys[$0] },
+                end: thread.$endMessage.id.flatMap { keys[$0] }
+            ).range
         else {
             return ""
         }
 
-        let rangeMessages = messages[range]
-        let messageIDs = Set(rangeMessages.compactMap(\.id))
+        let chitterSet = Set(thread.chitterChatter)
 
         // Accumulated with a budget rather than joined-then-truncated: a long
         // thread's transcript can run to hundreds of kilobytes, and building the
@@ -428,41 +430,42 @@ extension KeepTalkingClient {
         // it has become — so this fills from the end and restores order after.
         var budget = Double(documentTokenBudget)
         var selected: [String] = []
-        for message in rangeMessages.reversed() {
-            guard budget > 0 else { break }
-            if let messageID = message.id, chitterSet.contains(messageID) { continue }
-            guard message.type == .message else { continue }
-            let content = message.content
-            let cost = estimatedTokenCount(of: content)
-            if cost <= budget {
-                selected.append(content)
-                // The newline this will be joined with costs a token too.
-                budget -= cost + 0.25
-            } else {
-                // A single message can exceed the whole budget. Keep its tail for
-                // the same reason: recency. Reversed twice so the *end* of the
-                // message survives while its characters stay in order.
-                let (tail, spent) = truncated(
-                    String(content.reversed()),
-                    toTokens: budget
-                )
-                selected.append(String(tail.reversed()))
-                budget -= spent
+        var cursor = range
+        pages: while budget > 0 {
+            let page = try await messagePage(
+                in: contextID, range: cursor, direction: .backward,
+                limit: documentPageSize, attachments: .none, on: database
+            )
+            for message in page.messages.reversed() {
+                guard budget > 0 else { break pages }
+                if let messageID = message.id, chitterSet.contains(messageID) { continue }
+                guard message.type == .message else { continue }
+                let content = message.content
+                let cost = estimatedTokenCount(of: content)
+                if cost <= budget {
+                    selected.append(content)
+                    // The newline this will be joined with costs a token too.
+                    budget -= cost + 0.25
+                } else {
+                    // A single message can exceed the whole budget. Keep its tail for
+                    // the same reason: recency. Reversed twice so the *end* of the
+                    // message survives while its characters stay in order.
+                    let (tail, spent) = truncated(
+                        String(content.reversed()),
+                        toTokens: budget
+                    )
+                    selected.append(String(tail.reversed()))
+                    budget -= spent
+                }
             }
+            guard page.hasMore, let first = page.firstKey else { break }
+            cursor = cursor.before(first)
         }
         let messageText = selected.reversed().joined(separator: "\n")
 
-        // Append attachment metadata for attachments parented to messages
-        // in this range. Uses metadata only — never touches blob data.
-        let attachments = try await KeepTalkingContextAttachment.query(on: db)
-            .filter(\.$context.$id == contextID)
-            .all()
-            .filter { attachment in
-                guard let parentID = attachment.$parentMessage.id else {
-                    return false
-                }
-                return messageIDs.contains(parentID)
-            }
+        // Attachment metadata for the thread's rows, in a fixed order. Uses
+        // metadata only — never touches blob data.
+        let attachments = try await threadAttachments(in: contextID, range: range, on: database)
 
         let attachmentText: String
         if attachments.isEmpty {
@@ -484,6 +487,42 @@ extension KeepTalkingClient {
         }
 
         return body
+    }
+
+    /// Rows per page when a thread document is built.
+    static let documentPageSize = 256
+
+    /// Every attachment parented to a row in `range`, oldest first — by the
+    /// rows' ids, so the rows themselves are not read again.
+    private static func threadAttachments(
+        in contextID: UUID,
+        range: KeepTalkingMessageRange,
+        on database: any Database
+    ) async throws -> [KeepTalkingContextAttachment] {
+        var parentIDs: [UUID] = []
+        var cursor = range
+        while true {
+            let keys = try await messageKeys(
+                in: contextID, range: cursor, direction: .forward,
+                limit: MessageRangeReader.idChunk, on: database
+            )
+            parentIDs += keys.map(\.id)
+            guard keys.count == MessageRangeReader.idChunk, let last = keys.last else { break }
+            cursor = cursor.after(last)
+        }
+        var attachments: [KeepTalkingContextAttachment] = []
+        for start in stride(from: 0, to: parentIDs.count, by: MessageRangeReader.idChunk) {
+            let chunk = parentIDs[start..<min(start + MessageRangeReader.idChunk, parentIDs.count)]
+            attachments += try await KeepTalkingContextAttachment.query(on: database)
+                .filter(\.$context.$id == contextID)
+                .filter(\.$parentMessage.$id ~~ chunk.map { Optional($0) })
+                .all()
+        }
+        return attachments.sorted { lhs, rhs in
+            if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+            if lhs.sortIndex != rhs.sortIndex { return lhs.sortIndex < rhs.sortIndex }
+            return (lhs.id?.uuidString ?? "") < (rhs.id?.uuidString ?? "")
+        }
     }
 
     private static func normalizedDocumentSummary(for thread: KeepTalkingThread) -> String? {

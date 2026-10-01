@@ -75,7 +75,8 @@ public enum KeepTalkingClientError: LocalizedError {
             case .missingMapping(let mappingID):
                 return "Mapping is not found: \(mappingID)"
             case .aiNotConfigured:
-                return "OpenAI is not configured. Set OPENAI_API_KEY to enable AI tool planning."
+                return
+                    "No AI model is configured for this conversation. Choose a provider and model for the main and ACT agents."
             case .unknownTool(let functionName):
                 return "Tool is not in the normalized action catalog: \(functionName)"
             case .invalidToolArguments(let raw):
@@ -212,8 +213,11 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// peer-authored line, whose wake keyword we don't know) falls back to "ai".
     public var localVoiceAgentName: String?
 
+    /// Whether the host installed an agent configuration provider. A run
+    /// can still fail with `aiNotConfigured` when the provider has nothing
+    /// for its context.
     public var aiEnabled: Bool {
-        aiConnector != nil
+        agentConfigurationProvider != nil
     }
 
     public let logon: UUID
@@ -233,13 +237,6 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let kvService: (any KeepTalkingKVService)?
     public let localStore: any KeepTalkingLocalStore
     public let keychain: any KeepTalkingKeychainStore
-    let openAIBackend: OpenAIConnectorBackend
-    /// Default model identifier passed to internally-driven agent loops
-    /// (`SkillManager.callAction`, etc.) when the caller does not supply one
-    /// explicitly. Set this to the active provider's model so OpenRouter and
-    /// other providers don't 404 on the OpenAI-style default.
-    public let openAIModel: String?
-    public let responseLanguages: [String]
     let livenessState: KeepTalkingContextLivenessState
     let mcpManager: MCPManager
     let mcpCredentialStore: KeepTalkingMCPCredentialStore
@@ -258,12 +255,6 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// nothing beyond reading the Catalogue file.
     public let pluginHost: KeepTalkingPluginHost
     #endif
-    let aiConnector: (any AIConnector)?
-    /// Connector used by the ACT (action/tool-calling) sub-agent. `nil` means
-    /// the ACT agent shares the main `aiConnector`; set it only when the ACT
-    /// role is configured with a different provider/endpoint than the main
-    /// agent. Resolved via `resolveACTConnector()`.
-    let actConnector: (any AIConnector)?
     let blobStore: KeepTalkingBlobStore
     /// Per-thread isolated execution workspaces (scratch/output dirs used as the
     /// cwd for skill / provider-side ACT runs); reaped on thread archive/delete.
@@ -276,10 +267,11 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let primitiveRegistry: KeepTalkingPrimitiveRegistry?
     var semanticSearchCallback: SemanticSearchCallback?
     var webSearchProvider: WebSearchProvider?
-    /// Looks up what the main agent's model can do (see `AIModelProfile`).
-    /// `nil`, or a resolver returning `nil`, keeps the loop's default
-    /// assumptions: tools, attachments, fixed message budgets, any effort.
-    var modelProfileResolver: ModelProfileResolver?
+    /// Builds link previews on the send path; nil sends messages without them.
+    var linkPreviewFetcher: (any KeepTalkingLinkPreviewFetching)?
+    /// Supplies the agent configuration for work the node runs without one
+    /// handed in (see `KeepTalkingAgentConfiguration`).
+    var agentConfigurationProvider: AgentConfigurationProvider?
     var jsRuntime: (any KeepTalkingJSRuntime)?
     /// Background work `init` started against the store (the orphan-workspace
     /// reap). A host that shuts the store down under a live client awaits it
@@ -396,33 +388,12 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let orphanAttachmentLock = NSLock()
     var orphanAttachmentsByParentMessageID: [UUID: [KeepTalkingContextAttachmentDTO]] = [:]
 
-    /// Creates a client with its transport, storage, and optional AI integrations.
+    /// Creates a client with its transport and storage. AI runs take their
+    /// models per run — see `KeepTalkingAgentConfiguration`.
     ///
     /// - Parameters:
     ///   - config: Session configuration for the local node.
     ///   - kvService: Optional KV backend used for node discovery and metadata.
-    ///   - openAIAPIKey: Explicit OpenAI API key override.
-    ///   - openAIEndpoint: Optional OpenAI-compatible endpoint override.
-    ///   - openAIBackend: Which OpenAI-compatible backend to target. Defaults to OpenRouter.
-    ///   - openAIModel: Default model identifier sent to the connector when
-    ///                  the SDK runs internal agent loops (e.g. skill execution
-    ///                  on incoming action calls). Should match the active
-    ///                  provider's model — for OpenRouter this is provider-prefixed
-    ///                  (e.g. `openai/gpt-5-codex`).
-    ///   - responseLanguages: Preferred natural-language output languages for
-    ///                        agent prompts. Empty means infer from the user.
-    ///   - aiConnector: Optional pre-built connector for the main agent. When
-    ///                  supplied it is used as-is and the `openAI*` parameters are
-    ///                  ignored. When `nil`, the client builds an OpenAI-compatible
-    ///                  connector from `openAIAPIKey` (falling back to the
-    ///                  `OPENAI_API_KEY` environment variable); if no key is found
-    ///                  anywhere, no connector is created and AI features stay off
-    ///                  while messaging and transport continue to work.
-    ///   - actConnector: Optional connector for the ACT (action/tool-calling)
-    ///                   sub-agent. When `nil`, the ACT agent reuses
-    ///                   `aiConnector`. Pass a distinct connector only when the
-    ///                   ACT role targets a different provider/endpoint than the
-    ///                   main agent.
     ///   - stdioTransportLauncher: Optional stdio transport launcher used for
     ///     MCP stdio actions.
     ///   - skillScriptExecutor: Optional skill script executor used for skill
@@ -442,13 +413,6 @@ public final class KeepTalkingClient: @unchecked Sendable {
     public convenience init(
         config: KeepTalkingConfig,
         kvService: (any KeepTalkingKVService)? = nil,
-        openAIAPIKey: String? = nil,
-        openAIEndpoint: String? = nil,
-        openAIBackend: OpenAIConnectorBackend = .openRouter,
-        openAIModel: String? = nil,
-        responseLanguages: [String] = [],
-        aiConnector: (any AIConnector)? = nil,
-        actConnector: (any AIConnector)? = nil,
         stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
             DefaultMCPStdioTransportLauncher.current,
         skillScriptExecutor: (any SkillScriptExecuting)? =
@@ -463,13 +427,6 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.init(
             config: config,
             kvService: kvService,
-            openAIAPIKey: openAIAPIKey,
-            openAIEndpoint: openAIEndpoint,
-            openAIBackend: openAIBackend,
-            openAIModel: openAIModel,
-            responseLanguages: responseLanguages,
-            aiConnector: aiConnector,
-            actConnector: actConnector,
             stdioTransportLauncher: stdioTransportLauncher,
             skillScriptExecutor: skillScriptExecutor,
             primitiveRegistry: primitiveRegistry,
@@ -485,13 +442,6 @@ public final class KeepTalkingClient: @unchecked Sendable {
     init(
         config: KeepTalkingConfig,
         kvService: (any KeepTalkingKVService)? = nil,
-        openAIAPIKey: String? = nil,
-        openAIEndpoint: String? = nil,
-        openAIBackend: OpenAIConnectorBackend = .openRouter,
-        openAIModel: String? = nil,
-        responseLanguages: [String] = [],
-        aiConnector: (any AIConnector)? = nil,
-        actConnector: (any AIConnector)? = nil,
         stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
             DefaultMCPStdioTransportLauncher.current,
         skillScriptExecutor: (any SkillScriptExecuting)? =
@@ -509,14 +459,6 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.localStore = localStore
         self.keychain = keychain
         self.logon = logon
-        self.openAIBackend = openAIBackend
-        let trimmedModel = openAIModel?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.openAIModel = (trimmedModel?.isEmpty == false) ? trimmedModel : nil
-        self.responseLanguages = responseLanguages.reduce(into: []) { result, language in
-            let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, !result.contains(trimmed) else { return }
-            result.append(trimmed)
-        }
         self.blobStore = KeepTalkingBlobStore.makeDefault(for: localStore)
         self.threadWorkspaces = KeepTalkingThreadWorkspaceManager.makeDefault(for: localStore)
         livenessState = KeepTalkingContextLivenessState(
@@ -554,31 +496,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
         KeepTalkingLoginShellEnvironment.prewarm()
         #endif
 
-        if let aiConnector {
-            self.aiConnector = aiConnector
-        } else {
-            let apiKey =
-                openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-                ?? ProcessInfo.processInfo.environment["OPENAI_API_KEY"]?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let endpoint =
-                openAIEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines)
-                ?? ProcessInfo.processInfo.environment["OPENAI_ENDPOINT"]?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                ?? ProcessInfo.processInfo.environment["OPENAI_BASE_URL"]?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            if let apiKey, !apiKey.isEmpty {
-                self.aiConnector =
-                    try? OpenAIConnector(apiKey: apiKey, endpoint: endpoint, backend: openAIBackend)
-            } else {
-                self.aiConnector = nil
-            }
-        }
-        self.actConnector = actConnector
         self.skillManager = SkillManager(
             nodeConfig: config,
-            aiConnector: self.aiConnector,
             scriptExecutor: skillScriptExecutor
         )
         self.primitiveRegistry = primitiveRegistry
@@ -690,13 +609,20 @@ public final class KeepTalkingClient: @unchecked Sendable {
         webSearchProvider = provider
     }
 
-    /// Resolves a model id to its `AIModelProfile`, consulted at the start of
-    /// every main-agent run. The host typically closes over a
-    /// `KeepTalkingModelCatalog` and the main provider's models.dev id.
-    public typealias ModelProfileResolver = @Sendable (_ model: String) -> AIModelProfile?
+    /// Installs the host's answer to "which models run this?" for work the
+    /// node starts on its own: delegated actions and tasks, plugin ACT turns,
+    /// planner ACT agents, and `runAI` calls without a configuration. Called
+    /// at the moment the work runs, so a model switch applies to the next
+    /// piece of work with no reconnect.
+    public func setAgentConfigurationProvider(_ provider: AgentConfigurationProvider?) {
+        agentConfigurationProvider = provider
+    }
 
-    public func setModelProfileResolver(_ resolver: ModelProfileResolver?) {
-        modelProfileResolver = resolver
+    /// Installs (or removes) what fetches link previews for messages this node
+    /// sends — people's and its agents' alike. Receivers never fetch: the
+    /// preview travels with the message.
+    public func setLinkPreviewFetcher(_ fetcher: (any KeepTalkingLinkPreviewFetching)?) {
+        linkPreviewFetcher = fetcher
     }
 
     /// Installs (or removes) the JavaScript runtime that backs the

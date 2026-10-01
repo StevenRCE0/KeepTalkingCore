@@ -21,6 +21,14 @@ public protocol KeepTalkingImageDownscaling: Sendable {
         mimeType: String,
         maxPixelSize: Int
     ) -> (data: Data, mimeType: String)
+
+    /// The pixel size of encoded image bytes, or nil when they can't be read.
+    /// Optional for hosts: the default answers nil.
+    func pixelSize(of data: Data) -> (width: Int, height: Int)?
+}
+
+extension KeepTalkingImageDownscaling {
+    public func pixelSize(of data: Data) -> (width: Int, height: Int)? { nil }
 }
 
 /// Registry + facade for the host-provided image downscaler. Call sites use the
@@ -54,5 +62,12 @@ public enum KeepTalkingImageDownscaler {
         guard let downscaler else { return (data, mimeType) }
         return downscaler.downscaledIfNeeded(
             data, mimeType: mimeType, maxPixelSize: maxPixelSize)
+    }
+
+    static func pixelSize(of data: Data) -> (width: Int, height: Int)? {
+        lock.lock()
+        let downscaler = registered
+        lock.unlock()
+        return downscaler?.pixelSize(of: data)
     }
 }

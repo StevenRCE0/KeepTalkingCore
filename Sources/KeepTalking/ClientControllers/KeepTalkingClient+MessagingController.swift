@@ -187,6 +187,15 @@ extension KeepTalkingClient {
             type: type,
             agentTurnID: agentTurnID
         )
+        // Previews resolve before the row exists — a synced message never
+        // changes, so they can only ride along. Only prose people read gets
+        // them, whether a person or an agent wrote it.
+        if type == .message {
+            let linkPreviews = await outgoingLinkPreviews(for: text)
+            if !linkPreviews.isEmpty {
+                message.linkPreviews = linkPreviews
+            }
+        }
 
         // updatedAt is advanced by the touch middleware when the message saves.
         try await message.save(on: localStore.database)
@@ -1013,7 +1022,8 @@ extension KeepTalkingClient {
         return KeepTalkingPushWakeMessagePreview(
             sender: message.sender,
             content: previewText,
-            isTruncated: rawContent.count > previewText.count
+            isTruncated: rawContent.count > previewText.count,
+            messageID: message.id
         )
     }
 

@@ -64,6 +64,10 @@ public enum KTPPFrameKind {
     public static let hostActionCreate = "host.action.create"
     /// Companion → host: open the "add action" UI without a pre-selected kind.
     public static let hostUIAddAction = "host.ui.addAction"
+    /// Host → companion: reveal the companion's panel and make it key. No
+    /// payload. Answered `ok` once the companion has surfaced it, `unhandled`
+    /// when the runtime has no UI attached (a headless run).
+    public static let uiReveal = "plugin.ui.reveal"
     /// Plugin → host: one bounded AI turn on the host's ACT connector, valid
     /// only while servicing an in-flight call (resources design doc §4).
     public static let hostActRequest = "host.act.request"

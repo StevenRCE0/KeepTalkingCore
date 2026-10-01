@@ -65,10 +65,14 @@ final class AgentSurface {
                 contextID: try context.requireID(),
                 node: try node.requireID()
             ),
-            aiConnector: aiConnector,
             primitiveRegistry: primitiveRegistry,
             localStore: store
         )
+        if let aiConnector {
+            client.setAgentConfigurationProvider { _ in
+                KeepTalkingAgentConfiguration(main: .init(connector: aiConnector, model: "test"))
+            }
+        }
         return try AgentSurface(
             store: store, client: client, node: node, context: context)
     }

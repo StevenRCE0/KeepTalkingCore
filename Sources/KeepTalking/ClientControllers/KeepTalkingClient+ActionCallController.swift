@@ -242,13 +242,22 @@ extension KeepTalkingClient {
                     )
                 case .skill:
                     #if os(macOS)
+                    // The skill runs as this node's ACT agent, on the model the
+                    // node chose for the conversation the call came from.
+                    let agent = try await resolveAgentConfiguration(
+                        .init(
+                            contextID: request.contextID,
+                            purpose: .delegatedAction(callerNodeID: request.callerNodeID)
+                        )
+                    )
                     let (skillResult, produced) = try await KeepTalkingIOManager(client: self)
                         .withActionRun(action: action, request: request, grant: grant) { run in
                             try await skillManager.callAction(
                                 action: action,
                                 call: request.call,
                                 sandboxPolicy: run.sandboxPolicy,
-                                model: openAIModel ?? "gpt-5-codex",
+                                connector: agent.act.connector,
+                                model: agent.act.model,
                                 attachmentsDir: run.attachmentsDir,
                                 manifest: run.manifest,
                                 workspaceDirectory: run.workspaceDirectory

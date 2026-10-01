@@ -109,6 +109,11 @@ public enum KTPPHostEvent: Sendable {
     case listening(socketPath: String)
     case paired(catalogID: UUID, info: KTPPPluginInfo, fingerprint: String, endorsedBy: UUID?)
     case kindsRegistered(catalogID: UUID, kinds: KTPPKindsResult)
+    /// A connection became the catalog's current session — fired for resumes
+    /// as well as first pairings, so observers learn a plugin is *connected*
+    /// without inferring it from `paired` (which a returning plugin never
+    /// re-emits).
+    case sessionOpened(catalogID: UUID)
     case sessionClosed(catalogID: UUID)
     case log(String)
 }
@@ -162,7 +167,9 @@ public actor KeepTalkingPluginHost {
     private var group: MultiThreadedEventLoopGroup?
     private var acceptTask: Task<Void, Never>?
     private var catalogs: [UUID: CatalogState] = [:]
-    private var pending: [String: CheckedContinuation<KTPPFrame, Error>] = [:]
+    /// In-flight host→plugin requests, tagged with the session they went out
+    /// on: a reply can only come back over that connection.
+    private var pending: [String: (session: UUID, continuation: CheckedContinuation<KTPPFrame, Error>)] = [:]
     private var kindWaiters: [(kind: String, continuation: CheckedContinuation<UUID, Error>)] = []
 
     private var callSequence: Int = 0
@@ -466,8 +473,8 @@ public actor KeepTalkingPluginHost {
     public func stop() async {
         acceptTask?.cancel()
         acceptTask = nil
-        for (_, continuation) in pending {
-            continuation.resume(throwing: KTPPHostError.notStarted)
+        for (_, entry) in pending {
+            entry.continuation.resume(throwing: KTPPHostError.notStarted)
         }
         pending.removeAll()
         try? await group?.shutdownGracefully()
@@ -510,6 +517,31 @@ public actor KeepTalkingPluginHost {
     }
 
     public func callRecords() -> [KTPPCallRecord] { records }
+
+    /// Asks every connected companion-role session to reveal its panel and make
+    /// it key (`plugin.ui.reveal`). Returns whether at least one companion
+    /// acknowledged with `ok` — false means no companion is connected, or the
+    /// connected one has no UI to reveal, so the caller can fall back to
+    /// launching the companion app.
+    @discardableResult
+    public func revealCompanion(timeout: TimeInterval = 5) async -> Bool {
+        let targets = catalogs.filter {
+            $0.value.role == KTPPConstants.companionRole && $0.value.writer != nil
+        }.map(\.key)
+        var acknowledged = false
+        for catalogID in targets {
+            let frame = KTPPFrame.request(KTPPFrameKind.uiReveal, payload: nil)
+            guard
+                let response = try? await request(
+                    catalogID: catalogID, frame: frame, timeout: timeout),
+                response.kind == KTPPFrameKind.res,
+                case .object(let fields)? = response.payload,
+                case .string("ok")? = fields["status"]
+            else { continue }
+            acknowledged = true
+        }
+        return acknowledged
+    }
 
     /// Awaits the first connected catalog that registers `kindName`.
     public func waitForKind(_ kindName: String, timeout: TimeInterval) async throws -> UUID {
@@ -787,14 +819,16 @@ public actor KeepTalkingPluginHost {
     private func request(
         catalogID: UUID, frame: KTPPFrame, timeout: TimeInterval
     ) async throws -> KTPPFrame {
-        guard let writer = catalogs[catalogID]?.writer else {
+        guard let writer = catalogs[catalogID]?.writer,
+            let session = catalogs[catalogID]?.sessionToken
+        else {
             throw KTPPHostError.sessionUnavailable(catalogID)
         }
         guard let frameID = frame.id else {
             throw KTPPHostError.protocolViolation("request frame without id")
         }
         return try await withCheckedThrowingContinuation { continuation in
-            pending[frameID] = continuation
+            pending[frameID] = (session, continuation)
             Task { [weak self] in
                 do {
                     try await writer.send(frame)
@@ -810,14 +844,14 @@ public actor KeepTalkingPluginHost {
     }
 
     private func failPending(_ frameID: String, error: Error) {
-        if let continuation = pending.removeValue(forKey: frameID) {
-            continuation.resume(throwing: error)
+        if let entry = pending.removeValue(forKey: frameID) {
+            entry.continuation.resume(throwing: error)
         }
     }
 
     private func resolvePending(_ frame: KTPPFrame) {
-        guard let re = frame.re, let continuation = pending.removeValue(forKey: re) else { return }
-        continuation.resume(returning: frame)
+        guard let re = frame.re, let entry = pending.removeValue(forKey: re) else { return }
+        entry.continuation.resume(returning: frame)
     }
 
     private func describeError(_ frame: KTPPFrame) -> String {
@@ -962,12 +996,19 @@ public actor KeepTalkingPluginHost {
         catalogs[catalogID]?.sessionToken = token
         let store = catalogue
         Task { await store.setConnected(true, catalogID: catalogID) }
+        emit(.sessionOpened(catalogID: catalogID))
         return token
     }
 
     /// Clears the catalog's session ONLY when the ending connection still IS
     /// the current session — a superseded connection's teardown is a no-op.
     private func detachSession(catalogID: UUID, token: UUID) {
+        // Requests that went out on this connection can no longer be
+        // answered — fail them now rather than at their (minutes-long)
+        // timeout. Runs for superseded connections too.
+        for (frameID, entry) in pending where entry.session == token {
+            failPending(frameID, error: KTPPHostError.sessionUnavailable(catalogID))
+        }
         guard catalogs[catalogID]?.sessionToken == token else { return }
         catalogs[catalogID]?.writer = nil
         catalogs[catalogID]?.sessionToken = nil
@@ -1449,6 +1490,12 @@ public actor KeepTalkingPluginHost {
                 let kinds = try (response.payload ?? .null).decode(KTPPKindsResult.self)
                 await storeKinds(catalogID: catalogID, kinds: kinds)
                 return
+            }
+            // The session is already attached, so a call may have been routed
+            // here during registration: deliver its reply, never drop it.
+            if response.re != nil {
+                await resolvePending(response)
+                continue
             }
             skipped += 1
             guard skipped <= 32 else {

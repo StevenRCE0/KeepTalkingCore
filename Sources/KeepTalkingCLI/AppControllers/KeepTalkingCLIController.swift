@@ -8,15 +8,15 @@ final class KeepTalkingCLIController {
     var currentConfig: KeepTalkingConfig
     var client: KeepTalkingClient
     var activeContext: KeepTalkingContext
+    let agentSelection: KeepTalkingCLIAgentSelection
 
     init(cliConfig: CliConfig, localStore: any KeepTalkingLocalStore) {
         self.cliConfig = cliConfig
         self.localStore = localStore
         self.currentConfig = cliConfig.sdkConfig
+        self.agentSelection = KeepTalkingCLIAgentSelection(cliConfig: cliConfig)
         self.client = KeepTalkingClient(
             config: cliConfig.sdkConfig,
-            openAIAPIKey: cliConfig.openAIAPIKey,
-            openAIEndpoint: cliConfig.openAIEndpoint,
             localStore: localStore
         )
         self.activeContext = KeepTalkingContext(id: cliConfig.sdkConfig.contextID)
@@ -91,9 +91,12 @@ final class KeepTalkingCLIController {
         }
 
         printConnectedBanner()
-        if !client.aiEnabled {
+        // Profiles (tools, attachments, window, efforts) come from models.dev;
+        // refreshed at most daily, and /ai works without them.
+        Task { [catalog = agentSelection.catalog] in _ = try? await catalog.refresh() }
+        if agentSelection.configuration(for: activeContext.id ?? currentConfig.contextID) == nil {
             print(
-                "[ai] no immediate env/flag key configured; /ai can still work with node-local AI settings."
+                "[ai] not configured: provide OPENAI_API_KEY/--openai-api-key and --model/KT_MODEL (or /model <id> per context)."
             )
         }
 
@@ -101,6 +104,7 @@ final class KeepTalkingCLIController {
     }
 
     func bindCallbacks(to targetClient: KeepTalkingClient) {
+        installAgentConfigurationProvider(on: targetClient)
         installMCPHTTPAuthHandler(on: targetClient)
         installACPAuthHandler(on: targetClient)
 
@@ -152,7 +156,7 @@ final class KeepTalkingCLIController {
 
     func printConnectedBanner() {
         print(
-            "Connected. Commands: /new, /join <context-id>, /trust <node-id> [all|context|<context-id>], /lure <node-id> <pubkey>, /actions list, /actions grant <node-id> <action-id> [context|all], /mcp add http <name> <url> [--header KEY=VALUE ...] [description], /mcp add stdio <name> [--env KEY=VALUE ...] -- <command> [args...], /mcp list, /mcp remove <action-id>, /skill add directory <name> <path> [description], /skill list, /skill remove <action-id>, /p2p, /stats, /quit, /ai <message>."
+            "Connected. Commands: /new, /join <context-id>, /trust <node-id> [all|context|<context-id>], /lure <node-id> <pubkey>, /actions list, /actions grant <node-id> <action-id> [context|all], /mcp add http <name> <url> [--header KEY=VALUE ...] [description], /mcp add stdio <name> [--env KEY=VALUE ...] -- <command> [args...], /mcp list, /mcp remove <action-id>, /skill add directory <name> <path> [description], /skill list, /skill remove <action-id>, /p2p, /stats, /quit, /ai <message>, /model [act] [<id>|reset]."
         )
     }
 }

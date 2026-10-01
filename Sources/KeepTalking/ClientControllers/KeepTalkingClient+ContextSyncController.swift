@@ -16,10 +16,14 @@ extension KeepTalkingClient {
             guard self?.isConnectionLifecycleActive(generation) == true else {
                 return
             }
-            await self?.performContextSync(
-                with: node,
-                generation: generation
-            )
+            // Nothing on screen waits on a sync: its reads and page writes
+            // yield to the user's own.
+            await withDatabaseLane(.background) {
+                await self?.performContextSync(
+                    with: node,
+                    generation: generation
+                )
+            }
         }
     }
 

@@ -45,10 +45,8 @@ extension KeepTalkingClient {
         _ prompt: String,
         attachments: [KeepTalkingLocalAttachmentInput] = [],
         in contextID: UUID,
-        model: String = "gpt-5-codex",
-        actModel: String? = nil,
-        roleName: String = "ai",
-        reasoningEffort: AIReasoning.Effort? = nil
+        agent: KeepTalkingAgentConfiguration,
+        roleName: String = "ai"
     ) async -> UUID {
         let context = KeepTalkingContext(id: contextID)
         let preview = String(prompt.prefix(120))
@@ -82,12 +80,10 @@ extension KeepTalkingClient {
             _ = try await runAI(
                 prompt: prompt,
                 in: context,
-                model: model,
-                actModel: actModel,
+                agent: agent,
                 roleName: roleName,
                 preparedPromptAttachments: preparedAttachments,
-                agentTurnID: agentTurnID,
-                reasoningEffort: reasoningEffort
+                agentTurnID: agentTurnID
             )
         }
 
@@ -121,7 +117,7 @@ extension KeepTalkingClient {
                             contextID: contextID,
                             agentTurnID: agentTurnID,
                             roleName: roleName,
-                            model: model,
+                            model: agent.main.model,
                             message: errorMessage
                         )
                     }
@@ -187,15 +183,11 @@ extension KeepTalkingClient {
     ///     model input.
     ///   - contextID: Identifies the context the prompt message and every
     ///     message the run publishes belong to.
-    ///   - model: Model identifier driving the main agent loop. Also recorded
-    ///     on the `.autonomous` sender of the messages the run publishes.
-    ///   - actModel: Model for the ACT sub-agent that executes `kt_run_action`
-    ///     calls. When `nil`, the ACT agent reuses the main loop's active
-    ///     model.
+    ///   - agent: The models, reasoning effort and response languages this
+    ///     run uses. The main model is also recorded on the `.autonomous`
+    ///     sender of the messages the run publishes.
     ///   - roleName: Sender name recorded on the `.autonomous` messages the run
     ///     publishes.
-    ///   - reasoningEffort: Reasoning effort forwarded to the connector through
-    ///     the turn configuration. `nil` leaves the choice to the connector.
     ///   - sendPromptMessage: When `true`, the prompt and its attachments are
     ///     persisted and broadcast into the context before the run starts. Pass
     ///     `false` when the prompt message is already in the context — the call
@@ -227,8 +219,7 @@ extension KeepTalkingClient {
     ///   voice bridge) can speak the reply. Empty string if the run produced
     ///   no text.
     /// - Throws: `CancellationError` if the surrounding task is cancelled
-    ///   before or between phases, `KeepTalkingClientError.aiNotConfigured`
-    ///   when no AI connector is configured, or any error raised while reading
+    ///   before or between phases, or any error raised while reading
     ///   and storing `attachments`, publishing the prompt message, or running
     ///   the agent loop.
     @discardableResult
@@ -236,10 +227,8 @@ extension KeepTalkingClient {
         _ prompt: String,
         attachments: [KeepTalkingLocalAttachmentInput] = [],
         in contextID: UUID,
-        model: String = "gpt-5-codex",
-        actModel: String? = nil,
+        agent: KeepTalkingAgentConfiguration,
         roleName: String = "ai",
-        reasoningEffort: AIReasoning.Effort? = nil,
         sendPromptMessage: Bool = true,
         promptType: KeepTalkingContextMessage.MessageType = .message,
         agentTurnID: UUID = UUID(),
@@ -264,12 +253,10 @@ extension KeepTalkingClient {
         let result = try await runAI(
             prompt: prompt,
             in: context,
-            model: model,
-            actModel: actModel,
+            agent: agent,
             roleName: roleName,
             preparedPromptAttachments: preparedAttachments,
             agentTurnID: agentTurnID,
-            reasoningEffort: reasoningEffort,
             checkpoint: checkpoint,
             onCheckpoint: onCheckpoint
         )
@@ -279,22 +266,30 @@ extension KeepTalkingClient {
 
     // MARK: - Direct execution (CLI / internal)
 
+    /// Runs one main-agent turn directly. `agent` defaults to what the host's
+    /// agent configuration provider answers for this context.
     public func runAI(
         prompt: String,
         in context: KeepTalkingContext,
-        model: String = "gpt-5-codex",
-        actModel: String? = nil,
+        agent: KeepTalkingAgentConfiguration? = nil,
         roleName: String = "ai",
         currentPromptAttachments: [KeepTalkingLocalAttachmentInput] = []
     ) async throws -> String {
+        let resolvedAgent: KeepTalkingAgentConfiguration
+        if let agent {
+            resolvedAgent = agent
+        } else {
+            resolvedAgent = try await resolveAgentConfiguration(
+                .init(contextID: try context.requireID(), purpose: .conversation)
+            )
+        }
         let preparedPromptAttachments = try await prepareLocalAttachments(
             currentPromptAttachments
         )
         return try await runAI(
             prompt: prompt,
             in: context,
-            model: model,
-            actModel: actModel,
+            agent: resolvedAgent,
             roleName: roleName,
             preparedPromptAttachments: preparedPromptAttachments
         )
@@ -303,28 +298,24 @@ extension KeepTalkingClient {
     private func runAI(
         prompt: String,
         in context: KeepTalkingContext,
-        model: String,
-        actModel: String?,
+        agent: KeepTalkingAgentConfiguration,
         roleName: String,
         preparedPromptAttachments: [KeepTalkingPreparedAttachment],
         agentTurnID: UUID = UUID(),
-        reasoningEffort: AIReasoning.Effort? = nil,
         checkpoint: AIAgentCheckpoint? = nil,
         onCheckpoint: ((AIAgentCheckpoint) async throws -> Void)? = nil
     ) async throws -> String {
-        guard let aiConnector = try await resolveAIConnector() else {
-            throw KeepTalkingClientError.aiNotConfigured
-        }
+        let aiConnector = agent.main.connector
+        let model = agent.main.model
         // The ACT sub-agent may target a different provider/endpoint than the
-        // main agent; resolve its connector independently (falls back to the
-        // main connector when no ACT-specific provider is configured).
-        let actConnector = (try await resolveACTConnector()) ?? aiConnector
+        // main agent; `agent.act` is the main role when none was chosen.
+        let actConnector = agent.act.connector
 
         await ensureMCPToolChangeObserverInstalled()
 
         // What the main model can do, when the host knows. `nil` keeps every
         // default: tools on, attachments inlined, fixed message budgets.
-        let modelProfile = modelProfileResolver?(model)
+        let modelProfile = agent.main.profile
         let modelTakesTools = modelProfile?.supportsToolCalling ?? true
         let modelTakesAttachments = modelProfile?.supportsAttachments ?? true
         let modelTakesImages = modelProfile?.acceptsImages ?? true
@@ -462,7 +453,7 @@ extension KeepTalkingClient {
             contextTranscript: contextTranscript,
             currentDate: currentDate,
             platform: platform,
-            responseLanguages: responseLanguages,
+            responseLanguages: agent.responseLanguages,
             modelProfile: modelProfile
         )
         // Fit the decay-selected history into the model's window: whatever the
@@ -533,7 +524,7 @@ extension KeepTalkingClient {
 
         let actAgent = AIOrchestrator.ACTAgent(
             canHandle: { $0.name == Self.runActionToolFunctionName },
-            execute: { [self] toolCalls, activeModel in
+            execute: { [self] toolCalls, _ in
                 var executions: [AIOrchestrator.ToolExecution] = []
                 for toolCall in toolCalls {
                     let toolCallID =
@@ -549,7 +540,7 @@ extension KeepTalkingClient {
                                 runtimeCatalog: runtimeCatalog,
                                 context: persistedContext,
                                 actConnector: actConnector,
-                                actModel: actModel ?? activeModel,
+                                actModel: agent.act.model,
                                 publisher: toolHintPublisher,
                                 agentTurnID: agentTurnID,
                                 assistantPublisher: assistantPublisher,
@@ -566,7 +557,7 @@ extension KeepTalkingClient {
         // for a model that can't be steered) instead of letting the provider
         // reject the turn.
         let effectiveEffort =
-            modelProfile.map { $0.resolvedEffort(reasoningEffort) } ?? reasoningEffort
+            modelProfile.map { $0.resolvedEffort(agent.reasoningEffort) } ?? agent.reasoningEffort
         let turnConfiguration = AITurnConfiguration(
             reasoning: effectiveEffort.map { AIReasoning(effort: $0) }
         )
@@ -1234,36 +1225,24 @@ extension KeepTalkingClient {
         try await resolveActionRuntimeCatalog(in: context).catalog
     }
 
-    func resolveAIConnector() async throws -> (any AIConnector)? {
-        aiConnector
-    }
-
-    /// Connector the ACT (action/tool-calling) sub-agent should use. Falls back
-    /// to the main connector when no ACT-specific connector was injected, so the
-    /// ACT role only diverges when explicitly configured with its own provider.
-    func resolveACTConnector() async throws -> (any AIConnector)? {
-        actConnector ?? aiConnector
-    }
-
     /// Builds a bound `AIOrchestrator.ACTAgent` for use inside `KeepTalkingSkillPlanner`
     /// when the planner is launched from within an existing conversation context.
     /// The returned agent captures the context's runtime catalog and a no-op publisher
     /// (planner turns don't emit intermediate trace rows to the conversation).
     public func makeSkillPlannerACTAgent(
-        contextID: UUID,
-        actModel: String?
+        contextID: UUID
     ) async throws -> AIOrchestrator.ACTAgent {
-        let actResolved = try await resolveACTConnector()
-        let mainResolved = try await resolveAIConnector()
-        guard let connector = actResolved ?? mainResolved
-        else { throw KeepTalkingClientError.aiNotConfigured }
+        let agent = try await resolveAgentConfiguration(
+            .init(contextID: contextID, purpose: .skillPlanner)
+        )
+        let connector = agent.act.connector
         let db = localStore.database
         guard let context = try await KeepTalkingContext.find(contextID, on: db)
         else { throw KeepTalkingClientError.aiNotConfigured }
         let runtimeCatalog = try await resolveActionRuntimeCatalog(in: context)
         return AIOrchestrator.ACTAgent(
             canHandle: { $0.name == Self.runActionToolFunctionName },
-            execute: { [self] toolCalls, activeModel in
+            execute: { [self] toolCalls, _ in
                 var executions: [AIOrchestrator.ToolExecution] = []
                 for toolCall in toolCalls {
                     let toolCallID =
@@ -1277,7 +1256,7 @@ extension KeepTalkingClient {
                                 runtimeCatalog: runtimeCatalog,
                                 context: context,
                                 actConnector: connector,
-                                actModel: actModel ?? activeModel,
+                                actModel: agent.act.model,
                                 publisher: { @Sendable _, _, _ in },
                                 agentTurnID: nil
                             )

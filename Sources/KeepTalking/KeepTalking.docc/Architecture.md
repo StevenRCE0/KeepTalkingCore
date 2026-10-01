@@ -271,3 +271,20 @@ The consequence for the model is one vocabulary and one path. Handles name files
 - ``KeepTalkingBlobStore``
 - ``KeepTalkingBlobReferenceIndex``
 - ``KeepTalkingOneTimeBlobRef``
+
+## Database admission
+
+Every `Database` a store hands out is gated. An operation first takes a permit
+on a ``KeepTalkingDatabaseLane`` — `interactive`, `utility` or `background` —
+and only then runs; the lane comes from ``withDatabaseLane(_:_:)``
+or, absent that, from the task's priority. Each lane has a width, utility and
+background together can never take every connection, one writer runs at a
+time, and waiters are granted most-urgent-first. Sync, reconciliation and
+whole-context scans run on `background`; a page the user is looking at runs on
+`interactive` and never queues behind them.
+
+A transaction holds one permit for its whole block and hands its closure the
+raw connection. ``KeepTalkingDatabaseActivity`` reports granted operations
+only, so a host's suspension guard sees held locks, not queued work.
+``KeepTalkingKeyedCoalescer`` gives hosts single-flight, trailing refreshes on
+a lane without holding a permit while they wait.

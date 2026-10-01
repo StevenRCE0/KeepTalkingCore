@@ -16,7 +16,6 @@ struct SkillManagerShellTests {
     private func makeManager(timeout: TimeInterval = 15) -> SkillManager {
         SkillManager(
             nodeConfig: KeepTalkingConfig(contextID: UUID(), node: UUID()),
-            aiConnector: nil,
             scriptTimeoutSeconds: timeout
         )
     }

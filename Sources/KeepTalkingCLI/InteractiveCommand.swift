@@ -13,6 +13,8 @@ enum InteractiveCommand {
     case actionsList
     case actionsGrant(nodeID: String, actionID: String, scope: String)
     case ai(String)
+    /// `/model [act] [<id>|reset]`; `role` is nil for a bare `/model`.
+    case model(role: String?, argument: String)
     case mcpList
     case mcpRemove(String)
     case mcpAddHTTP(
@@ -64,6 +66,13 @@ enum InteractiveCommand {
             let node = parts.count > 1 ? String(parts[1]) : ""
             let publicKey = parts.count > 2 ? String(parts[2]) : ""
             return .lure(nodeID: node, publicKey: publicKey)
+        }
+        if text == "/model" || text.hasPrefix("/model ") {
+            let parts = text.split(whereSeparator: \.isWhitespace).dropFirst().map(String.init)
+            if parts.first == "act" {
+                return .model(role: "act", argument: parts.dropFirst().joined(separator: " "))
+            }
+            return .model(role: parts.isEmpty ? nil : "main", argument: parts.joined(separator: " "))
         }
         if text.hasPrefix("/ai") {
             let prefix = "/ai"

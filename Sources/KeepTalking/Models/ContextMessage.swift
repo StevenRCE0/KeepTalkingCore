@@ -46,6 +46,11 @@ public final class KeepTalkingContextMessage: Model, Hashable, @unchecked Sendab
     @OptionalField(key: "agent_turn_id")
     public var agentTurnID: UUID?
 
+    /// Previews of the links standing on their own lines, built by the sender
+    /// before the message was saved (see `KeepTalkingLinkPreview`).
+    @OptionalField(key: "link_previews")
+    public var linkPreviews: [KeepTalkingLinkPreview]?
+
     @Children(for: \.$parentMessage)
     public var attachments: [KeepTalkingContextAttachment]
 

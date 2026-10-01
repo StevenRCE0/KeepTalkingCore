@@ -52,13 +52,6 @@ For the keychain, the client's default is ``KeepTalkingInMemoryKeychainStore`` �
 public init(
     config: KeepTalkingConfig,
     kvService: (any KeepTalkingKVService)? = nil,
-    openAIAPIKey: String? = nil,
-    openAIEndpoint: String? = nil,
-    openAIBackend: OpenAIConnectorBackend = .openRouter,
-    openAIModel: String? = nil,
-    responseLanguages: [String] = [],
-    aiConnector: (any AIConnector)? = nil,
-    actConnector: (any AIConnector)? = nil,
     stdioTransportLauncher: (any MCPStdioTransportLaunching)? = DefaultMCPStdioTransportLauncher.current,
     skillScriptExecutor: (any SkillScriptExecuting)? = DefaultSkillScriptExecutor.current,
     primitiveRegistry: KeepTalkingPrimitiveRegistry? = nil,
@@ -68,7 +61,7 @@ public init(
 )
 ```
 
-The AI parameters are entirely optional. If you pass an `aiConnector`, it is used as-is. Otherwise the client looks for an explicit `openAIAPIKey`, then the `OPENAI_API_KEY` environment variable, and builds an OpenAI-compatible connector against `openAIBackend` — ``OpenAIConnectorBackend`` defaults to `.openRouter`. The endpoint falls back to `openAIEndpoint`, then `OPENAI_ENDPOINT`, then `OPENAI_BASE_URL`. With no key anywhere, no connector is created and `aiEnabled` reports `false`; messaging and transport still work. Note that `openAIModel` should match the active provider's naming — OpenRouter model IDs are provider-prefixed — since it is the default model for agent loops the SDK drives itself, such as skill execution triggered by an incoming action call.
+There are no AI parameters: a client carries no connector and no model. Each AI run takes a ``KeepTalkingAgentConfiguration`` — pass one with a send, and install ``KeepTalkingClient/setAgentConfigurationProvider(_:)`` for the work the node serves on its own (a peer's call into a skill, a plugin ACT turn). Without a provider, `aiEnabled` reports `false` and such work fails with `aiNotConfigured`; messaging and transport still work. See <doc:AIAgents>.
 
 ### Connecting
 

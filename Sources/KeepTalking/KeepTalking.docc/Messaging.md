@@ -157,51 +157,46 @@ whole-context envelope at it.
 
 ### Reading history
 
-History is read through one primitive,
-``KeepTalkingClient/loadMessagePage(in:cursor:direction:limit:lowerBound:upperBound:)``.
-Its semantics are deliberately direction-agnostic: callers ask for messages relative
-to a timestamp cursor with an explicit walk direction, and assemble the pages into
-whatever orientation their UI wants.
+History is read by key. A ``KeepTalkingMessageKey`` is a row's `(timestamp, id)`
+position exactly as the store holds it, and a ``KeepTalkingMessageRange`` is the rows
+between two cuts — everything, or one thread's — so every page, count and offset is
+exact and runs off the `(context, timestamp, id)` index. Nothing reads a context
+whole.
 
 ```swift
-public func loadMessagePage(
+public static func messagePage(
     in contextID: UUID,
-    cursor: Date?,
+    range: KeepTalkingMessageRange = .all,
     direction: KeepTalkingMessagePageDirection,
     limit: Int,
-    lowerBound: Date? = nil,
-    upperBound: Date? = nil
-) async throws -> [KeepTalkingContextMessage]
+    attachments: KeepTalkingMessagePageAttachments = .rows,
+    on database: any Database
+) async throws -> KeepTalkingMessagePage
 ```
 
-The cursor is a `Date`, not a message ID, and it is exclusive: `.backward` returns
-messages strictly older than it, `.forward` messages strictly newer. Passing `nil`
-reads from the extreme of the chosen direction — the newest messages for
-`.backward`, the oldest for `.forward`. `lowerBound` and `upperBound` are inclusive
-clamps applied independently of the cursor, which is how you restrict a page to a
-known time window such as a thread's range. `limit` caps the row count.
-
-**The ordering contract:** results come back in the direction's natural order, not
-in display order. A `.backward` page is sorted descending, so its first element is
-the message just before the cursor and its last element is the oldest row in the
-page. A `.forward` page is sorted ascending. The caller re-sorts for display and
-takes the next cursor from the *last* element of the page it just received.
+A page is taken from the newest edge of the range for `.backward` or its oldest for
+`.forward`, and comes back oldest first with the keys the store holds for its rows
+(``KeepTalkingMessagePage/keysByID``) and, when asked, the attachments and blob
+records that ride along. To page on, cut the range at the page's edge:
 
 ```swift
-var cursor: Date?
-let page = try await client.loadMessagePage(
-    in: contextID,
-    cursor: cursor,
-    direction: .backward,
-    limit: 50
+var range = KeepTalkingMessageRange.all
+let page = try await KeepTalkingClient.messagePage(
+    in: contextID, range: range, direction: .backward, limit: 50, on: database
 )
-let displayOrder = Array(page.reversed())   // oldest → newest
-cursor = page.last?.timestamp               // feed straight back in
+if page.hasMore, let first = page.firstKey {
+    range = range.before(first)                // the next older page
+}
 ```
 
-This single primitive serves both orientations in practice: a chat list docked at
-the bottom starts at the tail with a `nil` cursor and walks `.backward`, while a
-view that reads a conversation top-down starts at the head and walks `.forward`.
+A chat list docked at the bottom starts from `.all` and walks `.backward`; a thread
+view starts from ``KeepTalkingClient/threadRange(_:on:)`` and walks `.forward`. Rows
+that change reach an open window by id through
+``KeepTalkingClient/messages(withIDs:in:attachments:on:)``; counts, offsets and thread
+geometry come from ``KeepTalkingClient/messageCount(in:range:on:)``,
+``KeepTalkingClient/messageKey(atOffset:in:range:on:)`` and
+``KeepTalkingClient/threadLayout(in:on:)``.
+
 
 ### Message types
 
@@ -413,7 +408,17 @@ alias when the scope has none.
 
 ### Reading history
 
-- ``KeepTalkingClient/loadMessagePage(in:cursor:direction:limit:lowerBound:upperBound:)``
+- ``KeepTalkingClient/messagePage(in:range:direction:limit:attachments:on:)``
+- ``KeepTalkingClient/messages(withIDs:in:attachments:on:)``
+- ``KeepTalkingClient/messageKeys(for:in:on:)``
+- ``KeepTalkingClient/messageCount(in:range:on:)``
+- ``KeepTalkingClient/messageKey(atOffset:in:range:on:)``
+- ``KeepTalkingClient/threadBoundaries(in:on:)``
+- ``KeepTalkingClient/threadLayout(in:on:)``
+- ``KeepTalkingClient/owningThread(forKey:in:on:)``
+- ``KeepTalkingMessageKey``
+- ``KeepTalkingMessageRange``
+- ``KeepTalkingMessagePage``
 - ``KeepTalkingMessagePageDirection``
 
 ### Message shape

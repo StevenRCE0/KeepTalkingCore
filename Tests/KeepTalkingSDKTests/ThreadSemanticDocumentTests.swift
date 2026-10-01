@@ -114,3 +114,75 @@ struct ThreadSemanticDocumentTests {
         #expect(text.contains("tags: finance, pdf"))
     }
 }
+
+extension ThreadSemanticDocumentTests {
+    @Test("a thread ending on a tied timestamp stops at its end row, by id")
+    func documentStopsAtTiedBoundary() async throws {
+        let store = try await KeepTalkingInMemoryStore.make()
+        let context = KeepTalkingContext(id: UUID())
+        try await context.save(on: store.database)
+        // The end row and the row after it share a timestamp; only the id
+        // separates them, and the id order is the key order.
+        let first = KeepTalkingContextMessage(
+            id: UUID(uuidString: "20000000-0000-0000-0000-000000000011")!,
+            context: context, sender: .autonomous(name: "a"),
+            content: "inside one", timestamp: Date(timeIntervalSince1970: 1)
+        )
+        let end = KeepTalkingContextMessage(
+            id: UUID(uuidString: "20000000-0000-0000-0000-000000000012")!,
+            context: context, sender: .autonomous(name: "a"),
+            content: "inside two", timestamp: Date(timeIntervalSince1970: 2)
+        )
+        let after = KeepTalkingContextMessage(
+            id: UUID(uuidString: "20000000-0000-0000-0000-000000000013")!,
+            context: context, sender: .autonomous(name: "a"),
+            content: "outside", timestamp: Date(timeIntervalSince1970: 2)
+        )
+        for message in [first, end, after] { try await message.save(on: store.database) }
+        let thread = KeepTalkingThread(context: context, startMessage: first, endMessage: end, state: .stored)
+        try await thread.save(on: store.database)
+
+        let text = try await KeepTalkingClient.threadDocumentText(for: thread, on: store.database)
+
+        #expect(text.contains("inside one"))
+        #expect(text.contains("inside two"))
+        #expect(!text.contains("outside"))
+        await store.shutdown()
+    }
+
+    @Test("a thread past the budget keeps its newest rows across pages")
+    func documentKeepsNewestAcrossPages() async throws {
+        let store = try await KeepTalkingInMemoryStore.make()
+        let context = KeepTalkingContext(id: UUID())
+        try await context.save(on: store.database)
+        // More rows than a document page, each about 40 estimated tokens, so
+        // the 400-token budget is met deep into the second page from the end.
+        let count = KeepTalkingClient.documentPageSize + 40
+        var messages: [KeepTalkingContextMessage] = []
+        for index in 0..<count {
+            let message = KeepTalkingContextMessage(
+                id: UUID(), context: context, sender: .autonomous(name: "a"),
+                content: "row \(index) " + String(repeating: "lorem ipsum ", count: 12),
+                timestamp: Date(timeIntervalSince1970: Double(index))
+            )
+            try await message.save(on: store.database)
+            messages.append(message)
+        }
+        let thread = KeepTalkingThread(
+            context: context, startMessage: messages[0], endMessage: nil, state: .contextMain)
+        try await thread.save(on: store.database)
+
+        let text = try await KeepTalkingClient.threadDocumentText(for: thread, on: store.database)
+
+        #expect(text.contains("row \(count - 1) "))
+        #expect(!text.contains("row 0 "))
+        // Oldest kept row comes first: order is restored after filling from the end.
+        let kept = text.components(separatedBy: "\n").compactMap { line -> Int? in
+            guard line.hasPrefix("row ") else { return nil }
+            return Int(line.split(separator: " ")[1])
+        }
+        #expect(kept == kept.sorted())
+        #expect(kept.count > 1)
+        await store.shutdown()
+    }
+}

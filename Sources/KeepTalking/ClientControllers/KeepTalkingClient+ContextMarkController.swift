@@ -118,7 +118,7 @@ extension KeepTalkingClient {
             context.consumedMarks = (context.consumedMarks ?? []) + newlyConsumed
             try await context.save(on: db)
         }
-        signals.threadChanges.send(())
+        signals.threadChanges.send(contextID)
 
         // Marks mutate persisted thread boundaries and metadata. Semantic
         // documents are a derived cache, so only enqueue reconciliation after

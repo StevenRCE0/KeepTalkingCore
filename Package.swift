@@ -23,6 +23,10 @@ let package = Package(
             url: "https://github.com/vapor/fluent-sqlite-driver.git",
             from: "4.6.0"
         ),
+        // Already transitive through the driver; declared so the SDK can name
+        // `SQLDatabase` (the wrapper must conform, see DatabaseActivity.swift)
+        // and run raw SQL for indexes and pragmas.
+        .package(url: "https://github.com/vapor/sql-kit.git", from: "3.34.0"),
         .package(
             url: "https://github.com/modelcontextprotocol/swift-sdk.git",
             from: "0.12.0"
@@ -53,6 +57,7 @@ let package = Package(
                     name: "FluentSQLiteDriver",
                     package: "fluent-sqlite-driver"
                 ),
+                .product(name: "SQLKit", package: "sql-kit"),
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "AIProxy", package: "AIProxySwift-MultiPlatform"),
                 .product(name: "KeepTalkingSFUClient", package: "KeepTalkingSFU"),

@@ -1,4 +1,5 @@
 import Foundation
+
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -243,16 +244,11 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
 
     public func sendPushWake(
         handle: KeepTalkingPushWakeHandle,
-        contextEnvelope: KeepTalkingPushWakeContextEnvelope? = nil,
-        actionEnvelope: KeepTalkingAsymmetricCipherEnvelope? = nil
+        wake: KeepTalkingPushWakeSendRequest.Wake
     ) async throws -> KeepTalkingPushWakeSendResponse {
         try await postJSON(
             path: "/api/apn/send",
-            payload: KeepTalkingPushWakeSendRequest(
-                handle: handle,
-                contextEnvelope: contextEnvelope,
-                actionEnvelope: actionEnvelope
-            )
+            payload: KeepTalkingPushWakeSendRequest(handle: handle, wake: wake)
         )
     }
 

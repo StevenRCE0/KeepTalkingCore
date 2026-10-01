@@ -54,6 +54,25 @@ struct PluginSocketE2ETests {
 
     // MARK: Harness
 
+    /// The user site-packages of the REAL home. The harness points `HOME` at a
+    /// scratch directory so plugin state stays isolated, which also hides a
+    /// user-installed `cryptography` from the system python — so the plugin
+    /// is handed the real location explicitly.
+    static let realUserSitePackages: String? = {
+        let probe = Process()
+        let pipe = Pipe()
+        probe.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        probe.arguments = ["python3", "-c", "import site; print(site.getusersitepackages())"]
+        probe.standardOutput = pipe
+        probe.standardError = FileHandle.nullDevice
+        guard (try? probe.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        probe.waitUntilExit()
+        let path = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
+    }()
+
     /// Collects live elucidation callbacks across concurrency domains.
     final class NoteCollector: @unchecked Sendable {
         private let lock = NSLock()
@@ -113,7 +132,14 @@ struct PluginSocketE2ETests {
         environment["HOME"] = home.path
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        if let userSite = realUserSitePackages {
+            environment["PYTHONPATH"] = [userSite, environment["PYTHONPATH"]]
+                .compactMap { $0 }.joined(separator: ":")
+        }
         plugin.environment = environment
+        // As the companion does: plugin_host.py exits on stdin EOF, so hand it
+        // a pipe we own instead of whatever stdin the test runner has.
+        plugin.standardInput = Pipe()
         // Keep output visible in the test log when something goes sideways.
         plugin.standardOutput = FileHandle.standardOutput
         plugin.standardError = FileHandle.standardOutput
@@ -379,6 +405,122 @@ struct PluginSocketE2ETests {
             Issue.record("unexpected ui-probe content shape")
         }
         #expect(uiRequests.notes == ["act-probe/ActProbe"])
+    }
+    /// A probe plugin that records `plugin.ui.reveal` by writing a marker file
+    /// under its (scratch) HOME, optionally claiming the companion role and
+    /// optionally installing a reveal handler at all.
+    private static func revealProbeModule(role: String?, handles: Bool) throws -> URL {
+        let module = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kt-reveal-probe-\(UUID().uuidString.prefix(8)).py")
+        let roleArgument = role.map { ", role=\($0.debugDescription)" } ?? ""
+        let handlerLine =
+            handles
+            ? "plugin.on_reveal = lambda: (Path.home() / 'revealed').write_text('1')"
+            : "pass"
+        try """
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, \(companionRuntimeDir.path.debugDescription))
+        from keeptalking_plugin import Plugin
+
+
+        def make_plugin():
+            plugin = Plugin(name="RevealProbe", vendor="test", version="0.0.1"\(roleArgument))
+
+            @plugin.kind("reveal-probe", description="exists so the catalog registers a kind")
+            async def noop(args, ctx):
+                return "noop"
+
+            \(handlerLine)
+            return plugin
+
+
+        if __name__ == "__main__":
+            make_plugin().run()
+        """.data(using: .utf8)!.write(to: module)
+        return module
+    }
+
+    /// Runs `revealCompanion()` against one probe plugin; returns the host's
+    /// verdict and whether the plugin actually saw the reveal.
+    private static func revealOutcome(role: String?, handles: Bool) async throws
+        -> (acknowledged: Bool, pluginRevealed: Bool)
+    {
+        let module = try revealProbeModule(role: role, handles: handles)
+        defer { try? FileManager.default.removeItem(at: module) }
+        let harness = try await startHarness(moduleFile: module)
+        defer { Task { await harness.tearDown() } }
+        let catalogID = try await harness.host.waitForKind("reveal-probe", timeout: 30)
+        try await waitForCatalogue(harness.host, catalogID: catalogID)
+        let acknowledged = await harness.host.revealCompanion(timeout: 5)
+        let marker = harness.scratch.appendingPathComponent("home/revealed")
+        return (acknowledged, FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    @Test(
+        "plugin.ui.reveal: reaches a companion's handler; declined or ignored otherwise",
+        .enabled(if: PluginSocketE2ETests.environmentReady))
+    func revealCompanionRoundTrip() async throws {
+        let companion = try await Self.revealOutcome(role: "companion", handles: true)
+        #expect(companion.acknowledged)
+        #expect(companion.pluginRevealed)
+
+        // A companion with no UI attached says `unhandled`: the host reports
+        // false so the app can launch the companion instead.
+        let headless = try await Self.revealOutcome(role: "companion", handles: false)
+        #expect(!headless.acknowledged)
+        #expect(!headless.pluginRevealed)
+
+        // An ordinary plugin is never a target, even with a handler installed.
+        let plain = try await Self.revealOutcome(role: nil, handles: true)
+        #expect(!plain.acknowledged)
+        #expect(!plain.pluginRevealed)
+    }
+
+    @Test(
+        "a session that drops mid-call fails the call at once, not at its timeout",
+        .enabled(if: PluginSocketE2ETests.environmentReady))
+    func droppedSessionFailsInFlightCall() async throws {
+        let module = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kt-hang-probe-\(UUID().uuidString.prefix(8)).py")
+        try """
+        import asyncio
+        import sys
+        sys.path.insert(0, \(Self.companionRuntimeDir.path.debugDescription))
+        from keeptalking_plugin import Plugin
+
+
+        def make_plugin():
+            plugin = Plugin(name="HangProbe", vendor="test", version="0.0.1")
+
+            @plugin.kind("hang-probe", description="never answers")
+            async def hang(args, ctx):
+                await asyncio.sleep(3600)
+
+            return plugin
+        """.data(using: .utf8)!.write(to: module)
+        defer { try? FileManager.default.removeItem(at: module) }
+
+        let harness = try await Self.startHarness(moduleFile: module)
+        defer { Task { await harness.tearDown() } }
+        let host = harness.host
+        let catalogID = try await host.waitForKind("hang-probe", timeout: 30)
+
+        let started = Date()
+        let call = Task {
+            try await host.callKind(
+                catalogID: catalogID, kindName: "hang-probe", arguments: [:],
+                instanceID: UUID.v7(), instanceScope: nil, timeout: 120)
+        }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        harness.plugin.terminate()
+
+        let error = await #expect(throws: KTPPHostError.self) { try await call.value }
+        guard case .sessionUnavailable? = error else {
+            Issue.record("expected sessionUnavailable, got \(String(describing: error))")
+            return
+        }
+        #expect(Date().timeIntervalSince(started) < 10)
     }
 }
 

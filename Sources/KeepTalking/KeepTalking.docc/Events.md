@@ -318,9 +318,11 @@ diagnostics.
 
 ## Threads, mappings, and notes
 
-**Invalidation pings** carry nothing at all. ``KeepTalkingClientSignals/threadChanges`` and
-``KeepTalkingClientSignals/mappingChanges`` say "that table moved" and expect the host to
-re-read; the SDK does not diff Fluent models across a concurrency domain.
+**Invalidation pings** carry little. ``KeepTalkingClientSignals/mappingChanges`` says "that
+table moved" and expects the host to re-read; ``KeepTalkingClientSignals/threadChanges``
+names the context whose threads changed, so a host re-reads that context's thread rows
+and boundaries and nothing else. The SDK does not diff Fluent models across a
+concurrency domain.
 
 **Scoped invalidations** narrow that to one context: ``KeepTalkingClientSignals/sideNoteChanges``
 and ``KeepTalkingClientSignals/semanticIndexReconciliations`` carry a context `UUID` — enough

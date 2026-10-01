@@ -65,6 +65,18 @@ extension KeepTalkingClient {
         // re-thread from their own turning points once their next sync lands.
         try await applyLocalTurningPointMarkThreading(in: contextID)
         publishMessageDeletions(fresh, in: contextID)
+
+        // Only `.message` rows ever raised a context wake.
+        let notified = Set(messages.filter { $0.type == .message }.compactMap(\.id))
+        let revoked = fresh.map(\.messageID).filter(notified.contains)
+        if !revoked.isEmpty {
+            Task { [weak self] in
+                await self?.sendContextWakeRevocationsIfNeeded(
+                    in: contextID,
+                    messageIDs: revoked
+                )
+            }
+        }
         return fresh.map(\.messageID)
     }
 
@@ -138,7 +150,7 @@ extension KeepTalkingClient {
         )
 
         if outcome.threadsChanged {
-            signals.threadChanges.send(())
+            signals.threadChanges.send(contextID)
         }
         if !outcome.removedMessageIDs.isEmpty {
             // Thread text changed under the semantic documents, and emptied

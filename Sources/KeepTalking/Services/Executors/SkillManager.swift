@@ -63,6 +63,8 @@ public actor SkillManager {
     static let fileReadMaxCharacters = 30_000
     static let scriptOutputMaxCharacters = 18_000
 
+    /// Set only for the standalone planner manager (`init(aiConnector:)`);
+    /// node runtimes pass a connector per `callAction`.
     public nonisolated let aiConnector: (any AIConnector)?
     let scriptExecutor: (any SkillScriptExecuting)?
     let scriptTimeoutSeconds: TimeInterval
@@ -70,15 +72,15 @@ public actor SkillManager {
     private(set) public var onLog: ((String) -> Void)?
     var skillBundlesByActionID: [UUID: KeepTalkingSkillBundle] = [:]
 
-    /// Creates a skill manager for a node runtime.
+    /// Creates a skill manager for a node runtime. It holds no connector:
+    /// each `callAction` brings the one its caller resolved for that run.
     public init(
         nodeConfig _: KeepTalkingConfig,
-        aiConnector: (any AIConnector)?,
         scriptExecutor: (any SkillScriptExecuting)? =
             DefaultSkillScriptExecutor.current,
         scriptTimeoutSeconds: TimeInterval = 20
     ) {
-        self.aiConnector = aiConnector
+        self.aiConnector = nil
         self.scriptExecutor = scriptExecutor
         self.scriptTimeoutSeconds = scriptTimeoutSeconds
     }
@@ -137,16 +139,14 @@ public actor SkillManager {
     #if os(macOS)
     /// Executes a skill action by planning tool usage with the configured AI connector.
     ///
-    /// `model` should match the active provider's model identifier (e.g.
-    /// `openai/gpt-5-codex` for OpenRouter, plain `gpt-5-codex` for direct
-    /// OpenAI). Defaults to `gpt-5-codex` for backward compatibility but
-    /// callers routing through the SDK's `KeepTalkingClient` thread the
-    /// configured model through automatically.
+    /// `connector` and `model` are the ACT role the caller resolved for this
+    /// run (the client asks its agent configuration provider per call).
     public func callAction(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
         sandboxPolicy: KTSandboxPolicy? = nil,
-        model: String = "gpt-5-codex",
+        connector aiConnector: any AIConnector,
+        model: String,
         attachmentsDir: URL? = nil,
         manifest: KTResourceManifest? = nil,
         workspaceDirectory: URL? = nil
@@ -156,9 +156,6 @@ public actor SkillManager {
         }
         guard case .skill(let skillBundle) = action.payload else {
             throw SkillManagerError.invalidAction
-        }
-        guard let aiConnector else {
-            throw SkillManagerError.missingAIConnector
         }
 
         try await registerIfNeeded(action)

@@ -47,18 +47,37 @@ public struct KeepTalkingActionWakeRoute: Codable, Sendable, Hashable {
 }
 
 public struct KeepTalkingPushWakeMessagePreview: Codable, Sendable, Hashable {
+    /// The `userInfo` key a delivered notification keeps its message id
+    /// under, so a revocation can find it.
+    public static let messageIDUserInfoKey = "kt_message_id"
+
     public var sender: KeepTalkingContextMessage.Sender
     public var content: String
     public var isTruncated: Bool
+    /// Absent in previews from nodes that predate revocation.
+    public var messageID: UUID?
 
     public init(
         sender: KeepTalkingContextMessage.Sender,
         content: String,
-        isTruncated: Bool
+        isTruncated: Bool,
+        messageID: UUID? = nil
     ) {
         self.sender = sender
         self.content = content
         self.isTruncated = isTruncated
+        self.messageID = messageID
+    }
+}
+
+/// Takes back the notifications a context wake raised for deleted messages.
+/// Sealed with the group secret, like a preview, so the relay never sees
+/// which messages went.
+public struct KeepTalkingPushWakeRevocation: Codable, Sendable, Hashable {
+    public var messageIDs: [UUID]
+
+    public init(messageIDs: [UUID]) {
+        self.messageIDs = messageIDs
     }
 }
 
@@ -77,13 +96,25 @@ public struct KeepTalkingPushWakeContextEnvelope: Codable, Sendable, Hashable {
     public static func decode(
         from userInfo: [AnyHashable: Any]
     ) -> KeepTalkingPushWakeContextEnvelope? {
-        if let json = userInfo["kt_context_wake"] as? String,
+        decode(userInfo["kt_context_wake"])
+    }
+
+    /// The envelope of a silent revocation push, whose ciphertext seals a
+    /// ``KeepTalkingPushWakeRevocation`` rather than a preview.
+    public static func decodeRevocation(
+        from userInfo: [AnyHashable: Any]
+    ) -> KeepTalkingPushWakeContextEnvelope? {
+        decode(userInfo["kt_context_revoke"])
+    }
+
+    private static func decode(_ value: Any?) -> KeepTalkingPushWakeContextEnvelope? {
+        if let json = value as? String,
             let data = json.data(using: .utf8)
         {
             return try? JSONDecoder().decode(Self.self, from: data)
         }
 
-        if let object = userInfo["kt_context_wake"],
+        if let object = value,
             JSONSerialization.isValidJSONObject(object),
             let data = try? JSONSerialization.data(withJSONObject: object)
         {
@@ -178,18 +209,21 @@ public struct KeepTalkingPushWakeMintResponse: Codable, Sendable {
 }
 
 public struct KeepTalkingPushWakeSendRequest: Codable, Sendable {
-    public var handle: KeepTalkingPushWakeHandle
-    public var contextEnvelope: KeepTalkingPushWakeContextEnvelope?
-    public var actionEnvelope: KeepTalkingAsymmetricCipherEnvelope?
+    /// What the push carries. `.context` and `.revocation` ride a
+    /// `.contextMessage` handle, `.action` an `.actionAuthorisation` one.
+    public enum Wake: Codable, Sendable {
+        case context(envelope: KeepTalkingPushWakeContextEnvelope)
+        case action(envelope: KeepTalkingAsymmetricCipherEnvelope)
+        /// Sent as a silent background push.
+        case revocation(envelope: KeepTalkingPushWakeContextEnvelope)
+    }
 
-    public init(
-        handle: KeepTalkingPushWakeHandle,
-        contextEnvelope: KeepTalkingPushWakeContextEnvelope? = nil,
-        actionEnvelope: KeepTalkingAsymmetricCipherEnvelope? = nil
-    ) {
+    public var handle: KeepTalkingPushWakeHandle
+    public var wake: Wake
+
+    public init(handle: KeepTalkingPushWakeHandle, wake: Wake) {
         self.handle = handle
-        self.contextEnvelope = contextEnvelope
-        self.actionEnvelope = actionEnvelope
+        self.wake = wake
     }
 }
 

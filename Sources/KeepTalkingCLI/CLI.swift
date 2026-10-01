@@ -3,7 +3,7 @@ import KeepTalkingSDK
 
 let keepTalkingUsage = """
     Usage:
-      KeepTalking [--sfu host:port] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--openai-endpoint <url>] [--openai-api-key <key>] [--mcp <list|remove|add-http|add-stdio> ...] [--skill <list|remove|add-directory> ...] [--p2p-timeout <seconds>]
+      KeepTalking [--sfu host:port] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--openai-endpoint <url>] [--openai-api-key <key>] [--model <id>] [--act-model <id>] [--mcp <list|remove|add-http|add-stdio> ...] [--skill <list|remove|add-directory> ...] [--p2p-timeout <seconds>]
 
     Environment fallbacks:
       KT_SFU        (optional host:port, default port 9701)
@@ -13,6 +13,8 @@ let keepTalkingUsage = """
       KT_P2P_TIMEOUT    (default: 5)
       OPENAI_API_KEY    (optional, enables /ai)
       KT_OPENAI_ENDPOINT / OPENAI_ENDPOINT / OPENAI_BASE_URL (optional, OpenAI-compatible API endpoint)
+      KT_MODEL          (node-wide main agent model, required for /ai)
+      KT_ACT_MODEL      (node-wide ACT agent model, default: the main model)
 
     Examples:
       KeepTalking --sfu 127.0.0.1:9701 --context 11111111-2222-3333-4444-555555555555
@@ -45,6 +47,9 @@ let keepTalkingUsage = """
       /skill remove <action-id>
                    remove a local skill action
       /ai <prompt> run AI tool planning and execution in active context
+      /model [act] [<id>|reset]
+                   show the active context's models, or override one for this
+                   context (session only); reset returns to the node-wide model
       /stats       print local send/receive counters
       /p2p         manually start a p2p upgrade trial
       /quit        exit
@@ -134,6 +139,11 @@ struct CliConfig {
     let singleMessage: String?
     let openAIAPIKey: String?
     let openAIEndpoint: String?
+    /// Node-wide main agent model (`--model` / `KT_MODEL`).
+    let model: String?
+    /// Node-wide ACT agent model (`--act-model` / `KT_ACT_MODEL`); `nil`
+    /// means the main model.
+    let actModel: String?
     let mcpCommand: MCPManagementCommand?
     let skillCommand: SkillManagementCommand?
     /// When true, run ICE connectivity probe then exit instead of entering
@@ -160,6 +170,8 @@ struct CliConfig {
             env["KT_OPENAI_ENDPOINT"]
             ?? env["OPENAI_ENDPOINT"]
             ?? env["OPENAI_BASE_URL"]
+        var model = env["KT_MODEL"]
+        var actModel = env["KT_ACT_MODEL"]
         var singleMessage: String?
         var mcpCommand: MCPManagementCommand?
         var skillCommand: SkillManagementCommand?
@@ -211,6 +223,14 @@ struct CliConfig {
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
                     openAIEndpointRaw = args[index]
+                case "--model":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue(arg) }
+                    model = args[index]
+                case "--act-model":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue(arg) }
+                    actModel = args[index]
                 case "--mcp":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
@@ -374,6 +394,8 @@ struct CliConfig {
                 ? normalizedOpenAIAPIKey
                 : nil,
             openAIEndpoint: openAIEndpoint,
+            model: model?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            actModel: actModel?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
             mcpCommand: mcpCommand,
             skillCommand: skillCommand,
             diagnose: diagnose,
@@ -519,4 +541,8 @@ struct CliConfig {
 
         return raw
     }
+}
+
+extension String {
+    fileprivate var nilIfEmpty: String? { isEmpty ? nil : self }
 }

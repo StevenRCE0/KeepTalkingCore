@@ -2,6 +2,10 @@ import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
+    /// Ids per revocation push; 48 seal to roughly 2.8 KB of payload, well
+    /// under APNs' 4 KB cap.
+    private static let maxPushWakeRevocationMessageIDs = 48
+
     func sendContextWakeNotificationsIfNeeded(
         for context: KeepTalkingContext,
         messagePreview: KeepTalkingPushWakeMessagePreview?
@@ -11,12 +15,92 @@ extension KeepTalkingClient {
             let messagePreview,
             let envelope = try? await encryptedContextWakeEnvelope(
                 contextID: try context.requireID(),
-                preview: messagePreview
+                sealing: messagePreview
             )
         else {
             return
         }
 
+        for (nodeID, handle) in await contextWakeHandles(for: context) {
+            do {
+                _ = try await kvService.sendPushWake(
+                    handle: handle,
+                    wake: .context(envelope: envelope)
+                )
+            } catch {
+                onLog?(
+                    "[push-wake][context] failed node=\(nodeID.uuidString.lowercased()) error=\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    /// Takes back, on peers' devices, the notifications `messageIDs` raised.
+    ///
+    /// Only the deleting node sends it — nodes merging the tombstones don't —
+    /// and it goes to every context wake handle, since this node can't know
+    /// which devices a message's sender woke. The push is silent; the app
+    /// removes whichever delivered notification names one of the ids. Best
+    /// effort: a device that misses it clears the notification once the
+    /// tombstones sync in.
+    func sendContextWakeRevocationsIfNeeded(
+        in contextID: UUID,
+        messageIDs: [UUID]
+    ) async {
+        guard
+            let kvService = kvService as? KeepTalkingPassKVService,
+            !messageIDs.isEmpty,
+            let context = try? await KeepTalkingContext.find(
+                contextID,
+                on: localStore.database
+            )
+        else {
+            return
+        }
+        let handles = await contextWakeHandles(for: context)
+        guard !handles.isEmpty else { return }
+
+        for start in stride(
+            from: 0,
+            to: messageIDs.count,
+            by: Self.maxPushWakeRevocationMessageIDs
+        ) {
+            let batch = Array(
+                messageIDs[
+                    start..<min(
+                        start + Self.maxPushWakeRevocationMessageIDs,
+                        messageIDs.count
+                    )
+                ]
+            )
+            guard
+                let envelope = try? await encryptedContextWakeEnvelope(
+                    contextID: contextID,
+                    sealing: KeepTalkingPushWakeRevocation(messageIDs: batch)
+                )
+            else {
+                return
+            }
+            for (nodeID, handle) in handles {
+                do {
+                    _ = try await kvService.sendPushWake(
+                        handle: handle,
+                        wake: .revocation(envelope: envelope)
+                    )
+                } catch {
+                    onLog?(
+                        "[push-wake][revoke] failed node=\(nodeID.uuidString.lowercased()) error=\(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+    }
+
+    /// Every other node's wake handle for `context`, over relations that
+    /// admit it.
+    private func contextWakeHandles(
+        for context: KeepTalkingContext
+    ) async -> [(nodeID: UUID, handle: KeepTalkingPushWakeHandle)] {
         let relations =
             (try? await KeepTalkingNodeRelation.query(
                 on: localStore.database
@@ -24,6 +108,7 @@ extension KeepTalkingClient {
             .filter(\.$from.$id, .equal, config.node)
             .all()) ?? []
 
+        var targets: [(nodeID: UUID, handle: KeepTalkingPushWakeHandle)] = []
         for relation in relations where relation.relationship.allows(context: context) {
             let nodeID = relation.$to.id
             guard nodeID != config.node else {
@@ -35,29 +120,19 @@ extension KeepTalkingClient {
                 )
                 .filter(\.$id, .equal, nodeID)
                 .first(),
-                let handles = remoteNode.contextWakeHandles?
-                    .filter({
-                        $0.purpose == .contextMessage
-                            && $0.contextID == context.id
-                    }),
-                !handles.isEmpty
+                let handles = remoteNode.contextWakeHandles
             else {
                 continue
             }
-
-            for handle in handles {
-                do {
-                    _ = try await kvService.sendPushWake(
-                        handle: handle,
-                        contextEnvelope: envelope
-                    )
-                } catch {
-                    onLog?(
-                        "[push-wake][context] failed node=\(nodeID.uuidString.lowercased()) error=\(error.localizedDescription)"
-                    )
+            targets +=
+                handles
+                .filter {
+                    $0.purpose == .contextMessage
+                        && $0.contextID == context.id
                 }
-            }
+                .map { (nodeID, $0) }
         }
+        return targets
     }
 
     func sendActionWakeIfNeeded(
@@ -123,7 +198,7 @@ extension KeepTalkingClient {
             do {
                 _ = try await kvService.sendPushWake(
                     handle: handle,
-                    actionEnvelope: envelope
+                    wake: .action(envelope: envelope)
                 )
             } catch {
                 onLog?(
@@ -145,10 +220,10 @@ extension KeepTalkingClient {
 
     func encryptedContextWakeEnvelope(
         contextID: UUID,
-        preview: KeepTalkingPushWakeMessagePreview
+        sealing payload: some Encodable
     ) async throws -> KeepTalkingPushWakeContextEnvelope {
         let secret = try await ensureGroupChatSecret(for: contextID)
-        let encoded = try JSONEncoder().encode(preview)
+        let encoded = try JSONEncoder().encode(payload)
         let ciphertext = try KeepTalkingPreviewCrypto.encryptString(
             String(decoding: encoded, as: UTF8.self),
             secret: secret

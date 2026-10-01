@@ -278,7 +278,7 @@ public actor OpenAIConnector: AIConnector {
         )
 
         var turnText = ""
-        var turnThinking: String? = nil
+        let turnThinking: String? = nil
         var turnToolCalls: [StreamToolCallAccumulator] = []
         var audioID: String? = nil
         var audioBase64 = ""

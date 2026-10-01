@@ -101,12 +101,11 @@ extension KeepTalkingClient {
         _ request: KTPPActTurnRequest,
         boundTo call: KTPPActCallContext
     ) async throws -> KTPPActResult {
-        let actResolved = try await resolveACTConnector()
-        let mainResolved = try await resolveAIConnector()
-        guard let connector = actResolved ?? mainResolved else {
-            throw KeepTalkingClientError.aiNotConfigured
-        }
-        let model = openAIModel ?? "gpt-5-codex"
+        let agent = try await resolveAgentConfiguration(
+            .init(contextID: call.contextID, purpose: .pluginACT(callerNodeID: call.callerNodeID))
+        )
+        let connector = agent.act.connector
+        let model = agent.act.model
 
         // Render requested attachments (§7.1): text verbatim (trimmed at the
         // cap), images as inline parts, other binary as trimmed base64.

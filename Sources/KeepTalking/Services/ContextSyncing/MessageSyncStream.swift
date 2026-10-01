@@ -127,19 +127,40 @@ func messagePageKey(
 }
 
 extension KeepTalkingClient {
+    /// Built on the background `KeepTalkingContextScanQueue`, never on the
+    /// caller's task.
     func contextSyncSnapshot(
+        for context: UUID
+    ) async throws -> KeepTalkingContextSyncSnapshot {
+        try await KeepTalkingContextScanQueue.shared.run(for: self, context: context) {
+            try await self.buildContextSyncSnapshot(for: context)
+        }
+    }
+
+    private func buildContextSyncSnapshot(
         for context: UUID
     ) async throws -> KeepTalkingContextSyncSnapshot {
         _ = try await ensure(context, for: KeepTalkingContext.self)
         let chunkSize = config.contextSyncChunkSize
-        let messages = try await KeepTalkingContextMessage.query(on: localStore.database)
-            .filter(\.$context.$id, .equal, context)
-            .all()
-        let attachments = try await KeepTalkingContextAttachment.query(
-            on: localStore.database
-        )
-        .filter(\.$context.$id, .equal, context)
-        .all()
+        let database = localStore.database
+        let messages = try await KeepTalkingContextScanQueue.readPaged(id: \.id) {
+            after, limit in
+            let query = KeepTalkingContextMessage.query(on: database)
+                .filter(\.$context.$id, .equal, context)
+            if let after {
+                query.filter(\.$id, .greaterThan, after)
+            }
+            return try await query.sort(\.$id, .ascending).range(..<limit).all()
+        }
+        let attachments = try await KeepTalkingContextScanQueue.readPaged(id: \.id) {
+            after, limit in
+            let query = KeepTalkingContextAttachment.query(on: database)
+                .filter(\.$context.$id, .equal, context)
+            if let after {
+                query.filter(\.$id, .greaterThan, after)
+            }
+            return try await query.sort(\.$id, .ascending).range(..<limit).all()
+        }
 
         return KeepTalkingContextSyncSnapshot(
             context: context,

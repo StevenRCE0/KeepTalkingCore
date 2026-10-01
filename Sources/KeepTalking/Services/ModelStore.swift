@@ -4,11 +4,41 @@ import FluentSQLiteDriver
 import Foundation
 import Logging
 import NIOConcurrencyHelpers
+import SQLKit
+
+/// How a file store journals writes.
+///
+/// There is no way back to the rollback journal on purpose: leaving WAL needs
+/// every other connection to the file closed — the extensions included — and
+/// SQLite's busy handler here retries forever, so a store that tried would
+/// spin rather than fail.
+public enum KeepTalkingStoreJournal: Sendable, Equatable {
+    /// Write-ahead logging: readers and the writer stop blocking each other,
+    /// across this process's connections and the extensions' too. Set once;
+    /// it persists in the file.
+    case wal
+    /// Leave the file's journal mode as it is.
+    case unchanged
+
+    /// WAL everywhere but iOS. There, a WAL connection keeps a shared lock on
+    /// the `-shm` file while idle — a lock in the App Group container that
+    /// `KeepTalkingDatabaseActivity` cannot see and the host cannot hold a
+    /// suspension assertion for — and whether the system kills for it is
+    /// unverified.
+    public static var platformDefault: Self {
+        #if os(iOS)
+        .unchanged
+        #else
+        .wal
+        #endif
+    }
+}
 
 public final class KeepTalkingModelStore: KeepTalkingLocalStore,
     @unchecked Sendable
 {
     public let databaseURL: URL
+    public let journal: KeepTalkingStoreJournal
 
     private let manager: FluentManager
     private let databaseID: DatabaseID
@@ -33,12 +63,16 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
         databaseURL: URL? = nil,
         databaseFileName: String? = nil,
         databaseID: DatabaseID = .sqlite,
+        journal: KeepTalkingStoreJournal = .platformDefault,
+        gate: KeepTalkingDatabaseGateConfiguration = .automatic,
         logger: Logger = .init(label: "KeepTalking.ModelStore")
     ) throws {
         self.databaseURL = databaseURL ?? Self.defaultDatabaseURL(for: databaseFileName)
         self.databaseID = databaseID
+        self.journal = journal
         self.logger = logger
         self.manager = FluentManager(
+            gate: gate,
             logger: .init(label: "KeepTalking.FluentManager")
         )
 
@@ -61,12 +95,16 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
         databaseURL: URL? = nil,
         databaseFileName: String? = nil,
         databaseID: DatabaseID = .sqlite,
+        journal: KeepTalkingStoreJournal = .platformDefault,
+        gate: KeepTalkingDatabaseGateConfiguration = .automatic,
         logger: Logger = .init(label: "KeepTalking.ModelStore")
     ) async throws -> KeepTalkingModelStore {
         let store = try KeepTalkingModelStore(
             databaseURL: databaseURL,
             databaseFileName: databaseFileName,
             databaseID: databaseID,
+            journal: journal,
+            gate: gate,
             logger: logger
         )
         try await store.migrate()
@@ -76,11 +114,48 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
     /// Applies any outstanding migrations. Must complete before the store is
     /// queried.
     public func migrate() async throws {
+        try await ensureJournal()
         try await manager.autoMigrate()
         let logger = self.logger
         try await KeepTalkingUndecodableActionSweep.run(on: database) {
             logger.notice("\($0)")
         }
+    }
+
+    /// The file's current journal mode, as SQLite reports it (`wal`, `delete`, …).
+    public func journalMode() async throws -> String {
+        guard let sql = database as? any SQLDatabase else {
+            throw KeepTalkingStoreError.notSQL
+        }
+        return try await Self.journalMode(on: sql)
+    }
+
+    /// Switches the file to WAL when asked to and it is not already — once;
+    /// the mode persists in the file, so reopening finds it set.
+    private func ensureJournal() async throws {
+        guard journal == .wal, let sql = database as? any SQLDatabase else { return }
+        let current = try await Self.journalMode(on: sql)
+        guard current != "wal" else { return }
+        let requested = "wal"
+        let actual = try await Self.journalMode(on: sql, setting: requested)
+        guard actual == requested else {
+            throw KeepTalkingStoreError.journalModeRefused(requested: requested, actual: actual)
+        }
+        logger.notice("journal mode \(current) → \(actual) for \(databaseURL.lastPathComponent)")
+    }
+
+    private static func journalMode(
+        on sql: any SQLDatabase,
+        setting mode: String? = nil
+    ) async throws -> String {
+        // The pragma answers with one row either way; the value is an
+        // identifier, never a bind parameter.
+        let statement: SQLQueryString =
+            mode.map { "PRAGMA journal_mode = \(unsafeRaw: $0)" } ?? "PRAGMA journal_mode"
+        guard let row = try await sql.raw(statement).first() else {
+            throw KeepTalkingStoreError.journalModeRefused(requested: mode ?? "", actual: "")
+        }
+        return try row.decode(column: "journal_mode", as: String.self).lowercased()
     }
 
     /// Drains in-flight queries and releases the event-loop group.
@@ -195,6 +270,8 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             AddKeepTalkingMappingScopeContextMigration(),
             CreateKeepTalkingWorkspacePlansMigration(),
             AddContextDeletedMessagesMigration(),
+            AddLinkPreviewsMigration(),
+            AddQueryIndexesMigration(),
             to: databaseID
         )
     }
@@ -203,15 +280,17 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
 public final class KeepTalkingInMemoryStore: KeepTalkingLocalStore,
     @unchecked Sendable
 {
-    private let manager = FluentManager(
-        logger: .init(label: "KeepTalking.InMemoryStore")
-    )
+    private let manager: FluentManager
     private let databaseID: DatabaseID = .sqlite
     private let hasShutDown = NIOLockedValueBox(false)
 
     /// Synchronous, like `KeepTalkingModelStore.init` — see its note. Call
     /// `migrate()` before querying, or use `make()`.
-    public init() {
+    public init(gate: KeepTalkingDatabaseGateConfiguration = .automatic) {
+        manager = FluentManager(
+            gate: gate,
+            logger: .init(label: "KeepTalking.InMemoryStore")
+        )
         KeepTalkingModelStore.configure(
             manager: manager,
             databaseID: databaseID,
@@ -219,8 +298,10 @@ public final class KeepTalkingInMemoryStore: KeepTalkingLocalStore,
         )
     }
 
-    public static func make() async throws -> KeepTalkingInMemoryStore {
-        let store = KeepTalkingInMemoryStore()
+    public static func make(
+        gate: KeepTalkingDatabaseGateConfiguration = .automatic
+    ) async throws -> KeepTalkingInMemoryStore {
+        let store = KeepTalkingInMemoryStore(gate: gate)
         try await store.migrate()
         return store
     }

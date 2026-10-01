@@ -104,12 +104,24 @@ Both connectors accept an explicit API key or fall back to environment variables
 
 ```swift
 let connector = try AnthropicConnector(backend: .anthropic)
-let client = KeepTalkingClient(
-    config: config,
-    aiConnector: connector,
-    localStore: store
+let agent = KeepTalkingAgentConfiguration(
+    main: .init(connector: connector, model: "claude-opus-5-5")
 )
 ```
+
+### Models are per run, not per client
+
+A client holds no connector and no model. Every run carries a ``KeepTalkingAgentConfiguration``: a ``KeepTalkingAgentConfiguration/Role`` (connector, model, optional ``AIModelProfile``) for the main loop and one for the ACT sub-agent — the ACT role defaults to the main one — plus the reasoning effort and response languages. A send passes it to ``KeepTalkingClient/enqueueAIPrompt(_:attachments:in:agent:roleName:)`` or ``KeepTalkingClient/runDequeuedAIPrompt(_:attachments:in:agent:roleName:sendPromptMessage:promptType:agentTurnID:onPromptMessageSent:checkpoint:onCheckpoint:)``.
+
+Work the node runs on its own has no send to carry one: a peer's call into one of this node's skills, a KTPP plugin's `host.act.request`, a planner's ACT agent, a delegated task. For those the client asks the host through ``KeepTalkingClient/setAgentConfigurationProvider(_:)``, handing it a ``KeepTalkingAgentConfigurationRequest`` that names the context the work belongs to and why. The host answers with that context's choice, so per-conversation model overrides reach served work too, and returning `nil` fails the work with `aiNotConfigured`.
+
+Because nothing about models lives on the client, switching a model — node-wide or for one conversation — never reconnects the transport; the next run simply resolves differently.
+
+### Model profiles
+
+``AIModelProfile`` describes what a model can do: tool calling, attachments and input modalities, context window and output limits, and its reasoning knob (graded efforts, an on/off toggle, a token budget, always-on, or none). ``KeepTalkingModelCatalog`` builds profiles from a local copy of the models.dev registry — it downloads `api.json` on request, keeps the raw file at a host-chosen path, and resolves a model ID per provider with fallbacks for OpenRouter variant suffixes, `vendor/model` IDs and custom endpoints.
+
+A run whose main role carries a profile adapts: a model without tool calling gets no tools and a conversation-only system prompt; one without attachment support gets placeholders instead of file contents, and image parts are replaced for text-only models at the single point every request passes through; the history is trimmed from the oldest end to fit the input budget; and the requested effort is snapped onto one the model accepts. A run with no profile behaves exactly as before.
 
 ### What the main agent is given
 
@@ -151,14 +163,13 @@ Sealing is never worth failing a turn over: if it fails, the arguments are dropp
 
 ### Queueing runs
 
-``KeepTalkingClient/enqueueAIPrompt(_:attachments:in:model:actModel:roleName:reasoningEffort:)`` is the normal entry point. It prepares attachments, mints an agent turn ID, and hands a unit of work to the coordinator, returning a stable run ID immediately.
+``KeepTalkingClient/enqueueAIPrompt(_:attachments:in:agent:roleName:)`` is the normal entry point. It prepares attachments, mints an agent turn ID, and hands a unit of work to the coordinator, returning a stable run ID immediately.
 
 ```swift
 let runID = await client.enqueueAIPrompt(
     "Summarise what changed in this conversation today.",
     in: contextID,
-    model: modelID,          // must match the active provider's naming
-    reasoningEffort: .medium
+    agent: agent             // connectors, models, effort for this run
 )
 ```
 
@@ -166,7 +177,7 @@ Two details matter. The user's prompt message is sent to the conversation only w
 
 Within a context, local turns are serialized: the first enqueued run starts immediately and the rest form a per-context backlog that advances automatically. Runs are not globally serial, though — different contexts proceed independently, a suspended turn frees its slot, and work this node performs on behalf of other nodes joins the same queue. That is why the component is a coordinator rather than a queue.
 
-Hosts that need a prompt to survive navigation, app switching, or process death should own their own durable queue and call ``KeepTalkingClient/runDequeuedAIPrompt(_:attachments:in:model:actModel:roleName:reasoningEffort:sendPromptMessage:promptType:agentTurnID:onPromptMessageSent:checkpoint:onCheckpoint:)`` when an item reaches the head; it deliberately does not touch the in-memory coordinator, and it returns the run's final assistant text so a caller such as the voice bridge can speak it. It also takes an ``AIAgentCheckpoint`` to resume an interrupted run from, plus a callback fired with each new one to persist. ``KeepTalkingClient/runAI(prompt:in:model:actModel:roleName:currentPromptAttachments:)`` is the direct, unqueued path used by the CLI and internal callers.
+Hosts that need a prompt to survive navigation, app switching, or process death should own their own durable queue and call ``KeepTalkingClient/runDequeuedAIPrompt(_:attachments:in:agent:roleName:sendPromptMessage:promptType:agentTurnID:onPromptMessageSent:checkpoint:onCheckpoint:)`` when an item reaches the head; it deliberately does not touch the in-memory coordinator, and it returns the run's final assistant text so a caller such as the voice bridge can speak it. It also takes an ``AIAgentCheckpoint`` to resume an interrupted run from, plus a callback fired with each new one to persist. ``KeepTalkingClient/runAI(prompt:in:agent:roleName:currentPromptAttachments:)`` is the direct, unqueued path used by the CLI and internal callers; without an `agent` it asks the configuration provider.
 
 ### Run lifecycle
 
@@ -296,12 +307,22 @@ The responding side calls ``KeepTalkingClient/respondToAgentTurnContinuation(con
 
 ### Queueing and running turns
 
-- ``KeepTalkingClient/enqueueAIPrompt(_:attachments:in:model:actModel:roleName:reasoningEffort:)``
-- ``KeepTalkingClient/runDequeuedAIPrompt(_:attachments:in:model:actModel:roleName:reasoningEffort:sendPromptMessage:promptType:agentTurnID:onPromptMessageSent:checkpoint:onCheckpoint:)``
-- ``KeepTalkingClient/runAI(prompt:in:model:actModel:roleName:currentPromptAttachments:)``
+- ``KeepTalkingClient/enqueueAIPrompt(_:attachments:in:agent:roleName:)``
+- ``KeepTalkingClient/runDequeuedAIPrompt(_:attachments:in:agent:roleName:sendPromptMessage:promptType:agentTurnID:onPromptMessageSent:checkpoint:onCheckpoint:)``
+- ``KeepTalkingClient/runAI(prompt:in:agent:roleName:currentPromptAttachments:)``
 - ``KeepTalkingClient/cancelAgentRun(_:)``
 - ``KeepTalkingClient/retryAgentRun(_:)``
 - ``KeepTalkingClient/dismissAgentRun(_:)``
+
+### Choosing models
+
+- ``KeepTalkingAgentConfiguration``
+- ``KeepTalkingAgentConfiguration/Role``
+- ``KeepTalkingAgentConfigurationRequest``
+- ``KeepTalkingClient/setAgentConfigurationProvider(_:)``
+- ``KeepTalkingClient/AgentConfigurationProvider``
+- ``AIModelProfile``
+- ``KeepTalkingModelCatalog``
 
 ### Run lifecycle and suspension
 

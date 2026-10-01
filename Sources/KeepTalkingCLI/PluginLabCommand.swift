@@ -74,6 +74,8 @@ enum PluginLabCommand {
                     for meter in kinds.meters ?? [] {
                         print("            meter \(meter.name) (per \(meter.quantum))")
                     }
+                case .sessionOpened(let catalogID):
+                    print("[pluginlab] session opened catalog=\(catalogID.uuidString.lowercased())")
                 case .sessionClosed(let catalogID):
                     print("[pluginlab] session closed catalog=\(catalogID.uuidString.lowercased())")
                 case .log(let message):

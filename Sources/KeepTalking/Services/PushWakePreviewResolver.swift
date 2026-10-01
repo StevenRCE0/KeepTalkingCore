@@ -5,11 +5,13 @@ public struct KeepTalkingResolvedPushWakePreview: Sendable, Hashable {
     public var title: String
     public var body: String
     public var contextID: UUID
+    public var messageID: UUID?
 
-    public init(title: String, body: String, contextID: UUID) {
+    public init(title: String, body: String, contextID: UUID, messageID: UUID? = nil) {
         self.title = title
         self.body = body
         self.contextID = contextID
+        self.messageID = messageID
     }
 }
 
@@ -32,23 +34,14 @@ public enum KeepTalkingPushWakePreviewResolver {
         keychain: any KeepTalkingKeychainStore
     ) async throws -> KeepTalkingResolvedPushWakePreview? {
         guard
-            let secret = try await keychain.get(
-                .groupSecret(contextID: envelope.contextID)
+            let preview = try await open(
+                envelope,
+                as: KeepTalkingPushWakeMessagePreview.self,
+                keychain: keychain
             )
         else {
             return nil
         }
-
-        let decryptedPayload =
-            try KeepTalkingPreviewCrypto
-            .decryptStringIfNeeded(
-                envelope.ciphertext,
-                secret: secret
-            )
-        let preview = try JSONDecoder().decode(
-            KeepTalkingPushWakeMessagePreview.self,
-            from: Data(decryptedPayload.utf8)
-        )
         let mappings = try await KeepTalkingMapping.query(on: database)
             .filter(\.$deletedAt == nil)
             .all()
@@ -65,7 +58,46 @@ public enum KeepTalkingPushWakePreviewResolver {
         return KeepTalkingResolvedPushWakePreview(
             title: senderLabel,
             body: body,
-            contextID: envelope.contextID
+            contextID: envelope.contextID,
+            messageID: preview.messageID
+        )
+    }
+
+    /// The message ids a revocation push takes back; nil when this device
+    /// holds no secret for the context.
+    public static func revokedMessageIDs(
+        _ envelope: KeepTalkingPushWakeContextEnvelope,
+        keychain: any KeepTalkingKeychainStore
+    ) async throws -> [UUID]? {
+        try await open(
+            envelope,
+            as: KeepTalkingPushWakeRevocation.self,
+            keychain: keychain
+        )?.messageIDs
+    }
+
+    private static func open<Payload: Decodable>(
+        _ envelope: KeepTalkingPushWakeContextEnvelope,
+        as _: Payload.Type,
+        keychain: any KeepTalkingKeychainStore
+    ) async throws -> Payload? {
+        guard
+            let secret = try await keychain.get(
+                .groupSecret(contextID: envelope.contextID)
+            )
+        else {
+            return nil
+        }
+
+        let decryptedPayload =
+            try KeepTalkingPreviewCrypto
+            .decryptStringIfNeeded(
+                envelope.ciphertext,
+                secret: secret
+            )
+        return try JSONDecoder().decode(
+            Payload.self,
+            from: Data(decryptedPayload.utf8)
         )
     }
 }

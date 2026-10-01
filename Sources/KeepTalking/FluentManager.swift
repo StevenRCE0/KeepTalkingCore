@@ -3,11 +3,15 @@ import Logging
 import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
+import SQLKit
 
 /// `FluentManager` manages Fluent databases, migrations, and lifecycle resources.
 public final class FluentManager: Sendable {
     private let threadPool: NIOLockedValueBox<NIOThreadPool>
     private let eventLoopGroup: any EventLoopGroup
+    /// Admission for every database this manager hands out. Sized to the
+    /// event loops, since the SQLite driver opens one connection per loop.
+    let gate: DatabaseGate
     private let migrationLogLevelBox: NIOLockedValueBox<Logger.Level>
     private let logger: Logger
 
@@ -26,11 +30,16 @@ public final class FluentManager: Sendable {
     public init(
         threadPool: NIOThreadPool = NIOThreadPool(numberOfThreads: System.coreCount),
         eventLoopGroup: any EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
+        gate: KeepTalkingDatabaseGateConfiguration = .automatic,
         logger: Logger = Logger(label: "FluentManager"),
         migrationLogLevel: Logger.Level = .info
     ) {
         self.threadPool = .init(threadPool)
         self.eventLoopGroup = eventLoopGroup
+        self.gate = DatabaseGate(
+            configuration: gate,
+            connections: eventLoopGroup.makeIterator().reduce(0) { count, _ in count + 1 }
+        )
         self.logger = logger
         self.databases = Databases(threadPool: threadPool, on: eventLoopGroup)
         self.migrations = Migrations()
@@ -38,7 +47,8 @@ public final class FluentManager: Sendable {
         self.threadPool.withLockedValue { $0.start() }
     }
 
-    /// Resolves a database connection by identifier.
+    /// Resolves a database connection by identifier, reporting its work to
+    /// ``KeepTalkingDatabaseActivity``.
     public func db(_ id: DatabaseID? = nil, logger: Logger = .init(label: "Fluent")) -> any Database {
         guard
             let db = self.databases.database(
@@ -49,11 +59,19 @@ public final class FluentManager: Sendable {
         else {
             fatalError("No database configured for \(id?.string ?? "default")")
         }
-        return db
+        // The SDK only configures SQLite, whose Fluent database is an
+        // `SQLDatabase`. The wrapper must be one too — see its doc comment.
+        guard let sqlDatabase = db as? any Database & SQLDatabase else {
+            fatalError("Database \(id?.string ?? "default") is not an SQLDatabase")
+        }
+        return ActivityReportingDatabase(base: sqlDatabase, gate: gate)
     }
 
     /// Runs pending forward migrations without prompting.
     public func autoMigrate() async throws {
+        // The migrator resolves its own databases, bypassing `db()`.
+        KeepTalkingDatabaseActivity.begin()
+        defer { KeepTalkingDatabaseActivity.end() }
         let migrator = Migrator(
             databases: self.databases,
             migrations: self.migrations,
@@ -68,6 +86,8 @@ public final class FluentManager: Sendable {
 
     /// Reverts all applied migration batches without prompting.
     public func autoRevert() async throws {
+        KeepTalkingDatabaseActivity.begin()
+        defer { KeepTalkingDatabaseActivity.end() }
         let migrator = Migrator(
             databases: self.databases,
             migrations: self.migrations,

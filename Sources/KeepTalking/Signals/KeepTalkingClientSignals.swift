@@ -37,8 +37,10 @@ public final class KeepTalkingClientSignals: Sendable {
     /// Messages were deleted from a context — locally or by merge. Message
     /// pages only ever add rows, so a message cache must re-read on this.
     public let messageDeletions = KeepTalkingSignal<KeepTalkingMessageDeletion>()
-    /// Invalidation ping: the threads table moved; re-read.
-    public let threadChanges = KeepTalkingSignal<Void>()
+    /// A context's threads changed — a mark, a merge, a chitter-chatter flag,
+    /// an archive, a sync's re-threading. Carries the context; re-read its
+    /// threads and boundaries.
+    public let threadChanges = KeepTalkingSignal<UUID>()
     /// The derived semantic index for a context needs reconciling. Enqueue
     /// best-effort work; the persisted thread rows remain the source of truth.
     public let semanticIndexReconciliations = KeepTalkingSignal<UUID>()

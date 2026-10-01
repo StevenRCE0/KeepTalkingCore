@@ -64,50 +64,17 @@ extension KeepTalkingClient {
             .all()
     }
 
-    private func rangeResolvedThreads(
-        for contextID: UUID,
-        messages: [KeepTalkingContextMessage]
-    ) async throws -> [(thread: KeepTalkingThread, range: ClosedRange<Int>)] {
-        try await KeepTalkingThread.query(on: localStore.database)
-            .filter(\.$context.$id == contextID)
-            .all()
-            .compactMap { thread in
-                guard let range = thread.resolvedMessageRange(in: messages) else {
-                    return nil
-                }
-                return (thread: thread, range: range)
-            }
-    }
-
-    /// Finds the thread that owns a given message within a context by testing each thread's
-    /// [startMessage, endMessage] range against the full sorted message list.
+    /// The thread that owns `messageID`: the narrowest whose boundaries
+    /// contain it, by key — see `owningThread(forKey:in:)`. Nothing of the
+    /// context is read but the thread rows and the keys involved.
     public func owningThread(for messageID: UUID, in contextID: UUID) async throws -> KeepTalkingThread? {
-        let db = localStore.database
-        let messages = try await KeepTalkingContextMessage.query(on: db)
-            .filter(\.$context.$id == contextID)
-            .all()
-            .sortedForSync()
-
-        guard let msgIdx = messages.firstIndex(where: { $0.id == messageID }) else {
+        guard
+            let key = try await messageKeys(for: [messageID], in: contextID)[messageID],
+            let boundary = try await owningThread(forKey: key, in: contextID)
+        else {
             return nil
         }
-
-        return try await rangeResolvedThreads(for: contextID, messages: messages)
-            .filter { $0.range.contains(msgIdx) }
-            .sorted {
-                let lhsWidth = $0.range.upperBound - $0.range.lowerBound
-                let rhsWidth = $1.range.upperBound - $1.range.lowerBound
-                if lhsWidth != rhsWidth {
-                    return lhsWidth < rhsWidth
-                }
-                if $0.thread.state != $1.thread.state {
-                    return $0.thread.state != .contextMain
-                }
-                return ($0.thread.createdAt ?? .distantPast)
-                    < ($1.thread.createdAt ?? .distantPast)
-            }
-            .first?
-            .thread
+        return try await KeepTalkingThread.find(boundary.threadID, on: localStore.database)
     }
 
     /// Toggles chitter-chatter status for a message within its thread.
@@ -126,7 +93,7 @@ extension KeepTalkingClient {
             thread.chitterChatter.append(messageID)
         }
         try await thread.save(on: localStore.database)
-        signals.threadChanges.send(())
+        signals.threadChanges.send(thread.$context.id)
     }
 
     /// Explicitly marks or unmarks a message as chitter-chatter, locating its owning thread
@@ -153,7 +120,7 @@ extension KeepTalkingClient {
             thread.chitterChatter.removeAll { $0 == messageID }
         }
         try await thread.save(on: localStore.database)
-        signals.threadChanges.send(())
+        signals.threadChanges.send(contextID)
         return true
     }
 
@@ -165,6 +132,7 @@ extension KeepTalkingClient {
         }
         thread.state = .archived
         try await thread.save(on: localStore.database)
+        signals.threadChanges.send(thread.$context.id)
         await sealThreadWorkspace(threadID)
     }
 
@@ -663,7 +631,7 @@ extension KeepTalkingClient {
             signals.mappingChanges.send(())
         }
         if changed || mappingsChanged {
-            signals.threadChanges.send(())
+            signals.threadChanges.send(contextID)
         }
         if changed {
             // Boundaries moved, and semantic documents are a derived cache of

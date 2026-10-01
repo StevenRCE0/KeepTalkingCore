@@ -209,6 +209,12 @@ extension KeepTalkingCLIController {
             case .ai(let prompt):
                 runAI(prompt: prompt)
                 return true
+            case .model(let role, let argument):
+                handleModelCommand(
+                    role: role.flatMap(KeepTalkingCLIAgentSelection.Role.init(rawValue:)),
+                    argument: argument
+                )
+                return true
             case .mcpList:
                 await listMCPActions()
                 return true
@@ -482,7 +488,7 @@ extension KeepTalkingCLIController {
                     case .aiNotConfigured = clientError
                 {
                     print(
-                        "[ai] disabled: provide OPENAI_API_KEY/--openai-api-key and optionally --openai-endpoint."
+                        "[ai] disabled: provide OPENAI_API_KEY/--openai-api-key and --model/KT_MODEL (or /model <id> for this context)."
                     )
                     return
                 }

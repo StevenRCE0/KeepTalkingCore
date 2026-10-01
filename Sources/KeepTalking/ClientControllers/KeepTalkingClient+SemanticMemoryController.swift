@@ -215,29 +215,20 @@ extension Array where Element == KeepTalkingSemanticMemoryScope.Tag {
 }
 
 extension KeepTalkingClient {
+    /// Every thread whose boundaries resolve — read from the thread rows and
+    /// their boundary keys, never from a context's messages.
     fileprivate static func retrievableSemanticThreads(
         on database: any Database
     ) async throws -> [KeepTalkingThread] {
         let threads = try await KeepTalkingThread.query(on: database).all()
-        let messages = try await KeepTalkingContextMessage.query(on: database)
-            .sort(\.$timestamp)
-            .all()
-        let messagesByContextID = Dictionary(
-            grouping: messages,
-            by: { $0.$context.id }
-        )
-
-        var retrievableThreads: [KeepTalkingThread] = []
-        for thread in threads {
-            guard
-                thread.resolvedMessageRange(
-                    in: messagesByContextID[thread.$context.id] ?? []
-                ) != nil
-            else { continue }
-            retrievableThreads.append(thread)
+        var resolving: Set<UUID> = []
+        for contextID in Set(threads.map { $0.$context.id }) {
+            for boundary in try await threadBoundaries(in: contextID, on: database)
+            where boundary.range != nil {
+                resolving.insert(boundary.threadID)
+            }
         }
-
-        return retrievableThreads
+        return threads.filter { $0.id.map(resolving.contains) ?? false }
     }
 
     fileprivate static func semanticEnhancements(
