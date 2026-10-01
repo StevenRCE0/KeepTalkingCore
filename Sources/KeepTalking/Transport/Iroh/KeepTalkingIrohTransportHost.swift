@@ -35,11 +35,22 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         /// QUIC address-discovery port of the relay. Nil takes it from
         /// `/kt/hub` (and disables QAD if the hub id is configured by hand).
         public var relayQUICPort: UInt16?
+        /// Also carry connections over Bluetooth LE (vendored
+        /// `iroh-ble-transport`, AGPL — development only until licensed).
+        /// One Bluetooth endpoint per device: a controller never sees its
+        /// own adverts.
+        public var bluetooth: Bool
 
-        public init(relayURL: String, hubEndpointID: String? = nil, relayQUICPort: UInt16? = nil) {
+        public init(
+            relayURL: String,
+            hubEndpointID: String? = nil,
+            relayQUICPort: UInt16? = nil,
+            bluetooth: Bool = false
+        ) {
             self.relayURL = relayURL
             self.hubEndpointID = hubEndpointID
             self.relayQUICPort = relayQUICPort
+            self.bluetooth = bluetooth
         }
     }
 
@@ -154,7 +165,8 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         let options = EndpointOptions(
             preset: presetMinimal(),
             alpns: [Self.peerALPN],
-            relayMode: try RelayMode.customFromUrls(urls: [configuration.relayURL])
+            relayMode: try RelayMode.customFromUrls(urls: [configuration.relayURL]),
+            ble: configuration.bluetooth ? true : nil
         )
         let endpoint = try await Endpoint.bind(options: options)
         if let port = configuration.relayQUICPort {
@@ -173,6 +185,9 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             state.tasks += tasks
         }
         log("endpoint \(Self.hex(myID).prefix(10)) bound \(endpoint.boundSockets().joined(separator: ", "))")
+        if configuration.bluetooth {
+            log("bluetooth transport on")
+        }
         return endpoint
     }
 
@@ -329,7 +344,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             state.connectedMembers(of: topic).compactMap { state.links[$0.endpointID]?.connection }
         }
         return connections.contains { connection in
-            connection.paths().contains { $0.isSelected && $0.isIp }
+            connection.paths().contains { $0.isSelected && !$0.isRelay }
         }
     }
 
@@ -764,7 +779,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             return connection
         }
         guard let connection, case .selected = event else { return }
-        let isDirect = connection.paths().contains { $0.isSelected && $0.isIp }
+        let isDirect = connection.paths().contains { $0.isSelected && !$0.isRelay }
         let firstDirect = state.withLockedValue { state -> Duration? in
             guard isDirect, state.links[endpointID]?.timeToDirect == nil,
                 let connectedAt = state.links[endpointID]?.connectedAt
@@ -835,12 +850,14 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                     : (connection?.closeReason().map { "closed: \($0)" } ?? "connected"),
                 connectLatencyMs: link.connectLatency.map(Self.milliseconds),
                 timeToDirectMs: link.timeToDirect.map(Self.milliseconds),
-                isDirect: paths.contains { $0.isSelected && $0.isIp },
+                isDirect: paths.contains { $0.isSelected && !$0.isRelay },
+                isBluetooth: paths.contains { $0.isSelected && !$0.isRelay && !$0.isIp },
                 selectedPath: connection.map(Self.selectedPath),
                 rttMs: connection?.rtt(),
                 paths: paths.map { path in
                     KeepTalkingIrohInstruments.Path(
                         remoteAddress: path.remoteAddr,
+                        kind: Self.pathKind(path),
                         isRelay: path.isRelay,
                         isSelected: path.isSelected,
                         rttMs: path.rttMs
@@ -886,6 +903,23 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 )
             },
             peers: peers.sorted { $0.id < $1.id },
+            bluetooth: snapshot.endpoint?.bleStatus().map { status in
+                KeepTalkingIrohInstruments.Bluetooth(
+                    powered: status.powered,
+                    txBytes: status.txBytes,
+                    rxBytes: status.rxBytes,
+                    retransmits: status.retransmits,
+                    devices: status.peers.map { peer in
+                        KeepTalkingIrohInstruments.BluetoothDevice(
+                            id: peer.deviceId,
+                            phase: peer.phase,
+                            connectPath: peer.connectPath,
+                            endpointID: peer.verifiedEndpoint,
+                            failures: Int(peer.consecutiveFailures)
+                        )
+                    }
+                )
+            },
             droppedFrames: snapshot.droppedFrames,
             events: snapshot.events
         )
@@ -927,7 +961,16 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     private static func selectedPath(_ connection: Connection) -> String {
         guard let path = connection.paths().first(where: \.isSelected) else { return "none" }
-        return path.isRelay ? "relay" : "direct \(path.remoteAddr)"
+        switch pathKind(path) {
+            case "relay": return "relay"
+            case "bluetooth": return "bluetooth"
+            default: return "direct \(path.remoteAddr)"
+        }
+    }
+
+    /// `relay`, `ip`, or `bluetooth` (the only custom transport we add).
+    private static func pathKind(_ path: PathSnapshot) -> String {
+        path.isRelay ? "relay" : (path.isIp ? "ip" : "bluetooth")
     }
 
     private static func milliseconds(_ duration: Duration) -> Double {

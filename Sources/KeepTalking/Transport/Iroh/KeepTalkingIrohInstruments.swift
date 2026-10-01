@@ -45,6 +45,8 @@ public struct KeepTalkingIrohInstruments: Sendable {
 
     public struct Path: Sendable, Hashable {
         public var remoteAddress: String
+        /// `relay`, `ip` or `bluetooth`.
+        public var kind: String
         public var isRelay: Bool
         public var isSelected: Bool
         public var rttMs: UInt64
@@ -60,7 +62,10 @@ public struct KeepTalkingIrohInstruments: Sendable {
         public var connectLatencyMs: Double?
         /// Time from connect until a direct path was first selected.
         public var timeToDirectMs: Double?
+        /// The selected path skips the relay (IP or Bluetooth).
         public var isDirect: Bool
+        /// The selected path is Bluetooth.
+        public var isBluetooth: Bool
         public var selectedPath: String?
         public var rttMs: UInt64?
         public var paths: [Path]
@@ -73,6 +78,27 @@ public struct KeepTalkingIrohInstruments: Sendable {
         public var lostPackets: Int64?
 
         public var shortID: String { String(id.prefix(10)) }
+    }
+
+    /// The Bluetooth transport, when the host was configured with it.
+    public struct Bluetooth: Sendable {
+        /// Adapter on and permission granted.
+        public var powered: Bool
+        public var txBytes: UInt64
+        public var rxBytes: UInt64
+        public var retransmits: UInt64
+        public var devices: [BluetoothDevice]
+    }
+
+    public struct BluetoothDevice: Sendable, Identifiable {
+        public var id: String
+        /// `Discovered`, `Connecting`, `Connected`, …
+        public var phase: String
+        /// `Gatt` or `L2cap` once a data pipe exists.
+        public var connectPath: String?
+        /// The peer's endpoint id (hex) once its handshake verified it.
+        public var endpointID: String?
+        public var failures: Int
     }
 
     public struct Event: Sendable, Identifiable {
@@ -88,6 +114,7 @@ public struct KeepTalkingIrohInstruments: Sendable {
     public var hub: Hub
     public var contexts: [Context]
     public var peers: [Peer]
+    public var bluetooth: Bluetooth?
     /// Peer frames dropped because no attached context has their topic.
     public var droppedFrames: Int
     public var events: [Event]
