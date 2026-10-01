@@ -142,9 +142,9 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         nodeID: UUID,
         secret: Data
     ) throws {
-        let (myID, writer) = try state.withLockedValue { state -> (Data, AsyncStream<Data>.Continuation?) in
+        let myID = try state.withLockedValue { state -> Data in
             guard !state.isShutDown, let myID = state.myEndpointID else { throw HostError.stopped }
-            return (myID, state.hub.writer)
+            return myID
         }
         let blob = try KeepTalkingIrohPresenceSeal.seal(
             nodeID: nodeID,
@@ -152,13 +152,17 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             contextID: contextID,
             secret: secret
         )
-        state.withLockedValue { state in
+        // Insert and read the hub writer in one critical section: the hub
+        // loop publishes its writer and collects contexts to re-join in one
+        // too, so either it sees this context or we see its writer.
+        let writer = state.withLockedValue { state -> AsyncStream<Data>.Continuation? in
             state.contexts[contextID] = ContextEntry(
                 nodeID: nodeID,
                 sink: WeakSink(sink),
                 secret: secret,
                 blob: blob
             )
+            return state.hub.writer
         }
         writer?.yield(KeepTalkingIrohPresenceFrame.encode(.join(context: contextID)))
         writer?.yield(KeepTalkingIrohPresenceFrame.encode(.publish(context: contextID, blob: blob)))
@@ -167,8 +171,8 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     func detach(contextID: UUID) {
         let (writer, orphans) = state.withLockedValue { state -> (AsyncStream<Data>.Continuation?, [Connection]) in
-            guard state.contexts.removeValue(forKey: contextID) != nil else { return (nil, []) }
-            return (state.hub.writer, state.dropUnneededLinks())
+            guard let removed = state.contexts.removeValue(forKey: contextID) else { return (nil, []) }
+            return (state.hub.writer, state.dropUnneededLinks(among: Array(removed.members.keys)))
         }
         writer?.yield(KeepTalkingIrohPresenceFrame.encode(.leave(context: contextID)))
         for connection in orphans {
@@ -334,9 +338,18 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     private func handleHubFrame(_ frame: KeepTalkingIrohPresenceFrame.Server) {
         switch frame {
             case .snapshot(let context, let members):
-                let sink = state.withLockedValue { state -> KeepTalkingIrohContextTransport? in
+                // A snapshot is the whole room: forget members that left while
+                // the hub session was down, then learn the current ones.
+                let present = Set(members.map(\.endpointID))
+                let (sink, orphans) = state.withLockedValue { state in
                     state.contexts[context]?.joined = true
-                    return state.contexts[context]?.sink.value
+                    let previous = state.contexts[context]?.members ?? [:]
+                    state.contexts[context]?.members = previous.filter { present.contains($0.key) }
+                    let gone = previous.keys.filter { !present.contains($0) }
+                    return (state.contexts[context]?.sink.value, state.dropUnneededLinks(among: gone))
+                }
+                for connection in orphans {
+                    try? connection.close(errorCode: 0, reason: Data("left".utf8))
                 }
                 log("ctx \(context.uuidString.prefix(8)) snapshot: \(members.count) other member(s)")
                 for member in members where !member.blob.isEmpty {
@@ -350,7 +363,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             case .left(let context, let endpointID):
                 let (sink, nodeID, orphans) = state.withLockedValue { state in
                     let nodeID = state.contexts[context]?.members.removeValue(forKey: endpointID)
-                    return (state.contexts[context]?.sink.value, nodeID, state.dropUnneededLinks())
+                    return (state.contexts[context]?.sink.value, nodeID, state.dropUnneededLinks(among: [endpointID]))
                 }
                 for connection in orphans {
                     try? connection.close(errorCode: 0, reason: Data("left".utf8))
@@ -866,9 +879,13 @@ extension KeepTalkingIrohTransportHost {
         }
 
         /// Forgets links no attached context needs; returns what to close.
-        mutating func dropUnneededLinks() -> [Connection] {
+        /// `among` limits the sweep to those endpoints, so an accepted link
+        /// whose sealed presence has not arrived yet survives.
+        mutating func dropUnneededLinks(among candidates: [Data]? = nil) -> [Connection] {
             var orphans: [Connection] = []
-            for (endpointID, link) in links where !isWanted(endpointID) {
+            let scope = candidates.map(Set.init)
+            for (endpointID, link) in links
+            where !isWanted(endpointID) && scope?.contains(endpointID) != false {
                 link.writer?.finish()
                 link.tasks.forEach { $0.cancel() }
                 if let connection = link.connection { orphans.append(connection) }
