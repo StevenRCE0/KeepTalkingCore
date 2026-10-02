@@ -13,8 +13,10 @@ import NIOConcurrencyHelpers
 public final class KeepTalkingIrohLog: LogSink, @unchecked Sendable {
     public static let shared = KeepTalkingIrohLog()
     /// Bluetooth transport and its BLE backend at debug, everything else at
-    /// warn.
-    public static let bluetoothDirectives = "iroh_ble_transport=debug,blew=debug,warn"
+    /// warn. blew's Apple central stays at info: its debug level logs every
+    /// advert it hears.
+    public static let bluetoothDirectives =
+        "iroh_ble_transport=debug,blew=debug,blew::platform::apple::central=info,warn"
 
     private static let capacity = 600
     private struct Buffer {

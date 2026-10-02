@@ -19,10 +19,12 @@ import NIOConcurrencyHelpers
 /// - **Bluetooth** — optional, on a *separate*, Bluetooth-only endpoint
 ///   (vendored `iroh-ble-transport`). Its handshakes must run over Bluetooth
 ///   (the transport only verifies a pipe that carried one), so it can't share
-///   the relay endpoint. Its key is fixed for the host's lifetime and
+///   the relay endpoint. It is process-wide (`KeepTalkingIrohBluetoothRadio`):
+///   the crate cannot shut its radio down, so the endpoint is bound once and
+///   lent to one host at a time. Its key is fixed for the process and
 ///   announced in sealed presence, so peers know it before the hub goes away.
-///   It runs always, or only while the hub is unreachable — closing the
-///   endpoint is what stops the radio.
+///   A host uses it always, or only while the hub is unreachable; the radio
+///   stays on from its first use until the process exits.
 /// - **Delivery** — each publish goes through the hub or the mesh, chosen
 ///   per publish by `DeliveryPolicy`. On the mesh each member gets one link:
 ///   network when connected, Bluetooth otherwise. Receivers take everything;
@@ -129,9 +131,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         state.withLockedValue { state in
             state.policy = policy
             if configuration.bluetooth != .off {
-                let key = SecretKey.generate()
-                state.bluetooth.secret = key.toBytes()
-                state.bluetooth.myID = key.public().toBytes()
+                state.bluetooth.myID = KeepTalkingIrohBluetoothRadio.shared.endpointID
             }
         }
     }
@@ -154,13 +154,12 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     public func shutdown() async {
         let (endpoints, tasks, connections, writers) = state.withLockedValue { state in
             state.isShutDown = true
-            let tasks = state.tasks + state.bluetooth.tasks + state.links.values.flatMap(\.tasks)
+            let tasks = state.tasks + state.links.values.flatMap(\.tasks)
             let connections =
                 state.links.values.compactMap(\.connection) + [state.hub.connection].compactMap { $0 }
             let writers = state.links.values.compactMap(\.writer) + [state.hub.writer].compactMap { $0 }
-            let endpoints = [state.endpoint, state.bluetooth.endpoint].compactMap { $0 }
+            let endpoints = [state.endpoint].compactMap { $0 }
             state.tasks = []
-            state.bluetooth.tasks = []
             state.bluetooth.endpoint = nil
             state.links = [:]
             state.hub = HubState()
@@ -172,6 +171,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             try? connection.close(errorCode: 0, reason: Data("shutdown".utf8))
         }
         for endpoint in endpoints { try? await endpoint.close() }
+        KeepTalkingIrohBluetoothRadio.shared.release(from: self)
         log("host shut down")
     }
 
@@ -251,64 +251,57 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     }
 
     private func startBluetooth() async {
-        let secret = state.withLockedValue { state -> Data? in
-            guard !state.isShutDown, state.bluetooth.endpoint == nil, !state.bluetooth.starting,
-                let secret = state.bluetooth.secret
-            else { return nil }
+        let proceed = state.withLockedValue { state -> Bool in
+            guard !state.isShutDown, state.bluetooth.endpoint == nil, !state.bluetooth.starting else {
+                return false
+            }
             state.bluetooth.starting = true
-            return secret
+            return true
         }
-        guard let secret else { return }
+        guard proceed else { return }
         do {
-            let endpoint = try await Endpoint.bind(
-                options: EndpointOptions(
-                    preset: presetMinimal(),
-                    secretKey: secret,
-                    alpns: [Self.peerALPN],
-                    relayMode: RelayMode.disabled(),
-                    ble: true,
-                    clearIpTransports: true
-                )
-            )
-            let accept = Task { await self.acceptLoop(endpoint, kind: .bluetooth) }
-            let targets = state.withLockedValue { state -> [Data] in
+            let endpoint = try await KeepTalkingIrohBluetoothRadio.shared.claim(for: self)
+            let targets = state.withLockedValue { state -> [Data]? in
                 state.bluetooth.starting = false
+                // Shut down while claiming: hand the radio straight back.
+                guard !state.isShutDown else { return nil }
                 state.bluetooth.endpoint = endpoint
-                state.bluetooth.tasks = [accept]
                 state.bluetooth.failure = nil
                 state.bluetooth.starts += 1
                 return state.contexts.values.flatMap { Array($0.bluetoothMembers.keys) }
             }
-            log("bluetooth endpoint \(Self.hex(endpoint.id().toBytes()).prefix(10)) up")
+            guard let targets else {
+                KeepTalkingIrohBluetoothRadio.shared.release(from: self)
+                return
+            }
+            log("bluetooth endpoint \(Self.hex(endpoint.id().toBytes()).prefix(10)) claimed")
             for target in Set(targets) { ensureLink(to: target, kind: .bluetooth) }
         } catch {
-            state.withLockedValue { state in
+            let changed = state.withLockedValue { state -> Bool in
                 state.bluetooth.starting = false
-                state.bluetooth.failure = error.localizedDescription
+                defer { state.bluetooth.failure = error.localizedDescription }
+                return state.bluetooth.failure != error.localizedDescription
             }
-            log("bluetooth failed to start: \(error.localizedDescription)")
+            if changed { log("bluetooth unavailable: \(error.localizedDescription)") }
         }
     }
 
+    /// Drops our Bluetooth links and lends the endpoint back. The radio
+    /// itself keeps running (see `KeepTalkingIrohBluetoothRadio`).
     private func stopBluetooth() async {
-        let (endpoint, tasks, closing) = state.withLockedValue {
-            state -> (Endpoint?, [Task<Void, Never>], [PeerLink]) in
-            let endpoint = state.bluetooth.endpoint
-            let tasks = state.bluetooth.tasks
+        let closing = state.withLockedValue { state -> [PeerLink] in
             state.bluetooth.endpoint = nil
-            state.bluetooth.tasks = []
             let closing = state.links.filter { $0.value.kind == .bluetooth }
             for key in closing.keys { state.links[key] = nil }
-            return (endpoint, tasks, Array(closing.values))
+            return Array(closing.values)
         }
-        tasks.forEach { $0.cancel() }
         for link in closing {
             link.writer?.finish()
             link.tasks.forEach { $0.cancel() }
             try? link.connection?.close(errorCode: 0, reason: Data("bluetooth off".utf8))
         }
-        try? await endpoint?.close()
-        log("bluetooth endpoint down")
+        KeepTalkingIrohBluetoothRadio.shared.release(from: self)
+        log("bluetooth endpoint released")
     }
 
     // MARK: - Attachments
@@ -783,25 +776,35 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     private func acceptLoop(_ endpoint: Endpoint, kind: PeerLink.Kind) async {
         while !Task.isCancelled, let incoming = await endpoint.acceptNext() {
-            Task {
-                let started = ContinuousClock.now
-                do {
-                    let accepting = try await incoming.accept()
-                    guard try await accepting.alpn() == Self.peerALPN else {
-                        log("refused connection with unknown ALPN")
-                        return
-                    }
-                    let connection = try await accepting.connect()
-                    install(
-                        connection,
-                        endpointID: connection.remoteId().toBytes(),
-                        side: .accepted,
-                        kind: kind,
-                        latency: ContinuousClock.now - started
-                    )
-                } catch {
-                    log("accept \(kind.rawValue) failed: \(error.localizedDescription)")
+            handleIncoming(incoming, kind: kind)
+        }
+    }
+
+    /// An incoming connection on the process-wide Bluetooth endpoint while
+    /// this host holds it.
+    func acceptBluetooth(_ incoming: Incoming) {
+        handleIncoming(incoming, kind: .bluetooth)
+    }
+
+    private func handleIncoming(_ incoming: Incoming, kind: PeerLink.Kind) {
+        Task {
+            let started = ContinuousClock.now
+            do {
+                let accepting = try await incoming.accept()
+                guard try await accepting.alpn() == Self.peerALPN else {
+                    log("refused connection with unknown ALPN")
+                    return
                 }
+                let connection = try await accepting.connect()
+                install(
+                    connection,
+                    endpointID: connection.remoteId().toBytes(),
+                    side: .accepted,
+                    kind: kind,
+                    latency: ContinuousClock.now - started
+                )
+            } catch {
+                log("accept \(kind.rawValue) failed: \(error.localizedDescription)")
             }
         }
     }
@@ -1184,12 +1187,10 @@ extension KeepTalkingIrohTransportHost {
     }
 
     fileprivate struct BluetoothState {
-        /// Fixed for the host's lifetime, so the id announced in presence
-        /// stays valid across gate cycles.
-        var secret: Data?
+        /// The process-wide Bluetooth endpoint id, announced in presence.
         var myID: Data?
+        /// The radio's endpoint while this host holds it.
         var endpoint: Endpoint?
-        var tasks: [Task<Void, Never>] = []
         var starting = false
         var failure: String?
         var starts = 0
