@@ -25,10 +25,12 @@ import NIOConcurrencyHelpers
 ///   announced in sealed presence, so peers know it before the hub goes away.
 ///   A host uses it always, or only while the network fails it; the radio
 ///   stays on from its first use until the process exits.
-/// - **Membership** — learned from sealed presence; the hub roster is only
-///   discovery. A member the hub stops listing stays while a link reaches
-///   it or it may come back over Bluetooth, and is forgotten after
-///   `memberRetention` without either.
+/// - **Membership** — learned from sealed presence, through the hub or, with
+///   no hub, from the hello on a Bluetooth link: nearby devices are found by
+///   reading the full key their advert only half-carries, then dialled.
+///   The hub roster is only discovery. A member the hub stops listing stays
+///   while a link reaches it or it may come back over Bluetooth, and is
+///   forgotten after `memberRetention` without either.
 /// - **Delivery** — each publish goes through the hub or the mesh, chosen
 ///   per publish by `DeliveryPolicy`. On the mesh each member gets one link:
 ///   network while it has a path, Bluetooth otherwise. When a member's
@@ -62,8 +64,8 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         /// QUIC address-discovery port of the relay. Nil takes it from
         /// `/kt/hub` (and disables QAD if the hub id is configured by hand).
         public var relayQUICPort: UInt16?
-        /// The Bluetooth LE endpoint (vendored `iroh-ble-transport`, AGPL —
-        /// development only until licensed). One per device: a controller
+        /// The Bluetooth LE endpoint (`iroh-ble-transport`, vendored and
+        /// patched in the iroh-ffi fork; AGPL-3.0). One per device: a controller
         /// never sees its own adverts.
         public var bluetooth: BluetoothMode
 
@@ -104,6 +106,11 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         case blob = 0x02
         case ping = 0x03
         case pong = 0x04
+        /// Sealed presence for every attached context, sent first on a
+        /// Bluetooth link (topic field zero). A blob only opens for members,
+        /// so it's how two devices that met offline learn which contexts
+        /// they share — strangers learn nothing.
+        case hello = 0x05
     }
 
     enum HostError: LocalizedError {
@@ -134,6 +141,10 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     /// How long a member the hub stopped listing is kept without any link
     /// reaching it, so Bluetooth can still find it.
     static let memberRetention: Duration = .seconds(30 * 60)
+    /// Bytes of the key a Bluetooth advert carries.
+    private static let bluetoothPrefixLength = 12
+    /// A nearby device that served no identity is asked again after this.
+    private static let identityRetryAfter: Duration = .seconds(30)
 
     public let configuration: Configuration
     private let state = NIOLockedValueBox(State())
@@ -272,6 +283,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                     await stopBluetooth()
                 }
             }
+            discoverNearby(at: now)
             try? await Task.sleep(for: .seconds(1))
         }
     }
@@ -332,6 +344,167 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         log("bluetooth endpoint released")
     }
 
+    // MARK: - Offline discovery
+
+    /// Finds nearby KeepTalking devices without the hub. Adverts carry a
+    /// 12-byte key prefix, which can't be dialled, so the full id is read
+    /// from the device (`KeepTalkingIrohBluetoothIdentityReader`) — only for
+    /// devices we're due to dial, i.e. whose prefix sorts below ours (the
+    /// higher Bluetooth id dials). A dialled device is wanted until its
+    /// hello shows we share no context. One read at a time.
+    private func discoverNearby(at now: ContinuousClock.Instant) {
+        guard
+            let bluetooth = state.withLockedValue({ state -> (endpoint: Endpoint, myID: Data)? in
+                guard let endpoint = state.bluetooth.endpoint, let myID = state.bluetooth.myID else { return nil }
+                return (endpoint, myID)
+            })
+        else { return }
+        let (endpoint, myID) = bluetooth
+        let devices: [(deviceID: String, prefix: Data)] = (endpoint.bleStatus()?.peers ?? []).compactMap { peer in
+            peer.prefix.flatMap(Self.bytes(fromHex:)).map { (peer.deviceId, $0) }
+        }
+        let myPrefix = myID.prefix(Self.bluetoothPrefixLength)
+        let (probe, redial) = state.withLockedValue { state -> ((String, Data)?, [Data]) in
+            // Devices that stopped advertising are no longer worth a dial.
+            let present = Set(devices.map(\.prefix))
+            for id in state.bluetooth.nearby.keys where !present.contains(id.prefix(Self.bluetoothPrefixLength)) {
+                state.bluetooth.nearby[id] = nil
+            }
+            let redial = state.bluetooth.nearby.keys.filter {
+                !state.bluetooth.strangers.contains($0) && state.links[$0] == nil
+            }
+            guard !state.bluetooth.probing else { return (nil, redial) }
+            let known = Set(
+                (state.contexts.values.flatMap(\.bluetoothMembers.keys) + Array(state.bluetooth.nearby.keys))
+                    .map { Data($0.prefix(Self.bluetoothPrefixLength)) }
+            )
+            let probe = devices.first { device in
+                device.prefix.lexicographicallyPrecedes(myPrefix) && !known.contains(device.prefix)
+                    && (state.bluetooth.probeRetryAt[device.deviceID].map { $0 <= now } ?? true)
+            }
+            if probe != nil { state.bluetooth.probing = true }
+            return (probe, redial)
+        }
+        for id in redial { ensureLink(to: id, kind: .bluetooth) }
+        guard let probe else { return }
+        let (deviceID, prefix) = probe
+        Task { [self] in
+            let id = await KeepTalkingIrohBluetoothRadio.shared.readIdentity(deviceID: deviceID)
+            // The id must be the one the device advertises half of.
+            let verified = id.flatMap { $0.prefix(Self.bluetoothPrefixLength) == prefix ? $0 : nil }
+            state.withLockedValue { state in
+                state.bluetooth.probing = false
+                if let verified {
+                    state.bluetooth.nearby[verified] = deviceID
+                    state.bluetooth.probeRetryAt[deviceID] = nil
+                } else {
+                    state.bluetooth.probeRetryAt[deviceID] = ContinuousClock.now + Self.identityRetryAfter
+                }
+            }
+            if let verified {
+                log("nearby \(Self.hex(verified).prefix(10)) identified over Bluetooth")
+                ensureLink(to: verified, kind: .bluetooth)
+            } else {
+                log("nearby device \(deviceID.prefix(8)) did not serve an identity")
+            }
+        }
+    }
+
+    /// Sends our hello: sealed presence for every attached context, freshly
+    /// sealed so it can't be linked to what the hub stored.
+    private func sendHello(to endpointIDs: [Data]) {
+        guard !endpointIDs.isEmpty else { return }
+        let snapshot = state.withLockedValue {
+            state -> (Data, Data?, [ContextEntry], [AsyncStream<Data>.Continuation])? in
+            guard let myID = state.myEndpointID else { return nil }
+            return (
+                myID, state.bluetooth.myID, Array(state.contexts.values),
+                endpointIDs.compactMap { state.links[$0]?.writer }
+            )
+        }
+        guard let snapshot, !snapshot.3.isEmpty else { return }
+        let (myID, bluetoothID, entries, writers) = snapshot
+        var payload = Data()
+        for entry in entries {
+            guard
+                let blob = try? KeepTalkingIrohPresenceSeal.seal(
+                    nodeID: entry.nodeID,
+                    endpointID: myID,
+                    bluetoothEndpointID: bluetoothID,
+                    contextID: entry.topic.contextID,
+                    secret: entry.secret
+                )
+            else { continue }
+            payload.appendBigEndian(UInt16(blob.count))
+            payload.append(blob)
+        }
+        var body = Data([FrameKind.hello.rawValue])
+        body.append(payload)
+        let frame = Self.peerFrame(topic: Data(count: 32), body: body)
+        writers.forEach { $0.yield(frame) }
+    }
+
+    /// A peer's hello: every blob one of our contexts opens — carrying the
+    /// very id this link authenticated — makes the peer a member there. A
+    /// hello that opens nowhere marks a stranger, whose link we drop.
+    private func handleHello(_ payload: Data, from endpointID: Data) {
+        var blobs: [Data] = []
+        var index = payload.startIndex
+        while payload.endIndex - index >= 2 {
+            let length = Int(payload[index]) << 8 | Int(payload[index + 1])
+            index += 2
+            guard payload.endIndex - index >= length else { break }
+            blobs.append(Data(payload[index..<(index + length)]))
+            index += length
+        }
+        let now = ContinuousClock.now
+        let (learned, orphans) = mutateLinks(touching: [endpointID]) { state -> ([(UUID, Data)], [Connection]) in
+            var learned: [(UUID, Data)] = []
+            for (topic, entry) in state.contexts {
+                for blob in blobs {
+                    guard
+                        let presence = KeepTalkingIrohPresenceSeal.open(
+                            blob,
+                            contextID: entry.topic.contextID,
+                            secret: entry.secret
+                        ),
+                        presence.bluetoothEndpointID == endpointID || presence.endpointID == endpointID,
+                        presence.endpointID != state.myEndpointID
+                    else { continue }
+                    let main = presence.endpointID
+                    if entry.members[main] == nil { state.contexts[topic]?.offHub[main] = now }
+                    state.contexts[topic]?.members[main] = presence.nodeID
+                    if let stale = entry.bluetoothOf[main], stale != presence.bluetoothEndpointID {
+                        state.contexts[topic]?.bluetoothMembers[stale] = nil
+                    }
+                    state.contexts[topic]?.bluetoothOf[main] = presence.bluetoothEndpointID
+                    if let bluetooth = presence.bluetoothEndpointID {
+                        state.contexts[topic]?.bluetoothMembers[bluetooth] = presence.nodeID
+                    }
+                    learned.append((presence.nodeID, main))
+                    break
+                }
+            }
+            guard learned.isEmpty else {
+                state.bluetooth.strangers.remove(endpointID)
+                return (learned, [])
+            }
+            state.bluetooth.strangers.insert(endpointID)
+            return ([], state.dropUnneededLinks(among: [endpointID]))
+        }
+        if learned.isEmpty {
+            log("hello from \(Self.hex(endpointID).prefix(10)): no shared context")
+            for connection in orphans {
+                try? connection.close(errorCode: 0, reason: Data("no shared context".utf8))
+            }
+            return
+        }
+        for (nodeID, main) in learned {
+            log("member \(nodeID.uuidString.prefix(8)) met over Bluetooth")
+            ensureLink(to: main, kind: .network)
+        }
+    }
+
     // MARK: - Attachments
 
     /// Registers a context: subscribes to its topic at the hub and announces
@@ -369,6 +542,12 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         writer?.yield(KeepTalkingIrohHubFrame.encode(.subscribe(topic: topic.topic)))
         writer?.yield(KeepTalkingIrohHubFrame.encode(.announce(topic: topic.topic, blob: blob)))
         log("ctx \(topic.contextID.uuidString.prefix(8)) attached on topic \(Self.hex(topic.topic).prefix(10))")
+        // Nearby devices that shared nothing with us might share this one.
+        let bluetoothLinks = state.withLockedValue { state -> [Data] in
+            state.bluetooth.strangers = []
+            return state.links.filter { $0.value.kind == .bluetooth && $0.value.connection != nil }.map(\.key)
+        }
+        sendHello(to: bluetoothLinks)
     }
 
     func detach(topic: Data) {
@@ -888,6 +1067,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         log(
             "\(kind.rawValue) peer \(Self.hex(endpointID).prefix(10)) \(side.rawValue) in \(Self.ms(latency)) via \(Self.selectedPath(connection))"
         )
+        if kind == .bluetooth { sendHello(to: [endpointID]) }
     }
 
     private func writeLoop(_ connection: Connection, frames: AsyncStream<Data>, endpointID: Data) async {
@@ -958,6 +1138,10 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         guard let kind = FrameKind(rawValue: body[body.startIndex]) else { return }
         let topic = Data(body[(body.startIndex + 1)..<(body.startIndex + 33)])
         let payload = Data(body.dropFirst(33))
+        if kind == .hello {
+            handleHello(payload, from: endpointID)
+            return
+        }
         let route = state.withLockedValue { state -> (KeepTalkingIrohContextTransport, UUID?)? in
             state.links[endpointID]?.framesReceived += 1
             state.links[endpointID]?.bytesReceived += body.count + 4
@@ -1199,9 +1383,12 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                     phase: peer.phase,
                     connectPath: peer.connectPath,
                     endpointID: peer.verifiedEndpoint,
+                    prefix: peer.prefix,
                     failures: Int(peer.consecutiveFailures)
                 )
-            }
+            },
+            nearby: bluetooth.nearby.keys.map(Self.hex).sorted(),
+            strangers: bluetooth.strangers.count
         )
     }
 
@@ -1229,6 +1416,19 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     static func hex(_ bytes: Data) -> String {
         bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func bytes(fromHex hex: String) -> Data? {
+        guard hex.utf8.count.isMultiple(of: 2) else { return nil }
+        var bytes = Data(capacity: hex.utf8.count / 2)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = next
+        }
+        return bytes
     }
 
     private static func describe(_ policy: DeliveryPolicy) -> String {
@@ -1291,6 +1491,13 @@ extension KeepTalkingIrohTransportHost {
         var starting = false
         var failure: String?
         var starts = 0
+        /// Bluetooth ids read from nearby devices → their device id.
+        var nearby: [Data: String] = [:]
+        /// Nearby ids whose hello opened none of our contexts; forgotten
+        /// when we attach another.
+        var strangers: Set<Data> = []
+        var probing = false
+        var probeRetryAt: [String: ContinuousClock.Instant] = [:]
     }
 
     fileprivate struct WeakSink {
@@ -1525,10 +1732,11 @@ extension KeepTalkingIrohTransportHost {
         }
 
         func isWanted(_ endpointID: Data) -> Bool {
-            !isShutDown
-                && contexts.values.contains {
-                    $0.members[endpointID] != nil || $0.bluetoothMembers[endpointID] != nil
-                }
+            guard !isShutDown else { return false }
+            if bluetooth.nearby[endpointID] != nil, !bluetooth.strangers.contains(endpointID) { return true }
+            return contexts.values.contains {
+                $0.members[endpointID] != nil || $0.bluetoothMembers[endpointID] != nil
+            }
         }
 
         /// Forgets links no attached context needs; returns what to close.

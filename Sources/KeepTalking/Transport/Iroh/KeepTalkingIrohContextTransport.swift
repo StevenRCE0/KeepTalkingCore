@@ -314,6 +314,9 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
     ) {
         guard let topic = activeTopic else { return }
         switch kind {
+            case .hello:
+                // The host consumes hellos; they belong to no topic.
+                return
             case .ping:
                 state.withLockedValue { $0.received += 1 }
                 _ = try? host.publish(.pong, topic: topic.topic, payload: Data(), to: node)

@@ -95,7 +95,7 @@ public struct KeepTalkingIrohInstruments: Sendable {
         public var state: String
         /// Our Bluetooth endpoint id (hex), fixed for the process.
         public var endpointID: String?
-        /// How many times the endpoint has been started.
+        /// How many times this host has claimed the endpoint.
         public var starts: Int
         /// Adapter on and permission granted (false while stopped).
         public var powered: Bool
@@ -103,6 +103,11 @@ public struct KeepTalkingIrohInstruments: Sendable {
         public var rxBytes: UInt64
         public var retransmits: UInt64
         public var devices: [BluetoothDevice]
+        /// Bluetooth ids read from nearby devices (hex), for offline
+        /// discovery.
+        public var nearby: [String]
+        /// Nearby ids whose hello shared no context with us.
+        public var strangers: Int
     }
 
     public struct BluetoothDevice: Sendable, Identifiable {
@@ -113,6 +118,8 @@ public struct KeepTalkingIrohInstruments: Sendable {
         public var connectPath: String?
         /// The peer's endpoint id (hex) once its handshake verified it.
         public var endpointID: String?
+        /// The key prefix (hex) it advertises.
+        public var prefix: String?
         public var failures: Int
     }
 

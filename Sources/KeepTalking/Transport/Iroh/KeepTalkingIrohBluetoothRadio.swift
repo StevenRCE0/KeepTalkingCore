@@ -42,6 +42,9 @@ final class KeepTalkingIrohBluetoothRadio: @unchecked Sendable {
     private struct State {
         var bind: Task<Endpoint, Error>?
         weak var holder: KeepTalkingIrohTransportHost?
+        #if canImport(CoreBluetooth)
+        var identityReader: KeepTalkingIrohBluetoothIdentityReader?
+        #endif
     }
 
     private init() {
@@ -72,6 +75,17 @@ final class KeepTalkingIrohBluetoothRadio: @unchecked Sendable {
         }
     }
 
+    /// The full Bluetooth endpoint id a nearby device serves (see
+    /// `KeepTalkingIrohBluetoothIdentityReader`); nil before the radio is up.
+    func readIdentity(deviceID: String) async -> Data? {
+        #if canImport(CoreBluetooth)
+        guard let reader = state.withLockedValue({ $0.identityReader }) else { return nil }
+        return await reader.read(deviceID: deviceID)
+        #else
+        return nil
+        #endif
+    }
+
     /// Gives the endpoint back. The radio keeps running.
     func release(from host: KeepTalkingIrohTransportHost) {
         state.withLockedValue { state in
@@ -90,6 +104,10 @@ final class KeepTalkingIrohBluetoothRadio: @unchecked Sendable {
                 clearIpTransports: true
             )
         )
+        #if canImport(CoreBluetooth)
+        let reader = KeepTalkingIrohBluetoothIdentityReader()
+        state.withLockedValue { $0.identityReader = reader }
+        #endif
         Task { await self.acceptLoop(endpoint) }
         return endpoint
     }
