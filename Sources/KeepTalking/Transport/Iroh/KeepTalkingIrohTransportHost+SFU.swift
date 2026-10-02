@@ -35,6 +35,9 @@ extension KeepTalkingIrohTransportHost {
                 )
                 session = connection
                 let stream = try await connection.openBi()
+                // Room management goes out with control traffic, ahead of
+                // interactive and bulk publishes.
+                try await stream.send().setPriority(p: KeepTalkingIrohPeerFrame.priority(.lane(.control)))
                 var streams: [Data: AsyncStream<Void>] = [:]
                 var bells: [Data: AsyncStream<Void>.Continuation] = [:]
                 for key in [Self.sfuSessionQueue] + Lane.allCases.map(Self.sfuQueue) {

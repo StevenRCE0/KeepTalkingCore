@@ -3,9 +3,13 @@ import Foundation
 import IrohLib
 import NIOConcurrencyHelpers
 
-/// The iroh endpoints shared by every context attached to them.
+/// The process-wide transport: one per process, owned by the host app and
+/// handed to every client as `KeepTalkingTransport.iroh(host)`. Each client's
+/// `connect()` attaches its context as a room (`KeepTalkingIrohAttachment`);
+/// everything below is shared by every attached room.
 ///
-/// - **SFU** — one connection to the Rust `kt-sfu` (`keeptalking/sfu/1`).
+/// - **SFU** — one connection to the Rust `kt-sfu` (`keeptalking/sfu/2`): a
+///   session stream for room management, and a stream per lane.
 ///   Each attached context subscribes to its *topic* (`KeepTalkingIrohTopic`,
 ///   derived from the context secret) and announces a sealed presence blob
 ///   with our node id and endpoint ids. The SFU also fans publishes and
