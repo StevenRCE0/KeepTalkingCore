@@ -23,11 +23,17 @@ import NIOConcurrencyHelpers
 ///   the crate cannot shut its radio down, so the endpoint is bound once and
 ///   lent to one host at a time. Its key is fixed for the process and
 ///   announced in sealed presence, so peers know it before the hub goes away.
-///   A host uses it always, or only while the hub is unreachable; the radio
+///   A host uses it always, or only while the network fails it; the radio
 ///   stays on from its first use until the process exits.
+/// - **Membership** — learned from sealed presence; the hub roster is only
+///   discovery. A member the hub stops listing stays while a link reaches
+///   it or it may come back over Bluetooth, and is forgotten after
+///   `memberRetention` without either.
 /// - **Delivery** — each publish goes through the hub or the mesh, chosen
 ///   per publish by `DeliveryPolicy`. On the mesh each member gets one link:
-///   network when connected, Bluetooth otherwise. Receivers take everything;
+///   network while it has a path, Bluetooth otherwise. When a member's
+///   traffic moves to its other link, its context resyncs with it, so
+///   frames a dying link swallowed come back. Receivers take everything;
 ///   KeepTalking absorbs duplicates by row id.
 ///
 /// Frames for an attached topic are delivered whoever sent them: content is
@@ -37,12 +43,15 @@ import NIOConcurrencyHelpers
 /// relay only); the hub id comes from configuration or `<relay>/kt/hub`.
 @_spi(TransportLab)
 public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
-    /// When the Bluetooth endpoint runs.
+    /// When the host uses the Bluetooth endpoint.
     public enum BluetoothMode: String, Sendable, Hashable, CaseIterable {
         case off
         case always
-        /// Only while the hub is unreachable (or suspended): the network gate.
-        case whenHubUnreachable
+        /// Only while the network gate is open: the hub is unreachable (or
+        /// suspended), or a member that announced a Bluetooth id has no
+        /// working network link — so an online device still meets a
+        /// neighbour that went offline.
+        case whenNetworkFails
     }
 
     public struct Configuration: Sendable, Hashable {
@@ -118,10 +127,13 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     static let peerALPN = Data("keeptalking/peer/1".utf8)
     static let maxPeerFrameLength = 8 << 20
     private static let maxEvents = 300
-    /// Hub down this long before the gated Bluetooth endpoint starts…
+    /// Network gate open this long before the host claims Bluetooth…
     private static let bluetoothStartAfter: Duration = .seconds(3)
-    /// …and up this long before it stops again.
+    /// …and closed this long before it lets go again.
     private static let bluetoothStopAfter: Duration = .seconds(30)
+    /// How long a member the hub stopped listing is kept without any link
+    /// reaching it, so Bluetooth can still find it.
+    static let memberRetention: Duration = .seconds(30 * 60)
 
     public let configuration: Configuration
     private let state = NIOLockedValueBox(State())
@@ -207,11 +219,10 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         var tasks = [
             Task { await self.acceptLoop(endpoint, kind: .network) },
             Task { await self.hubLoop(endpoint) },
+            Task { await self.maintenanceLoop() },
         ]
-        switch configuration.bluetooth {
-            case .off: break
-            case .always: tasks.append(Task { await self.startBluetooth() })
-            case .whenHubUnreachable: tasks.append(Task { await self.bluetoothGateLoop() })
+        if configuration.bluetooth == .always {
+            tasks.append(Task { await self.startBluetooth() })
         }
         state.withLockedValue { state in
             state.endpoint = endpoint
@@ -222,33 +233,50 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         return endpoint
     }
 
-    // MARK: - Bluetooth endpoint
+    // MARK: - Maintenance
 
-    /// Starts the gated Bluetooth endpoint once the hub has been unusable
-    /// for a moment, and stops it after the hub has been back a while.
-    private func bluetoothGateLoop() async {
-        var hubDownSince: ContinuousClock.Instant?
-        var hubUpSince: ContinuousClock.Instant?
+    /// Once a second: forgets members nothing has reached for
+    /// `memberRetention`, and in `whenNetworkFails` mode claims Bluetooth
+    /// once the network gate has been open a moment and lets go after it has
+    /// been closed a while.
+    private func maintenanceLoop() async {
+        var openSince: ContinuousClock.Instant?
+        var closedSince: ContinuousClock.Instant?
         while !Task.isCancelled, !state.withLockedValue({ $0.isShutDown }) {
-            let (usable, running) = state.withLockedValue { ($0.isHubUsable, $0.bluetooth.endpoint != nil) }
             let now = ContinuousClock.now
-            if usable {
-                hubDownSince = nil
-                hubUpSince = hubUpSince ?? now
-            } else {
-                hubUpSince = nil
-                hubDownSince = hubDownSince ?? now
+            let (left, orphans) = state.withLockedValue {
+                $0.sweepMembers(at: now, retention: Self.memberRetention)
             }
-            if !running, let since = hubDownSince, now - since >= Self.bluetoothStartAfter {
-                log("hub unreachable: starting bluetooth")
-                await startBluetooth()
-            } else if running, let since = hubUpSince, now - since >= Self.bluetoothStopAfter {
-                log("hub back: stopping bluetooth")
-                await stopBluetooth()
+            for connection in orphans {
+                try? connection.close(errorCode: 0, reason: Data("left".utf8))
+            }
+            for (sink, nodeID) in left {
+                log("member \(nodeID.uuidString.prefix(8)) unreachable for \(Self.memberRetention): forgotten")
+                sink?.memberLeft(nodeID)
+            }
+
+            if configuration.bluetooth == .whenNetworkFails {
+                let (open, running) = state.withLockedValue { ($0.needsBluetooth, $0.bluetooth.endpoint != nil) }
+                if open {
+                    closedSince = nil
+                    openSince = openSince ?? now
+                } else {
+                    openSince = nil
+                    closedSince = closedSince ?? now
+                }
+                if !running, let since = openSince, now - since >= Self.bluetoothStartAfter {
+                    log("network gate open: claiming bluetooth")
+                    await startBluetooth()
+                } else if running, let since = closedSince, now - since >= Self.bluetoothStopAfter {
+                    log("network gate closed: releasing bluetooth")
+                    await stopBluetooth()
+                }
             }
             try? await Task.sleep(for: .seconds(1))
         }
     }
+
+    // MARK: - Bluetooth endpoint
 
     private func startBluetooth() async {
         let proceed = state.withLockedValue { state -> Bool in
@@ -289,7 +317,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     /// Drops our Bluetooth links and lends the endpoint back. The radio
     /// itself keeps running (see `KeepTalkingIrohBluetoothRadio`).
     private func stopBluetooth() async {
-        let closing = state.withLockedValue { state -> [PeerLink] in
+        let closing = mutateLinks(touching: nil) { state -> [PeerLink] in
             state.bluetooth.endpoint = nil
             let closing = state.links.filter { $0.value.kind == .bluetooth }
             for key in closing.keys { state.links[key] = nil }
@@ -607,23 +635,29 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     private func handleHubFrame(_ frame: KeepTalkingIrohHubFrame.Server) {
         switch frame {
             case .snapshot(let topic, let members):
-                // A snapshot is the whole room: forget members that left while
-                // the hub session was down, then learn the current ones.
+                // A snapshot is the whole room: members it lacks left the hub
+                // while our session was down (`hubDropped` decides whether
+                // they leave us too), then learn the current ones.
                 let present = Set(members.map(\.endpointID))
-                let (sink, orphans) = state.withLockedValue { state in
+                let (sink, left, orphans) = state.withLockedValue { state in
                     state.contexts[topic]?.joined = true
-                    let gone =
+                    let absent =
                         (state.contexts[topic]?.members.keys).map { Array($0) }?
                         .filter { !present.contains($0) } ?? []
-                    var goneIDs = gone
-                    for main in gone {
-                        if let bluetooth = state.contexts[topic]?.forget(main: main) { goneIDs.append(bluetooth) }
+                    var left: [UUID] = []
+                    var unlink: [Data] = []
+                    for main in absent {
+                        let nodeID = state.contexts[topic]?.members[main]
+                        guard let ids = state.hubDropped(main, in: topic, at: .now) else { continue }
+                        unlink += ids
+                        if let nodeID { left.append(nodeID) }
                     }
-                    return (state.contexts[topic]?.sink.value, state.dropUnneededLinks(among: goneIDs))
+                    return (state.contexts[topic]?.sink.value, left, state.dropUnneededLinks(among: unlink))
                 }
                 for connection in orphans {
                     try? connection.close(errorCode: 0, reason: Data("left".utf8))
                 }
+                left.forEach { sink?.memberLeft($0) }
                 log("topic \(Self.hex(topic).prefix(10)) snapshot: \(members.count) other member(s)")
                 for member in members where !member.blob.isEmpty {
                     learn(topic: topic, reportedID: member.endpointID, blob: member.blob)
@@ -634,17 +668,24 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             case .presence(let topic, let endpointID, let blob):
                 learn(topic: topic, reportedID: endpointID, blob: blob)
             case .left(let topic, let endpointID):
-                let (sink, nodeID, orphans) = state.withLockedValue { state in
+                let (sink, nodeID, kept, orphans) = state.withLockedValue { state in
                     let nodeID = state.contexts[topic]?.members[endpointID]
-                    var ids = [endpointID]
-                    if let bluetooth = state.contexts[topic]?.forget(main: endpointID) { ids.append(bluetooth) }
-                    return (state.contexts[topic]?.sink.value, nodeID, state.dropUnneededLinks(among: ids))
+                    guard let ids = state.hubDropped(endpointID, in: topic, at: .now) else {
+                        return (state.contexts[topic]?.sink.value, nodeID, nodeID != nil, [Connection]())
+                    }
+                    return (state.contexts[topic]?.sink.value, nodeID, false, state.dropUnneededLinks(among: ids))
                 }
                 for connection in orphans {
                     try? connection.close(errorCode: 0, reason: Data("left".utf8))
                 }
-                log("topic \(Self.hex(topic).prefix(10)) left by \(Self.hex(endpointID).prefix(10))")
-                if let nodeID { sink?.memberLeft(nodeID) }
+                if kept {
+                    log(
+                        "topic \(Self.hex(topic).prefix(10)): \(Self.hex(endpointID).prefix(10)) left the hub; kept (reachable or Bluetooth)"
+                    )
+                } else {
+                    log("topic \(Self.hex(topic).prefix(10)) left by \(Self.hex(endpointID).prefix(10))")
+                    if let nodeID { sink?.memberLeft(nodeID) }
+                }
             case .deliver(let topic, let body):
                 guard let first = body.first, let kind = FrameKind(rawValue: first) else { return }
                 let sink = state.withLockedValue { state -> KeepTalkingIrohContextTransport? in
@@ -672,6 +713,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             guard presence.endpointID == reportedID else { return .mismatch }
             guard presence.endpointID != state.myEndpointID else { return .ignored }
             state.contexts[topic]?.members[presence.endpointID] = presence.nodeID
+            state.contexts[topic]?.offHub[presence.endpointID] = nil
             if let stale = state.contexts[topic]?.bluetoothOf[presence.endpointID],
                 stale != presence.bluetoothEndpointID
             {
@@ -819,7 +861,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         let (frames, writer) = AsyncStream.makeStream(of: Data.self)
         let watcher = LinkPathWatcher(host: self, endpointID: endpointID, stableID: connection.stableId())
         let watch = connection.watchPathEvents(callback: watcher)
-        let replaced = state.withLockedValue { state -> PeerLink? in
+        let replaced = mutateLinks(touching: [endpointID]) { state -> PeerLink? in
             let previous = state.links[endpointID]
             var link = PeerLink(side: side, kind: kind)
             link.connection = connection
@@ -846,7 +888,6 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         log(
             "\(kind.rawValue) peer \(Self.hex(endpointID).prefix(10)) \(side.rawValue) in \(Self.ms(latency)) via \(Self.selectedPath(connection))"
         )
-        notifyMembership(of: endpointID) { sink, nodeID in sink.peerLinkUp(nodeID) }
     }
 
     private func writeLoop(_ connection: Connection, frames: AsyncStream<Data>, endpointID: Data) async {
@@ -899,7 +940,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     private func watchClosed(_ connection: Connection, endpointID: Data) async {
         let reason = await connection.closed()
         let stableID = connection.stableId()
-        let (wasCurrent, redial) = state.withLockedValue { state -> (Bool, PeerLink.Kind?) in
+        let (wasCurrent, redial) = mutateLinks(touching: [endpointID]) { state -> (Bool, PeerLink.Kind?) in
             guard let link = state.links[endpointID], link.connection?.stableId() == stableID
             else { return (false, nil) }
             link.writer?.finish()
@@ -908,7 +949,6 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         }
         guard wasCurrent else { return }
         log("peer \(Self.hex(endpointID).prefix(10)) closed: \(reason)")
-        notifyMembership(of: endpointID) { sink, nodeID in sink.peerLinkDown(nodeID) }
         if let redial { ensureLink(to: endpointID, kind: redial) }
     }
 
@@ -938,7 +978,22 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             else { return nil }
             return connection
         }
-        guard let connection, case .selected = event else { return }
+        guard let connection else { return }
+        // A connection whose every path closed lingers until QUIC times it
+        // out (up to ~30 s) while swallowing what we write: stop routing
+        // through it as soon as that happens.
+        let pathless = connection.paths().isEmpty
+        let changed = mutateLinks(touching: [endpointID]) { state -> Bool in
+            guard state.links[endpointID]?.connection?.stableId() == stableID,
+                state.links[endpointID]?.pathless != pathless
+            else { return false }
+            state.links[endpointID]?.pathless = pathless
+            return true
+        }
+        if changed {
+            log("peer \(Self.hex(endpointID).prefix(10)) \(pathless ? "lost every path" : "has a path again")")
+        }
+        guard case .selected = event else { return }
         let isDirect = connection.paths().contains { $0.isSelected && !$0.isRelay }
         let firstDirect = state.withLockedValue { state -> Duration? in
             guard isDirect, state.links[endpointID]?.timeToDirect == nil,
@@ -959,6 +1014,47 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     }
 
     // MARK: - Notifications
+
+    /// Applies a link change and tells each context how the carrying link of
+    /// the members it touched changed: a link appeared (`peerLinkUp`), none
+    /// is left (`peerLinkDown`), or traffic moved to the other live link
+    /// (`peerRerouted` — the context resyncs over it, since frames written
+    /// into a dying link are gone). `touching` names the endpoints whose
+    /// members to compare; nil compares every member.
+    private func mutateLinks<T>(touching endpointIDs: Set<Data>?, _ change: (inout State) -> T) -> T {
+        let (result, changes) = state.withLockedValue { state -> (T, [CarrierChange]) in
+            let before = state.carriers(touching: endpointIDs)
+            let result = change(&state)
+            let after = state.carriers(touching: endpointIDs)
+            var changes: [CarrierChange] = []
+            for key in Set(before.keys).union(after.keys) {
+                let old = before[key]?.carrier
+                let new = after[key]?.carrier
+                guard old != new, let nodeID = (after[key] ?? before[key])?.nodeID else { continue }
+                let sink = state.contexts[key.topic]?.sink.value
+                switch (old, new) {
+                    case (nil, _?): changes.append(.up(sink, nodeID))
+                    case (_?, nil): changes.append(.down(sink, nodeID))
+                    default: changes.append(.rerouted(sink, nodeID))
+                }
+            }
+            return (result, changes)
+        }
+        for change in changes {
+            switch change {
+                case .up(let sink, let nodeID): sink?.peerLinkUp(nodeID)
+                case .down(let sink, let nodeID): sink?.peerLinkDown(nodeID)
+                case .rerouted(let sink, let nodeID): sink?.peerRerouted(nodeID)
+            }
+        }
+        return result
+    }
+
+    private enum CarrierChange {
+        case up(KeepTalkingIrohContextTransport?, UUID)
+        case down(KeepTalkingIrohContextTransport?, UUID)
+        case rerouted(KeepTalkingIrohContextTransport?, UUID)
+    }
 
     private func notifyMembership(
         of endpointID: Data,
@@ -1057,7 +1153,8 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                         KeepTalkingIrohInstruments.Member(
                             nodeID: nodeID,
                             endpointID: Self.hex(endpointID),
-                            bluetoothEndpointID: entry.bluetoothOf[endpointID].map { Self.hex($0) }
+                            bluetoothEndpointID: entry.bluetoothOf[endpointID].map { Self.hex($0) },
+                            isListedByHub: entry.offHub[endpointID] == nil
                         )
                     },
                     meshPublished: entry.meshPublished,
@@ -1085,7 +1182,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         } else if let failure = bluetooth.failure {
             state = "failed: \(failure)"
         } else {
-            state = configuration.bluetooth == .whenHubUnreachable ? "standby (hub up)" : "stopped"
+            state = configuration.bluetooth == .whenNetworkFails ? "standby (network fine)" : "stopped"
         }
         return KeepTalkingIrohInstruments.Bluetooth(
             mode: configuration.bluetooth.rawValue,
@@ -1215,6 +1312,9 @@ extension KeepTalkingIrohTransportHost {
         var bluetoothOf: [Data: Data] = [:]
         /// Bluetooth endpoint id → node id.
         var bluetoothMembers: [Data: UUID] = [:]
+        /// Network endpoint id → since when a member the hub stopped listing
+        /// has gone unreached (restarted whenever a link reaches it).
+        var offHub: [Data: ContinuousClock.Instant] = [:]
         var meshPublished = 0
         var hubPublished = 0
         var meshReceived = 0
@@ -1234,9 +1334,17 @@ extension KeepTalkingIrohTransportHost {
             members[endpointID] ?? bluetoothMembers[endpointID]
         }
 
+        /// The network id of the member `endpointID` (network or Bluetooth)
+        /// belongs to.
+        func mainID(for endpointID: Data) -> Data? {
+            if members[endpointID] != nil { return endpointID }
+            return bluetoothOf.first { $0.value == endpointID }?.key
+        }
+
         /// Drops a member; returns its Bluetooth id if it had one.
         mutating func forget(main endpointID: Data) -> Data? {
             members[endpointID] = nil
+            offHub[endpointID] = nil
             guard let bluetooth = bluetoothOf.removeValue(forKey: endpointID) else { return nil }
             bluetoothMembers[bluetooth] = nil
             return bluetooth
@@ -1250,6 +1358,9 @@ extension KeepTalkingIrohTransportHost {
         let side: Side
         let kind: Kind
         var connection: Connection?
+        /// Every path of `connection` closed: it carries nothing until one
+        /// reopens or QUIC gives up on it.
+        var pathless = false
         var writer: AsyncStream<Data>.Continuation?
         var watch: WatchHandle?
         var tasks: [Task<Void, Never>] = []
@@ -1296,17 +1407,95 @@ extension KeepTalkingIrohTransportHost {
             hub.status == .ready && hub.writer != nil && !hub.suspended
         }
 
-        /// One link per connected member of `topic`: its network link when
-        /// that is up, its Bluetooth link otherwise.
+        /// A link that is connected and still has a path.
+        func isCarrying(_ endpointID: Data) -> Bool {
+            guard let link = links[endpointID] else { return false }
+            return link.connection != nil && !link.pathless
+        }
+
+        /// The link carrying member `main`: its network link while that
+        /// works, its Bluetooth link otherwise.
+        func carrier(of main: Data, in entry: ContextEntry) -> Data? {
+            if isCarrying(main) { return main }
+            if let bluetooth = entry.bluetoothOf[main], isCarrying(bluetooth) { return bluetooth }
+            return nil
+        }
+
+        /// One link per reachable member of `topic`.
         func connectedMembers(of topic: Data) -> [(endpointID: Data, nodeID: UUID)] {
             guard let entry = contexts[topic] else { return [] }
-            return entry.members.compactMap { endpointID, nodeID in
-                if links[endpointID]?.connection != nil { return (endpointID, nodeID) }
-                if let bluetooth = entry.bluetoothOf[endpointID], links[bluetooth]?.connection != nil {
-                    return (bluetooth, nodeID)
+            return entry.members.compactMap { main, nodeID in
+                carrier(of: main, in: entry).map { ($0, nodeID) }
+            }
+        }
+
+        struct MemberKey: Hashable {
+            let topic: Data
+            let main: Data
+        }
+
+        /// Node and carrying link of every member `endpointIDs` (network or
+        /// Bluetooth ids) belong to, per context; nil means every member.
+        func carriers(touching endpointIDs: Set<Data>?) -> [MemberKey: (nodeID: UUID, carrier: Data?)] {
+            var result: [MemberKey: (nodeID: UUID, carrier: Data?)] = [:]
+            for (topic, entry) in contexts {
+                let mains =
+                    endpointIDs.map { ids in Set(ids.compactMap(entry.mainID(for:))) } ?? Set(entry.members.keys)
+                for main in mains {
+                    guard let nodeID = entry.members[main] else { continue }
+                    result[MemberKey(topic: topic, main: main)] = (nodeID, carrier(of: main, in: entry))
                 }
+            }
+            return result
+        }
+
+        /// The network gate: the hub is unusable, or a member that announced
+        /// a Bluetooth id has no working network link.
+        var needsBluetooth: Bool {
+            !isHubUsable
+                || contexts.values.contains { entry in
+                    entry.bluetoothOf.keys.contains { !isCarrying($0) }
+                }
+        }
+
+        /// The hub stopped listing `main` in `topic`. Its roster is only
+        /// discovery, so a member a link still reaches — or that Bluetooth
+        /// may reach — is kept until `sweepMembers` gives up on it. Returns
+        /// the ids to unlink when the member is dropped now; nil when it's
+        /// kept or wasn't a member.
+        mutating func hubDropped(_ main: Data, in topic: Data, at now: ContinuousClock.Instant) -> [Data]? {
+            guard let entry = contexts[topic], entry.members[main] != nil else { return nil }
+            let mayUseBluetooth = bluetooth.myID != nil && entry.bluetoothOf[main] != nil
+            if carrier(of: main, in: entry) != nil || mayUseBluetooth {
+                if entry.offHub[main] == nil { contexts[topic]?.offHub[main] = now }
                 return nil
             }
+            var ids = [main]
+            if let bluetooth = contexts[topic]?.forget(main: main) { ids.append(bluetooth) }
+            return ids
+        }
+
+        /// Forgets members the hub stopped listing that no link has reached
+        /// for `retention`. Returns who left and the connections to close.
+        mutating func sweepMembers(
+            at now: ContinuousClock.Instant,
+            retention: Duration
+        ) -> (left: [(KeepTalkingIrohContextTransport?, UUID)], orphans: [Connection]) {
+            var left: [(KeepTalkingIrohContextTransport?, UUID)] = []
+            var unlink: [Data] = []
+            for (topic, entry) in contexts {
+                for (main, since) in entry.offHub {
+                    if carrier(of: main, in: entry) != nil {
+                        contexts[topic]?.offHub[main] = now
+                        continue
+                    }
+                    guard now - since >= retention, let nodeID = entry.members[main] else { continue }
+                    unlink.append(main)
+                    if let bluetooth = contexts[topic]?.forget(main: main) { unlink.append(bluetooth) }
+                    left.append((entry.sink.value, nodeID))
+                }
+            }
+            return (left, unlink.isEmpty ? [] : dropUnneededLinks(among: unlink))
         }
 
         /// The policy's pick for a broadcast on `topic`, falling back to

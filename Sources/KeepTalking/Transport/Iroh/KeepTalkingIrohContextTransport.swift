@@ -286,6 +286,17 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
         reportState()
     }
 
+    /// The member's traffic moved to its other live link (network died
+    /// under Bluetooth, or came back). Whatever went into the dying link is
+    /// lost, so run the node-online resync over the new one even when
+    /// liveness never saw the node go away.
+    func peerRerouted(_ node: UUID) {
+        guard activeTopic != nil, node != nodeID else { return }
+        debug("route to \(node.uuidString.prefix(8)) changed: resyncing")
+        if !observe(node) { onPeerConnect?(node) }
+        reportState()
+    }
+
     func memberLeft(_ node: UUID) {
         debug("member \(node.uuidString.prefix(8)) left")
         reportState()
@@ -363,14 +374,16 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
     /// Feeds the client's liveness state; on an offline→online edge tells the
     /// client the way `ContextTransport` does — a connect callback, plus the
     /// presence envelope its node handlers turn into discovery (unless that
-    /// envelope is itself what we're handling).
-    private func observe(_ node: UUID, announce: Bool = true) {
-        guard node != nodeID, let liveness = state.withLockedValue({ $0.liveness }) else { return }
+    /// envelope is itself what we're handling). Returns whether it did.
+    @discardableResult
+    private func observe(_ node: UUID, announce: Bool = true) -> Bool {
+        guard node != nodeID, let liveness = state.withLockedValue({ $0.liveness }) else { return false }
         let observation = liveness.observePresence(from: node, echoCooldown: 1)
-        guard observation.isNewConnection else { return }
+        guard observation.isNewConnection else { return false }
         debug("peer \(node.uuidString.prefix(8)) reachable")
         onPeerConnect?(node)
         if announce { onEnvelope?(KeepTalkingP2PPresencePayload(node: node)) }
+        return true
     }
 
     private func reportState() {

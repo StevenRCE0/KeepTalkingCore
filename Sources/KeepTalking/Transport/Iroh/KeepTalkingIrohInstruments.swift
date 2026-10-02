@@ -22,6 +22,9 @@ public struct KeepTalkingIrohInstruments: Sendable {
         public var endpointID: String
         /// The member's Bluetooth endpoint, if its presence announced one.
         public var bluetoothEndpointID: String?
+        /// False once the hub stopped listing the member; it stays while a
+        /// link reaches it or Bluetooth may.
+        public var isListedByHub: Bool
     }
 
     public struct Context: Sendable, Identifiable {
@@ -86,11 +89,11 @@ public struct KeepTalkingIrohInstruments: Sendable {
 
     /// The Bluetooth endpoint, when the host was configured with one.
     public struct Bluetooth: Sendable {
-        /// `always` or `whenHubUnreachable`.
+        /// `always` or `whenNetworkFails`.
         public var mode: String
-        /// `running`, `standby (hub up)`, `starting`, `stopped`, `failed: …`.
+        /// `running`, `standby (network fine)`, `starting`, `stopped`, `failed: …`.
         public var state: String
-        /// Our Bluetooth endpoint id (hex), fixed for the host's lifetime.
+        /// Our Bluetooth endpoint id (hex), fixed for the process.
         public var endpointID: String?
         /// How many times the endpoint has been started.
         public var starts: Int
