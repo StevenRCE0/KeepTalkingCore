@@ -56,7 +56,7 @@ extension KeepTalkingIrohTransportHost {
     /// link to, that have none yet; forgets expired demands. Rooms move
     /// between the mesh and the SFU as they grow, shrink, or the SFU comes
     /// and goes, so this runs every pass rather than only on learning.
-    private func keepMeshLinks(now: Instant) {
+    func keepMeshLinks(now: Instant) {
         let targets = state.withLockedValue { state -> [(Data, LinkKind)] in
             state.demand = state.demand.filter { $0.value > now }
             let mains = state.meshMembers.union(state.demand.keys)

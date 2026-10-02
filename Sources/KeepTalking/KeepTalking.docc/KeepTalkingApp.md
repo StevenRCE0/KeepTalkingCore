@@ -39,8 +39,9 @@ below name them in prose rather than with symbol links.
   mode replaces the host — the old one shuts down first, since the Bluetooth
   radio serves one host at a time — and rebuilds the clients on it. Bluetooth
   permission is asked once; the answer is stored, and after a denial
-  Bluetooth is only a Settings choice. On foreground the app reconnects only
-  contexts that are not connected: recovery is the transport's job.
+  Bluetooth is only a Settings choice. On return from the background the app
+  tells the host the network may have changed, and reconnects only contexts
+  that are not connected: recovery is the transport's job.
 - **Secrets.** The app injects the SDK's own `KeepTalkingSecItemKeychainStore`
   rather than the in-memory default, and shares it across the main app and
   its extensions through a common `keychain-access-groups` entitlement — the

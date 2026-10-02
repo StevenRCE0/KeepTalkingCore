@@ -261,9 +261,17 @@ it changed. See <doc:Events>.
 Recovery happens inside the host. Clients see only its effects, through status and
 events:
 
+- The host watches the system's network path. iroh notices few changes by itself on Apple
+  platforms, so on each change (Wi-Fi to cellular, a new Wi-Fi network, the network coming
+  back) the host tells it: iroh rebinds its sockets, reconnects to the relay and finds new
+  paths for every connection, which carry on across the switch. The SFU's retry wait and
+  the links' redial backoff are cut short, and while the path is down the network counts
+  as failing, so Bluetooth in `whenNetworkFails` mode starts without waiting for the SFU to
+  time out. No path update announces a return from the background, so the app calls
+  ``KeepTalkingIrohTransportHost/networkChanged()`` then.
 - The SFU session reconnects with backoff, and is closed and reopened when a write stalls.
-- A link that drops is redialled, with backoff from two to sixteen seconds, for as long as
-  it is still wanted.
+- A link that drops is redialled, with backoff from two seconds to a minute, for as long
+  as it is still wanted.
 - A connection whose every path closed would otherwise linger until QUIC times it out,
   swallowing writes. The host stops routing through it as soon as its paths go, so the
   member's queue drains through its other link.

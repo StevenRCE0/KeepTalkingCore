@@ -180,4 +180,10 @@ struct KeepTalkingIrohLinkTable: Sendable {
     mutating func pruneBackoff(now: Instant) {
         backoff = backoff.filter { now - $0.value.until < Self.maxBackoff * 5 }
     }
+
+    /// The network changed: what failed on the old one may work now, so
+    /// every endpoint may be dialled again at once.
+    mutating func clearBackoff() {
+        backoff = [:]
+    }
 }

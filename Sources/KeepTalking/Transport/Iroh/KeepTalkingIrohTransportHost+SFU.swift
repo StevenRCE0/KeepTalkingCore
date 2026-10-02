@@ -53,6 +53,7 @@ extension KeepTalkingIrohTransportHost {
                     state.sfu.connectLatency = latency
                     state.sfu.connectedSince = Date()
                     state.sfu.status = .ready
+                    state.sfu.retryNow = false
                     var frames: [Data] = []
                     for (topic, attachment) in state.attachments {
                         frames.append(KeepTalkingIrohSFUFrame.encode(.subscribe(topic: topic)))
@@ -123,9 +124,28 @@ extension KeepTalkingIrohTransportHost {
             attempt += 1
             notifyAllContexts { $0.sfuStateChanged() }
             if !state.withLockedValue({ $0.sfu.suspended }) {
-                try? await Task.sleep(for: .seconds(min(1 << min(attempt - 1, 3), 8)))
+                await sfuRetryWait(.seconds(min(1 << min(attempt - 1, 3), 8)))
             }
         }
+    }
+
+    /// Waits `delay` before the next attempt, or less when the network
+    /// changes: whatever failed on the old one may work now.
+    private func sfuRetryWait(_ delay: Duration) async {
+        let (wake, bell) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        let changed = state.withLockedValue { state -> Bool in
+            defer { state.sfu.retryNow = false }
+            if !state.sfu.retryNow { state.sfu.retryBell = bell }
+            return state.sfu.retryNow
+        }
+        guard !changed else { return }
+        let timer = Task {
+            try? await Task.sleep(for: delay, clock: clock)
+            bell.finish()
+        }
+        for await _ in wake { break }
+        timer.cancel()
+        state.withLockedValue { $0.sfu.retryBell = nil }
     }
 
     /// Opens the lanes of `connection`'s session (once its subscriptions are

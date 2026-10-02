@@ -2,6 +2,7 @@
 import Foundation
 import IrohLib
 import NIOConcurrencyHelpers
+import Network
 
 /// The process-wide transport: one per process, owned by the host app and
 /// handed to every client as `KeepTalkingTransport.iroh(host)`. Each client's
@@ -205,6 +206,8 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     public func shutdown() async {
         let (endpoint, tasks, ios, sfu) = state.withLockedValue { state in
             state.isShutDown = true
+            state.pathMonitor?.cancel()
+            state.pathMonitor = nil
             let ios = Array(state.io.values)
             let sfu = (state.sfu.connection, Array(state.sfu.doorbells.values))
             let tasks = state.tasks
@@ -269,6 +272,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 Task { await self.sfuLoop(endpoint) },
                 Task { await self.maintenanceLoop() },
             ]
+            state.pathMonitor = startPathMonitor()
             return true
         }
         guard installed else {
@@ -617,6 +621,10 @@ extension KeepTalkingIrohTransportHost {
         var bytePacer = KeepTalkingIrohPacer(rate: 3 * 1024 * 1024, burst: 3 * 1024 * 1024)
         /// Snapshot chunks received so far, per topic.
         var pendingSnapshots: [Data: [KeepTalkingIrohSFUFrame.Member]] = [:]
+        /// Rung by a network change to end the wait before the next attempt.
+        var retryBell: AsyncStream<Void>.Continuation?
+        /// The network changed during an attempt: skip the wait after it.
+        var retryNow = false
 
         /// How long to wait before sending `frames` frames of `bytes` bytes.
         mutating func pace(frames: Int, bytes: Int, now: Instant) -> Duration {
@@ -705,6 +713,13 @@ extension KeepTalkingIrohTransportHost {
         var demand: [Data: Instant] = [:]
         var sfu = SFUState()
         var bluetooth = BluetoothState()
+        /// Watches the system's network path while the endpoint is bound.
+        var pathMonitor: NWPathMonitor?
+        /// The last path seen, for the log; nil before the first.
+        var path: String?
+        var pathSatisfied = true
+        /// Counts network changes, so a burst of them acts once.
+        var networkChanges = 0
         var droppedFrames = 0
         var events: [KeepTalkingIrohInstruments.Event] = []
         var nextEventID = 0
@@ -786,7 +801,7 @@ extension KeepTalkingIrohTransportHost {
         /// The network gate's input: the SFU is unusable, or a member that
         /// announced a Bluetooth id has no working network link.
         var networkFailing: Bool {
-            !sfuUsable
+            !pathSatisfied || !sfuUsable
                 || meshMembers.contains { main in
                     membership.bluetoothID(of: main) != nil && !table.isCarrying(main)
                 }

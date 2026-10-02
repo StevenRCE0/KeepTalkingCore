@@ -247,6 +247,18 @@ struct IrohLinkTableTests {
         #expect(afterLongLink != nil)
     }
 
+    @Test("A network change lifts the redial backoff")
+    func networkChangeClearsBackoff() throws {
+        var table = KeepTalkingIrohLinkTable()
+        let tokenSlot = table.beginDial(to: high, kind: .network, myID: low, now: start)
+        let token = try #require(tokenSlot)
+        _ = table.install(high, kind: .network, side: .dialed, stableID: 1, token: token, now: start, latency: .zero)
+        _ = table.closed(high, stableID: 1, now: start + .seconds(1), wanted: true)
+        #expect(table.beginDial(to: high, kind: .network, myID: low, now: start + .seconds(2)) == nil)
+        table.clearBackoff()
+        #expect(table.beginDial(to: high, kind: .network, myID: low, now: start + .seconds(2)) != nil)
+    }
+
     @Test("Only a dialed, still-wanted link redials")
     func redial() {
         var table = KeepTalkingIrohLinkTable()
