@@ -151,3 +151,35 @@ struct KeepTalkingIrohNetworkGate: Sendable {
         return isOpen
     }
 }
+
+/// A token bucket: `rate` units a second, up to `burst` saved up. The SFU
+/// drops what a client sends over its limits (publishes and announces:
+/// 4 MiB/s and 200 frames/s, with bursts), so the client paces itself below
+/// them instead of losing frames it thinks it sent.
+struct KeepTalkingIrohPacer: Sendable {
+    typealias Instant = SuspendingClock.Instant
+
+    let rate: Double
+    let burst: Double
+    private var tokens: Double
+    private var updatedAt: Instant?
+
+    init(rate: Double, burst: Double) {
+        self.rate = rate
+        self.burst = burst
+        self.tokens = burst
+    }
+
+    /// Takes `cost` units; returns how long to wait before sending.
+    mutating func take(_ cost: Double, now: Instant) -> Duration {
+        if let updatedAt {
+            let elapsed = now - updatedAt
+            let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+            tokens = min(burst, tokens + seconds * rate)
+        }
+        updatedAt = now
+        tokens -= cost
+        guard tokens < 0 else { return .zero }
+        return .seconds(-tokens / rate)
+    }
+}

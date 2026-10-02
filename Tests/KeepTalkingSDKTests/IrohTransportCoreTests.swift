@@ -341,3 +341,21 @@ struct IrohDeliveryTests {
         #expect(!gate.isOpen)
     }
 }
+
+/// The client paces SFU sends below the server's limits.
+struct IrohPacerTests {
+    @Test("A burst goes out at once; past it, sends wait for the rate")
+    func pacer() {
+        var pacer = KeepTalkingIrohPacer(rate: 10, burst: 3)
+        let burst = (0..<3).map { _ in pacer.take(1, now: start) }
+        #expect(burst.allSatisfy { $0 == .zero })
+        let fourth = pacer.take(1, now: start)
+        let off = fourth - .milliseconds(100)
+        #expect(off < .microseconds(1) && off > .microseconds(-1))
+        // A second later the bucket has refilled to its burst, no further.
+        let later = pacer.take(3, now: start + .seconds(1))
+        #expect(later == .zero)
+        let afterBurst = pacer.take(1, now: start + .seconds(1))
+        #expect(afterBurst > .zero)
+    }
+}

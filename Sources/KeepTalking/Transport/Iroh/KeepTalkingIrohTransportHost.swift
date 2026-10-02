@@ -270,23 +270,30 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         // Queue the SFU frames in the critical section that registers the
         // topic: the SFU loop re-subscribes every registered topic in the one
         // that publishes its session, so a topic is never missed or doubled.
-        let (doorbell, links) = state.withLockedValue { state -> (AsyncStream<Void>.Continuation?, [Data]) in
+        let (doorbell, links, joined) = state.withLockedValue {
+            state -> (AsyncStream<Void>.Continuation?, [Data], Bool) in
             state.membership.attach(topic, nodeID: nodeID, secret: secret)
+            // Taking over a topic already subscribed: the SFU ignores the
+            // repeated SUBSCRIBE, so no snapshot will say we joined.
+            let joined = state.membership.contexts[topic.topic]?.joined ?? false
             let previous = state.attachments[topic.topic]
             var attachment = Attachment(sink: sink, topic: topic, nodeID: nodeID, blob: blob)
             if let previous { attachment.inheritCounters(from: previous) }
             state.attachments[topic.topic] = attachment
             state.bluetooth.strangers = []
-            guard let doorbell = state.sfu.doorbell else { return (nil, state.connectedLinks) }
+            guard let doorbell = state.sfu.doorbell else { return (nil, state.connectedLinks, false) }
             state.outbound.enqueue(KeepTalkingIrohSFUFrame.encode(.subscribe(topic: topic.topic)), for: Self.sfuQueue)
             state.outbound.enqueue(
                 KeepTalkingIrohSFUFrame.encode(.announce(topic: topic.topic, blob: blob)),
                 for: Self.sfuQueue
             )
-            return (doorbell, state.connectedLinks)
+            return (doorbell, state.connectedLinks, joined)
         }
         doorbell?.yield()
         sendHello(to: links)
+        // Not inline: the transport attaches under its own lock, which
+        // sfuJoined takes again to send a heartbeat.
+        if joined { Task { sink.sfuJoined() } }
         log("ctx \(topic.contextID.uuidString.prefix(8)) attached on topic \(Self.hex(topic.topic).prefix(10))")
     }
 

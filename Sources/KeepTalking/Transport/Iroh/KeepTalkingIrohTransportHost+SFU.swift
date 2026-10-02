@@ -98,6 +98,9 @@ extension KeepTalkingIrohTransportHost {
 
     private func sfuPump(_ connection: Connection, send: SendStream, doorbell: AsyncStream<Void>) async {
         let stableID = connection.stableId()
+        // Below the SFU's 200 frames/s and 4 MiB/s (bursts 400 and 4 MiB).
+        var frames = KeepTalkingIrohPacer(rate: 150, burst: 300)
+        var bytes = KeepTalkingIrohPacer(rate: 3 * 1024 * 1024, burst: 3 * 1024 * 1024)
         do {
             for await _ in doorbell {
                 while true {
@@ -110,6 +113,9 @@ extension KeepTalkingIrohTransportHost {
                     guard let batch else { return }
                     if batch.isEmpty { break }
                     for frame in batch {
+                        let now = clock.now
+                        let wait = max(frames.take(1, now: now), bytes.take(Double(frame.count), now: now))
+                        if wait > .zero { try await Task.sleep(for: wait, clock: clock) }
                         try await send.writeAll(buf: frame)
                     }
                 }
