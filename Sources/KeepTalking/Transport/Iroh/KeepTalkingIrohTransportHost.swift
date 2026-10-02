@@ -714,19 +714,23 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     // MARK: - Peer links
 
-    /// Dials `endpointID` on the matching endpoint when we hold the lower id
-    /// of that kind; the other side waits.
+    /// Dials `endpointID` on the matching endpoint when it's our turn; the
+    /// other side waits. Network links: the lower id dials. Bluetooth links:
+    /// the *higher* id dials, matching `iroh-ble-transport`, which keeps the
+    /// BLE connection whose central (dialer) holds the higher id and makes
+    /// the lower side hold back so the higher one lands first.
     private func ensureLink(to endpointID: Data, kind: PeerLink.Kind) {
         let shouldDial = state.withLockedValue { state -> Bool in
             let myID = kind == .network ? state.myEndpointID : state.bluetooth.myID
             let endpoint = kind == .network ? state.endpoint : state.bluetooth.endpoint
-            guard
-                !state.isShutDown,
-                endpoint != nil,
-                let myID,
-                myID.lexicographicallyPrecedes(endpointID),
-                state.links[endpointID] == nil
-            else { return false }
+            guard !state.isShutDown, endpoint != nil, let myID, state.links[endpointID] == nil else {
+                return false
+            }
+            let ourTurn =
+                kind == .network
+                ? myID.lexicographicallyPrecedes(endpointID)
+                : endpointID.lexicographicallyPrecedes(myID)
+            guard ourTurn else { return false }
             state.links[endpointID] = PeerLink(side: .dialed, kind: kind)
             return true
         }
