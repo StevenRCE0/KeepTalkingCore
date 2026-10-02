@@ -941,7 +941,7 @@ extension KeepTalkingClient {
             "[action-call/request] dispatching remote request=\(requestID) action=\(actionID) owner=\(actionOwner.uuidString.lowercased()) target=\(deliveryNodeID.uuidString.lowercased()) context=\(request.contextID.uuidString.lowercased())"
         )
 
-        try await sendRemoteActionCallRequest(request, deliveryDescription: "rtc")
+        try await sendRemoteActionCallRequest(request, deliveryDescription: "room")
 
         return try await withTaskCancellationHandler {
             try await waitForActionCallResult(

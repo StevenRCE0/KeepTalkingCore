@@ -381,26 +381,6 @@ extension KeepTalkingClient {
         return response
     }
 
-    func asymmetricPublicKeysForRecipient(nodeID: UUID) async throws
-        -> (localPublicKey: String, remotePublicKey: String, relationID: UUID)?
-    {
-        let node = try await ensure(nodeID, for: KeepTalkingNode.self)
-
-        let localKeyMaterial = try await localKeyAgreementMaterial(to: node)
-        guard
-            let remoteCandidate = try await remoteKeyAgreementPublicKeys(
-                nodeID: nodeID
-            ).first
-        else {
-            return nil
-        }
-        return (
-            localPublicKey: localKeyMaterial.publicKeyBase64,
-            remotePublicKey: remoteCandidate.publicKeyBase64,
-            relationID: remoteCandidate.relationID
-        )
-    }
-
     func encryptAsymmetricPayload(
         _ payload: Data,
         recipientNodeID: UUID,

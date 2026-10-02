@@ -580,25 +580,6 @@ public struct AIOrchestrator: @unchecked Sendable {
         return names.isEmpty ? rawNames : names
     }
 
-    /// Pull the text from the first `.tool` role message in `messages`. That's
-    /// the raw result string the executor returned for this tool call — the
-    /// model sees it; we surface it (collapsed) to the user too.
-    private static func extractToolResultText(_ messages: [AIMessage]) -> String? {
-        for message in messages where message.role == .tool {
-            // `content` is `Content?`; bind through the optional with `?`.
-            // Also fall through to `.parts` so we don't drop multi-part
-            // results that happen to carry a text leg.
-            if case .text(let str)? = message.content {
-                let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { return trimmed }
-            } else if let content = message.content {
-                let projection = content.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !projection.isEmpty { return projection }
-            }
-        }
-        return nil
-    }
-
     /// Parse the structured result text emitted by `SkillManager+ToolCalls.swift`
     /// (`command: ... \nexit_code: N\nstdout: ...\nstderr: ...`) into a flat
     /// parameters dict the chat's intermediate-message renderer can show

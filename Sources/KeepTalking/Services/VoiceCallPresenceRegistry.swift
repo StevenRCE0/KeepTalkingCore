@@ -104,25 +104,4 @@ public final class KeepTalkingVoiceCallPresenceRegistry: @unchecked Sendable {
         for contextID in touched { changes.send(contextID) }
         return touched
     }
-
-    /// Drops every entry tied to `nodeID` across all contexts. Used when
-    /// a peer disconnects from the chat transport — a call that survives
-    /// a disconnect is fine, but a call we *only* know about because of
-    /// a Started from a peer who has since vanished is stale.
-    public func forgetNode(_ nodeID: UUID) {
-        let touched: [UUID] = lock.withLock {
-            var hits: [UUID] = []
-            for (contextID, entries) in byContext {
-                let participant = Participant(nodeID: nodeID)
-                guard entries.contains(participant) else { continue }
-                byContext[contextID]?.remove(participant)
-                if byContext[contextID]?.isEmpty == true {
-                    byContext.removeValue(forKey: contextID)
-                }
-                hits.append(contextID)
-            }
-            return hits
-        }
-        for contextID in touched { changes.send(contextID) }
-    }
 }

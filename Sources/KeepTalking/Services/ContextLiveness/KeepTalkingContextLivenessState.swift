@@ -39,9 +39,10 @@ final class KeepTalkingContextLivenessState: @unchecked Sendable {
     }
 
     /// Record a presence from `node`. Returns whether this is a connect edge (was
-    /// offline, now online) and whether to echo our presence back. Both call sites
-    /// (SFU presence + p2p) feed this; whichever observes first while offline wins
-    /// the edge, so `onPeerConnect` fires once across sources.
+    /// offline, now online) and whether to echo our presence back. Every source
+    /// the connection sees — presence heartbeats, envelopes a link carried, links
+    /// coming up, blob streams — feeds this; whichever observes first while
+    /// offline wins the edge, so the node-online pass runs once across sources.
     func observePresence(
         from node: UUID,
         echoCooldown: TimeInterval,

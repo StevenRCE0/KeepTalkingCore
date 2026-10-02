@@ -1,7 +1,7 @@
 import Foundation
 
-/// Wire-level encoding of `KeepTalkingNodeTrustScope` for transport over the
-/// signaling channel. The full enum carries a `KeepTalkingContext` model
+/// Wire-level encoding of `KeepTalkingNodeTrustScope` for the trust handshake
+/// envelopes. The full enum carries a `KeepTalkingContext` model
 /// reference, which we don't ship across the wire — the recipient already
 /// has the context locally and looks it up by `contextID`.
 public enum KeepTalkingTrustScopeWire: String, Codable, Sendable {

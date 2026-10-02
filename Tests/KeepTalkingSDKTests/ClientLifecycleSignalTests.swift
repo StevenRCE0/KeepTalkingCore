@@ -235,6 +235,9 @@ struct ClientLifecycleSignalTests {
         await presence.waitForCount(2)
         #expect(presence.snapshot.last == .init(onlineNodeIDs: [peer], change: .online(peer)))
         #expect(fixture.client.isNodeOnline(peer))
+        // The edge starts the node-online pass, which sweeps presence on the
+        // real clock; let it land before sweeping at simulated times.
+        await presence.settle()
 
         // Aged out of the liveness window: the sweep reports offline.
         fixture.client.connection.sweepPresence(now: start.addingTimeInterval(41))

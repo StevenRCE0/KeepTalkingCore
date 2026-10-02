@@ -212,16 +212,6 @@ extension KeepTalkingClient {
         }
     }
 
-    func waitForNodeToComeOnline(
-        _ nodeID: UUID,
-        timeoutSeconds: TimeInterval = 60
-    ) async {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while !isNodeOnline(nodeID) && Date() < deadline {
-            try? await Task.sleep(for: .seconds(1))
-        }
-    }
-
     func encryptedContextWakeEnvelope(
         contextID: UUID,
         sealing payload: some Encodable

@@ -85,7 +85,7 @@ extension KeepTalkingClient {
     }
 
     /// Initiate a bidirectional trust handshake with `peerNodeID` over the
-    /// shared `contextID`'s signaling channel.
+    /// shared `contextID`'s room (control lane).
     ///
     /// The request itself carries no scope — the responder picks how widely
     /// to trust the initiator at accept time, and the chosen scope flows

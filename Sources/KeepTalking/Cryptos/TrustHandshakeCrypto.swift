@@ -3,8 +3,8 @@ import Foundation
 
 /// Pure cryptographic primitives for the bidirectional trust handshake.
 ///
-/// The handshake runs on the signaling channel (never written to context
-/// history) and exists to safely auto-exchange long-term identity public keys
+/// The handshake runs on the context's room, on the control lane (never
+/// written to context history), and exists to safely auto-exchange long-term identity public keys
 /// between two nodes that share a `KeepTalkingContext`.
 ///
 /// Algorithm: X25519 ECDH between fresh per-handshake ephemeral keypairs.

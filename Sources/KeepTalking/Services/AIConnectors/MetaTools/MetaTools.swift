@@ -141,51 +141,6 @@ extension KeepTalkingClient {
         return collapsed
     }
 
-    func renderCatalogListing(
-        _ catalog: KeepTalkingActionToolCatalog,
-        routesByFunctionName: [String: KeepTalkingAgentToolRoute],
-        contextID: UUID,
-        nodeAliasResolver: ((UUID) -> String?)? = nil
-    ) -> String {
-        let skillNameByActionID = skillNamesByActionID(
-            routesByFunctionName: routesByFunctionName
-        )
-        let rows = catalog.definitions.sorted {
-            $0.functionName < $1.functionName
-        }.map { definition in
-            let route = routesByFunctionName[definition.functionName]
-            let taggedToolName = actionDisplayName(
-                for: definition,
-                route: route,
-                skillNameByActionID: skillNameByActionID
-            )
-            let ownerNodeName = nodeDisplayName(
-                definition.ownerNodeID,
-                nodeAliasResolver: nodeAliasResolver
-            )
-            return [
-                "function_name": definition.functionName,
-                "route_kind": routeKind(route),
-                "source": definition.source.rawValue,
-                "action_id": definition.actionID.uuidString.lowercased(),
-                "owner_node_id": definition.ownerNodeID.uuidString.lowercased(),
-                "owner_node_name": ownerNodeName,
-                "is_current_node": definition.ownerNodeID == config.node,
-                "tool_name": taggedToolName,
-                "display_name": taggedToolName,
-                "target_name": ownerNodeName,
-                "description": definition.description,
-            ]
-        }
-
-        return jsonString([
-            "ok": true,
-            "context_id": contextID.uuidString.lowercased(),
-            "count": rows.count,
-            "tools": rows,
-        ])
-    }
-
     func routeKind(_ route: KeepTalkingAgentToolRoute?) -> String {
         guard let route else {
             return "unknown"

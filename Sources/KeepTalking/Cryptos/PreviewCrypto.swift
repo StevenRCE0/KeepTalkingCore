@@ -34,21 +34,3 @@ public enum KeepTalkingPreviewCrypto {
         return String(decoding: decrypted, as: UTF8.self)
     }
 }
-
-public enum KeepTalkingContextMessageCrypto {
-    public static let encryptedMessagePrefix =
-        KeepTalkingPreviewCrypto.encryptedPayloadPrefix
-
-    public static func encrypt(_ content: String, secret: Data) throws -> String {
-        try KeepTalkingPreviewCrypto.encryptString(content, secret: secret)
-    }
-
-    public static func decryptIfNeeded(_ content: String, secret: Data) throws
-        -> String
-    {
-        try KeepTalkingPreviewCrypto.decryptStringIfNeeded(
-            content,
-            secret: secret
-        )
-    }
-}
