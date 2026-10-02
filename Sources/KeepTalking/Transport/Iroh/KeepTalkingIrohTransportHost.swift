@@ -54,9 +54,9 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         /// Online or not, so an online node also links to a nearby
         /// Bluetooth-only one.
         case always
-        /// Only while the network gate is open: the SFU is unreachable (or
-        /// suspended), or a member that announced a Bluetooth id has no
-        /// working network link — so an online device still meets a
+        /// Only while the network gate is open: there is no network path,
+        /// the SFU is unreachable, or a member that announced a Bluetooth id
+        /// has no working network link — so an online device still meets a
         /// neighbour that went offline.
         case whenNetworkFails
     }
@@ -225,24 +225,6 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         try? await endpoint?.close()
         KeepTalkingIrohBluetoothRadio.shared.release(from: self)
         log("host shut down")
-    }
-
-    @_spi(TransportLab)
-    public var deliveryPolicy: DeliveryPolicy {
-        get { state.withLockedValue { $0.policy } }
-        set { state.withLockedValue { $0.policy = newValue } }
-    }
-
-    /// Lab switch: drop the SFU session and keep it down until resumed, so
-    /// the rest of the host runs as if the SFU were unreachable.
-    @_spi(TransportLab)
-    public func setSFUSuspended(_ suspended: Bool) {
-        let connection = state.withLockedValue { state -> Connection? in
-            state.sfu.suspended = suspended
-            return suspended ? state.sfu.connection : nil
-        }
-        try? connection?.close(errorCode: 0, reason: Data("suspended".utf8))
-        log(suspended ? "SFU suspended" : "SFU resumed")
     }
 
     private func bindEndpoint() async throws -> Endpoint {
@@ -607,7 +589,6 @@ extension KeepTalkingIrohTransportHost {
         /// Lanes hold their frames until the session's subscriptions are in,
         /// so the SFU never sees a publish for a topic it hasn't subscribed.
         var lanesOpen = false
-        var suspended = false
         var resolvedID: String?
         var attempts = 0
         var connectLatency: Duration?
@@ -725,7 +706,7 @@ extension KeepTalkingIrohTransportHost {
         var nextEventID = 0
 
         var sfuUsable: Bool {
-            sfu.status == .ready && sfu.lanesOpen && !sfu.suspended
+            sfu.status == .ready && sfu.lanesOpen
         }
 
         /// The SFU can carry `topic`: the session is up and its snapshot for
@@ -738,7 +719,6 @@ extension KeepTalkingIrohTransportHost {
         /// first way up: nothing reachable then reads as connecting, not
         /// offline.
         func sfuSettling(for topic: Data) -> Bool {
-            guard !sfu.suspended else { return false }
             switch sfu.status {
                 case .idle, .connecting(attempt: 0): return true
                 case .connecting: return false
@@ -798,13 +778,16 @@ extension KeepTalkingIrohTransportHost {
             return membership.mains(for: linkID).filter { carrier(of: $0) == linkID }
         }
 
-        /// The network gate's input: the SFU is unusable, or a member that
-        /// announced a Bluetooth id has no working network link.
-        var networkFailing: Bool {
-            !pathSatisfied || !sfuUsable
-                || meshMembers.contains { main in
-                    membership.bluetoothID(of: main) != nil && !table.isCarrying(main)
-                }
+        /// The network gate's input: why the network counts as failing, or
+        /// nil. No network path, the SFU unusable, or a member that announced
+        /// a Bluetooth id has no working network link.
+        var networkFailure: String? {
+            if !pathSatisfied { return "no network path" }
+            if !sfuUsable { return "SFU unusable" }
+            let unlinked = meshMembers.first { main in
+                membership.bluetoothID(of: main) != nil && !table.isCarrying(main)
+            }
+            return unlinked.map { "no network link to \(KeepTalkingIrohTransportHost.hex($0).prefix(10))" }
         }
 
         /// Queues a peer frame for `main` on `lane`; returns its carrier's

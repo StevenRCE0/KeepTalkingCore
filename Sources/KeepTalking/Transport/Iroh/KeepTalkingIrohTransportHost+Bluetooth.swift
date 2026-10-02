@@ -75,7 +75,7 @@ extension KeepTalkingIrohTransportHost {
     /// Holds the Bluetooth endpoint always, or while the network gate is open.
     private func runBluetoothGate(now: Instant) {
         let (wanted, running, flipped) = state.withLockedValue { state -> (Bool, Bool, Bool?) in
-            let failing = state.networkFailing
+            let failing = state.networkFailure != nil
             let flipped = state.bluetooth.gate.update(failing: failing, now: now)
             let wanted = configuration.bluetooth == .always || state.bluetooth.gate.isOpen
             return (wanted, state.bluetooth.endpoint != nil || state.bluetooth.starting, flipped)

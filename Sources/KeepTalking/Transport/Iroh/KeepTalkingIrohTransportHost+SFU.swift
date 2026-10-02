@@ -15,10 +15,6 @@ extension KeepTalkingIrohTransportHost {
     func sfuLoop(_ endpoint: Endpoint) async {
         var attempt = 0
         while !Task.isCancelled, !state.withLockedValue({ $0.isShutDown }) {
-            if state.withLockedValue({ $0.sfu.suspended }) {
-                try? await Task.sleep(for: .milliseconds(300))
-                continue
-            }
             setSFUStatus(.connecting(attempt: attempt))
             let started = clock.now
             var session: Connection?
@@ -47,7 +43,7 @@ extension KeepTalkingIrohTransportHost {
                 }
                 let latency = clock.now - started
                 let ready = state.withLockedValue { state -> Bool in
-                    guard !state.isShutDown, !state.sfu.suspended else { return false }
+                    guard !state.isShutDown else { return false }
                     state.sfu.connection = connection
                     state.sfu.doorbells = bells
                     state.sfu.connectLatency = latency
@@ -102,9 +98,7 @@ extension KeepTalkingIrohTransportHost {
                     }
                 }
             } catch {
-                if !state.withLockedValue({ $0.sfu.suspended }) {
-                    log("SFU: \(error.localizedDescription)")
-                }
+                log("SFU: \(error.localizedDescription)")
             }
             tasks.forEach { $0.cancel() }
             let connection = state.withLockedValue { state -> Connection? in
@@ -123,9 +117,7 @@ extension KeepTalkingIrohTransportHost {
             try? (connection ?? session)?.close(errorCode: 0, reason: Data("reconnect".utf8))
             attempt += 1
             notifyAllContexts { $0.sfuStateChanged() }
-            if !state.withLockedValue({ $0.sfu.suspended }) {
-                await sfuRetryWait(.seconds(min(1 << min(attempt - 1, 3), 8)))
-            }
+            await sfuRetryWait(.seconds(min(1 << min(attempt - 1, 3), 8)))
         }
     }
 

@@ -94,6 +94,22 @@ public struct KeepTalkingIrohInstruments: Sendable {
         public var shortID: String { String(id.prefix(10)) }
     }
 
+    /// The network as the host sees it, and the gate it drives.
+    public struct Network: Sendable {
+        /// The system's network path, e.g. `satisfied via en0, pdp_ip0`;
+        /// nil before the first reading.
+        public var path: String?
+        /// Network changes noticed: path updates and returns from the
+        /// background. A burst of them is acted on once.
+        public var changes: Int
+        /// Why the network counts as failing now, or nil.
+        public var failure: String?
+        /// Open once the network has failed for 3 s, closed 30 s after it
+        /// recovers. In `whenNetworkFails` mode Bluetooth runs only while
+        /// it's open.
+        public var gateOpen: Bool
+    }
+
     /// The Bluetooth endpoint, when the host was configured with one.
     public struct Bluetooth: Sendable {
         /// `always` or `whenNetworkFails`.
@@ -145,6 +161,7 @@ public struct KeepTalkingIrohInstruments: Sendable {
     public var sfu: SFU
     public var contexts: [Context]
     public var peers: [Peer]
+    public var network: Network
     public var bluetooth: Bluetooth?
     /// Peer frames dropped because no attached context has their topic.
     public var droppedFrames: Int

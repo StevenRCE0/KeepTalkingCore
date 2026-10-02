@@ -16,7 +16,6 @@ extension KeepTalkingIrohTransportHost {
             case .connecting(let attempt): sfuStatus = attempt == 0 ? "connecting" : "reconnecting #\(attempt)"
             case .ready: sfuStatus = "ready"
         }
-        if snapshot.sfu.suspended { sfuStatus = "suspended" }
         if snapshot.isShutDown { sfuStatus = "shut down" }
 
         let membership = snapshot.membership
@@ -110,6 +109,12 @@ extension KeepTalkingIrohTransportHost {
                 )
             },
             peers: peers.sorted { ($0.link, $0.id) < ($1.link, $1.id) },
+            network: KeepTalkingIrohInstruments.Network(
+                path: snapshot.path,
+                changes: snapshot.networkChanges,
+                failure: snapshot.networkFailure,
+                gateOpen: snapshot.bluetooth.gate.isOpen
+            ),
             bluetooth: configuration.bluetooth == .off ? nil : bluetoothInstruments(snapshot.bluetooth),
             droppedFrames: snapshot.droppedFrames,
             events: snapshot.events
