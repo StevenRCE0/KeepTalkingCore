@@ -149,7 +149,9 @@ struct KeepTalkingIrohMembership: Sendable {
     ) -> Learned {
         guard var context = contexts[topic] else { return .rejected("not attached") }
         let main = presence.endpointID
-        guard main != myID else { return .ourselves }
+        // Our own node under another endpoint: an earlier launch of this
+        // app, whose presence the SFU still had. Never a member to dial.
+        guard main != myID, presence.nodeID != context.nodeID else { return .ourselves }
         switch source {
             case .sfu(let reported):
                 guard main == reported else { return .rejected("presence id differs from the SFU's") }

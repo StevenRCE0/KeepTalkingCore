@@ -1,6 +1,7 @@
 #if canImport(IrohLib)
 import Foundation
 import IrohLib
+import NIOConcurrencyHelpers
 
 /// Peer links (`keeptalking/peer/2`): dialling, accepting, a pump per lane
 /// that drains member queues, reading lane and blob streams, hellos, blob
@@ -45,14 +46,15 @@ extension KeepTalkingIrohTransportHost {
             guard let endpoint else { break }
             let started = clock.now
             do {
-                let connection = try await endpoint.connect(
-                    addr: EndpointAddr(
-                        id: try EndpointId.fromBytes(bytes: endpointID),
-                        relayUrl: kind == .network ? configuration.relayURL : nil,
-                        addresses: []
-                    ),
-                    alpn: Self.peerALPN
+                let addr = EndpointAddr(
+                    id: try EndpointId.fromBytes(bytes: endpointID),
+                    relayUrl: kind == .network ? configuration.relayURL : nil,
+                    addresses: []
                 )
+                let connection =
+                    kind == .bluetooth
+                    ? try await Self.connect(endpoint, to: addr, within: Self.bluetoothDialTimeout)
+                    : try await endpoint.connect(addr: addr, alpn: Self.peerALPN)
                 install(connection, endpointID: endpointID, side: .dialed, kind: kind, token: token, started: started)
                 return
             } catch {
@@ -69,6 +71,40 @@ extension KeepTalkingIrohTransportHost {
             guard state.table.ownsDial(endpointID, token: token) else { return }
             state.table.endDial(endpointID, token: token)
             if state.io[endpointID]?.connection == nil { state.io[endpointID] = nil }
+        }
+    }
+
+    /// `endpoint.connect`, given up on after `timeout`. iroh can't cancel it
+    /// from Swift, so a connection that arrives too late is closed.
+    private static func connect(
+        _ endpoint: Endpoint,
+        to addr: EndpointAddr,
+        within timeout: Duration
+    ) async throws -> Connection {
+        let answered = NIOLockedValueBox(false)
+        let claim: @Sendable () -> Bool = {
+            answered.withLockedValue { done in
+                defer { done = true }
+                return !done
+            }
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            Task {
+                do {
+                    let connection = try await endpoint.connect(addr: addr, alpn: peerALPN)
+                    if claim() {
+                        continuation.resume(returning: connection)
+                    } else {
+                        try? connection.close(errorCode: 0, reason: Data("dial timed out".utf8))
+                    }
+                } catch {
+                    if claim() { continuation.resume(throwing: error) }
+                }
+            }
+            Task {
+                try? await Task.sleep(for: timeout)
+                if claim() { continuation.resume(throwing: HostError.dialTimedOut(timeout)) }
+            }
         }
     }
 

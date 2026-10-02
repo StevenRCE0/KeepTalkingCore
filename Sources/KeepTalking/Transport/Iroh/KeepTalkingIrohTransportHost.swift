@@ -104,6 +104,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         case sfuInfo(String)
         case malformedFrame
         case notMember(UUID)
+        case dialTimedOut(Duration)
 
         var errorDescription: String? {
             switch self {
@@ -114,6 +115,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 case .sfuInfo(let reason): return "SFU lookup failed: \(reason)"
                 case .malformedFrame: return "Malformed frame."
                 case .notMember(let node): return "Node \(node) isn't a member of this context."
+                case .dialTimedOut(let after): return "No answer within \(after)."
             }
         }
     }
@@ -175,6 +177,10 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     /// …and one that heard nothing for this long stops carrying, and counts
     /// as a failing network for the Bluetooth gate. QUIC alone takes 30 s.
     static let silenceAfter: Duration = .seconds(6)
+    /// A Bluetooth dial to a device that isn't advertising never returns, so
+    /// the next attempt starts after this; a connection that turns up later
+    /// is closed.
+    static let bluetoothDialTimeout: Duration = .seconds(15)
     /// Bytes of the key a Bluetooth advert carries.
     static let bluetoothPrefixLength = 12
     /// A nearby device that served no identity is asked again after this.

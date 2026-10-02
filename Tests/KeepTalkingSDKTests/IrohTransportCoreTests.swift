@@ -46,6 +46,17 @@ struct IrohMembershipTests {
         #expect(membership.nodeID(for: id(0x10), in: topic.topic) == alice)
     }
 
+    @Test("Our own node under an old endpoint, from an earlier launch, is ourselves")
+    func earlierLaunch() {
+        var membership = KeepTalkingIrohMembership()
+        let myNode = UUID()
+        membership.attach(topic, nodeID: myNode, secret: secret)
+        let stale = Presence(nodeID: myNode, endpointID: id(0x20), bluetoothEndpointID: id(0xB2))
+        let learned = membership.learn(stale, in: topic.topic, from: .sfu(reportedID: id(0x20)), myID: me, now: start)
+        #expect(learned == .ourselves)
+        #expect(membership.nodeID(for: id(0x20), in: topic.topic) == nil)
+    }
+
     @Test("A node back under a new network id replaces its old one")
     func newNetworkID() {
         var membership = membership()

@@ -142,7 +142,7 @@ final class KeepTalkingIrohAttachment: KeepTalkingTransportAttachment, @unchecke
         switch error {
             case .notAttached, .stopped:
                 return .notAttached
-            case .noRoute, .notMember, .frameTooLarge, .sfuInfo, .malformedFrame:
+            case .noRoute, .notMember, .frameTooLarge, .sfuInfo, .malformedFrame, .dialTimedOut:
                 return .noRoute
         }
     }
