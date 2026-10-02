@@ -141,6 +141,31 @@ struct IrohHubFrameTests {
         #expect(KeepTalkingIrohPresenceSeal.open(tampered, contextID: context, secret: secret) == nil)
     }
 
+    @Test("Sealed presence carries the Bluetooth endpoint when there is one")
+    func sealedPresenceWithBluetooth() throws {
+        let secret = Data(repeating: 7, count: 32)
+        let node = UUID()
+        let bluetoothID = Data(repeating: 0xB1, count: 32)
+        let blob = try KeepTalkingIrohPresenceSeal.seal(
+            nodeID: node,
+            endpointID: memberID,
+            bluetoothEndpointID: bluetoothID,
+            contextID: context,
+            secret: secret
+        )
+        let opened = try #require(KeepTalkingIrohPresenceSeal.open(blob, contextID: context, secret: secret))
+        #expect(opened.nodeID == node)
+        #expect(opened.endpointID == memberID)
+        #expect(opened.bluetoothEndpointID == bluetoothID)
+        let plain = try KeepTalkingIrohPresenceSeal.seal(
+            nodeID: node,
+            endpointID: memberID,
+            contextID: context,
+            secret: secret
+        )
+        #expect(KeepTalkingIrohPresenceSeal.open(plain, contextID: context, secret: secret)?.bluetoothEndpointID == nil)
+    }
+
     #if canImport(IrohLib)
     @Test("Peer frames are [len][kind][topic][payload]")
     func peerFrameLayout() {

@@ -3,7 +3,7 @@ import Foundation
 import IrohLib
 import NIOConcurrencyHelpers
 
-/// One iroh endpoint shared by every context attached to it.
+/// The iroh endpoints shared by every context attached to them.
 ///
 /// The host owns the connection machinery that `ContextTransport` used to
 /// spread over the SFU client, libjuice and the HTTP/2 direct channels:
@@ -11,22 +11,38 @@ import NIOConcurrencyHelpers
 /// - **Hub** — one connection to the Rust `kt-sfu` hub
 ///   (`keeptalking/hub/1`). Each attached context subscribes to its *topic*
 ///   (`KeepTalkingIrohTopic`, derived from the context secret) and announces
-///   a sealed blob carrying our node id and endpoint id. The hub also fans
+///   a sealed blob carrying our node id and endpoint ids. The hub also fans
 ///   publishes and datagrams out to the topic, so a sender uploads once.
 /// - **Mesh** — iroh connections (`keeptalking/peer/1`), one per remote
-///   endpoint however many topics we share. They start on the relay and go
-///   direct when hole punching works. The lower endpoint id dials.
+///   endpoint however many topics we share. Network links start on the relay
+///   and go direct when hole punching works. The lower endpoint id dials.
+/// - **Bluetooth** — optional, on a *separate*, Bluetooth-only endpoint
+///   (vendored `iroh-ble-transport`). Its handshakes must run over Bluetooth
+///   (the transport only verifies a pipe that carried one), so it can't share
+///   the relay endpoint. Its key is fixed for the host's lifetime and
+///   announced in sealed presence, so peers know it before the hub goes away.
+///   It runs always, or only while the hub is unreachable — closing the
+///   endpoint is what stops the radio.
 /// - **Delivery** — each publish goes through the hub or the mesh, chosen
-///   per publish by `DeliveryPolicy`. Receivers take both; KeepTalking
-///   absorbs duplicates by row id.
+///   per publish by `DeliveryPolicy`. On the mesh each member gets one link:
+///   network when connected, Bluetooth otherwise. Receivers take everything;
+///   KeepTalking absorbs duplicates by row id.
 ///
 /// Frames for an attached topic are delivered whoever sent them: content is
 /// sealed with the topic's key, so only members can produce anything that
 /// opens. Endpoint ids to dial still come only from sealed presence, never
-/// from the hub. The key is ephemeral; discovery is off (minimal preset, our
+/// from the hub. Keys are ephemeral; discovery is off (minimal preset, our
 /// relay only); the hub id comes from configuration or `<relay>/kt/hub`.
 @_spi(TransportLab)
 public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
+    /// When the Bluetooth endpoint runs.
+    public enum BluetoothMode: String, Sendable, Hashable, CaseIterable {
+        case off
+        case always
+        /// Only while the hub is unreachable (or suspended): the network gate.
+        case whenHubUnreachable
+    }
+
     public struct Configuration: Sendable, Hashable {
         /// Relay URL, e.g. `https://signal.rcex.live/`.
         public var relayURL: String
@@ -35,17 +51,16 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         /// QUIC address-discovery port of the relay. Nil takes it from
         /// `/kt/hub` (and disables QAD if the hub id is configured by hand).
         public var relayQUICPort: UInt16?
-        /// Also carry connections over Bluetooth LE (vendored
-        /// `iroh-ble-transport`, AGPL — development only until licensed).
-        /// One Bluetooth endpoint per device: a controller never sees its
-        /// own adverts.
-        public var bluetooth: Bool
+        /// The Bluetooth LE endpoint (vendored `iroh-ble-transport`, AGPL —
+        /// development only until licensed). One per device: a controller
+        /// never sees its own adverts.
+        public var bluetooth: BluetoothMode
 
         public init(
             relayURL: String,
             hubEndpointID: String? = nil,
             relayQUICPort: UInt16? = nil,
-            bluetooth: Bool = false
+            bluetooth: BluetoothMode = .off
         ) {
             self.relayURL = relayURL
             self.hubEndpointID = hubEndpointID
@@ -101,18 +116,30 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     static let peerALPN = Data("keeptalking/peer/1".utf8)
     static let maxPeerFrameLength = 8 << 20
     private static let maxEvents = 300
+    /// Hub down this long before the gated Bluetooth endpoint starts…
+    private static let bluetoothStartAfter: Duration = .seconds(3)
+    /// …and up this long before it stops again.
+    private static let bluetoothStopAfter: Duration = .seconds(30)
 
     public let configuration: Configuration
     private let state = NIOLockedValueBox(State())
 
     public init(configuration: Configuration, policy: DeliveryPolicy = .standard) {
         self.configuration = configuration
-        state.withLockedValue { $0.policy = policy }
+        state.withLockedValue { state in
+            state.policy = policy
+            if configuration.bluetooth != .off {
+                let key = SecretKey.generate()
+                state.bluetooth.secret = key.toBytes()
+                state.bluetooth.myID = key.public().toBytes()
+            }
+        }
     }
 
     // MARK: - Lifecycle
 
-    /// Binds the endpoint and starts the accept and hub loops. Idempotent.
+    /// Binds the network endpoint and starts the accept, hub and (if
+    /// configured) Bluetooth loops. Idempotent.
     public func start() async throws {
         let task = try state.withLockedValue { state -> Task<Endpoint, Error> in
             if state.isShutDown { throw HostError.stopped }
@@ -125,23 +152,26 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     }
 
     public func shutdown() async {
-        let (endpoint, tasks, connections, writers) = state.withLockedValue { state in
+        let (endpoints, tasks, connections, writers) = state.withLockedValue { state in
             state.isShutDown = true
-            let tasks = state.tasks + state.links.values.flatMap(\.tasks)
+            let tasks = state.tasks + state.bluetooth.tasks + state.links.values.flatMap(\.tasks)
             let connections =
                 state.links.values.compactMap(\.connection) + [state.hub.connection].compactMap { $0 }
             let writers = state.links.values.compactMap(\.writer) + [state.hub.writer].compactMap { $0 }
+            let endpoints = [state.endpoint, state.bluetooth.endpoint].compactMap { $0 }
             state.tasks = []
+            state.bluetooth.tasks = []
+            state.bluetooth.endpoint = nil
             state.links = [:]
             state.hub = HubState()
-            return (state.endpoint, tasks, connections, writers)
+            return (endpoints, tasks, connections, writers)
         }
         tasks.forEach { $0.cancel() }
         writers.forEach { $0.finish() }
         for connection in connections {
             try? connection.close(errorCode: 0, reason: Data("shutdown".utf8))
         }
-        try? await endpoint?.close()
+        for endpoint in endpoints { try? await endpoint.close() }
         log("host shut down")
     }
 
@@ -165,8 +195,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         let options = EndpointOptions(
             preset: presetMinimal(),
             alpns: [Self.peerALPN],
-            relayMode: try RelayMode.customFromUrls(urls: [configuration.relayURL]),
-            ble: configuration.bluetooth ? true : nil
+            relayMode: try RelayMode.customFromUrls(urls: [configuration.relayURL])
         )
         let endpoint = try await Endpoint.bind(options: options)
         if let port = configuration.relayQUICPort {
@@ -175,20 +204,111 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             )
         }
         let myID = endpoint.id().toBytes()
-        let tasks = [
-            Task { await self.acceptLoop(endpoint) },
+        var tasks = [
+            Task { await self.acceptLoop(endpoint, kind: .network) },
             Task { await self.hubLoop(endpoint) },
         ]
+        switch configuration.bluetooth {
+            case .off: break
+            case .always: tasks.append(Task { await self.startBluetooth() })
+            case .whenHubUnreachable: tasks.append(Task { await self.bluetoothGateLoop() })
+        }
         state.withLockedValue { state in
             state.endpoint = endpoint
             state.myEndpointID = myID
             state.tasks += tasks
         }
         log("endpoint \(Self.hex(myID).prefix(10)) bound \(endpoint.boundSockets().joined(separator: ", "))")
-        if configuration.bluetooth {
-            log("bluetooth transport on")
-        }
         return endpoint
+    }
+
+    // MARK: - Bluetooth endpoint
+
+    /// Starts the gated Bluetooth endpoint once the hub has been unusable
+    /// for a moment, and stops it after the hub has been back a while.
+    private func bluetoothGateLoop() async {
+        var hubDownSince: ContinuousClock.Instant?
+        var hubUpSince: ContinuousClock.Instant?
+        while !Task.isCancelled, !state.withLockedValue({ $0.isShutDown }) {
+            let (usable, running) = state.withLockedValue { ($0.isHubUsable, $0.bluetooth.endpoint != nil) }
+            let now = ContinuousClock.now
+            if usable {
+                hubDownSince = nil
+                hubUpSince = hubUpSince ?? now
+            } else {
+                hubUpSince = nil
+                hubDownSince = hubDownSince ?? now
+            }
+            if !running, let since = hubDownSince, now - since >= Self.bluetoothStartAfter {
+                log("hub unreachable: starting bluetooth")
+                await startBluetooth()
+            } else if running, let since = hubUpSince, now - since >= Self.bluetoothStopAfter {
+                log("hub back: stopping bluetooth")
+                await stopBluetooth()
+            }
+            try? await Task.sleep(for: .seconds(1))
+        }
+    }
+
+    private func startBluetooth() async {
+        let secret = state.withLockedValue { state -> Data? in
+            guard !state.isShutDown, state.bluetooth.endpoint == nil, !state.bluetooth.starting,
+                let secret = state.bluetooth.secret
+            else { return nil }
+            state.bluetooth.starting = true
+            return secret
+        }
+        guard let secret else { return }
+        do {
+            let endpoint = try await Endpoint.bind(
+                options: EndpointOptions(
+                    preset: presetMinimal(),
+                    secretKey: secret,
+                    alpns: [Self.peerALPN],
+                    relayMode: RelayMode.disabled(),
+                    ble: true,
+                    clearIpTransports: true
+                )
+            )
+            let accept = Task { await self.acceptLoop(endpoint, kind: .bluetooth) }
+            let targets = state.withLockedValue { state -> [Data] in
+                state.bluetooth.starting = false
+                state.bluetooth.endpoint = endpoint
+                state.bluetooth.tasks = [accept]
+                state.bluetooth.failure = nil
+                state.bluetooth.starts += 1
+                return state.contexts.values.flatMap { Array($0.bluetoothMembers.keys) }
+            }
+            log("bluetooth endpoint \(Self.hex(endpoint.id().toBytes()).prefix(10)) up")
+            for target in Set(targets) { ensureLink(to: target, kind: .bluetooth) }
+        } catch {
+            state.withLockedValue { state in
+                state.bluetooth.starting = false
+                state.bluetooth.failure = error.localizedDescription
+            }
+            log("bluetooth failed to start: \(error.localizedDescription)")
+        }
+    }
+
+    private func stopBluetooth() async {
+        let (endpoint, tasks, closing) = state.withLockedValue {
+            state -> (Endpoint?, [Task<Void, Never>], [PeerLink]) in
+            let endpoint = state.bluetooth.endpoint
+            let tasks = state.bluetooth.tasks
+            state.bluetooth.endpoint = nil
+            state.bluetooth.tasks = []
+            let closing = state.links.filter { $0.value.kind == .bluetooth }
+            for key in closing.keys { state.links[key] = nil }
+            return (endpoint, tasks, Array(closing.values))
+        }
+        tasks.forEach { $0.cancel() }
+        for link in closing {
+            link.writer?.finish()
+            link.tasks.forEach { $0.cancel() }
+            try? link.connection?.close(errorCode: 0, reason: Data("bluetooth off".utf8))
+        }
+        try? await endpoint?.close()
+        log("bluetooth endpoint down")
     }
 
     // MARK: - Attachments
@@ -201,13 +321,14 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         nodeID: UUID,
         secret: Data
     ) throws {
-        let myID = try state.withLockedValue { state -> Data in
+        let (myID, bluetoothID) = try state.withLockedValue { state -> (Data, Data?) in
             guard !state.isShutDown, let myID = state.myEndpointID else { throw HostError.stopped }
-            return myID
+            return (myID, state.bluetooth.myID)
         }
         let blob = try KeepTalkingIrohPresenceSeal.seal(
             nodeID: nodeID,
             endpointID: myID,
+            bluetoothEndpointID: bluetoothID,
             contextID: topic.contextID,
             secret: secret
         )
@@ -232,7 +353,8 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     func detach(topic: Data) {
         let (writer, orphans) = state.withLockedValue { state -> (AsyncStream<Data>.Continuation?, [Connection]) in
             guard let removed = state.contexts.removeValue(forKey: topic) else { return (nil, []) }
-            return (state.hub.writer, state.dropUnneededLinks(among: Array(removed.members.keys)))
+            let ids = Array(removed.members.keys) + Array(removed.bluetoothMembers.keys)
+            return (state.hub.writer, state.dropUnneededLinks(among: ids))
         }
         writer?.yield(KeepTalkingIrohHubFrame.encode(.unsubscribe(topic: topic)))
         for connection in orphans {
@@ -338,7 +460,8 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         }
     }
 
-    /// True when some connected member of `topic` talks over a direct path.
+    /// True when some connected member of `topic` is reached without the
+    /// relay (a direct IP path or Bluetooth).
     func hasDirectMember(in topic: Data) -> Bool {
         let connections = state.withLockedValue { state in
             state.connectedMembers(of: topic).compactMap { state.links[$0.endpointID]?.connection }
@@ -444,7 +567,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             throw HostError.hubInfo("\(url) answered \((response as? HTTPURLResponse)?.statusCode ?? -1)")
         }
         let info = try JSONDecoder().decode(HubInfo.self, from: data)
-        guard info.alpn == nil || info.alpn.map { Data($0.utf8) } == KeepTalkingIrohHubFrame.alpn else {
+        guard info.alpn == nil || info.alpn.map({ Data($0.utf8) }) == KeepTalkingIrohHubFrame.alpn else {
             throw HostError.hubInfo("hub speaks \(info.alpn ?? "?")")
         }
         if configuration.relayQUICPort == nil, let port = info.qadPort {
@@ -496,10 +619,14 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 let present = Set(members.map(\.endpointID))
                 let (sink, orphans) = state.withLockedValue { state in
                     state.contexts[topic]?.joined = true
-                    let previous = state.contexts[topic]?.members ?? [:]
-                    state.contexts[topic]?.members = previous.filter { present.contains($0.key) }
-                    let gone = previous.keys.filter { !present.contains($0) }
-                    return (state.contexts[topic]?.sink.value, state.dropUnneededLinks(among: gone))
+                    let gone =
+                        (state.contexts[topic]?.members.keys).map { Array($0) }?
+                        .filter { !present.contains($0) } ?? []
+                    var goneIDs = gone
+                    for main in gone {
+                        if let bluetooth = state.contexts[topic]?.forget(main: main) { goneIDs.append(bluetooth) }
+                    }
+                    return (state.contexts[topic]?.sink.value, state.dropUnneededLinks(among: goneIDs))
                 }
                 for connection in orphans {
                     try? connection.close(errorCode: 0, reason: Data("left".utf8))
@@ -515,11 +642,10 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 learn(topic: topic, reportedID: endpointID, blob: blob)
             case .left(let topic, let endpointID):
                 let (sink, nodeID, orphans) = state.withLockedValue { state in
-                    let nodeID = state.contexts[topic]?.members.removeValue(forKey: endpointID)
-                    return (
-                        state.contexts[topic]?.sink.value, nodeID,
-                        state.dropUnneededLinks(among: [endpointID])
-                    )
+                    let nodeID = state.contexts[topic]?.members[endpointID]
+                    var ids = [endpointID]
+                    if let bluetooth = state.contexts[topic]?.forget(main: endpointID) { ids.append(bluetooth) }
+                    return (state.contexts[topic]?.sink.value, nodeID, state.dropUnneededLinks(among: ids))
                 }
                 for connection in orphans {
                     try? connection.close(errorCode: 0, reason: Data("left".utf8))
@@ -539,7 +665,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     }
 
     /// Opens a member's sealed presence. Only a blob this context's secret
-    /// opens, carrying the very id the hub reported, gives us a key to dial.
+    /// opens, carrying the very id the hub reported, gives us keys to dial.
     private func learn(topic: Data, reportedID: Data, blob: Data) {
         let outcome = state.withLockedValue { state -> LearnOutcome in
             guard let entry = state.contexts[topic] else { return .ignored }
@@ -553,8 +679,23 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             guard presence.endpointID == reportedID else { return .mismatch }
             guard presence.endpointID != state.myEndpointID else { return .ignored }
             state.contexts[topic]?.members[presence.endpointID] = presence.nodeID
-            let isConnected = state.links[presence.endpointID]?.connection != nil
-            return .member(presence.nodeID, isConnected: isConnected, sink: entry.sink.value)
+            if let stale = state.contexts[topic]?.bluetoothOf[presence.endpointID],
+                stale != presence.bluetoothEndpointID
+            {
+                state.contexts[topic]?.bluetoothMembers[stale] = nil
+            }
+            state.contexts[topic]?.bluetoothOf[presence.endpointID] = presence.bluetoothEndpointID
+            if let bluetooth = presence.bluetoothEndpointID {
+                state.contexts[topic]?.bluetoothMembers[bluetooth] = presence.nodeID
+            }
+            let isConnected = state.connectedMembers(of: topic).contains { $0.nodeID == presence.nodeID }
+            let bluetoothTarget = state.bluetooth.endpoint == nil ? nil : presence.bluetoothEndpointID
+            return .member(
+                presence.nodeID,
+                isConnected: isConnected,
+                sink: entry.sink.value,
+                bluetooth: bluetoothTarget
+            )
         }
         switch outcome {
             case .ignored:
@@ -563,42 +704,44 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 log("presence from \(Self.hex(reportedID).prefix(10)) does not open")
             case .mismatch:
                 log("presence id != hub id for \(Self.hex(reportedID).prefix(10)); dropped")
-            case .member(let nodeID, let isConnected, let sink):
+            case .member(let nodeID, let isConnected, let sink, let bluetooth):
                 log("member \(nodeID.uuidString.prefix(8)) @ \(Self.hex(reportedID).prefix(10))")
-                if isConnected {
-                    sink?.peerLinkUp(nodeID)
-                } else {
-                    ensureLink(to: reportedID)
-                }
+                if isConnected { sink?.peerLinkUp(nodeID) }
+                ensureLink(to: reportedID, kind: .network)
+                if let bluetooth { ensureLink(to: bluetooth, kind: .bluetooth) }
         }
     }
 
     // MARK: - Peer links
 
-    /// Dials `endpointID` when we hold the lower id; the other side waits.
-    private func ensureLink(to endpointID: Data) {
+    /// Dials `endpointID` on the matching endpoint when we hold the lower id
+    /// of that kind; the other side waits.
+    private func ensureLink(to endpointID: Data, kind: PeerLink.Kind) {
         let shouldDial = state.withLockedValue { state -> Bool in
+            let myID = kind == .network ? state.myEndpointID : state.bluetooth.myID
+            let endpoint = kind == .network ? state.endpoint : state.bluetooth.endpoint
             guard
                 !state.isShutDown,
-                let myID = state.myEndpointID,
+                endpoint != nil,
+                let myID,
                 myID.lexicographicallyPrecedes(endpointID),
                 state.links[endpointID] == nil
             else { return false }
-            state.links[endpointID] = PeerLink(side: .dialed)
+            state.links[endpointID] = PeerLink(side: .dialed, kind: kind)
             return true
         }
         guard shouldDial else { return }
-        let task = Task { await self.dialLoop(endpointID) }
+        let task = Task { await self.dialLoop(endpointID, kind: kind) }
         state.withLockedValue { $0.links[endpointID]?.tasks.append(task) }
     }
 
-    private func dialLoop(_ endpointID: Data) async {
+    private func dialLoop(_ endpointID: Data, kind: PeerLink.Kind) async {
         var attempt = 0
         while !Task.isCancelled {
             let endpoint = state.withLockedValue { state -> Endpoint? in
                 guard state.isWanted(endpointID) else { return nil }
                 state.links[endpointID]?.dialAttempts += 1
-                return state.endpoint
+                return kind == .network ? state.endpoint : state.bluetooth.endpoint
             }
             guard let endpoint else {
                 state.withLockedValue { state in
@@ -611,22 +754,30 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 let connection = try await endpoint.connect(
                     addr: EndpointAddr(
                         id: try EndpointId.fromBytes(bytes: endpointID),
-                        relayUrl: configuration.relayURL,
+                        relayUrl: kind == .network ? configuration.relayURL : nil,
                         addresses: []
                     ),
                     alpn: Self.peerALPN
                 )
-                install(connection, endpointID: endpointID, side: .dialed, latency: ContinuousClock.now - started)
+                install(
+                    connection,
+                    endpointID: endpointID,
+                    side: .dialed,
+                    kind: kind,
+                    latency: ContinuousClock.now - started
+                )
                 return
             } catch {
                 attempt += 1
-                log("dial \(Self.hex(endpointID).prefix(10)) failed (#\(attempt)): \(error.localizedDescription)")
+                log(
+                    "dial \(kind.rawValue) \(Self.hex(endpointID).prefix(10)) failed (#\(attempt)): \(error.localizedDescription)"
+                )
                 try? await Task.sleep(for: .seconds(min(1 << min(attempt, 4), 16)))
             }
         }
     }
 
-    private func acceptLoop(_ endpoint: Endpoint) async {
+    private func acceptLoop(_ endpoint: Endpoint, kind: PeerLink.Kind) async {
         while !Task.isCancelled, let incoming = await endpoint.acceptNext() {
             Task {
                 let started = ContinuousClock.now
@@ -641,10 +792,11 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                         connection,
                         endpointID: connection.remoteId().toBytes(),
                         side: .accepted,
+                        kind: kind,
                         latency: ContinuousClock.now - started
                     )
                 } catch {
-                    log("accept failed: \(error.localizedDescription)")
+                    log("accept \(kind.rawValue) failed: \(error.localizedDescription)")
                 }
             }
         }
@@ -654,6 +806,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         _ connection: Connection,
         endpointID: Data,
         side: PeerLink.Side,
+        kind: PeerLink.Kind,
         latency: Duration
     ) {
         let (frames, writer) = AsyncStream.makeStream(of: Data.self)
@@ -661,7 +814,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         let watch = connection.watchPathEvents(callback: watcher)
         let replaced = state.withLockedValue { state -> PeerLink? in
             let previous = state.links[endpointID]
-            var link = PeerLink(side: side)
+            var link = PeerLink(side: side, kind: kind)
             link.connection = connection
             link.writer = writer
             link.watch = watch
@@ -684,7 +837,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         ]
         state.withLockedValue { $0.links[endpointID]?.tasks = tasks }
         log(
-            "peer \(Self.hex(endpointID).prefix(10)) \(side.rawValue) in \(Self.ms(latency)) via \(Self.selectedPath(connection))"
+            "\(kind.rawValue) peer \(Self.hex(endpointID).prefix(10)) \(side.rawValue) in \(Self.ms(latency)) via \(Self.selectedPath(connection))"
         )
         notifyMembership(of: endpointID) { sink, nodeID in sink.peerLinkUp(nodeID) }
     }
@@ -728,7 +881,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             let route = state.withLockedValue { state -> (KeepTalkingIrohContextTransport, UUID?)? in
                 state.links[endpointID]?.datagramsReceived += 1
                 guard let entry = state.contexts[topic], let sink = entry.sink.value else { return nil }
-                return (sink, entry.members[endpointID])
+                return (sink, entry.nodeID(for: endpointID))
             }
             if let route {
                 route.0.deliverRealtime(payload, from: route.1)
@@ -739,17 +892,17 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     private func watchClosed(_ connection: Connection, endpointID: Data) async {
         let reason = await connection.closed()
         let stableID = connection.stableId()
-        let (wasCurrent, redial) = state.withLockedValue { state -> (Bool, Bool) in
-            guard state.links[endpointID]?.connection?.stableId() == stableID else { return (false, false) }
-            state.links[endpointID]?.writer?.finish()
-            let side = state.links[endpointID]?.side
+        let (wasCurrent, redial) = state.withLockedValue { state -> (Bool, PeerLink.Kind?) in
+            guard let link = state.links[endpointID], link.connection?.stableId() == stableID
+            else { return (false, nil) }
+            link.writer?.finish()
             state.links[endpointID] = nil
-            return (true, side == .dialed && state.isWanted(endpointID))
+            return (true, link.side == .dialed && state.isWanted(endpointID) ? link.kind : nil)
         }
         guard wasCurrent else { return }
         log("peer \(Self.hex(endpointID).prefix(10)) closed: \(reason)")
         notifyMembership(of: endpointID) { sink, nodeID in sink.peerLinkDown(nodeID) }
-        if redial { ensureLink(to: endpointID) }
+        if let redial { ensureLink(to: endpointID, kind: redial) }
     }
 
     /// `[kind][topic(32)][payload]`. Delivered for any attached topic: the
@@ -766,7 +919,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 return nil
             }
             state.contexts[topic]?.meshReceived += 1
-            return (sink, entry.members[endpointID])
+            return (sink, entry.nodeID(for: endpointID))
         }
         guard let route else { return }
         route.0.deliver(kind, payload: payload, from: route.1, route: .mesh)
@@ -806,7 +959,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     ) {
         let targets = state.withLockedValue { state in
             state.contexts.values.compactMap { entry -> (KeepTalkingIrohContextTransport, UUID)? in
-                guard let nodeID = entry.members[endpointID], let sink = entry.sink.value else { return nil }
+                guard let nodeID = entry.nodeID(for: endpointID), let sink = entry.sink.value else { return nil }
                 return (sink, nodeID)
             }
         }
@@ -820,7 +973,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     // MARK: - Instruments
 
-    /// A point-in-time reading of the endpoint, the hub session, every
+    /// A point-in-time reading of the endpoints, the hub session, every
     /// context and every peer link, plus the recent event log.
     public func instruments() -> KeepTalkingIrohInstruments {
         let snapshot = state.withLockedValue { $0 }
@@ -836,6 +989,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
         let nodeByEndpoint = snapshot.contexts.values.reduce(into: [Data: Set<UUID>]()) { result, entry in
             for (endpointID, nodeID) in entry.members { result[endpointID, default: []].insert(nodeID) }
+            for (endpointID, nodeID) in entry.bluetoothMembers { result[endpointID, default: []].insert(nodeID) }
         }
         let peers = snapshot.links.map { endpointID, link -> KeepTalkingIrohInstruments.Peer in
             let connection = link.connection
@@ -843,6 +997,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             let stats = connection?.stats()
             return KeepTalkingIrohInstruments.Peer(
                 id: Self.hex(endpointID),
+                link: link.kind.rawValue,
                 nodeIDs: nodeByEndpoint[endpointID].map { Array($0) } ?? [],
                 side: link.side.rawValue,
                 status: connection == nil
@@ -892,7 +1047,11 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                     nodeID: entry.nodeID,
                     joined: entry.joined,
                     members: entry.members.map { endpointID, nodeID in
-                        KeepTalkingIrohInstruments.Member(nodeID: nodeID, endpointID: Self.hex(endpointID))
+                        KeepTalkingIrohInstruments.Member(
+                            nodeID: nodeID,
+                            endpointID: Self.hex(endpointID),
+                            bluetoothEndpointID: entry.bluetoothOf[endpointID].map { Self.hex($0) }
+                        )
                     },
                     meshPublished: entry.meshPublished,
                     hubPublished: entry.hubPublished,
@@ -902,26 +1061,43 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                     hubDatagramsReceived: entry.hubDatagramsReceived
                 )
             },
-            peers: peers.sorted { $0.id < $1.id },
-            bluetooth: snapshot.endpoint?.bleStatus().map { status in
-                KeepTalkingIrohInstruments.Bluetooth(
-                    powered: status.powered,
-                    txBytes: status.txBytes,
-                    rxBytes: status.rxBytes,
-                    retransmits: status.retransmits,
-                    devices: status.peers.map { peer in
-                        KeepTalkingIrohInstruments.BluetoothDevice(
-                            id: peer.deviceId,
-                            phase: peer.phase,
-                            connectPath: peer.connectPath,
-                            endpointID: peer.verifiedEndpoint,
-                            failures: Int(peer.consecutiveFailures)
-                        )
-                    }
-                )
-            },
+            peers: peers.sorted { ($0.link, $0.id) < ($1.link, $1.id) },
+            bluetooth: configuration.bluetooth == .off ? nil : bluetoothInstruments(snapshot.bluetooth),
             droppedFrames: snapshot.droppedFrames,
             events: snapshot.events
+        )
+    }
+
+    private func bluetoothInstruments(_ bluetooth: BluetoothState) -> KeepTalkingIrohInstruments.Bluetooth {
+        let status = bluetooth.endpoint?.bleStatus()
+        let state: String
+        if bluetooth.endpoint != nil {
+            state = "running"
+        } else if bluetooth.starting {
+            state = "starting"
+        } else if let failure = bluetooth.failure {
+            state = "failed: \(failure)"
+        } else {
+            state = configuration.bluetooth == .whenHubUnreachable ? "standby (hub up)" : "stopped"
+        }
+        return KeepTalkingIrohInstruments.Bluetooth(
+            mode: configuration.bluetooth.rawValue,
+            state: state,
+            endpointID: bluetooth.myID.map(Self.hex),
+            starts: bluetooth.starts,
+            powered: status?.powered ?? false,
+            txBytes: status?.txBytes ?? 0,
+            rxBytes: status?.rxBytes ?? 0,
+            retransmits: status?.retransmits ?? 0,
+            devices: (status?.peers ?? []).map { peer in
+                KeepTalkingIrohInstruments.BluetoothDevice(
+                    id: peer.deviceId,
+                    phase: peer.phase,
+                    connectPath: peer.connectPath,
+                    endpointID: peer.verifiedEndpoint,
+                    failures: Int(peer.consecutiveFailures)
+                )
+            }
         )
     }
 
@@ -1003,6 +1179,18 @@ extension KeepTalkingIrohTransportHost {
         var connectedSince: Date?
     }
 
+    fileprivate struct BluetoothState {
+        /// Fixed for the host's lifetime, so the id announced in presence
+        /// stays valid across gate cycles.
+        var secret: Data?
+        var myID: Data?
+        var endpoint: Endpoint?
+        var tasks: [Task<Void, Never>] = []
+        var starting = false
+        var failure: String?
+        var starts = 0
+    }
+
     fileprivate struct WeakSink {
         weak var value: KeepTalkingIrohContextTransport?
         init(_ value: KeepTalkingIrohContextTransport) { self.value = value }
@@ -1016,9 +1204,12 @@ extension KeepTalkingIrohTransportHost {
         let blob: Data
         /// True once the hub's snapshot for this topic arrived.
         var joined = false
-        /// Endpoint id → node id, from sealed presence only. These are the
-        /// endpoints we dial and count as members for routing.
+        /// Network endpoint id → node id, from sealed presence only.
         var members: [Data: UUID] = [:]
+        /// Network endpoint id → that member's Bluetooth endpoint id.
+        var bluetoothOf: [Data: Data] = [:]
+        /// Bluetooth endpoint id → node id.
+        var bluetoothMembers: [Data: UUID] = [:]
         var meshPublished = 0
         var hubPublished = 0
         var meshReceived = 0
@@ -1033,12 +1224,26 @@ extension KeepTalkingIrohTransportHost {
             self.secret = secret
             self.blob = blob
         }
+
+        func nodeID(for endpointID: Data) -> UUID? {
+            members[endpointID] ?? bluetoothMembers[endpointID]
+        }
+
+        /// Drops a member; returns its Bluetooth id if it had one.
+        mutating func forget(main endpointID: Data) -> Data? {
+            members[endpointID] = nil
+            guard let bluetooth = bluetoothOf.removeValue(forKey: endpointID) else { return nil }
+            bluetoothMembers[bluetooth] = nil
+            return bluetooth
+        }
     }
 
     fileprivate struct PeerLink {
         enum Side: String { case dialed, accepted }
+        enum Kind: String { case network, bluetooth }
 
         let side: Side
+        let kind: Kind
         var connection: Connection?
         var writer: AsyncStream<Data>.Continuation?
         var watch: WatchHandle?
@@ -1054,14 +1259,17 @@ extension KeepTalkingIrohTransportHost {
         var datagramsSent = 0
         var datagramsReceived = 0
 
-        init(side: Side) { self.side = side }
+        init(side: Side, kind: Kind) {
+            self.side = side
+            self.kind = kind
+        }
     }
 
     fileprivate enum LearnOutcome {
         case ignored
         case unreadable
         case mismatch
-        case member(UUID, isConnected: Bool, sink: KeepTalkingIrohContextTransport?)
+        case member(UUID, isConnected: Bool, sink: KeepTalkingIrohContextTransport?, bluetooth: Data?)
     }
 
     fileprivate struct State {
@@ -1071,6 +1279,7 @@ extension KeepTalkingIrohTransportHost {
         var myEndpointID: Data?
         var tasks: [Task<Void, Never>] = []
         var hub = HubState()
+        var bluetooth = BluetoothState()
         var policy = DeliveryPolicy.standard
         var contexts: [Data: ContextEntry] = [:]
         var links: [Data: PeerLink] = [:]
@@ -1082,11 +1291,16 @@ extension KeepTalkingIrohTransportHost {
             hub.status == .ready && hub.writer != nil && !hub.suspended
         }
 
-        /// Members of `topic` whose link is connected.
+        /// One link per connected member of `topic`: its network link when
+        /// that is up, its Bluetooth link otherwise.
         func connectedMembers(of topic: Data) -> [(endpointID: Data, nodeID: UUID)] {
-            guard let members = contexts[topic]?.members else { return [] }
-            return members.compactMap { endpointID, nodeID in
-                links[endpointID]?.connection == nil ? nil : (endpointID, nodeID)
+            guard let entry = contexts[topic] else { return [] }
+            return entry.members.compactMap { endpointID, nodeID in
+                if links[endpointID]?.connection != nil { return (endpointID, nodeID) }
+                if let bluetooth = entry.bluetoothOf[endpointID], links[bluetooth]?.connection != nil {
+                    return (bluetooth, nodeID)
+                }
+                return nil
             }
         }
 
@@ -1117,7 +1331,10 @@ extension KeepTalkingIrohTransportHost {
         }
 
         func isWanted(_ endpointID: Data) -> Bool {
-            !isShutDown && contexts.values.contains { $0.members[endpointID] != nil }
+            !isShutDown
+                && contexts.values.contains {
+                    $0.members[endpointID] != nil || $0.bluetoothMembers[endpointID] != nil
+                }
         }
 
         /// Forgets links no attached context needs; returns what to close.

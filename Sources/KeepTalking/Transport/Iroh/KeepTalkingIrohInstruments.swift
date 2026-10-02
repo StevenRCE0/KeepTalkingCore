@@ -20,6 +20,8 @@ public struct KeepTalkingIrohInstruments: Sendable {
     public struct Member: Sendable, Hashable {
         public var nodeID: UUID
         public var endpointID: String
+        /// The member's Bluetooth endpoint, if its presence announced one.
+        public var bluetoothEndpointID: String?
     }
 
     public struct Context: Sendable, Identifiable {
@@ -55,6 +57,8 @@ public struct KeepTalkingIrohInstruments: Sendable {
     public struct Peer: Sendable, Identifiable {
         /// Remote endpoint id (hex).
         public var id: String
+        /// `network` (relay/IP endpoint) or `bluetooth` (Bluetooth-only endpoint).
+        public var link: String
         public var nodeIDs: [UUID]
         /// `dialed` (we hold the lower id) or `accepted`.
         public var side: String
@@ -80,9 +84,17 @@ public struct KeepTalkingIrohInstruments: Sendable {
         public var shortID: String { String(id.prefix(10)) }
     }
 
-    /// The Bluetooth transport, when the host was configured with it.
+    /// The Bluetooth endpoint, when the host was configured with one.
     public struct Bluetooth: Sendable {
-        /// Adapter on and permission granted.
+        /// `always` or `whenHubUnreachable`.
+        public var mode: String
+        /// `running`, `standby (hub up)`, `starting`, `stopped`, `failed: …`.
+        public var state: String
+        /// Our Bluetooth endpoint id (hex), fixed for the host's lifetime.
+        public var endpointID: String?
+        /// How many times the endpoint has been started.
+        public var starts: Int
+        /// Adapter on and permission granted (false while stopped).
         public var powered: Bool
         public var txBytes: UInt64
         public var rxBytes: UInt64
