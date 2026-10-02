@@ -125,7 +125,7 @@ extension KeepTalkingIrohTransportHost {
         let status = bluetooth.endpoint?.bleStatus()
         let state: String
         if bluetooth.endpoint != nil {
-            state = "running"
+            state = bluetooth.discovering ? "running (looking around)" : "running"
         } else if bluetooth.starting {
             state = "starting"
         } else if let failure = bluetooth.failure {

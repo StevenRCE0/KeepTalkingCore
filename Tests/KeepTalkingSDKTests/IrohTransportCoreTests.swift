@@ -386,6 +386,18 @@ struct IrohDeliveryTests {
         #expect(gate.update(failing: false, now: start + .seconds(37)) == false)
         #expect(!gate.isOpen)
     }
+
+    @Test("Discovery opens a window at once, then one per interval, and again when asked")
+    func discoverySchedule() {
+        var schedule = KeepTalkingIrohDiscoverySchedule(window: .seconds(20), interval: .seconds(120))
+        let opening = [0, 19, 20, 119, 120, 139, 140].map { schedule.isOpen(at: start + .seconds($0)) }
+        #expect(opening == [true, true, false, false, true, true, false])
+        schedule.lookSoon()
+        let asked = schedule.isOpen(at: start + .seconds(150))
+        #expect(asked)
+        let after = schedule.isOpen(at: start + .seconds(171))
+        #expect(!after)
+    }
 }
 
 /// The client paces SFU sends below the server's limits.

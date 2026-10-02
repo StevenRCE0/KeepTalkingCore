@@ -55,10 +55,13 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         /// Online or not, so an online node also links to a nearby
         /// Bluetooth-only one.
         case always
-        /// Only while the network gate is open: there is no network path,
-        /// the SFU is unreachable, or a member that announced a Bluetooth id
-        /// has no working network link — so an online device still meets a
-        /// neighbour that went offline.
+        /// While the network gate is open: there is no network path, the SFU
+        /// is unreachable, or a member that announced a Bluetooth id has no
+        /// working network link — so an online device still meets a
+        /// neighbour that went offline. Also for a short discovery window
+        /// every couple of minutes, and when a context attaches or the
+        /// network changes, to find context nodes it never met over the
+        /// network; a window only links to what the network doesn't reach.
         case whenNetworkFails
     }
 
@@ -154,6 +157,10 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     static let bluetoothStartAfter: Duration = .seconds(3)
     /// …and closed this long before it lets go again.
     static let bluetoothStopAfter: Duration = .seconds(30)
+    /// In `whenNetworkFails`, the radio also runs this long…
+    static let discoveryWindow: Duration = .seconds(20)
+    /// …this often, to find context nodes the network doesn't reach.
+    static let discoveryInterval: Duration = .seconds(120)
     /// How long a member the SFU doesn't list is kept without any link
     /// reaching it, so Bluetooth can still find it.
     static let memberRetention: Duration = .seconds(30 * 60)
@@ -308,6 +315,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             if let previous { attachment.inheritCounters(from: previous) }
             state.attachments[topic.topic] = attachment
             state.bluetooth.strangers = []
+            state.bluetooth.discovery.lookSoon()
             guard let doorbell = state.sfu.doorbells[Self.sfuSessionQueue] else {
                 return (nil, state.connectedLinks, false)
             }
@@ -636,6 +644,14 @@ extension KeepTalkingIrohTransportHost {
             openAfter: KeepTalkingIrohTransportHost.bluetoothStartAfter,
             closeAfter: KeepTalkingIrohTransportHost.bluetoothStopAfter
         )
+        var discovery = KeepTalkingIrohDiscoverySchedule(
+            window: KeepTalkingIrohTransportHost.discoveryWindow,
+            interval: KeepTalkingIrohTransportHost.discoveryInterval
+        )
+        /// The radio is held for a discovery window only: links just to
+        /// devices whose hello we haven't seen and members the network
+        /// doesn't reach.
+        var discovering = false
         /// Bluetooth ids read from nearby devices → their device id.
         var nearby: [Data: String] = [:]
         /// Nearby ids whose hello opened none of our contexts; forgotten
@@ -758,8 +774,13 @@ extension KeepTalkingIrohTransportHost {
         /// link, or it's a nearby device whose hello we haven't seen.
         func wantsDial(_ endpointID: Data, now: Instant) -> Bool {
             guard isWanted(endpointID) else { return false }
-            if bluetooth.nearby[endpointID] != nil, !bluetooth.strangers.contains(endpointID) { return true }
             let mains = membership.mains(for: endpointID)
+            // Looking around only: no Bluetooth link to a member the network
+            // already carries.
+            if bluetooth.discovering, isBluetoothID(endpointID), !mains.isEmpty, mains.allSatisfy(table.isCarrying) {
+                return false
+            }
+            if bluetooth.nearby[endpointID] != nil, !bluetooth.strangers.contains(endpointID) { return true }
             if mains.contains(where: { (demand[$0] ?? now) > now }) { return true }
             return !mains.isDisjoint(with: meshMembers)
         }
@@ -769,6 +790,10 @@ extension KeepTalkingIrohTransportHost {
         }
 
         /// A member, or a nearby device whose hello we haven't seen refused.
+        func isBluetoothID(_ endpointID: Data) -> Bool {
+            bluetooth.nearby[endpointID] != nil || membership.bluetoothIDs.contains(endpointID)
+        }
+
         func isWanted(_ endpointID: Data) -> Bool {
             guard !isShutDown else { return false }
             if membership.isMember(endpointID) { return true }

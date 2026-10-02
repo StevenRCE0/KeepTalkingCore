@@ -66,6 +66,7 @@ extension KeepTalkingIrohTransportHost {
                 return nil
             }
             state.table.clearBackoff()
+            state.bluetooth.discovery.lookSoon()
             let bell = state.sfu.retryBell
             if bell == nil, case .connecting = state.sfu.status { state.sfu.retryNow = true }
             return (endpoint, bell)

@@ -124,13 +124,22 @@ none of our contexts is dropped, and until a link has shown that it shares one, 
 it sends may exceed 64 KiB.
 
 **Bluetooth.** Optional, set by ``KeepTalkingIrohTransportHost/BluetoothMode``: `off`,
-`always`, or `whenNetworkFails`, which holds the radio only while the network is failing —
-the SFU is unreachable, or a member that announced a Bluetooth ID has no working network
-link. That gate opens after three seconds of failure and closes after thirty seconds of
-working network, so a flapping network does not flap the radio. The Bluetooth endpoint is
-process-wide and lent to one host at a time, and on it the higher ID dials. Nearby devices
-are found even without the SFU: an advert carries only a prefix of a device's key, so the
-host reads the full key from the device before it dials.
+`always`, or `whenNetworkFails`, which holds the radio while the network is failing —
+there is no network path, the SFU is unreachable, or a member that announced a Bluetooth ID
+has no working network link. That gate opens after three seconds of failure and closes
+after thirty seconds of working network, so a flapping network does not flap the radio.
+
+A member's Bluetooth ID comes from its presence, so a context node this host never met over
+the network — it started offline, or joined while this host was away — can only be found by
+discovery, and discovery needs the radio. So `whenNetworkFails` also takes the radio for a
+twenty-second window every two minutes, and at once when a context attaches or the network
+changes. A window links only to devices whose hello it hasn't seen and members the network
+doesn't reach; finding one of those opens the gate, which keeps the radio.
+
+The Bluetooth endpoint is process-wide and lent to one host at a time, and on it the higher
+ID dials, retrying every three seconds while the link is wanted. Nearby devices are found
+even without the SFU: an advert carries only a prefix of a device's key, so the host reads
+the full key from the device before it dials.
 
 ### Membership
 
@@ -275,6 +284,11 @@ events:
 - A connection whose every path closed would otherwise linger until QUIC times it out,
   swallowing writes. The host stops routing through it as soon as its paths go, so the
   member's queue drains through its other link.
+- A peer that went away (airplane mode, out of range) leaves its link looking alive for up
+  to thirty seconds, as long as iroh keeps a relay path. So every network link carries a
+  ping each two seconds, and one that heard nothing for six seconds goes silent: it stops
+  carrying, and counts as a failing network for the Bluetooth gate. Any frame brings it
+  back.
 - When a member's traffic moves to another live link — the network died under Bluetooth,
   or came back — whatever went into the old connection may be lost. The attachment reports
   the member as rerouted, and the client resyncs with it.

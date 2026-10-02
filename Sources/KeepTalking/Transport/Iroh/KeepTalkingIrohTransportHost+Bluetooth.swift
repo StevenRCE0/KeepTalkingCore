@@ -93,17 +93,24 @@ extension KeepTalkingIrohTransportHost {
         for (id, kind) in targets { ensureLink(to: id, kind: kind) }
     }
 
-    /// Holds the Bluetooth endpoint always, or while the network gate is open.
+    /// Holds the Bluetooth endpoint always, while the network gate is open,
+    /// or for a discovery window.
     private func runBluetoothGate(now: Instant) {
-        let (wanted, running, flipped) = state.withLockedValue { state -> (Bool, Bool, Bool?) in
+        let (wanted, discovering, running, flipped) = state.withLockedValue {
+            state -> (Bool, Bool, Bool, Bool?) in
             let failing = state.networkFailure != nil
             let flipped = state.bluetooth.gate.update(failing: failing, now: now)
-            let wanted = configuration.bluetooth == .always || state.bluetooth.gate.isOpen
-            return (wanted, state.bluetooth.endpoint != nil || state.bluetooth.starting, flipped)
+            let gated = configuration.bluetooth == .always || state.bluetooth.gate.isOpen
+            let discovering = !gated && state.bluetooth.discovery.isOpen(at: now)
+            state.bluetooth.discovering = discovering
+            return (
+                gated || discovering, discovering, state.bluetooth.endpoint != nil || state.bluetooth.starting,
+                flipped
+            )
         }
         if let flipped { log(flipped ? "network gate open" : "network gate closed") }
         if wanted, !running {
-            log("claiming bluetooth")
+            log(discovering ? "claiming bluetooth to look for nearby context nodes" : "claiming bluetooth")
             Task { await self.startBluetooth() }
         } else if !wanted, running {
             log("releasing bluetooth")

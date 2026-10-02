@@ -190,6 +190,40 @@ struct KeepTalkingIrohNetworkGate: Sendable {
     }
 }
 
+/// When a host whose Bluetooth waits for the network to fail looks around
+/// anyway: a window every `interval`, and one at once when asked (a context
+/// attached, the network changed). A context node that started offline, or
+/// one this host never met over the network, only turns up this way: its
+/// Bluetooth id comes from presence, which it never got to send.
+struct KeepTalkingIrohDiscoverySchedule: Sendable {
+    typealias Instant = SuspendingClock.Instant
+
+    let window: Duration
+    let interval: Duration
+    private var openUntil: Instant?
+    private var nextAt: Instant?
+
+    init(window: Duration, interval: Duration) {
+        self.window = window
+        self.interval = interval
+    }
+
+    /// Whether a window is open at `now`, opening one when it's due.
+    mutating func isOpen(at now: Instant) -> Bool {
+        if let until = openUntil, now < until { return true }
+        openUntil = nil
+        if let next = nextAt, now < next { return false }
+        openUntil = now + window
+        nextAt = now + interval
+        return true
+    }
+
+    /// The next check opens a window.
+    mutating func lookSoon() {
+        nextAt = nil
+    }
+}
+
 /// A token bucket: `rate` units a second, up to `burst` saved up. The SFU
 /// drops what a client sends over its limits (publishes and announces:
 /// 4 MiB/s and 200 frames/s, with bursts), so the client paces itself below
