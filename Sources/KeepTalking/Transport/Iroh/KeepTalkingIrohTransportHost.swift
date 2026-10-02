@@ -45,9 +45,13 @@ import NIOConcurrencyHelpers
 /// relay only); the hub id comes from configuration or `<relay>/kt/hub`.
 @_spi(TransportLab)
 public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
-    /// When the host uses the Bluetooth endpoint.
+    /// When the host uses the Bluetooth endpoint: Bluetooth links to members
+    /// that announced an id, and discovery of nearby devices (serving and
+    /// reading Bluetooth ids, dialling and accepting them, hellos).
     public enum BluetoothMode: String, Sendable, Hashable, CaseIterable {
         case off
+        /// Online or not, so an online node also links to a nearby
+        /// Bluetooth-only one.
         case always
         /// Only while the network gate is open: the hub is unreachable (or
         /// suspended), or a member that announced a Bluetooth id has no
@@ -68,27 +72,17 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         /// patched in the iroh-ffi fork; AGPL-3.0). One per device: a controller
         /// never sees its own adverts.
         public var bluetooth: BluetoothMode
-        /// The Bluetooth id gate for online devices: keep discovery running
-        /// — serving and reading Bluetooth ids, dialling and accepting nearby
-        /// devices, exchanging hellos — while the network works, so an
-        /// online node meets nearby nodes that only have Bluetooth. Off,
-        /// discovery runs only while the network fails. Ignored when
-        /// `bluetooth` is `.off`. (Meant to grow into an Off / when offline /
-        /// on strategy like `BluetoothMode`.)
-        public var bluetoothDiscoveryWhileOnline: Bool
 
         public init(
             relayURL: String,
             hubEndpointID: String? = nil,
             relayQUICPort: UInt16? = nil,
-            bluetooth: BluetoothMode = .off,
-            bluetoothDiscoveryWhileOnline: Bool = false
+            bluetooth: BluetoothMode = .off
         ) {
             self.relayURL = relayURL
             self.hubEndpointID = hubEndpointID
             self.relayQUICPort = relayQUICPort
             self.bluetooth = bluetooth
-            self.bluetoothDiscoveryWhileOnline = bluetoothDiscoveryWhileOnline
         }
     }
 
@@ -254,15 +248,13 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     // MARK: - Maintenance
 
     /// Once a second: forgets members nothing has reached for
-    /// `memberRetention`, runs the Bluetooth gates and offline discovery.
+    /// `memberRetention`, runs the Bluetooth gate and offline discovery.
     ///
     /// The network gate opens once the network has failed us for
     /// `bluetoothStartAfter` and closes after it has worked for
-    /// `bluetoothStopAfter`. Two gates follow from it: **links** (Bluetooth
-    /// links to every member that announced an id — `always`, or the network
-    /// gate in `whenNetworkFails`) and **discovery** (the id gate — the
-    /// network gate, or always with `bluetoothDiscoveryWhileOnline`). The
-    /// host holds the Bluetooth endpoint while either is open.
+    /// `bluetoothStopAfter`. The host holds the Bluetooth endpoint — links
+    /// and discovery both — always, or while that gate is open in
+    /// `whenNetworkFails`.
     private func maintenanceLoop() async {
         var networkGate = false
         var flipSince: ContinuousClock.Instant?
@@ -292,23 +284,12 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                         log(failing ? "network gate open" : "network gate closed")
                     }
                 }
-                let links = configuration.bluetooth == .always || networkGate
-                let discovery = configuration.bluetoothDiscoveryWhileOnline || networkGate
-                let (running, opened) = state.withLockedValue { state -> (Bool, [Data]) in
-                    let opened = links && !state.bluetooth.linksOpen
-                    state.bluetooth.linksOpen = links
-                    state.bluetooth.discovering = discovery
-                    let members = opened ? state.contexts.values.flatMap { Array($0.bluetoothMembers.keys) } : []
-                    return (state.bluetooth.endpoint != nil, members)
-                }
-                if links || discovery {
-                    if running {
-                        for target in Set(opened) { ensureLink(to: target, kind: .bluetooth) }
-                    } else {
-                        log("claiming bluetooth (\(Self.describeUse(links: links, discovery: discovery)))")
-                        await startBluetooth()
-                    }
-                } else if running {
+                let wanted = configuration.bluetooth == .always || networkGate
+                let running = state.withLockedValue { $0.bluetooth.endpoint != nil }
+                if wanted, !running {
+                    log("claiming bluetooth")
+                    await startBluetooth()
+                } else if !wanted, running {
                     log("releasing bluetooth")
                     await stopBluetooth()
                 }
@@ -339,7 +320,6 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 state.bluetooth.failure = nil
                 state.bluetooth.starts += 1
                 return state.contexts.values.flatMap { Array($0.bluetoothMembers.keys) }
-                    .filter(state.mayDialBluetooth)
             }
             guard let targets else {
                 KeepTalkingIrohBluetoothRadio.shared.release(from: self)
@@ -386,9 +366,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     private func discoverNearby(at now: ContinuousClock.Instant) {
         guard
             let bluetooth = state.withLockedValue({ state -> (endpoint: Endpoint, myID: Data)? in
-                guard state.bluetooth.discovering, let endpoint = state.bluetooth.endpoint,
-                    let myID = state.bluetooth.myID
-                else { return nil }
+                guard let endpoint = state.bluetooth.endpoint, let myID = state.bluetooth.myID else { return nil }
                 return (endpoint, myID)
             })
         else { return }
@@ -400,7 +378,6 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         let (probe, redial) = state.withLockedValue { state -> ((String, Data)?, [Data]) in
             // Devices that stopped advertising are no longer worth a dial.
             let present = Set(devices.map(\.prefix))
-            state.bluetooth.present = present
             for id in state.bluetooth.nearby.keys where !present.contains(id.prefix(Self.bluetoothPrefixLength)) {
                 state.bluetooth.nearby[id] = nil
             }
@@ -408,7 +385,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             // and aren't linked to yet.
             let candidates = Array(state.bluetooth.nearby.keys) + state.contexts.values.flatMap(\.bluetoothMembers.keys)
             let redial = Array(Set(candidates)).filter {
-                !state.bluetooth.strangers.contains($0) && state.links[$0] == nil && state.mayDialBluetooth($0)
+                !state.bluetooth.strangers.contains($0) && state.links[$0] == nil
             }
             guard !state.bluetooth.probing else { return (nil, redial) }
             let known = Set(
@@ -940,7 +917,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 state.contexts[topic]?.bluetoothMembers[bluetooth] = presence.nodeID
             }
             let isConnected = state.connectedMembers(of: topic).contains { $0.nodeID == presence.nodeID }
-            let bluetoothTarget = presence.bluetoothEndpointID.flatMap { state.mayDialBluetooth($0) ? $0 : nil }
+            let bluetoothTarget = state.bluetooth.endpoint == nil ? nil : presence.bluetoothEndpointID
             return .member(
                 presence.nodeID,
                 isConnected: isConnected,
@@ -977,7 +954,6 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             guard !state.isShutDown, endpoint != nil, let myID, state.links[endpointID] == nil else {
                 return false
             }
-            if kind == .bluetooth, !state.mayDialBluetooth(endpointID) { return false }
             let ourTurn =
                 kind == .network
                 ? myID.lexicographicallyPrecedes(endpointID)
@@ -996,7 +972,6 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         while !Task.isCancelled {
             let endpoint = state.withLockedValue { state -> Endpoint? in
                 guard state.isWanted(endpointID) else { return nil }
-                if kind == .bluetooth, !state.mayDialBluetooth(endpointID) { return nil }
                 state.links[endpointID]?.dialAttempts += 1
                 return kind == .network ? state.endpoint : state.bluetooth.endpoint
             }
@@ -1399,7 +1374,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         let status = bluetooth.endpoint?.bleStatus()
         let state: String
         if bluetooth.endpoint != nil {
-            state = "running · \(Self.describeUse(links: bluetooth.linksOpen, discovery: bluetooth.discovering))"
+            state = "running"
         } else if bluetooth.starting {
             state = "starting"
         } else if let failure = bluetooth.failure {
@@ -1470,15 +1445,6 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         return bytes
     }
 
-    private static func describeUse(links: Bool, discovery: Bool) -> String {
-        switch (links, discovery) {
-            case (true, true): return "links + discovery"
-            case (true, false): return "links"
-            case (false, true): return "discovery"
-            case (false, false): return "idle"
-        }
-    }
-
     private static func describe(_ policy: DeliveryPolicy) -> String {
         switch policy {
             case .automatic(let threshold): return "automatic (hub at ≥\(threshold) members)"
@@ -1546,12 +1512,6 @@ extension KeepTalkingIrohTransportHost {
         var strangers: Set<Data> = []
         var probing = false
         var probeRetryAt: [String: ContinuousClock.Instant] = [:]
-        /// Links gate: Bluetooth links to every member that announced an id.
-        var linksOpen = false
-        /// Id gate: discovery of nearby devices.
-        var discovering = false
-        /// Key prefixes advertising nearby, from the last discovery pass.
-        var present: Set<Data> = []
     }
 
     fileprivate struct WeakSink {
@@ -1708,17 +1668,6 @@ extension KeepTalkingIrohTransportHost {
                 }
             }
             return result
-        }
-
-        /// Whether a Bluetooth dial to `endpointID` is allowed now: any member
-        /// while the links gate is open, otherwise only a device advertising
-        /// nearby while discovery runs.
-        func mayDialBluetooth(_ endpointID: Data) -> Bool {
-            guard bluetooth.endpoint != nil else { return false }
-            if bluetooth.linksOpen { return true }
-            return bluetooth.discovering
-                && bluetooth.present.contains(
-                    Data(endpointID.prefix(KeepTalkingIrohTransportHost.bluetoothPrefixLength)))
         }
 
         /// The network gate: the hub is unusable, or a member that announced
