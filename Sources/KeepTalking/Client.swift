@@ -386,6 +386,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// attachments missing until a later full resync repopulated them via
     /// `saveContext`), buffer it here keyed by `parentMessageID` and re-drive
     /// when the parent message is saved. Guarded by `orphanAttachmentLock`.
+    /// Newest node-status snapshot applied per sender and context.
+    let nodeStatusWatermarks = KeepTalkingNodeStatusWatermarks()
     let orphanAttachmentLock = NSLock()
     var orphanAttachmentsByParentMessageID: [UUID: [KeepTalkingContextAttachmentDTO]] = [:]
 

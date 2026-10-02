@@ -707,6 +707,10 @@ extension KeepTalkingClient {
     }
 
     func mergeDiscoveredNodeStatus(_ status: KeepTalkingNodeStatus) async throws {
+        guard nodeStatusWatermarks.admit(status) else {
+            debug("dropped stale node status node=\(status.node.id?.uuidString.lowercased() ?? "unknown")")
+            return
+        }
         try await mergeDiscoveredNode(status.node)
 
         let advertisedActions = deduplicatedAndSortedActions(
