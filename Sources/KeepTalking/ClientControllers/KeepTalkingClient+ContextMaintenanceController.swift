@@ -63,7 +63,7 @@ extension KeepTalkingClient {
             case .nodeOnline(let node):
                 guard node != config.node else { return }
                 connection.sweepPresence()
-                rtcClient.debug("peer connected node=\(node.uuidString.lowercased())")
+                debug("peer connected node=\(node.uuidString.lowercased())")
                 await broadcastLocalNodeState(
                     reason: "peer-connect node=\(node.uuidString.lowercased())"
                 )
@@ -127,11 +127,10 @@ extension KeepTalkingClient {
         let payload = KeepTalkingVoiceCallStartedPayload(
             from: config.node,
             contextID: config.contextID,
-            effectiveTransport: activeVoiceSession.effectiveTransport.rawValue,
             sessionID: activeVoiceSession.sessionID
         )
         do {
-            try rtcClient.sendEnvelope(payload)
+            try sendEnvelope(payload)
         } catch {
             onLog?("failed to send voice call started: \(error)")
         }
@@ -183,7 +182,7 @@ extension KeepTalkingClient {
                 since: since
             )
         } catch {
-            rtcClient.debug(
+            debug(
                 "attachment recovery failed peer=\(node.uuidString.lowercased()) error=\(error.localizedDescription)"
             )
         }

@@ -1,8 +1,10 @@
 import Foundation
 
-/// Receives and reassembles inbound one-time-blob (OTB) frames. Each transfer
-/// gets a private temp directory; each encrypted chunk is written as its own
-/// file (named by chunk index, so ordering and boundaries are intrinsic).
+/// Receives and reassembles inbound one-time blobs (OTBs) pulled from their
+/// holders. Each transfer gets a private temp directory; each encrypted chunk
+/// is written as its own file (named by chunk index, so ordering and
+/// boundaries are intrinsic). Only a transfer this node is pulling, from the
+/// holder it asked, takes chunks.
 /// Nothing here touches the blob store, blob records, or context attachments —
 /// the bytes stay ciphertext until `KeepTalkingClient` materializes them with
 /// the unsealed key (which also verifies the sender).
@@ -28,6 +30,8 @@ actor KeepTalkingOneTimeBlobAssembler {
     private let maxConcurrentTransfers: Int
     private let maxTransferBytes: Int
     private var transfers: [UUID: Transfer] = [:]
+    /// Transfers being pulled, and the holder each is pulled from.
+    private var pulls: [UUID: UUID] = [:]
     /// Transfer IDs already discarded — late/duplicate frames for these are
     /// dropped rather than resurrecting a fresh entry + temp dir. Bounded.
     private var discarded: Set<UUID> = []
@@ -87,9 +91,34 @@ actor KeepTalkingOneTimeBlobAssembler {
         resumeIfComplete(transferID)
     }
 
-    /// Records the expected chunk count from the transfer's completion frame.
+    /// Marks `transferID` as pulled from `holder`. False when a pull of it is
+    /// already in flight, it's complete, or it was discarded.
+    func beginPull(_ transferID: UUID, from holder: UUID) -> Bool {
+        guard !discarded.contains(transferID), pulls[transferID] == nil,
+            transfers[transferID]?.isComplete != true
+        else { return false }
+        pulls[transferID] = holder
+        return true
+    }
+
+    /// Whether a stream of `transferID` from `holder` is one we asked for.
+    func isPulling(_ transferID: UUID, from holder: UUID) -> Bool {
+        pulls[transferID] == holder
+    }
+
+    /// The pull broke or the holder refused it: drop what it delivered and
+    /// fail the waiters with `error`, so a materialize can pull again.
+    func pullFailed(_ transferID: UUID, error: Error) {
+        pulls[transferID] = nil
+        guard let transfer = transfers.removeValue(forKey: transferID) else { return }
+        try? FileManager.default.removeItem(at: transfer.directory)
+        for (_, continuation) in transfer.waiters { continuation.resume(throwing: error) }
+    }
+
+    /// Records the chunk count once the holder finished the stream.
     func markComplete(transferID: UUID, chunkCount: Int) {
         reapStale()
+        pulls[transferID] = nil
         guard !discarded.contains(transferID) else { return }
         if transfers[transferID] == nil, transfers.count >= maxConcurrentTransfers { return }
         var transfer = transfers[transferID] ?? makeTransfer(transferID)
@@ -157,6 +186,7 @@ actor KeepTalkingOneTimeBlobAssembler {
     /// waiters.
     func discard(transferID: UUID, error: Error? = nil) {
         rememberDiscarded(transferID)
+        pulls[transferID] = nil
         guard let transfer = transfers.removeValue(forKey: transferID) else { return }
         try? FileManager.default.removeItem(at: transfer.directory)
         let failure = error ?? KeepTalkingOneTimeBlobError.transferTimedOut(transferID)

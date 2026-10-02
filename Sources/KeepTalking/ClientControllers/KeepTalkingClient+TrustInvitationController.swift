@@ -136,7 +136,7 @@ extension KeepTalkingClient {
             )
 
             do {
-                try rtcClient.sendEnvelope(payload)
+                try sendEnvelope(payload)
             } catch {
                 _ = takePendingSession(sessionID: sessionID)?.timeoutTask?.cancel()
                 trustQueue.sync { pendingTrustSessions[sessionID] = nil }

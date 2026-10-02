@@ -6,6 +6,7 @@ extension KeepTalkingIrohTransportHost {
     /// A point-in-time reading of the endpoints, the SFU session, every
     /// context and every peer link, plus the recent event log. Calls into
     /// iroh per link, so it's for labs, not hot paths.
+    @_spi(TransportLab)
     public func instruments() -> KeepTalkingIrohInstruments {
         let snapshot = state.withLockedValue { $0 }
         let sfuConnection = snapshot.sfu.connection
@@ -78,7 +79,8 @@ extension KeepTalkingIrohTransportHost {
                 connectedSince: snapshot.sfu.connectedSince,
                 selectedPath: sfuConnection.map(Self.selectedPath),
                 rttMs: sfuConnection?.rtt(),
-                queuedBytes: snapshot.outbound.bytes(for: Self.sfuQueue),
+                queuedBytes: ([Self.sfuSessionQueue] + Lane.allCases.map(Self.sfuQueue))
+                    .reduce(0) { $0 + snapshot.outbound.bytes(for: $1) },
                 skippedFrames: snapshot.sfu.skippedFrames
             ),
             contexts: snapshot.attachments.compactMap { topic, attachment in
@@ -94,7 +96,9 @@ extension KeepTalkingIrohTransportHost {
                             endpointID: Self.hex(main),
                             bluetoothEndpointID: context?.bluetoothOf[main].map { Self.hex($0) },
                             isListedBySFU: context?.unlisted[main] == nil,
-                            queuedBytes: snapshot.outbound.bytes(for: main)
+                            queuedBytes: Lane.allCases.reduce(0) {
+                                $0 + snapshot.outbound.bytes(for: Self.memberQueue(main, $1))
+                            }
                         )
                     },
                     meshPublished: attachment.meshPublished,

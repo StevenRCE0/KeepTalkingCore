@@ -1,12 +1,13 @@
 import Crypto
 import Foundation
 
-/// Reference to a one-time blob (OTB) transfer carried inside an action-call
-/// request/result. The actual bytes stream over the blob channel as ephemeral
-/// frames keyed by `transferID`; `sealedKey` is the per-transfer symmetric key
-/// sealed to the recipient (Curve25519 → AES-GCM), so only the target node can
-/// decrypt the streamed chunks. Unlike context attachments, an OTB is
-/// point-to-point, never recorded, never broadcast, and discarded after use.
+/// Reference to a one-time blob (OTB) carried inside an action-call
+/// request/result. The node that sent the request or result holds the bytes;
+/// the recipient pulls them by `transferID` as soon as the reference arrives.
+/// `sealedKey` is the per-transfer symmetric key sealed to the recipient
+/// (Curve25519 → AES-GCM), so only the target node can decrypt the streamed
+/// chunks. Unlike context attachments, an OTB is point-to-point, never
+/// recorded, never broadcast, and discarded after use.
 public struct KeepTalkingOneTimeBlobRef: Codable, Sendable {
     public let transferID: UUID
     public let filename: String
@@ -33,9 +34,9 @@ public struct KeepTalkingOneTimeBlobRef: Codable, Sendable {
 /// sealed to the recipient via the existing asym pathway; chunks are encrypted
 /// with that key (AES-GCM, random nonce per chunk → integrity per chunk).
 enum KeepTalkingOneTimeBlobCrypto {
-    /// Plaintext chunk size. Ciphertext is slightly larger (nonce + tag), still
-    /// well under the 32 KB SCTP-safe frame budget the blob transport uses.
-    static let plaintextChunkSize = 24 * 1024
+    /// Plaintext chunk size. Ciphertext adds a nonce and tag, and the
+    /// transport's seal a little more, still well under a blob-stream frame.
+    static let plaintextChunkSize = 128 * 1024
 
     static func generateKey() -> SymmetricKey {
         SymmetricKey(size: .bits256)
@@ -84,6 +85,10 @@ public enum KeepTalkingOneTimeBlobError: LocalizedError {
     /// result even when device transport logs aren't accessible.
     case materializationFailed(String)
     case transferTimedOut(UUID)
+    /// The pull broke mid-stream; pulling again may work.
+    case transferFailed(UUID, String)
+    /// The holder no longer has it, or not for us.
+    case unavailable(UUID)
     case sourceUnreadable(String)
 
     public var errorDescription: String? {
@@ -96,6 +101,10 @@ public enum KeepTalkingOneTimeBlobError: LocalizedError {
                 return detail
             case .transferTimedOut(let id):
                 return "One-time blob transfer \(id.uuidString.lowercased()) timed out."
+            case .transferFailed(let id, let reason):
+                return "One-time blob transfer \(id.uuidString.lowercased()) failed: \(reason)"
+            case .unavailable(let id):
+                return "One-time blob \(id.uuidString.lowercased()) is no longer available from its holder."
             case .sourceUnreadable(let path):
                 return "Cannot read source file for one-time blob: \(path)"
         }

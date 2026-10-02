@@ -760,7 +760,7 @@ extension KeepTalkingClient {
             "[action-call/result] returning request=\(requestID) action=\(actionID) is_error=\(result.isError)"
         )
 
-        try await rtcClient.sendTrustedEnvelope(
+        try await sendTrustedEnvelope(
             result,
             cryptorSource: trustedEnvelopeCryptorSource()
         )
@@ -789,7 +789,7 @@ extension KeepTalkingClient {
         )
 
         do {
-            try await rtcClient.sendTrustedEnvelope(
+            try await sendTrustedEnvelope(
                 acknowledgement,
                 cryptorSource: trustedEnvelopeCryptorSource()
             )
@@ -1061,7 +1061,7 @@ extension KeepTalkingClient {
             onLog?(
                 "[action-call/request] sending request=\(requestID) action=\(actionID) attempt=\(attempt) delivery=\(deliveryDescription)"
             )
-            try await rtcClient.sendTrustedEnvelope(
+            try await sendTrustedEnvelope(
                 request,
                 cryptorSource: trustedEnvelopeCryptorSource()
             )
@@ -1087,10 +1087,7 @@ extension KeepTalkingClient {
             }
 
             onLog?(
-                "[action-call/ack] missing request=\(requestID) action=\(actionID) after=\(Int(Self.actionCallAckTimeoutSeconds))s; retrying on reliable route"
-            )
-            rtcClient.preferReliableRoute(
-                reason: "missing action-call ack request=\(requestID)"
+                "[action-call/ack] missing request=\(requestID) action=\(actionID) after=\(Int(Self.actionCallAckTimeoutSeconds))s; retrying"
             )
         }
     }

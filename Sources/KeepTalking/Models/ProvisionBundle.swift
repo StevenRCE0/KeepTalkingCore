@@ -180,8 +180,10 @@ public nonisolated struct KeepTalkingProvisionBundle: Codable, Sendable, Identif
     // MARK: Topology
 
     public var passKVServerURL: ProvisionedValue<String>?
-    public var sfuHost: ProvisionedValue<String>?
-    public var sfuPort: ProvisionedValue<Int>?
+    /// The iroh relay the node's transport uses, e.g. `https://signal.example/`.
+    public var relayURL: ProvisionedValue<String>?
+    /// The SFU's endpoint id. Absent: looked up at `<relay>/kt/sfu`.
+    public var sfuEndpointID: ProvisionedValue<String>?
 
     // MARK: AI
 
@@ -210,8 +212,8 @@ public nonisolated struct KeepTalkingProvisionBundle: Codable, Sendable, Identif
         version: Int = 1,
         security: ProvisionSecurity = .none,
         passKVServerURL: ProvisionedValue<String>? = nil,
-        sfuHost: ProvisionedValue<String>? = nil,
-        sfuPort: ProvisionedValue<Int>? = nil,
+        relayURL: ProvisionedValue<String>? = nil,
+        sfuEndpointID: ProvisionedValue<String>? = nil,
         providers: ProvisionedValue<[ProvisionedProvider]>? = nil,
         roleAssignments: ProvisionedValue<ProvisionedRoleAssignments>? = nil,
         webSearch: ProvisionedValue<ProvisionedWebSearch>? = nil,
@@ -224,8 +226,8 @@ public nonisolated struct KeepTalkingProvisionBundle: Codable, Sendable, Identif
         self.version = version
         self.security = security
         self.passKVServerURL = passKVServerURL
-        self.sfuHost = sfuHost
-        self.sfuPort = sfuPort
+        self.relayURL = relayURL
+        self.sfuEndpointID = sfuEndpointID
         self.providers = providers
         self.roleAssignments = roleAssignments
         self.webSearch = webSearch

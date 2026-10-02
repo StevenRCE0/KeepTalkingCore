@@ -363,7 +363,7 @@ extension KeepTalkingClient {
             guard !page.isEmpty else { break }
             remaining.removeFirst(page.count)
             do {
-                try rtcClient.sendEnvelope(
+                try sendEnvelope(
                     KeepTalkingContextSyncEnvelope.messageDeletionsPush(
                         KeepTalkingContextSyncMessageDeletionsPush(
                             context: contextID,

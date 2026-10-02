@@ -10,9 +10,11 @@ import NIOConcurrencyHelpers
 ///   derived from the context secret) and announces a sealed presence blob
 ///   with our node id and endpoint ids. The SFU also fans publishes and
 ///   datagrams out to the topic, so a sender uploads once.
-/// - **Mesh** — iroh connections (`keeptalking/peer/1`), one per remote
+/// - **Mesh** — iroh connections (`keeptalking/peer/2`), one per remote
 ///   endpoint however many topics we share. They start on the relay and go
-///   direct when hole punching works; the lower id dials.
+///   direct when hole punching works; the lower id dials. Rooms on the mesh
+///   dial every member; rooms on the SFU open peer links only on demand
+///   (blob transfers).
 /// - **Bluetooth** — optional, on the process-wide Bluetooth-only endpoint
 ///   (`KeepTalkingIrohBluetoothRadio`), lent to one host at a time. Its
 ///   handshakes must run over Bluetooth, so it can't share the relay
@@ -21,19 +23,23 @@ import NIOConcurrencyHelpers
 /// - **Membership** (`KeepTalkingIrohMembership`) — learned from sealed
 ///   presence, through the SFU or from the hello every link starts with.
 ///   The SFU roster is only discovery.
-/// - **Delivery** — per publish, the SFU or the mesh (`DeliveryPolicy`). On
-///   the mesh every known member has a byte-bounded queue, drained by
-///   whichever of its links carries it: network while that has a path,
-///   Bluetooth otherwise. Nothing waits on a connection being up. When a
-///   member's carrier changes, its context resyncs with it, recovering
-///   whatever a dying connection swallowed.
+/// - **Delivery** — per room, the SFU or the mesh (`DeliveryPolicy`); on the
+///   SFU, broadcasts fan out and directed frames go to one member
+///   (PUBLISH_TO). Every frame rides a lane (`KeepTalkingEnvelopeDelivery`):
+///   control and interactive are long-lived ordered streams, bulk frames get
+///   a stream each, so no lane waits behind another. On the mesh every known
+///   member has a byte-bounded queue per lane, drained by whichever of its
+///   links carries it: network while that has a path, Bluetooth otherwise.
+///   Nothing waits on a connection being up. When a member's carrier
+///   changes, its context resyncs with it, recovering whatever a dying
+///   connection swallowed. Blob bytes travel point to point on a stream per
+///   transfer, never through the SFU. Voice datagrams never ride Bluetooth.
 ///
 /// Frames for an attached topic are delivered whoever sent them: payloads
 /// are sealed with the topic's key, so only members produce anything that
 /// opens. Endpoint ids to dial come only from sealed presence, never from
 /// the SFU. Keys are ephemeral; discovery is off (minimal preset, our relay
 /// only); the SFU id comes from configuration or `<relay>/kt/sfu`.
-@_spi(TransportLab)
 public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     /// When the host uses the Bluetooth endpoint: Bluetooth links to members
     /// that announced an id, and discovery of nearby devices (serving and
@@ -78,6 +84,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     public typealias DeliveryPolicy = KeepTalkingIrohDeliveryPolicy
     public typealias Route = KeepTalkingIrohRoute
     typealias FrameKind = KeepTalkingIrohPeerFrame.Kind
+    typealias Lane = KeepTalkingEnvelopeDelivery.Lane
     typealias Instant = SuspendingClock.Instant
 
     enum HostError: LocalizedError {
@@ -87,6 +94,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         case frameTooLarge(bytes: Int, limit: Int)
         case sfuInfo(String)
         case malformedFrame
+        case notMember(UUID)
 
         var errorDescription: String? {
             switch self {
@@ -96,22 +104,43 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 case .frameTooLarge(let bytes, let limit): return "Frame of \(bytes) bytes is over \(limit)."
                 case .sfuInfo(let reason): return "SFU lookup failed: \(reason)"
                 case .malformedFrame: return "Malformed frame."
+                case .notMember(let node): return "Node \(node) isn't a member of this context."
             }
         }
     }
 
-    static let peerALPN = Data("keeptalking/peer/1".utf8)
-    /// The SFU's outbound queue key (not 32 bytes, so never an endpoint id).
-    static let sfuQueue = Data("sfu".utf8)
+    static let peerALPN = KeepTalkingIrohPeerFrame.alpn
 
-    /// The queue of frames for one link only, like hellos — apart from the
-    /// member queue its endpoint id keys, so a link that isn't carrying its
-    /// member never drains that.
+    // Outbound queue keys. Endpoint ids are 32 bytes; none of these are.
+
+    /// A member's frames on one lane, drained by whichever link carries it.
+    static func memberQueue(_ main: Data, _ lane: Lane) -> Data {
+        var key = main
+        key.append(lane.rawValue)
+        return key
+    }
+
+    /// Control frames for one link only, like hellos — apart from the member
+    /// queues, so a link that isn't carrying its member never drains those.
     static func linkQueue(_ endpointID: Data) -> Data {
         var key = Data("link".utf8)
         key.append(endpointID)
         return key
     }
+
+    /// The SFU session stream: room management (subscribe, announce).
+    static let sfuSessionQueue = Data("sfu-session".utf8)
+
+    /// One SFU lane.
+    static func sfuQueue(_ lane: Lane) -> Data {
+        var key = Data("sfu".utf8)
+        key.append(lane.rawValue)
+        return key
+    }
+
+    /// How long a member stays wanted for a peer link once something (a
+    /// blob transfer) asked for one in a room on the SFU.
+    static let linkDemand: Duration = .seconds(120)
     /// Per-destination outbound budget.
     static let queueBudget = 16 << 20
     static let maxEvents = 300
@@ -173,7 +202,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         let (endpoint, tasks, ios, sfu) = state.withLockedValue { state in
             state.isShutDown = true
             let ios = Array(state.io.values)
-            let sfu = (state.sfu.connection, state.sfu.doorbell)
+            let sfu = (state.sfu.connection, Array(state.sfu.doorbells.values))
             let tasks = state.tasks
             state.tasks = []
             state.io = [:]
@@ -184,13 +213,14 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         }
         tasks.forEach { $0.cancel() }
         ios.forEach { Self.tearDown($0, reason: "shutdown") }
-        sfu.1?.finish()
+        sfu.1.forEach { $0.finish() }
         try? sfu.0?.close(errorCode: 0, reason: Data("shutdown".utf8))
         try? await endpoint?.close()
         KeepTalkingIrohBluetoothRadio.shared.release(from: self)
         log("host shut down")
     }
 
+    @_spi(TransportLab)
     public var deliveryPolicy: DeliveryPolicy {
         get { state.withLockedValue { $0.policy } }
         set { state.withLockedValue { $0.policy = newValue } }
@@ -198,6 +228,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     /// Lab switch: drop the SFU session and keep it down until resumed, so
     /// the rest of the host runs as if the SFU were unreachable.
+    @_spi(TransportLab)
     public func setSFUSuspended(_ suspended: Bool) {
         let connection = state.withLockedValue { state -> Connection? in
             state.sfu.suspended = suspended
@@ -250,7 +281,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     /// sealed presence and says hello on every link. The endpoint must be
     /// bound (`start()`). A later attach of the same topic takes it over.
     func attach(
-        _ sink: KeepTalkingIrohContextTransport,
+        _ sink: KeepTalkingIrohAttachment,
         topic: KeepTalkingIrohTopic,
         nodeID: UUID,
         secret: Data
@@ -281,11 +312,16 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
             if let previous { attachment.inheritCounters(from: previous) }
             state.attachments[topic.topic] = attachment
             state.bluetooth.strangers = []
-            guard let doorbell = state.sfu.doorbell else { return (nil, state.connectedLinks, false) }
-            state.outbound.enqueue(KeepTalkingIrohSFUFrame.encode(.subscribe(topic: topic.topic)), for: Self.sfuQueue)
+            guard let doorbell = state.sfu.doorbells[Self.sfuSessionQueue] else {
+                return (nil, state.connectedLinks, false)
+            }
+            state.outbound.enqueue(
+                KeepTalkingIrohSFUFrame.encode(.subscribe(topic: topic.topic)),
+                for: Self.sfuSessionQueue
+            )
             state.outbound.enqueue(
                 KeepTalkingIrohSFUFrame.encode(.announce(topic: topic.topic, blob: blob)),
-                for: Self.sfuQueue
+                for: Self.sfuSessionQueue
             )
             return (doorbell, state.connectedLinks, joined)
         }
@@ -299,13 +335,18 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     /// Unregisters `sink`'s context. A stale detach — another attachment took
     /// the topic over since — does nothing.
-    func detach(_ sink: KeepTalkingIrohContextTransport, topic: Data) {
+    func detach(_ sink: KeepTalkingIrohAttachment, topic: Data) {
         let detached = mutateLinks(touching: nil) { state -> (AsyncStream<Void>.Continuation?, [LinkIO], [Data])? in
             guard let attachment = state.attachments[topic], attachment.sink === sink else { return nil }
             state.attachments[topic] = nil
             let ids = state.membership.detach(topic)
-            state.outbound.enqueue(KeepTalkingIrohSFUFrame.encode(.unsubscribe(topic: topic)), for: Self.sfuQueue)
-            return (state.sfu.doorbell, state.dropUnneededLinks(among: ids), state.connectedLinks)
+            state.outbound.enqueue(
+                KeepTalkingIrohSFUFrame.encode(.unsubscribe(topic: topic)),
+                for: Self.sfuSessionQueue
+            )
+            return (
+                state.sfu.doorbells[Self.sfuSessionQueue], state.dropUnneededLinks(among: ids), state.connectedLinks
+            )
         }
         guard let detached else { return }
         let (doorbell, orphans, links) = detached
@@ -318,38 +359,41 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     // MARK: - Sending
 
-    /// Publishes one frame to `topic`. A frame directed at a known member goes
-    /// to that member's queue; everything else goes through the SFU or the
-    /// mesh per `DeliveryPolicy`. Throws when there's no route, so callers
-    /// such as the outbox keep the payload.
+    /// Publishes one frame to `topic` on `lane`. A room on the SFU gets it
+    /// fanned out there, or sent to one member when it's directed; a room on
+    /// the mesh gets it queued for every member (or the one it's directed
+    /// at). Throws when there's no route, so callers such as the outbox keep
+    /// the payload.
     @discardableResult
-    func publish(_ kind: FrameKind, topic: Data, payload: Data, to target: UUID?) throws -> Route {
+    func publish(_ kind: FrameKind, topic: Data, payload: Data, to target: UUID?, lane: Lane) throws -> Route {
         let bodyLength = 1 + payload.count
         guard bodyLength <= KeepTalkingIrohSFUFrame.maxPublishLength else {
             throw HostError.frameTooLarge(bytes: bodyLength, limit: KeepTalkingIrohSFUFrame.maxPublishLength - 1)
         }
-        let peerFrame = KeepTalkingIrohPeerFrame.encode(kind: kind, topic: topic, payload: payload)
         let (route, doorbells) = try state.withLockedValue {
             state -> (Route, [AsyncStream<Void>.Continuation]) in
             guard !state.isShutDown else { throw HostError.stopped }
             guard state.attachments[topic] != nil else { throw HostError.notAttached }
             let members = state.membership.members(of: topic)
-            if let target, let main = members.first(where: { $0.nodeID == target })?.main {
-                state.attachments[topic]?.meshPublished += 1
-                return (.mesh, state.enqueue(peerFrame, forMember: main))
-            }
-            switch KeepTalkingIrohDelivery.route(state.policy, sfuUsable: state.sfuUsable, members: members.count) {
+            let recipient = target.flatMap { target in members.first { $0.nodeID == target }?.main }
+            switch state.route(for: topic) {
                 case .sfu?:
                     var body = Data([kind.rawValue])
                     body.append(payload)
-                    let frame = KeepTalkingIrohSFUFrame.encode(.publish(topic: topic, payload: body))
-                    guard state.outbound.fits(frame.count, for: Self.sfuQueue) else { throw HostError.noRoute }
-                    state.outbound.enqueue(frame, for: Self.sfuQueue)
+                    let frame = KeepTalkingIrohSFUFrame.encode(
+                        recipient.map { .publishTo(topic: topic, recipient: $0, payload: body) }
+                            ?? .publish(topic: topic, payload: body)
+                    )
+                    let queue = Self.sfuQueue(lane)
+                    guard state.outbound.fits(frame.count, for: queue) else { throw HostError.noRoute }
+                    state.outbound.enqueue(frame, for: queue)
                     state.attachments[topic]?.sfuPublished += 1
-                    return (.sfu, [state.sfu.doorbell].compactMap { $0 })
+                    return (.sfu, [state.sfu.doorbells[queue]].compactMap { $0 })
                 case .mesh?:
+                    let frame = KeepTalkingIrohPeerFrame.encode(kind: kind, topic: topic, payload: payload)
                     state.attachments[topic]?.meshPublished += 1
-                    return (.mesh, members.flatMap { state.enqueue(peerFrame, forMember: $0.main) })
+                    let mains = recipient.map { [$0] } ?? members.map(\.main)
+                    return (.mesh, mains.flatMap { state.enqueue(frame, forMember: $0, lane: lane) })
                 case nil:
                     throw HostError.noRoute
             }
@@ -359,21 +403,22 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     }
 
     /// Unreliable realtime bytes (voice), routed like a publish. Datagrams
-    /// don't queue: on the mesh they go only to members a link reaches now.
+    /// don't queue: on the mesh they go only to members a network link
+    /// reaches now — never over Bluetooth, which can't carry a call.
     func sendDatagram(topic: Data, payload: Data) throws {
         let datagram = KeepTalkingIrohSFUFrame.datagram(topic: topic, payload: payload)
         let connections = try state.withLockedValue { state -> [Connection] in
             guard !state.isShutDown else { throw HostError.stopped }
             let members = state.membership.members(of: topic)
-            switch KeepTalkingIrohDelivery.route(state.policy, sfuUsable: state.sfuUsable, members: members.count) {
+            switch state.route(for: topic) {
                 case .sfu?:
                     state.attachments[topic]?.sfuDatagramsSent += 1
                     return [state.sfu.connection].compactMap { $0 }
                 case .mesh?:
                     return members.compactMap { member in
-                        guard let carrier = state.carrier(of: member.main) else { return nil }
-                        state.table.update(carrier) { $0.datagramsSent += 1 }
-                        return state.io[carrier]?.connection
+                        guard state.table.isCarrying(member.main) else { return nil }
+                        state.table.update(member.main) { $0.datagramsSent += 1 }
+                        return state.io[member.main]?.connection
                     }
                 case nil:
                     throw HostError.noRoute
@@ -385,47 +430,47 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
         }
     }
 
-    // MARK: - Reads for attachments
+    // MARK: - Room status
 
-    func sfuChannelState() -> BroadcastChannelState {
-        state.withLockedValue { state in
-            switch state.sfu.status {
-                case .idle, .connecting(attempt: 0): return .connecting
-                case .connecting(let attempt): return .reconnecting(attempt: attempt)
-                case .ready: return .ready
+    /// `topic`'s status, as its attachment reports it.
+    func roomStatus(of topic: Data) -> KeepTalkingTransportStatus {
+        let (route, carriers, settling) = state.withLockedValue { state in
+            let carriers = state.membership.members(of: topic).map { member -> (LinkKind, Connection?)? in
+                guard let link = state.carrier(of: member.main), let kind = state.table.links[link]?.kind else {
+                    return nil
+                }
+                return (kind, state.io[link]?.connection)
             }
+            return (state.route(for: topic), carriers, state.sfuSettling(for: topic))
         }
+        return KeepTalkingIrohDelivery.status(route: route, members: carriers.map(Self.reach), settling: settling)
     }
 
-    /// Members a link reaches now.
-    func connectedMemberNodes(of topic: Data) -> [UUID] {
-        state.withLockedValue { state in
-            state.membership.members(of: topic).filter { state.carrier(of: $0.main) != nil }.map(\.nodeID)
-        }
-    }
-
-    /// True when the SFU or some member can take a publish for `topic`.
-    func canDeliver(to topic: Data) -> Bool {
-        state.withLockedValue { state in
-            KeepTalkingIrohDelivery.route(
-                state.policy,
-                sfuUsable: state.sfuUsable,
-                members: state.membership.members(of: topic).count
-            ) != nil
-        }
-    }
-
-    /// True when some member of `topic` is reached without the relay (a
-    /// direct IP path or Bluetooth).
-    func hasDirectMember(in topic: Data) -> Bool {
-        let connections = state.withLockedValue { state in
-            state.membership.members(of: topic).compactMap { member in
-                state.carrier(of: member.main).flatMap { state.io[$0]?.connection }
+    /// `topic`'s members and queues; the attachment adds its own counters.
+    func roomStats(of topic: Data) -> KeepTalkingRuntimeStats {
+        let (members, reachable, queued) = state.withLockedValue { state -> (Int, Int, Int) in
+            let members = state.membership.members(of: topic)
+            let reachable = members.filter { state.carrier(of: $0.main) != nil }.count
+            let queued = members.reduce(0) { total, member in
+                Lane.allCases.reduce(total) { $0 + state.outbound.bytes(for: Self.memberQueue(member.main, $1)) }
             }
+            return (members.count, reachable, queued)
         }
-        return connections.contains { connection in
-            connection.paths().contains { $0.isSelected && !$0.isRelay }
-        }
+        return KeepTalkingRuntimeStats(
+            members: members,
+            reachableMembers: reachable,
+            queuedBytes: queued,
+            status: roomStatus(of: topic)
+        )
+    }
+
+    /// How a member's carrier reaches it. Reads the connection's paths, so
+    /// call it outside the lock.
+    private static func reach(_ carrier: (LinkKind, Connection?)?) -> KeepTalkingIrohDelivery.MemberReach {
+        guard let (kind, connection) = carrier else { return .unreachable }
+        if kind == .bluetooth { return .bluetooth }
+        let direct = connection?.paths().contains { $0.isSelected && !$0.isRelay } ?? false
+        return direct ? .direct : .relay
     }
 
     // MARK: - Change notifications
@@ -459,8 +504,8 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                     case (_?, nil): changes.append(.down(sink, nodeID))
                     default: changes.append(.rerouted(sink, nodeID))
                 }
-                if let carrier = new?.carrier, let doorbell = state.io[carrier]?.doorbell {
-                    doorbells.append(doorbell)
+                if let carrier = new?.carrier, let io = state.io[carrier] {
+                    doorbells.append(contentsOf: io.doorbells.values)
                 }
             }
             return (result, changes, doorbells)
@@ -477,12 +522,12 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     }
 
     enum CarrierChange {
-        case up(KeepTalkingIrohContextTransport?, UUID)
-        case down(KeepTalkingIrohContextTransport?, UUID)
-        case rerouted(KeepTalkingIrohContextTransport?, UUID)
+        case up(KeepTalkingIrohAttachment?, UUID)
+        case down(KeepTalkingIrohAttachment?, UUID)
+        case rerouted(KeepTalkingIrohAttachment?, UUID)
     }
 
-    func notifyAllContexts(_ body: (KeepTalkingIrohContextTransport) -> Void) {
+    func notifyAllContexts(_ body: (KeepTalkingIrohAttachment) -> Void) {
         let sinks = state.withLockedValue { $0.attachments.values.compactMap(\.sink) }
         sinks.forEach(body)
     }
@@ -490,7 +535,7 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     /// Finishes a link's doorbell, cancels its tasks and closes its
     /// connection.
     static func tearDown(_ io: LinkIO, reason: String) {
-        io.doorbell?.finish()
+        io.doorbells.values.forEach { $0.finish() }
         io.tasks.forEach { $0.cancel() }
         try? io.connection?.close(errorCode: 0, reason: Data(reason.utf8))
     }
@@ -548,18 +593,31 @@ extension KeepTalkingIrohTransportHost {
     struct SFUState {
         var status: SFUStatus = .idle
         var connection: Connection?
-        /// Rung when the SFU queue has frames; set while a session is up.
-        var doorbell: AsyncStream<Void>.Continuation?
+        /// Per queue (session, each lane): rung when it has frames; set while
+        /// a session is up.
+        var doorbells: [Data: AsyncStream<Void>.Continuation] = [:]
+        /// Lanes hold their frames until the session's subscriptions are in,
+        /// so the SFU never sees a publish for a topic it hasn't subscribed.
+        var lanesOpen = false
         var suspended = false
         var resolvedID: String?
         var attempts = 0
         var connectLatency: Duration?
         var connectedSince: Date?
-        /// When the session's current write started; nil while idle.
-        var writingSince: Instant?
+        /// When each pump's current write started; absent while idle.
+        var writingSince: [Data: Instant] = [:]
         var skippedFrames = 0
+        /// Below the SFU's 200 frames/s and 4 MiB/s (bursts 400 and 4 MiB),
+        /// across all lanes.
+        var framePacer = KeepTalkingIrohPacer(rate: 150, burst: 300)
+        var bytePacer = KeepTalkingIrohPacer(rate: 3 * 1024 * 1024, burst: 3 * 1024 * 1024)
         /// Snapshot chunks received so far, per topic.
         var pendingSnapshots: [Data: [KeepTalkingIrohSFUFrame.Member]] = [:]
+
+        /// How long to wait before sending `frames` frames of `bytes` bytes.
+        mutating func pace(frames: Int, bytes: Int, now: Instant) -> Duration {
+            max(framePacer.take(Double(frames), now: now), bytePacer.take(Double(bytes), now: now))
+        }
     }
 
     struct BluetoothState {
@@ -584,7 +642,7 @@ extension KeepTalkingIrohTransportHost {
     }
 
     struct Attachment {
-        weak var sink: KeepTalkingIrohContextTransport?
+        weak var sink: KeepTalkingIrohAttachment?
         let topic: KeepTalkingIrohTopic
         let nodeID: UUID
         let blob: Data
@@ -595,7 +653,7 @@ extension KeepTalkingIrohTransportHost {
         var sfuDatagramsSent = 0
         var sfuDatagramsReceived = 0
 
-        init(sink: KeepTalkingIrohContextTransport, topic: KeepTalkingIrohTopic, nodeID: UUID, blob: Data) {
+        init(sink: KeepTalkingIrohAttachment, topic: KeepTalkingIrohTopic, nodeID: UUID, blob: Data) {
             self.sink = sink
             self.topic = topic
             self.nodeID = nodeID
@@ -612,11 +670,11 @@ extension KeepTalkingIrohTransportHost {
         }
     }
 
-    /// The iroh side of a link: its connection once up, the doorbell its
-    /// pump waits on, and its tasks.
+    /// The iroh side of a link: its connection once up, the doorbell each
+    /// lane's pump waits on, and its tasks.
     struct LinkIO {
         var connection: Connection?
-        var doorbell: AsyncStream<Void>.Continuation?
+        var doorbells: [Lane: AsyncStream<Void>.Continuation] = [:]
         var tasks: [Task<Void, Never>] = []
         var watch: WatchHandle?
     }
@@ -638,6 +696,9 @@ extension KeepTalkingIrohTransportHost {
         var table = KeepTalkingIrohLinkTable()
         var io: [Data: LinkIO] = [:]
         var outbound = KeepTalkingIrohOutbound(budget: KeepTalkingIrohTransportHost.queueBudget)
+        /// Members wanted for a peer link until then, though their rooms are
+        /// on the SFU: something (a blob transfer) needs one.
+        var demand: [Data: Instant] = [:]
         var sfu = SFUState()
         var bluetooth = BluetoothState()
         var droppedFrames = 0
@@ -645,7 +706,52 @@ extension KeepTalkingIrohTransportHost {
         var nextEventID = 0
 
         var sfuUsable: Bool {
-            sfu.status == .ready && sfu.doorbell != nil && !sfu.suspended
+            sfu.status == .ready && sfu.lanesOpen && !sfu.suspended
+        }
+
+        /// The SFU can carry `topic`: the session is up and its snapshot for
+        /// the topic arrived, so the subscription is in.
+        func sfuUsable(for topic: Data) -> Bool {
+            sfuUsable && membership.contexts[topic]?.joined == true
+        }
+
+        /// The SFU session, or `topic`'s subscription on it, is still on its
+        /// first way up: nothing reachable then reads as connecting, not
+        /// offline.
+        func sfuSettling(for topic: Data) -> Bool {
+            guard !sfu.suspended else { return false }
+            switch sfu.status {
+                case .idle, .connecting(attempt: 0): return true
+                case .connecting: return false
+                case .ready: return !sfuUsable(for: topic)
+            }
+        }
+
+        /// Where `topic`'s traffic goes now.
+        func route(for topic: Data) -> Route? {
+            KeepTalkingIrohDelivery.route(
+                policy,
+                sfuUsable: sfuUsable(for: topic),
+                members: membership.contexts[topic]?.members.count ?? 0
+            )
+        }
+
+        /// Members of rooms on the mesh, which get a peer link each.
+        var meshMembers: Set<Data> {
+            membership.contexts.reduce(into: Set<Data>()) { result, entry in
+                if route(for: entry.key) == .mesh { result.formUnion(entry.value.members.keys) }
+            }
+        }
+
+        /// Whether to dial `endpointID` (a member's network or Bluetooth id,
+        /// or a nearby device): its room is on the mesh, something demands a
+        /// link, or it's a nearby device whose hello we haven't seen.
+        func wantsDial(_ endpointID: Data, now: Instant) -> Bool {
+            guard isWanted(endpointID) else { return false }
+            if bluetooth.nearby[endpointID] != nil, !bluetooth.strangers.contains(endpointID) { return true }
+            let mains = membership.mains(for: endpointID)
+            if mains.contains(where: { (demand[$0] ?? now) > now }) { return true }
+            return !mains.isDisjoint(with: meshMembers)
         }
 
         var connectedLinks: [Data] {
@@ -677,15 +783,16 @@ extension KeepTalkingIrohTransportHost {
         /// announced a Bluetooth id has no working network link.
         var networkFailing: Bool {
             !sfuUsable
-                || membership.allMains.contains { main in
+                || meshMembers.contains { main in
                     membership.bluetoothID(of: main) != nil && !table.isCarrying(main)
                 }
         }
 
-        /// Queues a peer frame for `main`; returns its carrier's doorbell.
-        mutating func enqueue(_ frame: Data, forMember main: Data) -> [AsyncStream<Void>.Continuation] {
-            outbound.enqueue(frame, for: main)
-            guard let carrier = carrier(of: main), let doorbell = io[carrier]?.doorbell else { return [] }
+        /// Queues a peer frame for `main` on `lane`; returns its carrier's
+        /// doorbell for that lane.
+        mutating func enqueue(_ frame: Data, forMember main: Data, lane: Lane) -> [AsyncStream<Void>.Continuation] {
+            outbound.enqueue(frame, for: KeepTalkingIrohTransportHost.memberQueue(main, lane))
+            guard let carrier = carrier(of: main), let doorbell = io[carrier]?.doorbells[lane] else { return [] }
             return [doorbell]
         }
 
@@ -716,7 +823,11 @@ extension KeepTalkingIrohTransportHost {
         mutating func dropUnneededLinks(among candidates: [Data]) -> [LinkIO] {
             var orphans: [LinkIO] = []
             for id in Set(candidates) where !isWanted(id) {
-                if !membership.allMains.contains(id) { outbound.remove(id) }
+                if !membership.allMains.contains(id) {
+                    for lane in Lane.allCases {
+                        outbound.remove(KeepTalkingIrohTransportHost.memberQueue(id, lane))
+                    }
+                }
                 guard table.links[id] != nil else { continue }
                 table.remove(id)
                 outbound.remove(KeepTalkingIrohTransportHost.linkQueue(id))
@@ -741,6 +852,25 @@ final class LinkPathWatcher: PathEventCallback, @unchecked Sendable {
 
     func onEvent(event: PathEvent) async throws {
         host?.pathEvent(event, endpointID: endpointID, stableID: stableID)
+    }
+}
+// MARK: - Multiplexer
+
+extension KeepTalkingIrohTransportHost: KeepTalkingTransportMultiplexer {
+    /// Starts the host if this is its first attachment, then joins the
+    /// room's topic.
+    func attach(
+        _ room: KeepTalkingTransportRoom,
+        events: @escaping KeepTalkingTransportEventHandler
+    ) async throws -> any KeepTalkingTransportAttachment {
+        do {
+            try await start()
+            let attachment = KeepTalkingIrohAttachment(host: self, room: room, events: events)
+            try attach(attachment, topic: attachment.topic, nodeID: room.nodeID, secret: room.secret)
+            return attachment
+        } catch HostError.stopped {
+            throw KeepTalkingTransportError.unavailable
+        }
     }
 }
 #endif

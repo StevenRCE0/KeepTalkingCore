@@ -359,3 +359,74 @@ struct IrohPacerTests {
         #expect(afterBurst > .zero)
     }
 }
+
+/// A room's status from its route and how its members are reached.
+struct IrohRoomStatusTests {
+    typealias Reach = KeepTalkingIrohDelivery.MemberReach
+
+    @Test("A room on the SFU is ready, whatever its links")
+    func sfuRoom() {
+        let status = KeepTalkingIrohDelivery.status(
+            route: .sfu, members: [.unreachable, .unreachable], settling: false)
+        #expect(status == .init(state: .ready, path: .sfu))
+    }
+
+    @Test("A mesh room is ready when every member is reachable, degraded when some are")
+    func meshRoom() {
+        #expect(
+            KeepTalkingIrohDelivery.status(route: .mesh, members: [.direct, .relay], settling: false)
+                == .init(state: .ready, path: .direct)
+        )
+        #expect(
+            KeepTalkingIrohDelivery.status(route: .mesh, members: [.relay, .unreachable], settling: false)
+                == .init(state: .degraded, path: .relay)
+        )
+        #expect(
+            KeepTalkingIrohDelivery.status(route: .mesh, members: [.bluetooth, .relay], settling: false)
+                == .init(state: .ready, path: .bluetooth)
+        )
+    }
+
+    @Test("Nothing reachable reads connecting while the SFU settles, offline after")
+    func nothingReachable() {
+        #expect(
+            KeepTalkingIrohDelivery.status(route: .mesh, members: [.unreachable], settling: true).state == .connecting
+        )
+        #expect(
+            KeepTalkingIrohDelivery.status(route: .mesh, members: [.unreachable], settling: false) == .offline
+        )
+        #expect(KeepTalkingIrohDelivery.status(route: nil, members: [], settling: true).state == .connecting)
+        #expect(KeepTalkingIrohDelivery.status(route: nil, members: [], settling: false) == .offline)
+    }
+
+    @Test("Only ready and degraded rooms can send")
+    func canSend() {
+        #expect(KeepTalkingTransportStatus(state: .ready, path: .sfu).canSend)
+        #expect(KeepTalkingTransportStatus(state: .degraded, path: .relay).canSend)
+        #expect(!KeepTalkingTransportStatus(state: .connecting, path: nil).canSend)
+        #expect(!KeepTalkingTransportStatus.offline.canSend)
+    }
+}
+
+/// What every peer-link stream starts with, and how lanes rank.
+struct IrohPeerStreamTests {
+    @Test("A stream's first byte names its lane or a blob transfer")
+    func preambles() {
+        for lane in KeepTalkingEnvelopeDelivery.Lane.allCases {
+            let type = KeepTalkingIrohPeerFrame.StreamType.lane(lane)
+            #expect(KeepTalkingIrohPeerFrame.StreamType(preamble: type.preamble) == type)
+        }
+        #expect(KeepTalkingIrohPeerFrame.StreamType(preamble: 0x10) == .blob)
+        #expect(KeepTalkingIrohPeerFrame.StreamType(preamble: 0x7F) == nil)
+    }
+
+    @Test("Control outranks interactive, which outranks bulk; blobs go last")
+    func priorities() {
+        let ranked: [KeepTalkingIrohPeerFrame.StreamType] = [
+            .lane(.control), .lane(.interactive), .lane(.bulk), .blob,
+        ]
+        let priorities = ranked.map(KeepTalkingIrohPeerFrame.priority)
+        #expect(priorities == priorities.sorted(by: >))
+        #expect(Set(priorities).count == ranked.count)
+    }
+}

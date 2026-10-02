@@ -1089,15 +1089,17 @@ struct ContextSyncTransportTests {
         #expect(!registry.resolve(request, with: 1))
     }
 
-    @Test("attachment sync request includes only recent missing hashes")
+    @Test("the wanted announcement lists only recent missing blobs, once per interval")
     func attachmentRequestReturnsRecentMissingHashes() async throws {
         let localStore = try await KeepTalkingInMemoryStore.make()
         let config = KeepTalkingConfig(
             contextID: UUID(uuidString: "A0000000-0000-0000-0000-000000000000")!,
             node: UUID(uuidString: "EEEEEEEE-1111-1111-1111-111111111111")!
         )
+        let multiplexer = FakeMultiplexer()
         let client = KeepTalkingClient(
             config: config,
+            transport: multiplexer.transport,
             localStore: localStore
         )
         let context = KeepTalkingContext(id: config.contextID)
@@ -1157,12 +1159,25 @@ struct ContextSyncTransportTests {
             receivedBytes: recentAttachment.byteCount
         )
 
-        let request = try await client.contextSyncAttachmentRequest(
+        try await client.connect()
+        defer { client.disconnect() }
+        let attachment = try #require(multiplexer.current)
+        let wanted = {
+            attachment.envelopes.compactMap { ($0 as? KeepTalkingBlobTransferEnvelope)?.step }
+        }
+
+        try await client.requestRecentMissingAttachmentBlobs(
             in: config.contextID,
             since: Date(timeIntervalSince1970: 15)
         )
+        #expect(wanted() == [.wanted([.attachment(blobID: missingRecentAttachment.blobID)])])
 
-        #expect(request?.hashes == [missingRecentAttachment.blobID])
+        // Asked again right away: the room already heard it.
+        try await client.requestRecentMissingAttachmentBlobs(
+            in: config.contextID,
+            since: Date(timeIntervalSince1970: 15)
+        )
+        #expect(wanted().count == 1)
     }
 
     private func seededContext(

@@ -87,9 +87,22 @@ struct IrohSFUFrameTests {
         }
     }
 
-    @Test("The ALPN is keeptalking/sfu/1, and SNAPSHOT puts its flags before the count")
-    func protocolV1Layout() throws {
-        #expect(KeepTalkingIrohSFUFrame.alpn == Data("keeptalking/sfu/1".utf8))
+    @Test("PUBLISH_TO puts the recipient between the topic and the payload")
+    func publishToLayout() {
+        let recipient = Data(repeating: 0xAB, count: 32)
+        let frame = KeepTalkingIrohSFUFrame.encode(
+            KeepTalkingIrohSFUFrame.Client.publishTo(topic: topic, recipient: recipient, payload: Data("hi".utf8))
+        )
+        // [len][0x25][topic(32)][recipient(32)][payload]
+        #expect(frame.prefix(5) == Data([0, 0, 0, 67, 0x25]))
+        #expect(frame[5..<37] == topic)
+        #expect(frame[37..<69] == recipient)
+        #expect(frame.suffix(2) == Data("hi".utf8))
+    }
+
+    @Test("The ALPN is keeptalking/sfu/2, and SNAPSHOT puts its flags before the count")
+    func protocolV2Layout() throws {
+        #expect(KeepTalkingIrohSFUFrame.alpn == Data("keeptalking/sfu/2".utf8))
         let chunk = KeepTalkingIrohSFUFrame.encode(
             KeepTalkingIrohSFUFrame.Server.snapshot(topic: topic, members: [], more: true)
         )

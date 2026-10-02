@@ -120,7 +120,7 @@ extension KeepTalkingClient {
 
             try await threadAfterSync(in: persistedContextID)
 
-            rtcClient.debug(
+            debug(
                 "context sync complete peer=\(node.uuidString.lowercased()) context=\(persistedContextID.uuidString.lowercased())"
             )
             await notifyContextSync(
@@ -132,7 +132,7 @@ extension KeepTalkingClient {
                 )
             )
         } catch {
-            rtcClient.debug(
+            debug(
                 "context sync failed peer=\(node.uuidString.lowercased()) error=\(error.localizedDescription)"
             )
             await notifyContextSync(
@@ -257,15 +257,12 @@ extension KeepTalkingClient {
                     syncMessageDeletionPages.fail(result.request, error: error),
                 ].contains(true)
                 guard !handled else { return }
-                rtcClient.debug(
+                debug(
                     "unmatched context sync failure request=\(result.request.uuidString.lowercased()) peer=\(result.responder.uuidString.lowercased()) error=\(result.message)"
                 )
 
-            // Attachments don't follow the request→result-waiter shape: blob
-            // requests are answered out-of-band, records results persist on arrival.
-            case .attachmentRequest(let request):
-                guard request.requester != config.node else { return }
-                try await respondToContextSyncAttachmentRequest(request)
+            // Attachment records results don't follow the request→result-waiter
+            // shape: they persist on arrival.
             case .attachmentRecordsResult(let result):
                 guard result.requester == config.node else { return }
                 try await persistContextSyncAttachmentRecordsResult(result)
@@ -281,9 +278,9 @@ extension KeepTalkingClient {
     ) async throws {
         guard request.recipient == config.node else { return }
         do {
-            try rtcClient.sendEnvelope(wrap(try await execute(request)))
+            try sendEnvelope(wrap(try await execute(request)))
         } catch {
-            try rtcClient.sendEnvelope(
+            try sendEnvelope(
                 KeepTalkingContextSyncEnvelope.failureResult(
                     KeepTalkingContextSyncFailureResult(
                         request: request.request,
@@ -325,7 +322,7 @@ extension KeepTalkingClient {
             timeout: Self.contextSyncResultTimeoutSeconds,
             generation: generation,
             send: { [weak self] in
-                try self?.rtcClient.sendEnvelope(
+                try self?.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.summaryRequest(request)
                 )
             }
@@ -348,7 +345,7 @@ extension KeepTalkingClient {
             timeout: Self.contextSyncResultTimeoutSeconds,
             generation: generation,
             send: { [weak self] in
-                try self?.rtcClient.sendEnvelope(
+                try self?.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.tailRequest(request)
                 )
             }
@@ -371,7 +368,7 @@ extension KeepTalkingClient {
             timeout: Self.contextSyncResultTimeoutSeconds,
             generation: generation,
             send: { [weak self] in
-                try self?.rtcClient.sendEnvelope(
+                try self?.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.chunkRequest(request)
                 )
             }
@@ -528,7 +525,7 @@ extension KeepTalkingClient {
             timeout: Self.contextSyncResultTimeoutSeconds,
             generation: generation,
             send: { [weak self] in
-                try self?.rtcClient.sendEnvelope(wrap(request))
+                try self?.sendEnvelope(wrap(request))
             }
         )
     }

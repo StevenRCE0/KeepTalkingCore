@@ -4,7 +4,6 @@ import KeepTalkingSDK
 enum InteractiveCommand {
     case quit
     case stats
-    case p2pTrial
     case newContext
     case join(String)
     case send(String)
@@ -43,9 +42,6 @@ enum InteractiveCommand {
         }
         if text == "/stats" {
             return .stats
-        }
-        if text == "/p2p" || text == "/p2p-trial" {
-            return .p2pTrial
         }
         if text == "/new" {
             return .newContext

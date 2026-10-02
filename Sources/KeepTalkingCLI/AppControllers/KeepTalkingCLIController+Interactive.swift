@@ -24,12 +24,8 @@ extension KeepTalkingCLIController {
             case .stats:
                 let stats = client.runtimeStats()
                 print(
-                    "Stats: route=\(stats.route ?? "unknown") sent=\(stats.sent) recv=\(stats.received) outbound=\(stats.outboundLabel ?? "nil") state=\(stats.outboundState.map(String.init) ?? "nil") inbound=\(stats.inboundLabel ?? "nil") inboundState=\(stats.inboundState.map(String.init) ?? "nil") retained=\(stats.retainedChannels)"
+                    "Stats: state=\(stats.status.state) path=\(stats.status.path?.rawValue ?? "none") members=\(stats.reachableMembers)/\(stats.members) sent=\(stats.envelopesSent) recv=\(stats.envelopesReceived) datagrams=\(stats.datagramsSent)/\(stats.datagramsReceived) queued=\(stats.queuedBytes)B"
                 )
-                return true
-            case .p2pTrial:
-                client.requestP2PTrial()
-                print("[local] requested p2p trial")
                 return true
             case .newContext:
                 let nextContextID = UUID()
@@ -263,6 +259,7 @@ extension KeepTalkingCLIController {
         let candidateConfig = currentConfig.withContextID(nextContextID)
         let candidateClient = KeepTalkingClient(
             config: candidateConfig,
+            transport: transport,
             localStore: localStore
         )
         bindCallbacks(to: candidateClient)
@@ -280,9 +277,6 @@ extension KeepTalkingCLIController {
             print(
                 "[local] \(verb) context=\(nextContextID.uuidString.lowercased())"
             )
-            print(
-                "[local] channels signaling=\(currentConfig.signalingChannelLabel) chat=\(currentConfig.chatChannelLabel) action_call=\(currentConfig.actionCallChannelLabel)"
-            )
             return true
         } catch {
             candidateClient.disconnect()
@@ -292,6 +286,7 @@ extension KeepTalkingCLIController {
 
             let fallbackClient = KeepTalkingClient(
                 config: previousConfig,
+                transport: transport,
                 localStore: localStore
             )
             bindCallbacks(to: fallbackClient)

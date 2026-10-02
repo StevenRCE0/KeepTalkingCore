@@ -19,7 +19,6 @@ public final class KeepTalkingClientSignals: Sendable {
     /// ran and only when it changed something, plus the local echo of an
     /// outgoing message, attachment or continuation update.
     public let envelopes = KeepTalkingSignal<any KeepTalkingEnvelope>()
-    public let rawMessages = KeepTalkingSignal<String>()
     /// A blob changed availability or crossed a visible receive-progress step.
     public let blobAvailabilityChanges = KeepTalkingSignal<KeepTalkingBlobAvailabilityChange>()
     /// Fires on BOTH sides of a completed trust handshake — initiator when the
@@ -66,19 +65,19 @@ public final class KeepTalkingClientSignals: Sendable {
 
     // MARK: State driven by sub-objects
 
-    /// Connection lifecycle: phase, generation, transport health and route.
-    /// Replays on subscribe. Driven by the connection.
+    /// Connection lifecycle: phase, generation and the room's transport
+    /// status. Replays on subscribe. Driven by the connection.
     public let lifecycle = KeepTalkingStateSignal<KeepTalkingClientLifecycle>(
-        .init(phase: .idle, generation: 0, transport: .down, route: .sfu, cause: .initial)
+        .init(phase: .idle, generation: 0, transport: .offline, cause: .initial)
     )
     /// Which remote peers are reachable right now, and the last change.
     /// Driven by the connection.
     public let presence = KeepTalkingStateSignal<KeepTalkingClientPresence>(
         .init(onlineNodeIDs: [], change: .reset)
     )
-    /// Transport counters, sampled once a second while connected and
-    /// published only when they changed. Driven by the connection.
-    public let transportStats: KeepTalkingStateSignal<KeepTalkingRuntimeStats>
+    /// The room's traffic counters, sampled once a second while connected
+    /// and published only when they changed. Driven by the connection.
+    public let transportStats = KeepTalkingStateSignal<KeepTalkingRuntimeStats>(.zero)
     /// Flat snapshot of every agent run, republished on each transition.
     /// Driven by the agent coordinator.
     public let agentRuns = KeepTalkingStateSignal<[KeepTalkingAgentRunSnapshot]>([])
@@ -87,9 +86,5 @@ public final class KeepTalkingClientSignals: Sendable {
     /// `voiceCallPresence.participants(in:)`. Driven by the presence registry.
     public let voiceCallPresenceChanges = KeepTalkingSignal<UUID>()
 
-    /// `initialTransportStats` is the transport's first sample, so
-    /// `transportStats.current` is never a placeholder.
-    init(initialTransportStats: KeepTalkingRuntimeStats) {
-        transportStats = .init(initialTransportStats)
-    }
+    init() {}
 }

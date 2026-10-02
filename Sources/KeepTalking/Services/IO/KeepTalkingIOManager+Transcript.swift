@@ -490,7 +490,7 @@ extension KeepTalkingIOManager {
             if let byteCount = resource.byteCount,
                 byteCount > KeepTalkingClient.maxAINativeAttachmentBytes
             {
-                client.rtcClient.debug(
+                client.debug(
                     "[io/inject] skipped oversized produced resource handle=\(resource.handle) bytes=\(byteCount)"
                 )
                 continue
@@ -498,7 +498,7 @@ extension KeepTalkingIOManager {
             if let message = await transcriptMessage(for: resource, contextID: contextID) {
                 messages.append(message)
             } else {
-                client.rtcClient.debug(
+                client.debug(
                     "[io/inject] skipped unreadable produced resource handle=\(resource.handle) kind=\(resource.kind)"
                 )
             }

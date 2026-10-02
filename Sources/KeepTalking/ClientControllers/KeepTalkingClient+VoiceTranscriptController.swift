@@ -110,7 +110,7 @@ extension KeepTalkingClient {
                 sender: sender,
                 timestampMs: UInt64(existing.timestamp.timeIntervalSince1970 * 1000)
             )
-            try? rtcClient.sendEnvelope(payload)
+            try? sendEnvelope(payload)
             onLog?(
                 "[voice-transcript] ~revise line=\(lineID.uuidString.prefix(8)) seq=\(existing.sequence) chars=\(trimmed.count)"
             )
@@ -151,7 +151,7 @@ extension KeepTalkingClient {
         )
 
         do {
-            try rtcClient.sendEnvelope(payload)
+            try sendEnvelope(payload)
             onLog?("[voice-transcript] → broadcast line=\(newID.uuidString.prefix(8)) seq=\(sequence)")
         } catch {
             // Best-effort: the line is persisted locally; sync-backfill will
@@ -170,9 +170,9 @@ extension KeepTalkingClient {
     /// records the author as a participant, then fires `onVoiceTranscriptLine`.
     ///
     /// Returns whether anything was actually applied. `.voiceCallTranscriptLine`
-    /// is fan-out eligible, so the same line arrives over both the direct
-    /// channel and the SFU; reporting `false` for the copy that changed nothing
-    /// suppresses the second outward publish, matching messages and attachments.
+    /// is idempotent, so the same line can arrive live and again in a resync;
+    /// reporting `false` for the copy that changed nothing suppresses the
+    /// second outward publish, matching messages and attachments.
     @discardableResult
     func handleIncomingVoiceTranscriptLine(
         _ payload: KeepTalkingVoiceCallTranscriptLinePayload
@@ -217,8 +217,8 @@ extension KeepTalkingClient {
         do {
             try await line.create(on: voiceDB)
         } catch {
-            // `.voiceCallTranscriptLine` is fan-out eligible, so the direct and
-            // SFU copies arrive on two independent Tasks and both can pass the
+            // `.voiceCallTranscriptLine` is idempotent, so a live copy and a
+            // resync's copy arrive on two independent Tasks and both can pass the
             // `find` above before either writes. The loser drops its copy
             // rather than failing: the two carry the same payload, and a
             // genuine later revision arrives as its own delivery. Publishing is

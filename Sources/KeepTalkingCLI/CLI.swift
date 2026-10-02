@@ -3,21 +3,21 @@ import KeepTalkingSDK
 
 let keepTalkingUsage = """
     Usage:
-      KeepTalking [--sfu host:port] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--openai-endpoint <url>] [--openai-api-key <key>] [--model <id>] [--act-model <id>] [--mcp <list|remove|add-http|add-stdio> ...] [--skill <list|remove|add-directory> ...] [--p2p-timeout <seconds>]
+      KeepTalking [--relay <url>] [--sfu-id <hex>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--openai-endpoint <url>] [--openai-api-key <key>] [--model <id>] [--act-model <id>] [--mcp <list|remove|add-http|add-stdio> ...] [--skill <list|remove|add-directory> ...]
 
     Environment fallbacks:
-      KT_SFU        (optional host:port, default port 9701)
+      KT_RELAY      (iroh relay URL; without it the CLI has no transport and stays local)
+      KT_SFU_ID     (optional SFU endpoint id; default: looked up at <relay>/kt/sfu)
       KT_NODE       (default: random UUID)
       KT_CONTEXT    (default: 00000000-0000-0000-0000-000000000000)
       KT_DB_PATH    (optional, local sqlite file path)
-      KT_P2P_TIMEOUT    (default: 5)
       OPENAI_API_KEY    (optional, enables /ai)
       KT_OPENAI_ENDPOINT / OPENAI_ENDPOINT / OPENAI_BASE_URL (optional, OpenAI-compatible API endpoint)
       KT_MODEL          (node-wide main agent model, required for /ai)
       KT_ACT_MODEL      (node-wide ACT agent model, default: the main model)
 
     Examples:
-      KeepTalking --sfu 127.0.0.1:9701 --context 11111111-2222-3333-4444-555555555555
+      KeepTalking --relay https://signal.example/ --context 11111111-2222-3333-4444-555555555555
       KeepTalking --context 11111111-2222-3333-4444-555555555555 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
       KeepTalking --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --message "hello"
       KeepTalking --mcp add-http linear https://mcp.linear.app --header Authorization=Bearer_token
@@ -50,8 +50,7 @@ let keepTalkingUsage = """
       /model [act] [<id>|reset]
                    show the active context's models, or override one for this
                    context (session only); reset returns to the node-wide model
-      /stats       print local send/receive counters
-      /p2p         manually start a p2p upgrade trial
+      /stats       print this context's transport counters
       /quit        exit
     """
 
@@ -84,7 +83,6 @@ enum CliError: LocalizedError {
     case invalidDBPath(String)
     case invalidNodeID(String)
     case invalidContextID(String)
-    case invalidP2PTimeout(String)
     case invalidMCPCommand(String)
     case invalidMCPURL(String)
     case invalidActionID(String)
@@ -109,8 +107,6 @@ enum CliError: LocalizedError {
                 return "Invalid node UUID: \(raw)"
             case .invalidContextID(let raw):
                 return "Invalid context UUID: \(raw)"
-            case .invalidP2PTimeout(let raw):
-                return "Invalid p2p timeout: \(raw)"
             case .invalidMCPCommand(let raw):
                 return "Invalid --mcp command: \(raw)"
             case .invalidMCPURL(let raw):
@@ -146,16 +142,11 @@ struct CliConfig {
     let actModel: String?
     let mcpCommand: MCPManagementCommand?
     let skillCommand: SkillManagementCommand?
-    /// When true, run ICE connectivity probe then exit instead of entering
-    /// interactive / one-shot mode.
-    let diagnose: Bool
-    /// `--sfu host:port` — KeepTalkingSFU endpoint for envelope transport.
-    let sfuJuiceEndpoint: SFUJuiceEndpoint?
-
-    struct SFUJuiceEndpoint: Sendable {
-        let host: String
-        let port: UInt16
-    }
+    /// `--relay <url>` — the iroh relay the process-wide transport uses. Nil
+    /// leaves the CLI without a transport: local commands only.
+    let relayURL: String?
+    /// `--sfu-id <hex>` — the SFU's endpoint id; nil looks it up at the relay.
+    let sfuEndpointID: String?
 
     static func parse() throws -> CliConfig {
         let env = ProcessInfo.processInfo.environment
@@ -164,7 +155,6 @@ struct CliConfig {
             env["KT_CONTEXT"]
             ?? "00000000-0000-0000-0000-000000000000"
         var databasePathRaw = env["KT_DB_PATH"]
-        var p2pTimeoutRaw = env["KT_P2P_TIMEOUT"] ?? "5"
         var openAIAPIKey = env["OPENAI_API_KEY"]
         var openAIEndpointRaw =
             env["KT_OPENAI_ENDPOINT"]
@@ -175,8 +165,8 @@ struct CliConfig {
         var singleMessage: String?
         var mcpCommand: MCPManagementCommand?
         var skillCommand: SkillManagementCommand?
-        var diagnose = false
-        var sfuJuiceEndpoint = env["KT_SFU"].flatMap(Self.parseSFUEndpoint)
+        var relayURL = env["KT_RELAY"]
+        var sfuEndpointID = env["KT_SFU_ID"]
 
         let args = Array(CommandLine.arguments.dropFirst())
         var index = 0
@@ -186,15 +176,14 @@ struct CliConfig {
                 case "--help", "-h":
                     print(keepTalkingUsage)
                     Foundation.exit(0)
-                case "--diagnose":
-                    diagnose = true
-                case "--sfu", "--sfu-juice":
+                case "--relay":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
-                    guard let endpoint = Self.parseSFUEndpoint(args[index]) else {
-                        throw CliError.unknownFlag("\(arg) expects host:port, got \(args[index])")
-                    }
-                    sfuJuiceEndpoint = endpoint
+                    relayURL = args[index]
+                case "--sfu-id":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue(arg) }
+                    sfuEndpointID = args[index]
                 case "--node", "--id":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
@@ -207,10 +196,6 @@ struct CliConfig {
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
                     databasePathRaw = args[index]
-                case "--p2p-timeout":
-                    index += 1
-                    guard index < args.count else { throw CliError.missingValue(arg) }
-                    p2pTimeoutRaw = args[index]
                 case "--message":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
@@ -365,9 +350,6 @@ struct CliConfig {
             throw CliError.conflictingManagementCommands
         }
 
-        guard let p2pTimeout = TimeInterval(p2pTimeoutRaw), p2pTimeout > 0 else {
-            throw CliError.invalidP2PTimeout(p2pTimeoutRaw)
-        }
         guard let nodeID = UUID(uuidString: nodeIDRaw) else {
             throw CliError.invalidNodeID(nodeIDRaw)
         }
@@ -380,14 +362,7 @@ struct CliConfig {
             openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return CliConfig(
-            sdkConfig: KeepTalkingConfig(
-                contextID: contextID,
-                node: nodeID,
-                p2pAttemptTimeoutSeconds: p2pTimeout,
-                sfuEndpoint: sfuJuiceEndpoint.map {
-                    KeepTalkingConfig.SFUEndpoint(host: $0.host, port: $0.port)
-                }
-            ),
+            sdkConfig: KeepTalkingConfig(contextID: contextID, node: nodeID),
             databaseURL: databaseURL,
             singleMessage: singleMessage,
             openAIAPIKey: (normalizedOpenAIAPIKey?.isEmpty == false)
@@ -398,22 +373,9 @@ struct CliConfig {
             actModel: actModel?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
             mcpCommand: mcpCommand,
             skillCommand: skillCommand,
-            diagnose: diagnose,
-            sfuJuiceEndpoint: sfuJuiceEndpoint
+            relayURL: relayURL?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            sfuEndpointID: sfuEndpointID?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         )
-    }
-
-    private static func parseSFUEndpoint(_ raw: String) -> SFUJuiceEndpoint? {
-        let parts = raw.split(separator: ":", maxSplits: 1).map(String.init)
-        guard !parts.isEmpty, !parts[0].isEmpty else { return nil }
-        let port: UInt16
-        if parts.count == 2 {
-            guard let parsed = UInt16(parts[1]) else { return nil }
-            port = parsed
-        } else {
-            port = 9701
-        }
-        return SFUJuiceEndpoint(host: parts[0], port: port)
     }
 
     private static func resolveDatabaseURL(_ raw: String?) throws -> URL? {

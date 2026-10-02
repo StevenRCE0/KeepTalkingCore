@@ -3,20 +3,12 @@ import Foundation
 extension KeepTalkingClient {
     /// Builds a `KeepTalkingVoiceSession` bound to this client's context.
     ///
-    /// The session reuses:
-    ///   - the same node UUID (so SFU presence sees one identity for
-    ///     chat and voice together)
-    ///   - the same Ed25519 signing key (loaded via the client's
-    ///     keychain store)
-    ///   - the same SFU endpoint (from `config.sfuEndpoint`)
-    ///
-    /// **Transport split:**
-    ///   - *Signaling* (voice.started / .ended / .signal envelopes)
-    ///     routes through the shared `rtcClient` — needs to reach chat
-    ///     envelope handlers for bystander presence.
-    ///   - *Audio frames* (realtime data) go directly through the broadcast
-    ///     channel's `.realtime` channel, bypassing envelope routing
-    ///     entirely. Same SFU connection, no P2P detour.
+    /// The session rides the context's room on the process-wide transport:
+    /// - **Call presence** (`voice.started` / `voice.ended`) goes out as
+    ///   ordinary envelopes, so bystanders' chat sees who's in the call.
+    /// - **Audio** goes out as datagrams sealed with the call's key (the
+    ///   context secret and the session id). The transport fans them out
+    ///   through the SFU or sends them to each member a network link reaches.
     ///
     /// Callers own the session and are responsible for calling `stop()`
     /// (or letting it deinit) when voice is no longer wanted. The client holds a
@@ -24,29 +16,18 @@ extension KeepTalkingClient {
     /// presence — it clears that reference automatically on the session's
     /// `onStopped`, so "are we in a call?" stays accurate without the caller having
     /// to remember to detach.
-    public func makeVoiceSession(
-        mode: KeepTalkingVoiceSession.TransportMode = .auto,
-        maxP2PMeshSize: Int = 4
-    ) async throws -> KeepTalkingVoiceSession {
-        guard config.sfuEndpoint != nil else {
-            throw KeepTalkingClientError.noSFUEndpointConfigured
-        }
-        let contextSecret = try await loadGroupChatSecret(for: config.contextID)
+    public func makeVoiceSession() async throws -> KeepTalkingVoiceSession {
+        let contextSecret = try await ensureGroupChatSecret(for: config.contextID)
         let session = KeepTalkingVoiceSession(
             config: config,
             sendEnvelope: { [weak self] envelope in
                 guard let self else { throw KeepTalkingClientError.clientDisconnected }
-                try self.rtcClient.sendEnvelope(envelope)
+                try self.sendEnvelope(envelope)
             },
-            sendBlobData: { [weak self] data, _ in
+            sendDatagram: { [weak self] datagram in
                 guard let self else { throw KeepTalkingClientError.clientDisconnected }
-                // Voice audio goes straight to the SFU broadcast
-                // channel — same connection, `.realtime` channel tag,
-                // no routing-strategy detour through P2P.
-                try self.rtcClient.sendRealtimeDataViaBroadcast(data)
+                try self.connection.sendDatagram(datagram)
             },
-            mode: mode,
-            maxP2PMeshSize: maxP2PMeshSize,
             frameSecret: contextSecret
         )
         // Self-detach on stop so a torn-down session never lingers as

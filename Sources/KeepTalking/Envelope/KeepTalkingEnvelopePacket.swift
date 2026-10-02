@@ -111,11 +111,6 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
                     try cast(KeepTalkingEncryptedAgentTurnContinuationResponseEnvelope.self),
                     forKey: .payload
                 )
-            case .p2pSignal:
-                try container.encode(
-                    try cast(KeepTalkingP2PSignalPayload.self),
-                    forKey: .payload
-                )
             case .p2pPresence:
                 try container.encode(
                     try cast(KeepTalkingP2PPresencePayload.self),
@@ -151,14 +146,14 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
                     try cast(KeepTalkingVoiceCallEndedPayload.self),
                     forKey: .payload
                 )
-            case .voiceCallSignal:
-                try container.encode(
-                    try cast(KeepTalkingVoiceCallSignalPayload.self),
-                    forKey: .payload
-                )
             case .voiceCallTranscriptLine:
                 try container.encode(
                     try cast(KeepTalkingVoiceCallTranscriptLinePayload.self),
+                    forKey: .payload
+                )
+            case .blobTransfer:
+                try container.encode(
+                    try cast(KeepTalkingBlobTransferEnvelope.self),
                     forKey: .payload
                 )
         }
@@ -269,11 +264,6 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
                     KeepTalkingEncryptedAgentTurnContinuationResponseEnvelope.self,
                     forKey: .payload
                 )
-            case .p2pSignal:
-                return try container.decode(
-                    KeepTalkingP2PSignalPayload.self,
-                    forKey: .payload
-                )
             case .p2pPresence:
                 return try container.decode(
                     KeepTalkingP2PPresencePayload.self,
@@ -309,14 +299,14 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
                     KeepTalkingVoiceCallEndedPayload.self,
                     forKey: .payload
                 )
-            case .voiceCallSignal:
-                return try container.decode(
-                    KeepTalkingVoiceCallSignalPayload.self,
-                    forKey: .payload
-                )
             case .voiceCallTranscriptLine:
                 return try container.decode(
                     KeepTalkingVoiceCallTranscriptLinePayload.self,
+                    forKey: .payload
+                )
+            case .blobTransfer:
+                return try container.decode(
+                    KeepTalkingBlobTransferEnvelope.self,
                     forKey: .payload
                 )
         }

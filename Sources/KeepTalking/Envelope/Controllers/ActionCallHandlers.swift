@@ -10,6 +10,7 @@ import Foundation
 extension KeepTalkingEnvelopeAsyncHandlers {
     mutating func registerActionCallHandlers(for client: KeepTalkingClient) {
         onActionCallRequest { request in
+            client.prefetchOneTimeBlobs(for: request)
             client.enqueueIncomingActionCallRequest(request)
         }
         onRequestAck { acknowledgement in
@@ -19,6 +20,7 @@ extension KeepTalkingEnvelopeAsyncHandlers {
             client.handleIncomingRequestAck(acknowledgement)
         }
         onActionCallResult { result in
+            client.prefetchOneTimeBlobs(for: result)
             _ = client.resolvePendingActionCall(result)
         }
         onEncryptedActionCallRequest { encryptedRequest in
@@ -28,6 +30,7 @@ extension KeepTalkingEnvelopeAsyncHandlers {
             guard let request = decrypted.actionCallRequest else {
                 return
             }
+            client.prefetchOneTimeBlobs(for: request)
             client.enqueueIncomingActionCallRequest(request)
         }
         onEncryptedRequestAck { encryptedAcknowledgement in
@@ -49,6 +52,7 @@ extension KeepTalkingEnvelopeAsyncHandlers {
             guard let result = decrypted.actionCallResult else {
                 return
             }
+            client.prefetchOneTimeBlobs(for: result)
             _ = client.resolvePendingActionCall(result)
         }
         onEncryptedAgentTurnContinuationResponse { encryptedResponse in

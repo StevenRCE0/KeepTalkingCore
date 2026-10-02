@@ -73,7 +73,7 @@ extension KeepTalkingClient {
             request,
             context: context
         )
-        try await rtcClient.sendTrustedEnvelope(
+        try await sendTrustedEnvelope(
             result,
             cryptorSource: trustedEnvelopeCryptorSource()
         )
@@ -98,7 +98,7 @@ extension KeepTalkingClient {
             return await executeActionCatalogRequest(request, context: context)
         }
 
-        try await rtcClient.sendTrustedEnvelope(
+        try await sendTrustedEnvelope(
             request,
             cryptorSource: trustedEnvelopeCryptorSource()
         )

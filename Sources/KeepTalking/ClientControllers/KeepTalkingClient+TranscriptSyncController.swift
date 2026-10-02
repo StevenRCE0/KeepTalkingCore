@@ -214,7 +214,7 @@ extension KeepTalkingClient {
             timeout: Self.transcriptSyncTimeoutSeconds,
             generation: generation,
             send: { [weak self] in
-                try self?.rtcClient.sendEnvelope(
+                try self?.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.transcriptSummaryRequest(request)
                 )
             }
@@ -236,7 +236,7 @@ extension KeepTalkingClient {
             timeout: Self.transcriptSyncTimeoutSeconds,
             generation: generation,
             send: { [weak self] in
-                try self?.rtcClient.sendEnvelope(
+                try self?.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.transcriptTailRequest(request)
                 )
             }
@@ -258,7 +258,7 @@ extension KeepTalkingClient {
             timeout: Self.transcriptSyncTimeoutSeconds,
             generation: generation,
             send: { [weak self] in
-                try self?.rtcClient.sendEnvelope(
+                try self?.sendEnvelope(
                     KeepTalkingContextSyncEnvelope.transcriptChunkRequest(request)
                 )
             }

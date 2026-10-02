@@ -12,7 +12,7 @@ import Foundation
 /// contract. Diagnostics go to `onLog?`.
 ///
 /// Removal happens on:
-///   • successful `rtcClient.sendEnvelope` after the message landed locally
+///   • the room accepting the envelopes after the message landed locally
 ///   • drain after transport state change (peer connect / broadcast ready)
 ///
 /// Deleting the row does NOT delete the underlying `KeepTalkingContextMessage`

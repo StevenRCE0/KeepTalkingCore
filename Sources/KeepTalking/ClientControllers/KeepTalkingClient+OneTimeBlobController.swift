@@ -175,7 +175,7 @@ extension KeepTalkingClient {
         let fileManager = FileManager.default
         let tempBase = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         let prefixes = [
-            "kt-otb-recv-", "kt-otb-fsin-", "kt-otb-skillin-", "kt-otb-inbound",
+            "kt-otb-recv-", "kt-otb-fsin-", "kt-otb-skillin-", "kt-otb-inbound", "kt-otb-outbox",
             "kt-attach-", "kt-staged-files",
         ]
         guard let entries = try? fileManager.contentsOfDirectory(atPath: tempBase.path)
@@ -185,9 +185,10 @@ extension KeepTalkingClient {
         }
     }
 
-    /// Streams `fileURL` to `recipientNodeID` as an encrypted one-time blob and
+    /// Holds `fileURL` for `recipientNodeID` as an encrypted one-time blob and
     /// returns the ref (carrying the sealed per-transfer key) to embed in the
-    /// action-call request/result. Point-to-point and ephemeral — no blob
+    /// action-call request/result. The recipient pulls the bytes from this
+    /// node when the ref arrives. Point-to-point and ephemeral — no blob
     /// record, no context attachment, no broadcast.
     func sendOneTimeBlob(
         fileURL: URL,
@@ -195,58 +196,18 @@ extension KeepTalkingClient {
         mimeType: String,
         to recipientNodeID: UUID
     ) async throws -> KeepTalkingOneTimeBlobRef {
-        let transferID = UUID()
         let key = KeepTalkingOneTimeBlobCrypto.generateKey()
         let sealedKey = try await encryptAsymmetricPayload(
             KeepTalkingOneTimeBlobCrypto.keyData(key),
             recipientNodeID: recipientNodeID,
             purpose: "otb-key"
         )
-
-        guard let handle = try? FileHandle(forReadingFrom: fileURL) else {
-            throw KeepTalkingOneTimeBlobError.sourceUnreadable(fileURL.path)
-        }
-        defer { try? handle.close() }
-
-        var chunkIndex = 0
-        var byteCount = 0
-        while true {
-            let plaintext = handle.readData(
-                ofLength: KeepTalkingOneTimeBlobCrypto.plaintextChunkSize)
-            if plaintext.isEmpty { break }
-            byteCount += plaintext.count
-            let sealed = try KeepTalkingOneTimeBlobCrypto.sealChunk(
-                plaintext, key: key,
-                aad: KeepTalkingOneTimeBlobCrypto.chunkAAD(
-                    transferID: transferID, chunkIndex: chunkIndex))
-            try sendOneTimeBlobFrame(
-                kind: .chunk,
-                transferID: transferID,
-                recipient: recipientNodeID,
-                mimeType: mimeType,
-                chunkIndex: chunkIndex,
-                chunkCount: nil,
-                byteCount: nil,
-                payload: sealed
-            )
-            // Let the SCTP send buffer drain between chunks (mirrors the
-            // attachment blob streamer).
-            try await Task.sleep(nanoseconds: 10_000_000)
-            chunkIndex += 1
-        }
-
-        try await Task.sleep(nanoseconds: 20_000_000)
-        try sendOneTimeBlobFrame(
-            kind: .complete,
-            transferID: transferID,
+        let (transferID, byteCount) = try await oneTimeBlobOutbox.hold(
+            fileURL: fileURL,
+            key: key,
             recipient: recipientNodeID,
-            mimeType: mimeType,
-            chunkIndex: nil,
-            chunkCount: chunkIndex,
-            byteCount: byteCount,
-            payload: Data()
+            mimeType: mimeType
         )
-
         return KeepTalkingOneTimeBlobRef(
             transferID: transferID,
             filename: filename,
@@ -256,61 +217,125 @@ extension KeepTalkingClient {
         )
     }
 
-    private func sendOneTimeBlobFrame(
-        kind: KeepTalkingBlobTransferKind,
+    /// Holder side of a pull: streams the held file to its recipient, each
+    /// chunk sealed with the transfer's key, from chunk `fromChunk` on.
+    func streamOneTimeBlob(
+        _ entry: KeepTalkingOneTimeBlobOutbox.Entry,
         transferID: UUID,
-        recipient: UUID,
-        mimeType: String,
-        chunkIndex: Int?,
-        chunkCount: Int?,
-        byteCount: Int?,
-        payload: Data
-    ) throws {
-        let header = KeepTalkingBlobTransferHeader(
-            kind: kind,
-            transferID: transferID,
-            senderNodeID: config.node,
-            recipientNodeID: recipient,
-            blobID: transferID.uuidString.lowercased(),
-            mimeType: mimeType,
-            pathExtension: nil,
-            byteCount: byteCount,
-            chunkIndex: chunkIndex,
-            chunkCount: chunkCount,
-            chunkByteCount: kind == .chunk ? payload.count : nil,
-            isEphemeral: true
+        fromChunk: Int
+    ) async throws {
+        let chunkSize = KeepTalkingOneTimeBlobCrypto.plaintextChunkSize
+        let handle = try FileHandle(forReadingFrom: entry.fileURL)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(max(fromChunk, 0) * chunkSize))
+        let header = KeepTalkingBlobStreamHeader(
+            item: .oneTimeBlob(transferID: transferID),
+            offset: fromChunk,
+            byteCount: entry.byteCount,
+            mimeType: entry.mimeType,
+            pathExtension: nil
         )
-        let data = try KeepTalkingBlobTransferCodec.encode(
-            KeepTalkingBlobTransferFrame(header: header, payload: payload))
-        try rtcClient.sendBlobData(data, targetPeerNodeID: recipient)
-    }
-
-    /// Routes an inbound ephemeral frame to the assembler. Called from
-    /// `handleIncomingBlobFrameData` when `header.isEphemeral == true`.
-    func handleIncomingOneTimeBlobFrame(_ frame: KeepTalkingBlobTransferFrame) async {
-        switch frame.header.kind {
-            case .chunk:
-                // Drop malformed frames rather than coercing a nil index to 0
-                // (which a hostile/buggy sender could use to clobber chunk 0).
-                guard let chunkIndex = frame.header.chunkIndex else { return }
-                await oneTimeBlobAssembler.appendChunk(
-                    transferID: frame.header.transferID,
-                    chunkIndex: chunkIndex,
-                    payload: frame.payload
+        let writer = try await connection.openBlobStream(to: entry.recipient, header: try JSONEncoder().encode(header))
+        do {
+            var chunkIndex = fromChunk
+            while let plaintext = try handle.read(upToCount: chunkSize), !plaintext.isEmpty {
+                try await writer.write(
+                    try KeepTalkingOneTimeBlobCrypto.sealChunk(
+                        plaintext,
+                        key: entry.key,
+                        aad: KeepTalkingOneTimeBlobCrypto.chunkAAD(transferID: transferID, chunkIndex: chunkIndex)
+                    )
                 )
-            case .complete:
-                guard let chunkCount = frame.header.chunkCount else { return }
-                await oneTimeBlobAssembler.markComplete(
-                    transferID: frame.header.transferID,
-                    chunkCount: chunkCount
-                )
+                chunkIndex += 1
+            }
+            try await writer.finish()
+        } catch {
+            writer.cancel()
+            throw error
         }
     }
 
-    /// Awaits completion of an inbound OTB (hard timeout), unseals the
-    /// per-transfer key (verifying it came from `senderNodeID`), decrypts the
-    /// chunks, and writes the plaintext into `directory` as `ref.filename`.
-    /// Discards the ciphertext buffer afterward. Returns the file URL.
+    /// Starts pulling the refs' bytes from `holder` — the node whose request
+    /// or result carried them — so they're here, or on their way, before
+    /// anything materializes them. A tight agent run then never waits a
+    /// round trip it didn't have to.
+    func prefetchOneTimeBlobs(_ refs: [KeepTalkingOneTimeBlobRef], from holder: UUID) {
+        guard !refs.isEmpty, holder != config.node else { return }
+        Task {
+            for ref in refs { await self.pullOneTimeBlob(ref.transferID, from: holder) }
+        }
+    }
+
+    /// Prefetches a request's inputs when it's addressed to us; its caller
+    /// holds them.
+    func prefetchOneTimeBlobs(for request: KeepTalkingActionCallRequest) {
+        guard request.targetNodeID == config.node else { return }
+        prefetchOneTimeBlobs(request.call.inputTransfers ?? [], from: request.callerNodeID)
+    }
+
+    /// Prefetches a result's outputs when it answers us; the executor holds
+    /// them.
+    func prefetchOneTimeBlobs(for result: KeepTalkingActionCallResult) {
+        guard result.callerNodeID == config.node else { return }
+        prefetchOneTimeBlobs(result.outputTransfers ?? [], from: result.targetNodeID)
+    }
+
+    /// Asks `holder` to stream the transfer, unless a pull of it is already
+    /// in flight or done.
+    func pullOneTimeBlob(_ transferID: UUID, from holder: UUID) async {
+        guard await oneTimeBlobAssembler.beginPull(transferID, from: holder) else { return }
+        connection.expectBlobStream(from: holder)
+        do {
+            try sendEnvelope(
+                KeepTalkingBlobTransferEnvelope(
+                    context: config.contextID,
+                    sender: config.node,
+                    recipient: holder,
+                    step: .pull(.oneTimeBlob(transferID: transferID), offset: 0)
+                )
+            )
+        } catch {
+            await oneTimeBlobAssembler.pullFailed(
+                transferID,
+                error: KeepTalkingOneTimeBlobError.transferFailed(transferID, error.localizedDescription)
+            )
+        }
+    }
+
+    /// Receiver side of a pull: hands the sealed chunks to the assembler.
+    func receiveOneTimeBlob(
+        _ transferID: UUID,
+        header: KeepTalkingBlobStreamHeader,
+        reader: any KeepTalkingBlobStreamReader,
+        from holder: UUID
+    ) async {
+        let assembler = oneTimeBlobAssembler
+        guard await assembler.isPulling(transferID, from: holder) else {
+            reader.cancel()
+            return
+        }
+        do {
+            var chunkIndex = header.offset
+            while let chunk = try await reader.next() {
+                await assembler.appendChunk(transferID: transferID, chunkIndex: chunkIndex, payload: chunk)
+                chunkIndex += 1
+            }
+            await assembler.markComplete(transferID: transferID, chunkCount: chunkIndex)
+        } catch {
+            reader.cancel()
+            await assembler.pullFailed(
+                transferID,
+                error: KeepTalkingOneTimeBlobError.transferFailed(transferID, error.localizedDescription)
+            )
+        }
+    }
+
+    /// Pulls an inbound OTB from `senderNodeID` (its holder) unless that's
+    /// under way, awaits it (hard timeout), unseals the per-transfer key
+    /// (verifying it came from `senderNodeID`), decrypts the chunks, and
+    /// writes the plaintext into `directory` as `ref.filename`. A pull that
+    /// breaks is retried; a holder that no longer has it ends it. Discards
+    /// the ciphertext buffer afterward. Returns the file URL.
     func materializeOneTimeBlob(
         _ ref: KeepTalkingOneTimeBlobRef,
         from senderNodeID: UUID,
@@ -318,23 +343,19 @@ extension KeepTalkingClient {
         timeout: TimeInterval = 60
     ) async throws -> URL {
         let assembler = oneTimeBlobAssembler
-        let completed: Bool = try await withThrowingTaskGroup(of: Bool.self) { group in
-            group.addTask {
-                try await assembler.awaitCompletion(transferID: ref.transferID)
-                return true
+        let deadline = Date().addingTimeInterval(timeout)
+        var retries = 2
+        while true {
+            await pullOneTimeBlob(ref.transferID, from: senderNodeID)
+            do {
+                try await Self.awaitOneTimeBlob(ref.transferID, on: assembler, until: deadline)
+                break
+            } catch KeepTalkingOneTimeBlobError.transferFailed where retries > 0 {
+                retries -= 1
+            } catch {
+                await assembler.discard(transferID: ref.transferID, error: error)
+                throw error
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                return false
-            }
-            defer { group.cancelAll() }
-            return try await group.next() ?? false
-        }
-        guard completed else {
-            await assembler.discard(
-                transferID: ref.transferID,
-                error: KeepTalkingOneTimeBlobError.transferTimedOut(ref.transferID))
-            throw KeepTalkingOneTimeBlobError.transferTimedOut(ref.transferID)
         }
         // Reclaim the ciphertext buffer + assembler entry on every exit below
         // (success or throw), not just the happy path.
@@ -386,5 +407,29 @@ extension KeepTalkingClient {
                 "OTB transfer incomplete: decrypted \(written) of \(ref.byteCount) bytes.")
         }
         return destination
+    }
+
+    /// Waits for the assembler to finish `transferID`, or throws
+    /// `transferTimedOut` at `deadline`.
+    private static func awaitOneTimeBlob(
+        _ transferID: UUID,
+        on assembler: KeepTalkingOneTimeBlobAssembler,
+        until deadline: Date
+    ) async throws {
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > 0 else { throw KeepTalkingOneTimeBlobError.transferTimedOut(transferID) }
+        let completed: Bool = try await withThrowingTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                try await assembler.awaitCompletion(transferID: transferID)
+                return true
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+                return false
+            }
+            defer { group.cancelAll() }
+            return try await group.next() ?? false
+        }
+        guard completed else { throw KeepTalkingOneTimeBlobError.transferTimedOut(transferID) }
     }
 }

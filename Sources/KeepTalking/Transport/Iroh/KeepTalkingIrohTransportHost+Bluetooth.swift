@@ -16,6 +16,7 @@ extension KeepTalkingIrohTransportHost {
         while !Task.isCancelled, !state.withLockedValue({ $0.isShutDown }) {
             let now = clock.now
             sweep(now: now)
+            keepMeshLinks(now: now)
             if let stalled = stalledSFU(now: now) {
                 log("SFU writes stalled for \(Self.sfuStallTimeout); reconnecting")
                 try? stalled.close(errorCode: 1, reason: Data("stalled".utf8))
@@ -30,7 +31,7 @@ extension KeepTalkingIrohTransportHost {
 
     private func sweep(now: Instant) {
         let (departures, orphans) = mutateLinks(touching: nil) {
-            state -> ([(KeepTalkingIrohMembership.Departure, KeepTalkingIrohContextTransport?)], [LinkIO]) in
+            state -> ([(KeepTalkingIrohMembership.Departure, KeepTalkingIrohAttachment?)], [LinkIO]) in
             let table = state.table
             let departures = state.membership.sweep(
                 now: now,
@@ -49,6 +50,26 @@ extension KeepTalkingIrohTransportHost {
             log("member \(departure.nodeID.uuidString.prefix(8)) unreached for \(Self.memberRetention): forgotten")
             sink?.memberLeft(departure.nodeID)
         }
+    }
+
+    /// Dials members of rooms on the mesh, and members something demanded a
+    /// link to, that have none yet; forgets expired demands. Rooms move
+    /// between the mesh and the SFU as they grow, shrink, or the SFU comes
+    /// and goes, so this runs every pass rather than only on learning.
+    private func keepMeshLinks(now: Instant) {
+        let targets = state.withLockedValue { state -> [(Data, LinkKind)] in
+            state.demand = state.demand.filter { $0.value > now }
+            let mains = state.meshMembers.union(state.demand.keys)
+            return mains.flatMap { main -> [(Data, LinkKind)] in
+                var targets: [(Data, LinkKind)] = []
+                if state.table.links[main] == nil { targets.append((main, .network)) }
+                if let bluetooth = state.membership.bluetoothID(of: main), state.table.links[bluetooth] == nil {
+                    targets.append((bluetooth, .bluetooth))
+                }
+                return targets
+            }
+        }
+        for (id, kind) in targets { ensureLink(to: id, kind: kind) }
     }
 
     /// Holds the Bluetooth endpoint always, or while the network gate is open.

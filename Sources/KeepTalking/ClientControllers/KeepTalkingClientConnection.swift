@@ -3,31 +3,30 @@ import NIOConcurrencyHelpers
 
 /// The client's connection lifecycle, carved out of `KeepTalkingClient`.
 ///
-/// Owns the generation-tracked connect/disconnect state machine, the
-/// transport callback binding, and the three state signals derived from them:
-/// `lifecycle`, `presence` and `transportStats`. The decision logic is the one
-/// that lived in the client; this object only adds the emits.
+/// The transport is process-wide (``KeepTalkingTransport``) and outlives the
+/// client. Connecting **attaches** this client's context to it as a room;
+/// disconnecting **detaches**. Nothing here starts, stops or restarts a
+/// transport, and detaching is cheap, so teardown is synchronous.
 ///
-/// Teardown serialization: `rtcClient.stop()` synchronously closes peer
-/// connections, which joins worker threads and can block for hundreds of
-/// milliseconds. It runs on a detached task so MainActor callers don't freeze
-/// the UI, and `connect()` awaits any in-flight teardown so a tight
-/// disconnect→connect sequence still serializes correctly.
+/// The connection owns:
+/// - the generation-tracked connect/disconnect state machine;
+/// - the room's attachment and its events;
+/// - the client-side liveness the transport knows nothing about: the
+///   presence heartbeat, reachability edges, and the resync each edge runs;
+/// - the three state signals derived from all of it: `lifecycle`, `presence`
+///   and `transportStats`.
 ///
 /// The state machine is a lock, not an actor, on purpose: an actor would make
 /// `disconnect()` async (the app and CLI call it synchronously) and put an
-/// executor hop in the realtime voice-frame path. Everything the lock guards
-/// lives in `State`, which is only reachable inside `withLockedValue`; a
-/// helper that needs the lock held takes `inout State` (or a `State` copy for
-/// read-only use), so "lock held" is enforced by the type rather than a
-/// comment.
+/// executor hop in the realtime voice-datagram path. Everything the lock
+/// guards lives in `State`, which is only reachable inside `withLockedValue`;
+/// a helper that needs the lock held takes `inout State`, so "lock held" is
+/// enforced by the type rather than a comment.
 final class KeepTalkingClientConnection: Sendable {
     unowned let client: KeepTalkingClient
-    // Held strongly, not reached through `client`: the detached teardown
-    // publishes `.idle` after `rtcClient.stop()` returns, which can be after
-    // the client that scheduled it was already released (settings restarts
-    // drop the whole client dictionary). The signal box outliving the client
-    // is harmless; an unowned hop through a dead client is a crash.
+    // Held strongly, not reached through `client`: a signal box outliving
+    // the client is harmless; an unowned hop through a dead client is a
+    // crash.
     private let signals: KeepTalkingClientSignals
 
     var lifecycle: KeepTalkingStateSignal<KeepTalkingClientLifecycle> { signals.lifecycle }
@@ -36,26 +35,26 @@ final class KeepTalkingClientConnection: Sendable {
 
     private static let presenceSweepSeconds: TimeInterval = 10
     private static let statsSampleSeconds: TimeInterval = 1
+    /// The KeepTalking heartbeat: how often we tell the room we're here. It's
+    /// what members on the SFU, who have no link to us, see us by.
+    private static let presenceHeartbeatSeconds: TimeInterval = 13
 
     /// Everything the lifecycle lock guards.
     private struct State: Sendable {
-        var pendingTeardown: Task<Void, Never>?
         var generation: UInt64 = 0
         var activeConnectGeneration: UInt64?
         var isConnected = false
-        var isDisconnecting = false
-        /// Last transport report, folded into `lifecycle`.
-        var lastBroadcastState: BroadcastChannelState = .failed
-        var lastRoute: KeepTalkingTransportRoute = .sfu
-        /// What the next `.idle` says.
-        var terminalCause: KeepTalkingClientLifecycle.Cause = .tornDown
-        /// The periodic maintenance heartbeat (ContextMaintenance `.heartbeat`
-        /// trigger). Started on `connect()`, cancelled on `disconnect()`.
+        /// The room on the process-wide transport, from attach to detach.
+        var attachment: (any KeepTalkingTransportAttachment)?
+        /// Last status the attachment reported, folded into `lifecycle`.
+        var status: KeepTalkingTransportStatus = .offline
+        /// The periodic maintenance heartbeat (ContextMaintenance
+        /// `.heartbeat`). Started on connect, cancelled on disconnect.
         var maintenanceTask: Task<Void, Never>?
-        /// Ancillary work that starts after the transport is usable. It must
-        /// not keep `connect()` — and therefore the app's connection UI —
-        /// pending.
+        /// Ancillary work that starts once connected. It must not keep
+        /// `connect()` — and so the app's connection UI — pending.
         var postConnectTask: Task<Void, Never>?
+        var presenceHeartbeatTask: Task<Void, Never>?
         var presenceSweepTask: Task<Void, Never>?
         var statsSamplerTask: Task<Void, Never>?
 
@@ -64,33 +63,31 @@ final class KeepTalkingClientConnection: Sendable {
             self.generation == generation && activeConnectGeneration == generation
         }
 
-        /// Connecting or connected, and not tearing down. `activeConnectGeneration`
-        /// is only ever the current generation or nil, so this is the same test
-        /// `isLifecycleActive` makes for the current generation.
+        /// Connecting or connected.
         var isLive: Bool {
-            !isDisconnecting && (activeConnectGeneration == generation || isConnected)
+            activeConnectGeneration == generation || isConnected
         }
 
         func isLifecycleActive(_ generation: UInt64) -> Bool {
-            self.generation == generation
-                && !isDisconnecting
-                && (activeConnectGeneration == generation || isConnected)
+            self.generation == generation && isLive
         }
-    }
 
-    /// What reserving a disconnect hands back to the caller: the tasks it
-    /// cancels outside the lock, the teardown it may await, and the generation
-    /// it closes with `finishDisconnect`.
-    private struct DisconnectHandoff: Sendable {
-        var maintenanceTask: Task<Void, Never>?
-        var postConnectTask: Task<Void, Never>?
-        var teardown: Task<Void, Never>
-        var generation: UInt64
+        /// Hands back every task to cancel and forgets them.
+        mutating func takeTasks() -> [Task<Void, Never>] {
+            defer {
+                maintenanceTask = nil
+                postConnectTask = nil
+                presenceHeartbeatTask = nil
+                presenceSweepTask = nil
+                statsSamplerTask = nil
+            }
+            return [maintenanceTask, postConnectTask, presenceHeartbeatTask, presenceSweepTask, statsSamplerTask]
+                .compactMap { $0 }
+        }
     }
 
     private let state = NIOLockedValueBox(State())
 
-    private var rtcClient: any KeepTalkingTransportClient { client.rtcClient }
     private var config: KeepTalkingConfig { client.config }
 
     init(client: KeepTalkingClient) {
@@ -98,112 +95,130 @@ final class KeepTalkingClientConnection: Sendable {
         self.signals = client.signals
     }
 
-    // MARK: - Transport binding
+    // MARK: - Sending
 
-    /// Installs the transport callbacks. Each one takes a lifecycle snapshot
-    /// synchronously and re-checks it inside the task it spawns, so a
-    /// callback that fires during teardown is dropped instead of acting on a
-    /// stale generation.
-    func bindTransport() {
-        let rtcClient = client.rtcClient
-        rtcClient.contextSecretProvider = { [weak client] contextID in
-            try await client?.loadGroupChatSecret(for: contextID)
+    /// The room's attachment, while connecting or connected.
+    private func attachment() throws -> any KeepTalkingTransportAttachment {
+        guard let attachment = state.withLockedValue({ $0.attachment }) else {
+            throw client.transport.isAvailable
+                ? KeepTalkingTransportError.notAttached
+                : KeepTalkingTransportError.unavailable
         }
-        rtcClient.onRawMessage = { [weak self] raw in
-            guard let self, let generation = self.connectionLifecycleSnapshot(),
-                self.isConnectionLifecycleActive(generation)
-            else { return }
-            self.client.rawMessages.send(raw)
+        return attachment
+    }
+
+    func send(_ envelope: any KeepTalkingEnvelope) throws {
+        try attachment().send(envelope)
+    }
+
+    func sendDatagram(_ datagram: Data) throws {
+        try attachment().sendDatagram(datagram)
+    }
+
+    func openBlobStream(to node: UUID, header: Data) async throws -> any KeepTalkingBlobStreamWriter {
+        try await attachment().openBlobStream(to: node, header: header)
+    }
+
+    func expectBlobStream(from node: UUID) {
+        try? attachment().expectBlobStream(from: node)
+    }
+
+    /// The room's status now; `.offline` when not attached.
+    func transportStatus() -> KeepTalkingTransportStatus {
+        (try? attachment().status()) ?? .offline
+    }
+
+    func runtimeStats() -> KeepTalkingRuntimeStats {
+        (try? attachment().stats()) ?? .zero
+    }
+
+    // MARK: - Transport events
+
+    /// Events from one attachment, tagged with the generation that attached
+    /// it: anything from a superseded attachment is dropped.
+    private func handle(_ event: KeepTalkingTransportEvent, generation: UInt64) {
+        guard isConnectionLifecycleActive(generation) else {
+            if case .blobStream(let reader, _) = event { reader.cancel() }
+            return
         }
-        rtcClient.onBlobData = { [weak self] data in
-            guard let self, let generation = self.connectionLifecycleSnapshot() else { return }
-            Task {
-                guard self.isConnectionLifecycleActive(generation) else { return }
-                do {
-                    try await self.client.blobFrameProcessor.process {
-                        guard self.isConnectionLifecycleActive(generation) else { return }
-                        try await self.client.handleIncomingBlobFrameData(data)
+        switch event {
+            case .envelope(let envelope, let from):
+                if let from { noteReachable(from, generation: generation) }
+                if let presence = envelope as? KeepTalkingP2PPresencePayload {
+                    noteReachable(presence.node, generation: generation, viaPresence: true)
+                }
+                Task {
+                    guard self.isConnectionLifecycleActive(generation) else { return }
+                    await self.client.handleTransportEnvelope(envelope)
+                }
+            case .datagram(let datagram):
+                _ = client.activeVoiceSession?.receiveDatagram(datagram)
+            case .blobStream(let reader, let from):
+                noteReachable(from, generation: generation)
+                Task {
+                    guard self.isConnectionLifecycleActive(generation) else {
+                        reader.cancel()
+                        return
                     }
-                } catch {
-                    self.client.onLog?(
-                        "[client/blob] failed handling blob frame error=\(error.localizedDescription)"
-                    )
+                    await self.client.handleIncomingBlobStream(reader, from: from)
                 }
-            }
-        }
-        rtcClient.onRealtimeData = { [weak self] data in
-            guard let self, let generation = self.connectionLifecycleSnapshot(),
-                self.isConnectionLifecycleActive(generation)
-            else { return }
-            _ = self.client.activeVoiceSession?.receiveRelayedFrame(data)
-        }
-        rtcClient.onEnvelope = { [weak self] envelope in
-            guard let self, let generation = self.connectionLifecycleSnapshot() else { return }
-            Task {
-                guard self.isConnectionLifecycleActive(generation) else { return }
-                do {
-                    try await self.client.handleIncomingEnvelope(envelope)
-                } catch {
-                    self.client.onLog?(
-                        "[client] failed handling envelope error=\(error.localizedDescription)"
-                    )
+            case .peerConnected(let node):
+                noteReachable(node, generation: generation)
+            case .peerRerouted(let node):
+                // Whatever went into the old link may be gone: resync even
+                // when liveness never saw the node leave.
+                guard node != config.node else { return }
+                notePeerOnline(node)
+                Task {
+                    guard self.isConnectionLifecycleActive(generation) else { return }
+                    await self.client.handlePeerConnect(nodeID: node, generation: generation)
                 }
+            case .readyToSend:
+                sendPresenceHeartbeat()
+                Task {
+                    guard self.isConnectionLifecycleActive(generation) else { return }
+                    await self.client.drainOutbox()
+                }
+            case .statusChanged(let status):
+                noteTransportStatus(status)
+            case .log(let line):
+                client.onLog?(line)
+        }
+    }
+
+    /// Feeds liveness with traffic from `node`. On an offline→online edge it
+    /// records presence, echoes ours, and runs the node-online resync, plus
+    /// the discovery a presence envelope gets (unless that's what we're
+    /// handling).
+    private func noteReachable(_ node: UUID, generation: UInt64, viaPresence: Bool = false) {
+        guard node != config.node else { return }
+        let observation = client.livenessState.observePresence(from: node, echoCooldown: 1)
+        if observation.shouldEcho { sendPresenceHeartbeat() }
+        guard observation.isNewConnection else { return }
+        client.debug("peer \(node.uuidString.prefix(8)) reachable")
+        notePeerOnline(node)
+        Task {
+            guard self.isConnectionLifecycleActive(generation) else { return }
+            if !viaPresence {
+                try? await self.client.handleIncomingEnvelope(KeepTalkingP2PPresencePayload(node: node))
             }
+            await self.client.handlePeerConnect(nodeID: node, generation: generation)
         }
-        rtcClient.onTrustEnvelope = { [weak self] envelope in
-            guard let self, let generation = self.connectionLifecycleSnapshot() else { return }
-            Task {
-                guard self.isConnectionLifecycleActive(generation) else { return }
-                await self.client.handleIncomingTrustEnvelope(envelope)
-            }
-        }
-        rtcClient.onPeerConnect = { [weak self] nodeID in
-            guard let self, let generation = self.connectionLifecycleSnapshot() else { return }
-            self.notePeerOnline(nodeID)
-            Task {
-                guard self.isConnectionLifecycleActive(generation) else { return }
-                await self.client.handlePeerConnect(
-                    nodeID: nodeID,
-                    generation: generation
-                )
-            }
-        }
-        rtcClient.onBroadcastReady = { [weak self] in
-            guard let self, let generation = self.connectionLifecycleSnapshot() else { return }
-            Task {
-                guard self.isConnectionLifecycleActive(generation) else { return }
-                await self.client.drainOutbox()
-                guard self.isConnectionLifecycleActive(generation) else { return }
-                await self.client.dispatchMaintenance(
-                    .heartbeat,
-                    generation: generation
-                )
-            }
-        }
-        rtcClient.onTransportStateChange = { [weak self] state, route in
-            self?.noteTransportState(state, route: route)
-        }
+    }
+
+    private func sendPresenceHeartbeat() {
+        try? send(KeepTalkingP2PPresencePayload(node: config.node))
     }
 
     // MARK: - Lifecycle state machine
 
-    private func pendingTeardownSnapshot() -> Task<Void, Never>? {
-        state.withLockedValue { $0.pendingTeardown }
-    }
-
-    private func beginConnect() -> UInt64? {
-        state.withLockedValue { reserveConnect(&$0) }
-    }
-
     /// Reserves the next generation for a connect, or returns nil when one is
-    /// already in flight, live, or tearing down.
+    /// already in flight or live.
     private func reserveConnect(_ state: inout State) -> UInt64? {
-        guard state.activeConnectGeneration == nil, !state.isConnected, !state.isDisconnecting
-        else { return nil }
+        guard state.activeConnectGeneration == nil, !state.isConnected else { return nil }
         state.generation &+= 1
         state.activeConnectGeneration = state.generation
-        state.lastBroadcastState = .connecting
-        state.lastRoute = .sfu
+        state.status = KeepTalkingTransportStatus(state: .connecting, path: nil)
         publishLifecycle(state, .connecting, cause: .connectRequested)
         return state.generation
     }
@@ -215,162 +230,64 @@ final class KeepTalkingClientConnection: Sendable {
         }
     }
 
-    private func prepareTransportStart(_ generation: UInt64) throws -> Task<Void, Error> {
-        try state.withLockedValue { state in
-            guard state.isCurrentConnect(generation) else { throw CancellationError() }
-            return try rtcClient.start()
-        }
-    }
-
-    private func cancelConnect(_ generation: UInt64, error: any Error) {
-        state.withLockedValue { state in
-            guard state.isCurrentConnect(generation) else { return }
-            state.activeConnectGeneration = nil
-            publishLifecycle(state, .idle, cause: .connectFailed(error.localizedDescription))
-        }
-    }
-
     func isConnectionActive(_ generation: UInt64) -> Bool {
         state.withLockedValue { $0.generation == generation && $0.isConnected }
-    }
-
-    private func connectionLifecycleSnapshot() -> UInt64? {
-        state.withLockedValue { $0.isLive ? $0.generation : nil }
     }
 
     func isConnectionLifecycleActive(_ generation: UInt64) -> Bool {
         state.withLockedValue { $0.isLifecycleActive(generation) }
     }
 
-    private func commitConnect(
-        _ generation: UInt64,
-        transport: BroadcastChannelState,
-        route: KeepTalkingTransportRoute
+    /// Keeps the attachment if `generation` is still the connect in flight;
+    /// otherwise the caller detaches it.
+    private func install(
+        _ attachment: any KeepTalkingTransportAttachment,
+        generation: UInt64
     ) -> Bool {
         state.withLockedValue { state in
             guard state.isCurrentConnect(generation) else { return false }
+            state.attachment = attachment
+            return true
+        }
+    }
 
+    private func commitConnect(_ generation: UInt64) -> Bool {
+        // Read outside the lock: the status reads the transport.
+        let status = transportStatus()
+        return state.withLockedValue { state in
+            guard state.isCurrentConnect(generation) else { return false }
             state.activeConnectGeneration = nil
             state.isConnected = true
-            state.lastBroadcastState = transport
-            state.lastRoute = route
-            state.maintenanceTask?.cancel()
+            state.status = status
             state.maintenanceTask = client.makeMaintenanceTask(generation: generation)
-            state.postConnectTask?.cancel()
             state.postConnectTask = makePostConnectTask(generation: generation)
-            state.presenceSweepTask?.cancel()
+            state.presenceHeartbeatTask = makePresenceHeartbeatTask(generation: generation)
             state.presenceSweepTask = makePresenceSweepTask(generation: generation)
-            state.statsSamplerTask?.cancel()
             state.statsSamplerTask = makeStatsSamplerTask(generation: generation)
             publishLifecycle(state, .connected, cause: .connected)
             return true
         }
     }
 
-    private func beginDisconnect(
-        ifConnecting expectedGeneration: UInt64? = nil,
-        terminal: KeepTalkingClientLifecycle.Cause
-    ) -> DisconnectHandoff? {
-        state.withLockedValue {
-            reserveDisconnect(&$0, ifConnecting: expectedGeneration, terminal: terminal)
-        }
-    }
-
-    /// Moves to the next generation, detaches the transport stop, and hands the
-    /// cancellable tasks back to the caller. With `ifConnecting` set it only
-    /// acts on that exact in-flight connect and returns nil otherwise.
+    /// Ends the current generation: hands back the attachment and tasks to
+    /// release outside the lock. Nil when there's nothing live to end.
     private func reserveDisconnect(
         _ state: inout State,
         ifConnecting expectedGeneration: UInt64?,
-        terminal: KeepTalkingClientLifecycle.Cause
-    ) -> DisconnectHandoff? {
-        if let expectedGeneration, !state.isCurrentConnect(expectedGeneration) {
-            return nil
+        cause: KeepTalkingClientLifecycle.Cause
+    ) -> (attachment: (any KeepTalkingTransportAttachment)?, tasks: [Task<Void, Never>])? {
+        if let expectedGeneration {
+            guard state.isCurrentConnect(expectedGeneration) else { return nil }
+        } else {
+            guard state.isLive else { return nil }
         }
         state.generation &+= 1
-        let generation = state.generation
         state.activeConnectGeneration = nil
         state.isConnected = false
-        state.isDisconnecting = true
-        let maintenance = state.maintenanceTask
-        let postConnect = state.postConnectTask
-        state.maintenanceTask = nil
-        state.postConnectTask = nil
-        state.presenceSweepTask?.cancel()
-        state.presenceSweepTask = nil
-        state.statsSamplerTask?.cancel()
-        state.statsSamplerTask = nil
-        state.terminalCause = terminal
-
-        let previous = state.pendingTeardown
-        let rtc = rtcClient
-        let teardown = Task.detached(priority: .userInitiated) { [weak self] in
-            if let previous { await previous.value }
-            rtc.stop()
-            self?.completeTeardown(generation: generation)
-        }
-        state.pendingTeardown = teardown
-        // Only a live connection has something to announce: a redundant
-        // `disconnect()` on an idle client bumps the generation and schedules
-        // another stop exactly as before, but stays silent.
-        switch lifecycle.current.phase {
-            case .connecting, .connected:
-                publishLifecycle(
-                    state,
-                    .disconnecting,
-                    cause: terminal == .tornDown ? .disconnectRequested : terminal
-                )
-            case .idle, .disconnecting:
-                break
-        }
-        if !presence.current.onlineNodeIDs.isEmpty {
-            presence.send(.init(onlineNodeIDs: [], change: .reset))
-        }
-        return DisconnectHandoff(
-            maintenanceTask: maintenance,
-            postConnectTask: postConnect,
-            teardown: teardown,
-            generation: generation
-        )
-    }
-
-    /// A teardown and the next connect reserved as ONE transition, for
-    /// `reestablishTransport()`: the old teardown always finds a newer
-    /// generation, so a bounce can never publish `idle` — even when the
-    /// transport stops faster than the connect could reserve on its own.
-    private func beginReconnect() -> (
-        maintenance: Task<Void, Never>?, postConnect: Task<Void, Never>?, generation: UInt64
-    ) {
-        state.withLockedValue { state in
-            guard let torn = reserveDisconnect(&state, ifConnecting: nil, terminal: .tornDown)
-            else {
-                preconditionFailure("an unconditional teardown cannot be refused")
-            }
-            state.isDisconnecting = false
-            guard let generation = reserveConnect(&state) else {
-                preconditionFailure("a connect cannot be refused right after a teardown")
-            }
-            return (torn.maintenanceTask, torn.postConnectTask, generation)
-        }
-    }
-
-    private func finishDisconnect(_ generation: UInt64) {
-        state.withLockedValue { state in
-            if state.generation == generation { state.isDisconnecting = false }
-        }
-    }
-
-    /// Tail of the detached teardown: the transport has stopped. Publishes
-    /// `.idle` unless a newer generation already superseded this teardown —
-    /// which is exactly what `reestablishTransport()` does, so a bounce reads
-    /// `connected → disconnecting → connecting → connected` with no `idle`.
-    private func completeTeardown(generation: UInt64) {
-        state.withLockedValue { state in
-            guard state.generation == generation,
-                lifecycle.current.phase == .disconnecting
-            else { return }
-            publishLifecycle(state, .idle, cause: state.terminalCause)
-        }
+        state.status = .offline
+        defer { state.attachment = nil }
+        publishLifecycle(state, .disconnecting, cause: cause)
+        return (state.attachment, state.takeTasks())
     }
 
     /// Emits a lifecycle value from a locked `State`. Delivery is
@@ -385,188 +302,135 @@ final class KeepTalkingClientConnection: Sendable {
             .init(
                 phase: phase,
                 generation: state.generation,
-                transport: live ? .init(state.lastBroadcastState) : .down,
-                route: live ? state.lastRoute : .sfu,
+                transport: live ? state.status : .offline,
                 cause: cause
             )
         )
     }
 
-    private func noteTransportState(
-        _ transport: BroadcastChannelState,
-        route: KeepTalkingTransportRoute
-    ) {
+    private func noteTransportStatus(_ status: KeepTalkingTransportStatus) {
         state.withLockedValue { state in
-            guard state.isLive else { return }
-            state.lastBroadcastState = transport
-            state.lastRoute = route
-            // Only a live connection republishes: while connecting, the
-            // backbone's intermediate states are the connect's own business
-            // and `connected` carries the live reading at commit.
-            let current = lifecycle.current
-            guard current.phase == .connected else { return }
-            let health = KeepTalkingClient.TransportHealth(transport)
-            guard health != current.transport || route != current.route else { return }
+            guard state.isLive, state.status != status else { return }
+            state.status = status
+            // While connecting, the status is the connect's own business and
+            // `connected` carries the live reading at commit.
+            guard lifecycle.current.phase == .connected else { return }
             publishLifecycle(state, .connected, cause: .transportChanged)
         }
     }
 
     // MARK: - Connect / disconnect
 
-    /// Starts transports and persists local node state.
+    /// Attaches the context to the process-wide transport and persists local
+    /// node state.
     func connect() async throws {
         try Task.checkCancellation()
-        guard let generation = beginConnect() else {
-            throw KeepTalkingTransportError.allChannelsUnavailable
+        guard client.transport.isAvailable else { throw KeepTalkingTransportError.unavailable }
+        guard let generation = state.withLockedValue({ reserveConnect(&$0) }) else {
+            throw KeepTalkingClientError.alreadyConnected
         }
         try await performConnect(generation)
     }
 
     /// The connect sequence for an already reserved generation.
     private func performConnect(_ generation: UInt64) async throws {
-        var transportStarted = false
         do {
-            // Ensure any in-flight teardown from a previous disconnect() completes
-            // before bringing the transport back up.
-            if let teardown = pendingTeardownSnapshot() {
-                await teardown.value
+            guard let multiplexer = client.transport.multiplexer else {
+                throw KeepTalkingTransportError.unavailable
             }
-            try ensureCurrentConnect(generation)
-
             await client.mcpManager.setHTTPAuthURLHandler(client.mcpHTTPAuthURLHandler)
             #if os(macOS)
             await client.acpManager.setAuthHandler(client.acpAuthHandler)
             #endif
             try ensureCurrentConnect(generation)
             _ = try await client.ensure(config.contextID, for: KeepTalkingContext.self)
+            let secret = try await client.ensureGroupChatSecret(for: config.contextID)
             try ensureCurrentConnect(generation)
 
             client.openContextSyncRequests(generation: generation)
-            let startTask = try prepareTransportStart(generation)
-            transportStarted = true
-            try await startTask.waitPropagatingCancellation()
-            try ensureCurrentConnect(generation)
-            try await client.persistMyNode()
-            try ensureCurrentConnect(generation)
-
-            // Read outside the lock so the commit never re-enters the transport.
-            let transport = rtcClient.broadcastState()
-            let route = rtcClient.currentRoute()
-            guard commitConnect(generation, transport: transport, route: route) else {
+            let attachment = try await multiplexer.attach(
+                KeepTalkingTransportRoom(contextID: config.contextID, nodeID: config.node, secret: secret),
+                events: { [weak self] event in self?.handle(event, generation: generation) }
+            )
+            guard install(attachment, generation: generation) else {
+                attachment.detach()
                 throw CancellationError()
             }
+            try await client.persistMyNode()
+            guard commitConnect(generation) else { throw CancellationError() }
         } catch {
-            if transportStarted,
-                let teardown = scheduleDisconnect(
-                    ifConnecting: generation,
-                    terminal: .connectFailed(error.localizedDescription)
-                )
-            {
-                await teardown.value
-            } else {
-                client.failAllPendingContextSync(
-                    error: KeepTalkingClientError.clientDisconnected
-                )
-                cancelConnect(generation, error: error)
-            }
+            endConnection(ifConnecting: generation, cause: .connectFailed(error.localizedDescription))
             throw error
         }
     }
 
-    /// Stops transports and fails any pending remote requests.
-    ///
-    /// Lightweight bookkeeping (failing pending continuations, cancelling
-    /// debounce tasks) runs synchronously. The WebRTC teardown is dispatched
-    /// to a detached task because `peer.close()` synchronously joins WebRTC
-    /// worker threads — calling it from MainActor would freeze the UI for
-    /// hundreds of milliseconds. A subsequent `connect()` will await the
-    /// in-flight teardown before restarting the transport.
+    /// Detaches the context and fails any pending remote requests. Cheap and
+    /// synchronous: the shared transport stays up for every other context.
     func disconnect() {
-        _ = scheduleDisconnect()
+        endConnection(ifConnecting: nil, cause: .disconnectRequested)
     }
 
-    private func scheduleDisconnect(
-        ifConnecting generation: UInt64? = nil,
-        terminal: KeepTalkingClientLifecycle.Cause = .tornDown
-    ) -> Task<Void, Never>? {
-        guard let handoff = beginDisconnect(ifConnecting: generation, terminal: terminal) else {
-            return nil
+    /// Ends the live generation (or, with `ifConnecting`, only that connect
+    /// in flight): detaches, cancels the connection's tasks, fails pending
+    /// requests, and reads `disconnecting → idle`.
+    private func endConnection(ifConnecting generation: UInt64?, cause: KeepTalkingClientLifecycle.Cause) {
+        let reserved = state.withLockedValue {
+            reserveDisconnect(&$0, ifConnecting: generation, cause: cause)
         }
-        defer { finishDisconnect(handoff.generation) }
-        handoff.maintenanceTask?.cancel()
-        handoff.postConnectTask?.cancel()
-        client.failAllPendingActionCalls(error: KeepTalkingClientError.clientDisconnected)
-        client.failAllPendingActionCatalogRequests(error: KeepTalkingClientError.clientDisconnected)
-        client.failAllPendingContextSync(error: KeepTalkingClientError.clientDisconnected)
-        return handoff.teardown
-    }
-
-    /// Awaitable variant of `disconnect()` that returns once the WebRTC
-    /// transport has fully torn down.
-    func disconnectAndWait() async {
-        if let teardown = scheduleDisconnect() { await teardown.value }
-    }
-
-    /// Tears the transport down and brings it back up **on this same client
-    /// instance**. Unlike the app dropping and rebuilding a `KeepTalkingClient`,
-    /// this preserves every object that captured the client — most importantly
-    /// an `activeVoiceSession`, whose send closures route through
-    /// `rtcClient`. The voice session keeps running across the bounce; its
-    /// heartbeat re-announces over the freshly-started transport.
-    ///
-    /// `connect()` awaits the detached teardown `disconnect()` schedules, so
-    /// the stop fully completes before the restart.
-    func reestablishTransport() async throws {
-        client.debug("reestablishTransport: bouncing transport in place")
-        let (maintenance, postConnect, generation) = beginReconnect()
-        maintenance?.cancel()
-        postConnect?.cancel()
-        client.failAllPendingActionCalls(error: KeepTalkingClientError.clientDisconnected)
-        client.failAllPendingActionCatalogRequests(error: KeepTalkingClientError.clientDisconnected)
-        client.failAllPendingContextSync(error: KeepTalkingClientError.clientDisconnected)
-        try await performConnect(generation)
-    }
-
-    // MARK: - Transport health
-
-    /// Reads `TransportHealth` from the transport's current broadcast state.
-    /// Pure read, no I/O.
-    func transportHealth() -> KeepTalkingClient.TransportHealth {
-        .init(rtcClient.broadcastState())
-    }
-
-    /// Actively confirms a `.healthy` backbone is really carrying bytes, not
-    /// wedged open (e.g. the keepalive task starved across a long suspend).
-    ///
-    /// Sends one presence wave plus a native SFU roster request, then watches
-    /// the transport's inbound counter for progress within `timeout`. Any
-    /// inbound byte — a presence echo, roster reply, or peer's traffic —
-    /// counts. Returns `true` if inbound advanced (live), `false` on timeout
-    /// (wedged → caller should re-establish).
-    ///
-    /// Only worth calling when `transportHealth() == .healthy`: `.recovering`
-    /// already self-heals and `.down` is unambiguous.
-    func probeTransport(timeout: Duration) async -> Bool {
-        let before = rtcClient.runtimeStats().received
-        rtcClient.sendLivenessProbe()
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(100))
-            if rtcClient.runtimeStats().received > before {
-                return true
+        guard let reserved else { return }
+        let (attachment, tasks) = reserved
+        tasks.forEach { $0.cancel() }
+        attachment?.detach()
+        failPendingRequests()
+        // The next connect then sees every peer come online again, which is
+        // what drives the resync after a reconnect.
+        client.livenessState.reset()
+        state.withLockedValue { state in
+            publishLifecycle(state, .idle, cause: cause == .disconnectRequested ? .tornDown : cause)
+            if !presence.current.onlineNodeIDs.isEmpty {
+                presence.send(.init(onlineNodeIDs: [], change: .reset))
             }
         }
-        return false
+        transportStats.send(ifChanged: .zero)
+    }
+
+    private func failPendingRequests() {
+        client.failAllPendingActionCalls(error: KeepTalkingClientError.clientDisconnected)
+        client.failAllPendingActionCatalogRequests(error: KeepTalkingClientError.clientDisconnected)
+        client.failAllPendingContextSync(error: KeepTalkingClientError.clientDisconnected)
+    }
+
+    /// Moves a live client to a new room: the context's secret changed (a
+    /// join replaced it), and the secret addresses the room. Detach and
+    /// attach again on the same client, so nothing that captured it is lost.
+    func reattachIfConnected() async throws {
+        let reserved = state.withLockedValue {
+            state -> (UInt64, (any KeepTalkingTransportAttachment)?, [Task<Void, Never>])? in
+            guard state.isConnected else { return nil }
+            defer { state.attachment = nil }
+            state.isConnected = false
+            state.generation &+= 1
+            state.activeConnectGeneration = state.generation
+            state.status = KeepTalkingTransportStatus(state: .connecting, path: nil)
+            publishLifecycle(state, .connecting, cause: .connectRequested)
+            return (state.generation, state.attachment, state.takeTasks())
+        }
+        guard let reserved else { return }
+        let (generation, attachment, tasks) = reserved
+        tasks.forEach { $0.cancel() }
+        // Outside our lock: a detach can report to other rooms' clients.
+        attachment?.detach()
+        failPendingRequests()
+        client.livenessState.reset()
+        try await performConnect(generation)
     }
 
     // MARK: - Presence
 
     // Presence is a read-modify-write on the `presence` signal. It keeps no
     // field of its own in `State`; it takes the same lock so a sweep, a
-    // peer-connect edge and a teardown reset never interleave.
+    // reachability edge and a reset never interleave.
 
-    /// The peer-connect edge from the transport, recorded before the
-    /// node-online maintenance runs.
     private func notePeerOnline(_ nodeID: UUID) {
         guard nodeID != config.node else { return }
         state.withLockedValue { _ in
@@ -595,50 +459,51 @@ final class KeepTalkingClientConnection: Sendable {
         }
     }
 
-    private func makePresenceSweepTask(generation: UInt64) -> Task<Void, Never> {
+    // MARK: - Connected tasks
+
+    private func makeRepeatingTask(
+        generation: UInt64,
+        every seconds: TimeInterval,
+        _ body: @escaping @Sendable (KeepTalkingClientConnection) async -> Void
+    ) -> Task<Void, Never> {
         Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Self.presenceSweepSeconds))
-                guard !Task.isCancelled, let self, self.isConnectionActive(generation)
-                else { break }
-                self.sweepPresence()
+                try? await Task.sleep(for: .seconds(seconds))
+                guard !Task.isCancelled, let self, self.isConnectionActive(generation) else { break }
+                await body(self)
             }
         }
     }
 
-    // MARK: - Post-connect work
+    private func makePresenceHeartbeatTask(generation: UInt64) -> Task<Void, Never> {
+        makeRepeatingTask(generation: generation, every: Self.presenceHeartbeatSeconds) {
+            $0.sendPresenceHeartbeat()
+        }
+    }
+
+    private func makePresenceSweepTask(generation: UInt64) -> Task<Void, Never> {
+        makeRepeatingTask(generation: generation, every: Self.presenceSweepSeconds) { $0.sweepPresence() }
+    }
+
+    private func makeStatsSamplerTask(generation: UInt64) -> Task<Void, Never> {
+        makeRepeatingTask(generation: generation, every: Self.statsSampleSeconds) {
+            $0.transportStats.send(ifChanged: $0.runtimeStats())
+        }
+    }
 
     private func makePostConnectTask(generation: UInt64) -> Task<Void, Never> {
         Task { [weak self] in
             guard let self, self.isConnectionActive(generation) else { return }
-
             let client = self.client
-            await client.dispatchMaintenance(
-                .connected,
-                generation: generation
-            )
-            guard !Task.isCancelled,
-                self.isConnectionActive(generation),
-                client.kvService != nil
+            self.sendPresenceHeartbeat()
+            await client.dispatchMaintenance(.connected, generation: generation)
+            guard !Task.isCancelled, self.isConnectionActive(generation), client.kvService != nil
             else { return }
             do {
                 try await client.registerCurrentNodeID()
             } catch {
                 guard !Task.isCancelled else { return }
                 client.debug("[kv] KV registration failed: \(error)")
-            }
-        }
-    }
-
-    // MARK: - Transport stats
-
-    private func makeStatsSamplerTask(generation: UInt64) -> Task<Void, Never> {
-        Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Self.statsSampleSeconds))
-                guard !Task.isCancelled, let self, self.isConnectionActive(generation)
-                else { break }
-                self.transportStats.send(ifChanged: self.rtcClient.runtimeStats())
             }
         }
     }

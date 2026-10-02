@@ -227,14 +227,13 @@ extension KeepTalkingClient {
             context: persistedContext
         )
         do {
-            try rtcClient.sendEnvelope(message)
+            try sendEnvelope(message)
             for attachment in savedAttachments {
                 guard let attachmentDTO = KeepTalkingContextAttachmentDTO(attachment) else {
                     continue
                 }
-                try rtcClient.sendEnvelope(attachmentDTO)
+                try sendEnvelope(attachmentDTO)
             }
-            scheduleOutgoingBlobTransfers(for: savedAttachments)
             await clearOutboxEntry(contextMessageID: messageID)
         } catch {
             onLog?(
@@ -312,8 +311,9 @@ extension KeepTalkingClient {
     }
 
     /// Returns whether anything was newly persisted. `false` means every
-    /// message in the batch was already present — a routine outcome now that
-    /// fan-out can deliver the same envelope over two routes.
+    /// message in the batch was already present — a routine outcome, since a
+    /// live envelope and a sync page (or a resync after a link moved) can
+    /// carry the same message.
     @discardableResult
     func saveIncomingMessages(
         _ messages: [KeepTalkingContextMessage],
@@ -356,7 +356,7 @@ extension KeepTalkingClient {
         }
 
         // Per-row inside one transaction, not a bulk `create`. `filterNewMessages`
-        // is a check-then-act SELECT, so a concurrent fan-out delivery can insert
+        // is a check-then-act SELECT, so a concurrent second delivery can insert
         // the same id between the check and the write. A bulk insert turns that
         // one collision into a rollback of the entire page; per-row lets the
         // loser skip and keep the rest.
@@ -429,14 +429,14 @@ extension KeepTalkingClient {
                     // envelope beat the message envelope. Park it; it's re-driven
                     // by `flushOrphanAttachments` once the parent message saves.
                     bufferOrphanAttachment(attachment)
-                    rtcClient.debug(
+                    debug(
                         "buffered orphan attachment dto pending parent message attachment=\(attachment.id.uuidString.lowercased()) parent=\(parentMessageID.uuidString.lowercased())"
                     )
                     continue
                 }
                 let parentContextID = parentMessage.$context.id
                 guard parentContextID == attachment.contextID else {
-                    rtcClient.debug(
+                    debug(
                         "ignored attachment dto context mismatch attachment=\(attachment.id.uuidString.lowercased()) parent=\(parentMessageID.uuidString.lowercased())"
                     )
                     continue
@@ -470,7 +470,7 @@ extension KeepTalkingClient {
             }
 
             guard let sender = attachment.sender else {
-                rtcClient.debug(
+                debug(
                     "ignored parentless attachment dto missing sender attachment=\(attachment.id.uuidString.lowercased())"
                 )
                 continue
@@ -505,7 +505,7 @@ extension KeepTalkingClient {
     /// Creates an attachment row, tolerating a concurrent insert of the same id.
     ///
     /// `filterNewAttachmentDTOs` is a check-then-act SELECT, and `.attachment`
-    /// is fan-out eligible — the direct and SFU copies arrive on two
+    /// is idempotent — a live copy and a resync's copy arrive on two
     /// independent Tasks, so both can pass the filter before either writes.
     /// Returns false when the row already exists: the other delivery owns it,
     /// and this one must skip the rest of its per-row work rather than repeat
@@ -867,10 +867,10 @@ extension KeepTalkingClient {
         // store instead, so they are never broadcast/synced.
         await enqueueOutboxEntry(contextMessage: message, context: context)
         do {
-            try rtcClient.sendEnvelope(message)
+            try sendEnvelope(message)
             for attachment in saved {
                 if let dto = KeepTalkingContextAttachmentDTO(attachment) {
-                    try rtcClient.sendEnvelope(dto)
+                    try sendEnvelope(dto)
                 }
             }
             await clearOutboxEntry(contextMessageID: parentMessageID)
@@ -879,7 +879,6 @@ extension KeepTalkingClient {
                 "[io/summon] transport push failed messageID=\(parentMessageID.uuidString.lowercased()) "
                     + "error=\(error.localizedDescription) — left in outbox")
         }
-        scheduleOutgoingBlobTransfers(for: saved)
         onLog?(
             "[io/summon] context=\(contextID.uuidString.prefix(8)) "
                 + "summoned=\(saved.count) attachment(s) on carrier message=\(parentMessageID.uuidString.prefix(8))")
@@ -986,7 +985,9 @@ extension KeepTalkingClient {
         return secret
     }
 
-    /// Replaces the stored symmetric key for a conversation context.
+    /// Replaces the stored symmetric key for a conversation context. The
+    /// secret addresses the context's room, so a connected client of this
+    /// context moves to the new room.
     public func setGroupChatSecret(_ secret: Data, for contextID: UUID)
         async throws
     {
@@ -994,8 +995,12 @@ extension KeepTalkingClient {
             throw KeepTalkingKVServiceError.invalidStoredValue
         }
 
+        let previous = try await keychain.get(.groupSecret(contextID: contextID))
         _ = try await upsertContext(KeepTalkingContext(id: contextID))
         try await keychain.set(.groupSecret(contextID: contextID), value: secret)
+        if contextID == config.contextID, previous != secret {
+            try await connection.reattachIfConnected()
+        }
     }
 
     func loadGroupChatSecret(for contextID: UUID) async throws -> Data? {

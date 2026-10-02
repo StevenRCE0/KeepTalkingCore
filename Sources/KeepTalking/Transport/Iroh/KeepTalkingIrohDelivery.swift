@@ -2,7 +2,6 @@ import Foundation
 
 /// Where a publish goes. Receivers accept both routes, so senders never have
 /// to agree on a mode.
-@_spi(TransportLab)
 public enum KeepTalkingIrohDeliveryPolicy: Sendable, Hashable {
     /// The SFU once the room has at least `sfuAtMembers` other members, the
     /// mesh below that; whichever route is up when the other isn't.
@@ -15,7 +14,6 @@ public enum KeepTalkingIrohDeliveryPolicy: Sendable, Hashable {
     public static let standard = KeepTalkingIrohDeliveryPolicy.automatic(sfuAtMembers: 4)
 }
 
-@_spi(TransportLab)
 public enum KeepTalkingIrohRoute: String, Sendable {
     case mesh
     case sfu
@@ -40,6 +38,46 @@ enum KeepTalkingIrohDelivery {
         }
         if preferSFU { return sfuUsable ? .sfu : (mesh ? .mesh : nil) }
         return mesh ? .mesh : (sfuUsable ? .sfu : nil)
+    }
+}
+
+extension KeepTalkingIrohDelivery {
+    /// How a member's traffic travels now.
+    enum MemberReach: Equatable {
+        case unreachable
+        case relay
+        case direct
+        case bluetooth
+    }
+
+    /// A room's status from its route and how its members are reached. A
+    /// room on the SFU is ready; one on the mesh by how many members a link
+    /// reaches. `settling` (the SFU still on its first way up) makes a room
+    /// with nothing reachable read as connecting rather than offline.
+    static func status(
+        route: KeepTalkingIrohRoute?,
+        members: [MemberReach],
+        settling: Bool
+    ) -> KeepTalkingTransportStatus {
+        let reachable = members.filter { $0 != .unreachable }
+        let path: KeepTalkingTransportStatus.Path?
+        if reachable.contains(.direct) {
+            path = .direct
+        } else if reachable.contains(.bluetooth) {
+            path = .bluetooth
+        } else {
+            path = reachable.isEmpty ? nil : .relay
+        }
+        switch route {
+            case .sfu?:
+                return .init(state: .ready, path: .sfu)
+            case .mesh? where reachable.count == members.count:
+                return .init(state: .ready, path: path)
+            case .mesh? where !reachable.isEmpty:
+                return .init(state: .degraded, path: path)
+            case .mesh?, nil:
+                return .init(state: settling ? .connecting : .offline, path: nil)
+        }
     }
 }
 

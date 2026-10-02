@@ -33,17 +33,13 @@ let package = Package(
             from: "0.12.0"
         ),
         .package(path: "../AIProxySwift-MultiPlatform"),
-        .package(path: "../KeepTalkingSFU"),
-        // Vendored iroh-ffi (fork StevenRCE0/iroh-ffi, main): Swift bindings plus a
-        // locally built xcframework (`RUSTUP_TOOLCHAIN=stable ./make_swift.sh`).
-        // Apple-only, so the SDK takes it conditionally; see Transport/Iroh.
+        // The transport. Vendored iroh-ffi (fork StevenRCE0/iroh-ffi, main): Swift
+        // bindings plus a locally built xcframework
+        // (`RUSTUP_TOOLCHAIN=stable ./make_swift.sh`). Apple-only, so the SDK
+        // takes it conditionally; elsewhere clients get
+        // `KeepTalkingTransport.unavailable`. See Transport/Iroh.
         .package(path: "../iroh-ffi"),
-        .package(url: "https://github.com/StevenRCE0/swift-libjuice.git", from: "1.7.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
-        .package(url: "https://github.com/apple/swift-nio-http2.git", from: "1.30.0"),
-        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
-        .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
-        .package(url: "https://github.com/apple/swift-asn1.git", from: "1.0.0"),
         // swift-crypto is the canonical crypto layer so the SDK is Apple-free.
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         // swift-uuidv7: time-ordered (RFC 9562 v7) UUID generation used for
@@ -65,9 +61,6 @@ let package = Package(
                 .product(name: "SQLKit", package: "sql-kit"),
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "AIProxy", package: "AIProxySwift-MultiPlatform"),
-                .product(name: "KeepTalkingSFUClient", package: "KeepTalkingSFU"),
-                .product(name: "KeepTalkingSFUProtocol", package: "KeepTalkingSFU"),
-                .product(name: "SwiftJUICE", package: "swift-libjuice"),
                 .product(
                     name: "IrohLib",
                     package: "iroh-ffi",
@@ -75,12 +68,6 @@ let package = Package(
                 ),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "NIOFoundationCompat", package: "swift-nio"),
-                .product(name: "NIOHTTP2", package: "swift-nio-http2"),
-                .product(name: "NIOHPACK", package: "swift-nio-http2"),
-                .product(name: "NIOSSL", package: "swift-nio-ssl"),
-                .product(name: "X509", package: "swift-certificates"),
-                .product(name: "SwiftASN1", package: "swift-asn1"),
                 .product(name: "UUIDV7", package: "swift-uuidv7"),
             ],
             path: "Sources/KeepTalking"

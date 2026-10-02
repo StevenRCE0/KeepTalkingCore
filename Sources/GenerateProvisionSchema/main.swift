@@ -32,8 +32,8 @@ func sampleBundle() -> KeepTalkingProvisionBundle {
         version: 1,
         security: .none,
         passKVServerURL: ProvisionedValue("https://passkv.example.com", policies: [.userConfigurable]),
-        sfuHost: ProvisionedValue("sfu.example.com", policies: [.userConfigurable]),
-        sfuPort: ProvisionedValue(9701, policies: [.userConfigurable]),
+        relayURL: ProvisionedValue("https://signal.example.com/", policies: [.userConfigurable]),
+        sfuEndpointID: ProvisionedValue(String(repeating: "0", count: 64), policies: [.userConfigurable]),
         providers: ProvisionedValue(
             [
                 ProvisionedProvider(

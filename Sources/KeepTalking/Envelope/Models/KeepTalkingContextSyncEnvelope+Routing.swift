@@ -13,8 +13,6 @@ extension KeepTalkingContextSyncEnvelope {
                 return request.recipient
             case .messagesResult(let result):
                 return result.requester
-            case .attachmentRequest:
-                return nil
             case .attachmentRecordsRequest(let request):
                 return request.recipient
             case .attachmentRecordsResult(let result):
@@ -56,8 +54,6 @@ extension KeepTalkingContextSyncEnvelope {
                 return request.context
             case .messagesResult(let result):
                 return result.context
-            case .attachmentRequest(let request):
-                return request.context
             case .attachmentRecordsRequest(let request):
                 return request.context
             case .attachmentRecordsResult(let result):

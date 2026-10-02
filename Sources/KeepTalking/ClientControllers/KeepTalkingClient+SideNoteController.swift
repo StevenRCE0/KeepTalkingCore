@@ -282,7 +282,7 @@ extension KeepTalkingClient {
         _ dto: KeepTalkingSideNoteDTO,
         in contextID: UUID
     ) async {
-        try? rtcClient.sendEnvelope(
+        try? sendEnvelope(
             KeepTalkingContextSyncEnvelope.sideNotesPush(
                 KeepTalkingContextSyncSideNotesPush(
                     context: contextID,

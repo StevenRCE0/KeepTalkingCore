@@ -477,45 +477,6 @@ public struct KeepTalkingContextSyncMessagesResult: Codable, Sendable {
 
 }
 
-public struct KeepTalkingContextSyncAttachmentRequest: Codable, Sendable,
-    Equatable
-{
-    public let context: UUID
-    public let requester: UUID
-    public let hashes: [String]
-    public let masks: [String: Data]?
-
-    public init(
-        context: UUID,
-        requester: UUID,
-        hashes: [String],
-        masks: [String: Data]? = nil
-    ) {
-        self.context = context
-        self.requester = requester
-        self.hashes = Self.normalized(hashes)
-        self.masks = masks
-    }
-
-    private static func normalized(_ hashes: [String]) -> [String] {
-        var seen = Set<String>()
-        var normalized: [String] = []
-
-        for hash in hashes {
-            let trimmed = hash.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
-                continue
-            }
-            guard seen.insert(trimmed).inserted else {
-                continue
-            }
-            normalized.append(trimmed)
-        }
-
-        return normalized
-    }
-}
-
 /// Pull request for attachment *records* (not blob bytes) belonging to a set
 /// of message IDs the requester already has. Repairs the case where a message
 /// synced but its attachment record never landed (e.g. the live attachment
@@ -523,8 +484,8 @@ public struct KeepTalkingContextSyncAttachmentRequest: Codable, Sendable,
 /// sync can't recover this, because attachments only ride along with messages
 /// in the active delta, and the parent message is already behind the cursor.
 ///
-/// Distinct from `KeepTalkingContextSyncAttachmentRequest`, which fetches blob
-/// *bytes* (by hash) for records the requester already holds.
+/// Blob *bytes* for records the requester already holds are pulled with
+/// `KeepTalkingBlobTransferEnvelope`, not through context sync.
 public struct KeepTalkingContextSyncAttachmentRecordsRequest: Codable, Sendable,
     Equatable
 {
@@ -864,9 +825,8 @@ public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
     /// Messages answering a `tailRequest` or `chunkRequest`.
     case messagesResult(KeepTalkingContextSyncMessagesResult)
 
-    // Attachments: blob bytes by hash, plus record-repair by message id.
-    /// Pull attachment blob *bytes* (by content hash) for records we already hold.
-    case attachmentRequest(KeepTalkingContextSyncAttachmentRequest)
+    // Attachments: record-repair by message id. Blob bytes are pulled with
+    // `KeepTalkingBlobTransferEnvelope`.
     /// Pull attachment *records* for message ids whose attachment row never landed.
     case attachmentRecordsRequest(KeepTalkingContextSyncAttachmentRecordsRequest)
     /// Attachment records answering `attachmentRecordsRequest`.

@@ -73,8 +73,8 @@ extension KeepTalkingEnvelope {
         (self as? KeepTalkingEncryptedAgentTurnContinuationResponseEnvelope)?.payload
     }
 
-    public var p2pSignal: KeepTalkingP2PSignalPayload? {
-        self as? KeepTalkingP2PSignalPayload
+    public var blobTransfer: KeepTalkingBlobTransferEnvelope? {
+        self as? KeepTalkingBlobTransferEnvelope
     }
 
     public var p2pPresence: KeepTalkingP2PPresencePayload? {

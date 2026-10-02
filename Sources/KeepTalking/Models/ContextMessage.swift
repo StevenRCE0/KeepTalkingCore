@@ -207,15 +207,15 @@ extension KeepTalkingContextMessage {
 public enum KeepTalkingMessageLimits {
     /// Ceiling on a message's content, enforced when the message is created.
     ///
-    /// Transport no longer fragments envelopes, so an envelope that exceeds
-    /// `PacketTransportCrypto.maxOutboundPayloadBytes` (1 MiB) simply cannot be
+    /// Transport never fragments envelopes, so an envelope over the 1 MiB frame
+    /// ceiling (`KeepTalkingIrohSFUFrame.maxPublishLength`) simply cannot be
     /// sent — and, because a sync page carries whole items, cannot be
     /// replicated either. Refusing at creation is what keeps that from becoming
     /// a permanent condition: the alternative is a persisted row that retries
     /// forever in the outbox and stalls its own sync stream.
     ///
-    /// Set to half the envelope ceiling because the check is on plaintext while
-    /// the ceiling applies after sealing and base64/JSON framing, which inflate
-    /// by roughly a third. The headroom also covers the rest of the envelope.
+    /// Set to half the frame ceiling because the check is on plaintext while
+    /// the ceiling applies after JSON framing (escaping inflates text) and
+    /// sealing. The headroom also covers the rest of the envelope.
     public static let maximumContentBytes = 512 * 1024
 }

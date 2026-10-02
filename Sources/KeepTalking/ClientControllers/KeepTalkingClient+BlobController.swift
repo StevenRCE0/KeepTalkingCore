@@ -10,8 +10,9 @@ import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
-    // Max payload size to keep entire frame well under 64KB SCTP limit
-    private static let blobChunkSize = 32 * 1024
+    /// Bytes per blob-stream chunk. QUIC flow control paces the stream, so
+    /// this only sizes the frames.
+    private static let blobStreamChunkSize = 128 * 1024
 
     func upsertBlobRecord(
         blobID: String,
@@ -156,74 +157,48 @@ extension KeepTalkingClient {
         try await record.save(on: localStore.database)
     }
 
-    func scheduleOutgoingBlobTransfers(
-        for attachments: [KeepTalkingContextAttachment]
-    ) {
-        guard !attachments.isEmpty else {
-            return
-        }
+    // MARK: - Asking for blobs
 
-        let uniqueAttachments = Dictionary(
-            attachments.map { ($0.blobID, $0) },
-            uniquingKeysWith: { first, _ in first }
-        ).values.sorted {
-            if $0.createdAt != $1.createdAt {
-                return $0.createdAt < $1.createdAt
-            }
-            return $0.sortIndex < $1.sortIndex
-        }
-
-        Task { [weak self] in
-            guard let self else {
-                return
-            }
-            for attachment in uniqueAttachments {
-                do {
-                    try await self.sendBlobFrames(
-                        blobID: attachment.blobID,
-                        recipientNodeID: nil
-                    )
-                } catch {
-                    self.rtcClient.debug(
-                        "blob push failed blob=\(attachment.blobID) error=\(error.localizedDescription)"
-                    )
-                }
-            }
-        }
+    /// Announces the attachments' blobs we're missing to the room.
+    func requestAttachmentBlobsIfNeeded(
+        for attachments: [KeepTalkingContextAttachment],
+        in contextID: UUID
+    ) async throws {
+        try await announceWantedBlobs(try await missingBlobIDs(for: attachments), in: contextID)
     }
 
-    func handleIncomingBlobFrameData(_ data: Data) async throws {
-        let frame = try KeepTalkingBlobTransferCodec.decode(data)
-        // One-time blobs route to the ephemeral assembler — never the blob
-        // store, records, or context attachments. OTB is strictly
-        // point-to-point: require the frame be addressed to THIS node (a nil
-        // recipient is the broadcast-attachment case and is never a valid OTB).
-        if frame.header.isEphemeral == true {
-            guard frame.header.recipientNodeID == config.node else { return }
-            await handleIncomingOneTimeBlobFrame(frame)
-            return
-        }
-        switch frame.header.kind {
-            case .chunk:
-                try await handleIncomingBlobChunk(frame)
-            case .complete:
-                try await handleIncomingBlobComplete(frame.header)
-        }
-    }
-
+    /// Announces every recent attachment blob we're missing. Runs on each
+    /// node-online and heartbeat maintenance pass; announcements of the same
+    /// blob are spaced out, so the room hears each once per interval.
     func requestRecentMissingAttachmentBlobs(
         in contextID: UUID,
         since: Date
     ) async throws {
-        guard
-            let request = try await contextSyncAttachmentRequest(
-                in: contextID,
-                since: since
-            )
-        else { return }
+        let attachments = try await recentAttachments(in: contextID, since: since)
+        try await announceWantedBlobs(try await missingBlobIDs(for: attachments), in: contextID)
+    }
 
-        try rtcClient.sendEnvelope(
-            KeepTalkingContextSyncEnvelope.attachmentRequest(request)
+    /// The distinct blob ids among `attachments` that aren't ready here.
+    func missingBlobIDs(for attachments: [KeepTalkingContextAttachment]) async throws -> [String] {
+        var seen = Set<String>()
+        var missing: [String] = []
+        for attachment in attachments where seen.insert(attachment.blobID).inserted {
+            if try await !isBlobReady(blobID: attachment.blobID) { missing.append(attachment.blobID) }
+        }
+        return missing
+    }
+
+    private func announceWantedBlobs(_ blobIDs: [String], in contextID: UUID) async throws {
+        guard !blobIDs.isEmpty else { return }
+        let due = await blobPulls.dueForAnnouncement(blobIDs)
+        guard !due.isEmpty else { return }
+        try sendEnvelope(
+            KeepTalkingBlobTransferEnvelope(
+                context: contextID,
+                sender: config.node,
+                recipient: nil,
+                step: .wanted(due.map { .attachment(blobID: $0) })
+            )
         )
     }
 
@@ -253,7 +228,7 @@ extension KeepTalkingClient {
             recipient: recipient,
             messageIDs: messageIDs
         )
-        try rtcClient.sendEnvelope(
+        try sendEnvelope(
             KeepTalkingContextSyncEnvelope.attachmentRecordsRequest(request)
         )
     }
@@ -283,442 +258,267 @@ extension KeepTalkingClient {
         }
     }
 
-    func requestAttachmentBlobsIfNeeded(
-        for attachments: [KeepTalkingContextAttachment],
-        in contextID: UUID
-    ) async throws {
-        guard
-            let request = try await attachmentRequest(
-                for: attachments,
-                in: contextID
-            )
-        else { return }
-
-        try rtcClient.sendEnvelope(
-            KeepTalkingContextSyncEnvelope.attachmentRequest(request)
-        )
-    }
-
-    func respondToContextSyncAttachmentRequest(
-        _ request: KeepTalkingContextSyncAttachmentRequest
-    ) async throws {
-        for hash in request.hashes {
-            let mask = request.masks?[hash]
-            guard let blobRecord = try await blobRecord(for: hash),
-                blobRecord.availability == .ready
-            else { continue }
-
-            await blobTransportQueue.enqueue(
-                blobID: hash,
-                mask: mask,
-                recipient: request.requester
-            )
-        }
-        triggerBlobTransportQueue()
-    }
-
     func hexDigest(for data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private func triggerBlobTransportQueue() {
-        Task { [weak self] in
-            guard let self else { return }
-            let isSending = await self.blobTransportQueue.markSending()
-            guard !isSending else { return }
+    // MARK: - Negotiation
 
-            while let (blobID, request) = await self.blobTransportQueue.next() {
-                do {
-                    if request.recipients.isEmpty {
-                        try await self.sendBlobFrames(blobID: blobID, mask: request.mask, recipientNodeID: nil)
-                    } else {
-                        for recipient in request.recipients {
-                            try await self.sendBlobFrames(
-                                blobID: blobID, mask: request.mask, recipientNodeID: recipient)
-                        }
-                    }
-                } catch {
-                    self.rtcClient.debug("blob transport failed blob=\(blobID) error=\(error.localizedDescription)")
-                }
-            }
+    /// Blob negotiation from the room: offers to askers, pulls of offers,
+    /// streams for pulls.
+    func handleBlobTransferEnvelope(_ envelope: KeepTalkingBlobTransferEnvelope) async {
+        guard envelope.sender != config.node else { return }
+        if let recipient = envelope.recipient, recipient != config.node { return }
+        switch envelope.step {
+            case .wanted(let items):
+                await offerHeldBlobs(items, to: envelope.sender, in: envelope.context)
+            case .offer(let offered):
+                await pullOffered(offered, from: envelope.sender, in: envelope.context)
+            case .pull(let item, let offset):
+                Task { await self.servePull(item, offset: offset, to: envelope.sender, in: envelope.context) }
+            case .unavailable(.attachment(let blobID)):
+                guard await blobPulls.isPulling(blobID, from: envelope.sender) else { return }
+                await blobPulls.finish(blobID)
+            case .unavailable(.oneTimeBlob(let transferID)):
+                guard await oneTimeBlobAssembler.isPulling(transferID, from: envelope.sender) else { return }
+                await oneTimeBlobAssembler.pullFailed(
+                    transferID,
+                    error: KeepTalkingOneTimeBlobError.unavailable(transferID)
+                )
         }
     }
 
-    func contextSyncAttachmentRequest(
-        in contextID: UUID,
-        since: Date
-    ) async throws -> KeepTalkingContextSyncAttachmentRequest? {
-        let attachments = try await recentAttachments(
-            in: contextID,
-            since: since
-        )
-        return try await attachmentRequest(
-            for: attachments,
-            in: contextID
-        )
-    }
-
-    private func attachmentRequest(
-        for attachments: [KeepTalkingContextAttachment],
+    private func offerHeldBlobs(
+        _ items: [KeepTalkingBlobTransferEnvelope.Item],
+        to requester: UUID,
         in contextID: UUID
-    ) async throws -> KeepTalkingContextSyncAttachmentRequest? {
-        let missing = try await missingAttachmentRequests(for: attachments)
-        guard !missing.hashes.isEmpty else { return nil }
-
-        return KeepTalkingContextSyncAttachmentRequest(
-            context: contextID,
-            requester: config.node,
-            hashes: missing.hashes,
-            masks: missing.masks.isEmpty ? nil : missing.masks
+    ) async {
+        var offered: [KeepTalkingBlobTransferEnvelope.Offered] = []
+        for case .attachment(let blobID) in items {
+            guard (try? await isBlobReady(blobID: blobID)) == true,
+                let record = try? await blobRecord(for: blobID)
+            else { continue }
+            offered.append(.init(item: .attachment(blobID: blobID), byteCount: record.byteCount))
+        }
+        guard !offered.isEmpty else { return }
+        try? sendEnvelope(
+            KeepTalkingBlobTransferEnvelope(
+                context: contextID,
+                sender: config.node,
+                recipient: requester,
+                step: .offer(offered)
+            )
         )
     }
 
-    private func missingAttachmentRequests(
-        for attachments: [KeepTalkingContextAttachment]
-    ) async throws -> (hashes: [String], masks: [String: Data]) {
-        var requestedBlobIDs = Set<String>()
-        var missingHashes: [String] = []
-        var missingMasks: [String: Data] = [:]
-
-        for attachment in attachments {
-            guard requestedBlobIDs.insert(attachment.blobID).inserted else {
-                continue
+    /// Pulls each offered blob we still miss and aren't already pulling, from
+    /// where our partial copy ends: blobs are content-addressed, so any
+    /// holder's bytes continue any other's.
+    private func pullOffered(
+        _ offered: [KeepTalkingBlobTransferEnvelope.Offered],
+        from holder: UUID,
+        in contextID: UUID
+    ) async {
+        for offer in offered {
+            guard case .attachment(let blobID) = offer.item,
+                (try? await isBlobReady(blobID: blobID)) == false,
+                await blobPulls.claim(blobID, from: holder)
+            else { continue }
+            connection.expectBlobStream(from: holder)
+            do {
+                try sendEnvelope(
+                    KeepTalkingBlobTransferEnvelope(
+                        context: contextID,
+                        sender: config.node,
+                        recipient: holder,
+                        step: .pull(offer.item, offset: partialByteCount(blobID: blobID))
+                    )
+                )
+            } catch {
+                await blobPulls.finish(blobID)
+                debug("blob pull failed blob=\(blobID) error=\(error.localizedDescription)")
             }
-            guard try await isBlobReady(blobID: attachment.blobID) == false else {
-                continue
-            }
-            missingHashes.append(attachment.blobID)
+        }
+    }
 
-            if let tryPartial = try? blobStore.partialData(blobID: attachment.blobID) {
-                let receivedBytes = tryPartial.count
-                let chunkIndex = receivedBytes / Self.blobChunkSize
-                var maskData = Data(repeating: 0, count: (chunkIndex + 7) / 8)
-                if chunkIndex > 0 {
-                    let bitRemainder = chunkIndex % 8
-                    if bitRemainder > 0 {
-                        var lastByte: UInt8 = 0
-                        for b in bitRemainder..<8 {
-                            lastByte |= (1 << b)
-                        }
-                        maskData[maskData.count - 1] = lastByte
+    private func partialByteCount(blobID: String) -> Int {
+        guard let url = try? blobStore.partialFileURL(for: blobID),
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        else { return 0 }
+        return (attributes[.size] as? NSNumber)?.intValue ?? 0
+    }
+
+    // MARK: - Holder side
+
+    /// Streams a pulled blob to `requester`, or tells it we can't.
+    private func servePull(
+        _ item: KeepTalkingBlobTransferEnvelope.Item,
+        offset: Int,
+        to requester: UUID,
+        in contextID: UUID
+    ) async {
+        do {
+            switch item {
+                case .attachment(let blobID):
+                    guard (try? await isBlobReady(blobID: blobID)) == true,
+                        let record = try await blobRecord(for: blobID),
+                        let relativePath = record.relativePath
+                    else { throw KeepTalkingBlobStoreError.blobNotFound(blobID) }
+                    try await streamAttachmentBlob(
+                        blobStore.fileURL(forRelativePath: relativePath),
+                        header: KeepTalkingBlobStreamHeader(
+                            item: item,
+                            offset: offset,
+                            byteCount: record.byteCount,
+                            mimeType: record.mimeType,
+                            pathExtension: blobPathExtension(from: relativePath)
+                        ),
+                        to: requester
+                    )
+                case .oneTimeBlob(let transferID):
+                    guard let entry = await oneTimeBlobOutbox.entry(for: transferID, requester: requester) else {
+                        throw KeepTalkingOneTimeBlobError.unavailable(transferID)
                     }
-                }
-                missingMasks[attachment.blobID] = maskData
+                    try await streamOneTimeBlob(entry, transferID: transferID, fromChunk: offset)
             }
-        }
-
-        return (missingHashes, missingMasks)
-    }
-
-    private func handleIncomingBlobChunk(
-        _ frame: KeepTalkingBlobTransferFrame
-    ) async throws {
-        let header = frame.header
-        guard shouldAcceptBlobFrame(header) else {
-            return
-        }
-        guard try await isBlobReady(blobID: header.blobID) == false else {
-            return
-        }
-
-        let byteCount = max(header.byteCount ?? frame.payload.count, 0)
-        let directive = await blobFrameProcessor.prepareChunk(
-            blobID: header.blobID,
-            transferID: header.transferID,
-            chunkIndex: header.chunkIndex
-        )
-        guard case .accept(let reset) = directive else {
-            rtcClient.debug(
-                "ignored stale blob chunk blob=\(header.blobID) transfer=\(header.transferID.uuidString.lowercased()) chunk=\(header.chunkIndex ?? -1)"
+        } catch {
+            debug(
+                "blob serve failed item=\(item) to=\(requester.uuidString.prefix(8)) error=\(error.localizedDescription)"
             )
-            return
-        }
-        let receivedBytes = try blobStore.appendPartial(
-            data: frame.payload,
-            blobID: header.blobID,
-            reset: reset
-        )
-        try await upsertBlobRecord(
-            blobID: header.blobID,
-            relativePath: nil,
-            availability: .partial,
-            mimeType: header.mimeType ?? "application/octet-stream",
-            byteCount: byteCount,
-            receivedBytes: receivedBytes
-        )
-        let progressStep = max(Self.blobChunkSize, byteCount / 100)
-        let previousReceivedBytes = max(receivedBytes - frame.payload.count, 0)
-        if receivedBytes == frame.payload.count
-            || receivedBytes == byteCount
-            || receivedBytes / progressStep != previousReceivedBytes / progressStep
-        {
-            notifyBlobAvailabilityChange(
-                contextID: config.contextID,
-                blobID: header.blobID
+            try? sendEnvelope(
+                KeepTalkingBlobTransferEnvelope(
+                    context: contextID,
+                    sender: config.node,
+                    recipient: requester,
+                    step: .unavailable(item)
+                )
             )
         }
     }
 
-    private func handleIncomingBlobComplete(
-        _ header: KeepTalkingBlobTransferHeader
+    private func streamAttachmentBlob(
+        _ fileURL: URL,
+        header: KeepTalkingBlobStreamHeader,
+        to requester: UUID
     ) async throws {
-        guard shouldAcceptBlobFrame(header) else {
-            return
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(max(header.offset, 0)))
+        let writer = try await connection.openBlobStream(to: requester, header: try JSONEncoder().encode(header))
+        do {
+            while let chunk = try handle.read(upToCount: Self.blobStreamChunkSize), !chunk.isEmpty {
+                try await writer.write(chunk)
+            }
+            try await writer.finish()
+        } catch {
+            writer.cancel()
+            throw error
         }
-        guard try await isBlobReady(blobID: header.blobID) == false else {
-            return
-        }
+    }
 
-        let byteCount = max(header.byteCount ?? 0, 0)
-        guard
-            await blobFrameProcessor.shouldAcceptComplete(
-                blobID: header.blobID,
-                transferID: header.transferID,
-                byteCount: byteCount
-            )
-        else {
-            rtcClient.debug(
-                "ignored stale blob complete blob=\(header.blobID) transfer=\(header.transferID.uuidString.lowercased())"
-            )
+    // MARK: - Receiver side
+
+    /// A blob stream from `holder`. Only streams we pulled are read.
+    func handleIncomingBlobStream(_ reader: any KeepTalkingBlobStreamReader, from holder: UUID) async {
+        guard let header = try? JSONDecoder().decode(KeepTalkingBlobStreamHeader.self, from: reader.header) else {
+            reader.cancel()
             return
         }
+        switch header.item {
+            case .attachment(let blobID):
+                await receiveAttachmentBlob(blobID, header: header, reader: reader, from: holder)
+            case .oneTimeBlob(let transferID):
+                await receiveOneTimeBlob(transferID, header: header, reader: reader, from: holder)
+        }
+    }
+
+    private func receiveAttachmentBlob(
+        _ blobID: String,
+        header: KeepTalkingBlobStreamHeader,
+        reader: any KeepTalkingBlobStreamReader,
+        from holder: UUID
+    ) async {
+        guard await blobPulls.isPulling(blobID, from: holder) else {
+            reader.cancel()
+            return
+        }
+        do {
+            try await appendAttachmentStream(blobID, header: header, reader: reader)
+        } catch {
+            reader.cancel()
+            debug("blob receive failed blob=\(blobID) error=\(error.localizedDescription)")
+        }
+        await blobPulls.finish(blobID)
+    }
+
+    /// Appends the stream to the blob's partial file from `header.offset`,
+    /// then checks size and digest and promotes it to ready.
+    private func appendAttachmentStream(
+        _ blobID: String,
+        header: KeepTalkingBlobStreamHeader,
+        reader: any KeepTalkingBlobStreamReader
+    ) async throws {
         let mimeType = header.mimeType ?? "application/octet-stream"
-        let pathExtension = normalizedPathExtension(header.pathExtension)
-
-        if byteCount == 0 {
-            let stored = try blobStore.put(
-                data: Data(),
-                blobID: header.blobID,
-                pathExtension: pathExtension
-            )
-            try await upsertBlobRecord(
-                blobID: header.blobID,
-                relativePath: stored.relativePath,
-                availability: .ready,
-                mimeType: mimeType,
-                byteCount: 0,
-                receivedBytes: 0
-            )
-            notifyBlobAvailabilityChange(
-                contextID: config.contextID,
-                blobID: header.blobID
-            )
-            await blobFrameProcessor.finish(
-                blobID: header.blobID,
-                transferID: header.transferID
-            )
-            return
+        let byteCount = max(header.byteCount, 0)
+        // A stream continues our partial copy or starts it over; anything else
+        // would splice bytes at the wrong place.
+        let restart = header.offset == 0
+        guard restart || header.offset == partialByteCount(blobID: blobID) else {
+            throw KeepTalkingBlobStoreError.blobNotFound(blobID)
         }
-
-        let partialData = try blobStore.partialData(blobID: header.blobID)
-        guard partialData.count == byteCount else {
+        var received = header.offset
+        var isFirstChunk = true
+        let progressStep = max(Self.blobStreamChunkSize, byteCount / 100)
+        while let chunk = try await reader.next() {
+            let previous = received
+            received = try blobStore.appendPartial(data: chunk, blobID: blobID, reset: restart && isFirstChunk)
+            isFirstChunk = false
+            guard received <= byteCount else { throw KeepTalkingBlobStoreError.blobNotFound(blobID) }
             try await upsertBlobRecord(
-                blobID: header.blobID,
+                blobID: blobID,
                 relativePath: nil,
                 availability: .partial,
                 mimeType: mimeType,
                 byteCount: byteCount,
-                receivedBytes: partialData.count
+                receivedBytes: received
             )
-            rtcClient.debug(
-                "blob complete deferred blob=\(header.blobID) expected=\(byteCount) received=\(partialData.count)"
-            )
-            return
+            if previous == header.offset || received / progressStep != previous / progressStep {
+                notifyBlobAvailabilityChange(contextID: config.contextID, blobID: blobID)
+            }
         }
-
-        guard hexDigest(for: partialData) == header.blobID else {
-            try? blobStore.removePartial(blobID: header.blobID)
-            try await upsertBlobRecord(
-                blobID: header.blobID,
-                relativePath: nil,
-                availability: .missing,
-                mimeType: mimeType,
-                byteCount: byteCount,
-                receivedBytes: 0
-            )
-            notifyBlobAvailabilityChange(
-                contextID: config.contextID,
-                blobID: header.blobID
-            )
-            await blobFrameProcessor.finish(
-                blobID: header.blobID,
-                transferID: header.transferID
-            )
-            rtcClient.debug("blob digest mismatch blob=\(header.blobID)")
-            return
+        let pathExtension = normalizedPathExtension(header.pathExtension)
+        let stored: (relativePath: String, fileURL: URL)
+        if byteCount == 0 {
+            stored = try blobStore.put(data: Data(), blobID: blobID, pathExtension: pathExtension)
+        } else {
+            let partial = try blobStore.partialData(blobID: blobID)
+            guard partial.count == byteCount, hexDigest(for: partial) == blobID else {
+                try? blobStore.removePartial(blobID: blobID)
+                try await upsertBlobRecord(
+                    blobID: blobID,
+                    relativePath: nil,
+                    availability: .missing,
+                    mimeType: mimeType,
+                    byteCount: byteCount,
+                    receivedBytes: 0
+                )
+                notifyBlobAvailabilityChange(contextID: config.contextID, blobID: blobID)
+                throw KeepTalkingBlobStoreError.blobNotFound(blobID)
+            }
+            stored = try blobStore.promotePartial(blobID: blobID, pathExtension: pathExtension)
         }
-
-        let stored = try blobStore.promotePartial(
-            blobID: header.blobID,
-            pathExtension: pathExtension
-        )
         try await upsertBlobRecord(
-            blobID: header.blobID,
+            blobID: blobID,
             relativePath: stored.relativePath,
             availability: .ready,
             mimeType: mimeType,
             byteCount: byteCount,
             receivedBytes: byteCount
         )
-        notifyBlobAvailabilityChange(
-            contextID: config.contextID,
-            blobID: header.blobID
-        )
-        await blobFrameProcessor.finish(
-            blobID: header.blobID,
-            transferID: header.transferID
-        )
+        notifyBlobAvailabilityChange(contextID: config.contextID, blobID: blobID)
     }
 
-    private func sendBlobFrames(
-        blobID: String,
-        mask: Data? = nil,
-        recipientNodeID: UUID?
-    ) async throws {
-        guard let blobRecord = try await blobRecord(for: blobID),
-            blobRecord.availability == .ready
-        else {
-            throw KeepTalkingBlobStoreError.blobNotFound(blobID)
-        }
-
-        try await sendBlobFrames(
-            blobID: blobID,
-            mimeType: blobRecord.mimeType,
-            pathExtension: blobPathExtension(from: blobRecord.relativePath),
-            expectedByteCount: blobRecord.byteCount,
-            mask: mask,
-            recipientNodeID: recipientNodeID
-        )
-    }
-
-    private func sendBlobFrames(
-        blobID: String,
-        mimeType: String,
-        pathExtension: String?,
-        expectedByteCount: Int,
-        mask: Data? = nil,
-        recipientNodeID: UUID?
-    ) async throws {
-        guard let blobRecord = try await blobRecord(for: blobID),
-            blobRecord.availability == .ready,
-            let relativePath = blobRecord.relativePath
-        else {
-            throw KeepTalkingBlobStoreError.blobNotFound(blobID)
-        }
-
-        try await streamBlobFrames(
-            blobID: blobID,
-            mimeType: mimeType,
-            pathExtension: pathExtension,
-            expectedByteCount: expectedByteCount,
-            mask: mask,
-            recipientNodeID: recipientNodeID,
-            relativePath: relativePath
-        )
-    }
-
-    private func streamBlobFrames(
-        blobID: String,
-        mimeType: String,
-        pathExtension: String?,
-        expectedByteCount: Int,
-        mask: Data? = nil,
-        recipientNodeID: UUID?,
-        relativePath: String
-    ) async throws {
-        let fileURL = blobStore.fileURL(forRelativePath: relativePath)
-        let fileAttributes = try FileManager.default.attributesOfItem(
-            atPath: fileURL.path
-        )
-        let fileByteCount =
-            (fileAttributes[.size] as? NSNumber)?.intValue ?? expectedByteCount
-        let byteCount = max(fileByteCount, expectedByteCount)
-        let chunkCount =
-            byteCount == 0
-            ? 0
-            : (byteCount + Self.blobChunkSize - 1) / Self.blobChunkSize
-        let transferID = UUID()
-
-        let handle = try FileHandle(forReadingFrom: fileURL)
-        defer { try? handle.close() }
-
-        var chunkIndex = 0
-        while true {
-            let chunk = handle.readData(ofLength: Self.blobChunkSize)
-            guard !chunk.isEmpty else {
-                break
-            }
-
-            let shouldSend: Bool
-            if let mask {
-                let byteIndex = chunkIndex / 8
-                let bitIndex = chunkIndex % 8
-                if byteIndex < mask.count {
-                    shouldSend = (mask[byteIndex] & (1 << bitIndex)) != 0
-                } else {
-                    shouldSend = true
-                }
-            } else {
-                shouldSend = true
-            }
-
-            if shouldSend {
-                let header = KeepTalkingBlobTransferHeader(
-                    kind: .chunk,
-                    transferID: transferID,
-                    senderNodeID: config.node,
-                    recipientNodeID: recipientNodeID,
-                    blobID: blobID,
-                    mimeType: mimeType,
-                    pathExtension: pathExtension,
-                    byteCount: byteCount,
-                    chunkIndex: chunkIndex,
-                    chunkCount: chunkCount,
-                    chunkByteCount: chunk.count
-                )
-                try rtcClient.sendBlobData(
-                    try KeepTalkingBlobTransferCodec.encode(
-                        KeepTalkingBlobTransferFrame(
-                            header: header,
-                            payload: chunk
-                        )
-                    ),
-                    targetPeerNodeID: recipientNodeID
-                )
-                // Sleep slightly between chunks to let WebRTC flush the SCTP send buffer
-                // and prevent bufferedAmount from spiking without blocking the thread locally.
-                try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
-            }
-            chunkIndex += 1
-        }
-
-        // Brief sleep before the completion frame so the last chunk
-        // has time to drain from the send buffer.
-        try await Task.sleep(nanoseconds: 20_000_000)
-
-        let completionHeader = KeepTalkingBlobTransferHeader(
-            kind: .complete,
-            transferID: transferID,
-            senderNodeID: config.node,
-            recipientNodeID: recipientNodeID,
-            blobID: blobID,
-            mimeType: mimeType,
-            pathExtension: pathExtension,
-            byteCount: byteCount,
-            chunkIndex: nil,
-            chunkCount: chunkCount,
-            chunkByteCount: nil
-        )
-        try rtcClient.sendBlobData(
-            try KeepTalkingBlobTransferCodec.encode(
-                KeepTalkingBlobTransferFrame(
-                    header: completionHeader,
-                    payload: Data()
-                )
-            ),
-            targetPeerNodeID: recipientNodeID
-        )
-    }
+    // MARK: - Store reads
 
     private func recentAttachments(
         in contextID: UUID,
@@ -766,18 +566,6 @@ extension KeepTalkingClient {
             return true
         } catch {
             return false
-        }
-    }
-
-    private func shouldAcceptBlobFrame(
-        _ header: KeepTalkingBlobTransferHeader
-    ) -> Bool {
-        switch header.kind {
-            case .chunk, .complete:
-                guard let recipientNodeID = header.recipientNodeID else {
-                    return true
-                }
-                return recipientNodeID == config.node
         }
     }
 

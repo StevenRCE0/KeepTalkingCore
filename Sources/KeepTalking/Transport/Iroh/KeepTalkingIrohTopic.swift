@@ -7,8 +7,7 @@ import Foundation
 ///   datagrams carry it instead of the context id, so the SFU and any
 ///   non-member on a link see opaque bytes.
 /// - **payload key** — seals everything published to the topic (envelopes
-///   and blob frames). It replaces `KeepTalkingPacketTransportCrypto`'s
-///   wrapper on iroh links, whose context and sender ids travel in the clear.
+///   and blob frames), so no context or sender id travels in the clear.
 ///
 /// Both come from HKDF over the secret with separate salts, so knowing the
 /// topic reveals nothing about the key. Rotating a context's secret moves

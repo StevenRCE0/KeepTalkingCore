@@ -134,7 +134,7 @@ extension KeepTalkingClient {
                 state: .cancelled
             )
             try? await message.save(on: localStore.database)
-            try? rtcClient.sendEnvelope(message)
+            try? sendEnvelope(message)
         }
     }
 
@@ -170,7 +170,7 @@ extension KeepTalkingClient {
                 state: .cancelled
             )
             try? await message.save(on: localStore.database)
-            try? rtcClient.sendEnvelope(message)
+            try? sendEnvelope(message)
         }
     }
 
@@ -221,7 +221,7 @@ extension KeepTalkingClient {
             state: state
         )
 
-        try await rtcClient.sendTrustedEnvelope(
+        try await sendTrustedEnvelope(
             response,
             cryptorSource: trustedEnvelopeCryptorSource()
         )
@@ -321,7 +321,7 @@ extension KeepTalkingClient {
         )
         try await continuationMessage.save(on: localStore.database)
         let continuationID = try continuationMessage.requireID()
-        try rtcClient.sendEnvelope(continuationMessage)
+        try sendEnvelope(continuationMessage)
 
         onLog?(
             "[continuation] suspended agentTurnID=\(agentTurnID.uuidString.lowercased()) action=\(actionID.uuidString.lowercased()) target=\(targetNodeID.uuidString.lowercased()) context=\(contextID.uuidString.lowercased())"

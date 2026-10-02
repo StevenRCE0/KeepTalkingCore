@@ -1,9 +1,16 @@
 import Foundation
 
 /// Wire format of the SFU protocol spoken with the Rust `kt-sfu`
-/// (ALPN `keeptalking/sfu/1`; `KeepTalkingSFU` branch `iroh-sfu`,
-/// `src/proto.rs`). The client opens one bidirectional stream and speaks
-/// first; both directions carry `[u32 BE length = 1 + body][u8 tag][body]`.
+/// (ALPN `keeptalking/sfu/2`; `KeepTalkingSFU` branch `iroh-sfu`,
+/// `src/proto.rs`). Frames are `[u32 BE length = 1 + body][u8 tag][body]`.
+///
+/// - **Session stream** — the one bidirectional stream the client opens
+///   first: SUBSCRIBE / UNSUBSCRIBE / ANNOUNCE up; SNAPSHOT / JOINED / LEFT /
+///   PRESENCE / ERROR down.
+/// - **Lane streams** — unidirectional, each starting with its lane byte
+///   (`KeepTalkingEnvelopeDelivery.Lane`): PUBLISH / PUBLISH_TO up, DELIVER
+///   down, on the same lane. Control and interactive are long-lived; a bulk
+///   stream carries one frame, then ends.
 ///
 /// Rooms are keyed by a 32-byte topic derived from the context secret
 /// (`KeepTalkingIrohTopic`), so the SFU never sees a context id. Member ids
@@ -13,7 +20,7 @@ import Foundation
 /// A frame whose length prefix is in range but whose tag or body doesn't
 /// parse is skipped; only a bad length prefix ends the session.
 enum KeepTalkingIrohSFUFrame {
-    static let alpn = Data("keeptalking/sfu/1".utf8)
+    static let alpn = Data("keeptalking/sfu/2".utf8)
     static let maxPublishLength = 1 << 20
     static let maxFrameLength = maxPublishLength + 64 * 1024
     static let maxAnnounceLength = 1024
@@ -27,6 +34,7 @@ enum KeepTalkingIrohSFUFrame {
         static let unsubscribe: UInt8 = 0x22
         static let announce: UInt8 = 0x23
         static let publish: UInt8 = 0x24
+        static let publishTo: UInt8 = 0x25
         static let snapshot: UInt8 = 0x31
         static let joined: UInt8 = 0x32
         static let left: UInt8 = 0x33
@@ -50,6 +58,8 @@ enum KeepTalkingIrohSFUFrame {
         case announce(topic: Data, blob: Data)
         /// Reliable fan-out: the SFU sends it to every other subscriber.
         case publish(topic: Data, payload: Data)
+        /// To one subscriber of the topic only.
+        case publishTo(topic: Data, recipient: Data, payload: Data)
     }
 
     enum Server: Equatable, Sendable {
@@ -92,6 +102,11 @@ enum KeepTalkingIrohSFUFrame {
                 body.append(topic)
                 body.append(payload)
                 tag = Tag.publish
+            case .publishTo(let topic, let recipient, let payload):
+                body.append(topic)
+                body.append(recipient)
+                body.append(payload)
+                tag = Tag.publishTo
         }
         return framed(tag: tag, body: body)
     }

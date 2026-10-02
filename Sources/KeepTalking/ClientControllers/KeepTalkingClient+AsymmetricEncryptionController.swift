@@ -418,7 +418,7 @@ extension KeepTalkingClient {
             )
         }
 
-        rtcClient.debug(
+        debug(
             "[asym.encrypt] purpose=\(purpose) sender=\(config.node.uuidString.lowercased()) recipient=\(recipientNodeID.uuidString.lowercased()) localPublicKey=\(localKeyMaterial.publicKeyBase64) remotePublicKey=\(recipientCandidate.publicKeyBase64) relation=\(recipientCandidate.relationID.uuidString.lowercased()) payloadBytes=\(payload.count)"
         )
 
@@ -452,8 +452,8 @@ extension KeepTalkingClient {
             on: localStore.database,
             keychain: keychain,
             purpose: purpose,
-            debug: { [rtcClient] message in
-                rtcClient.debug(message)
+            debug: { [weak self] message in
+                self?.debug(message)
             }
         )
     }
@@ -553,7 +553,7 @@ extension KeepTalkingClient {
                     from: sharedSecret
                 )
                 if let decrypted = try? AES.GCM.open(sealed, using: symmetricKey) {
-                    rtcClient.debug(
+                    debug(
                         "[asym.decrypt] success-as-sender purpose=\(purpose) recipient=\(recipientNodeID.uuidString.lowercased()) relation=\(candidate.relationID.uuidString.lowercased())"
                     )
                     return decrypted

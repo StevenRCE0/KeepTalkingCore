@@ -44,8 +44,8 @@ public struct KeepTalkingEnvelopeAsyncHandlers: Sendable {
     /// Register a handler that reports whether the envelope actually changed
     /// anything locally.
     ///
-    /// Fan-out can deliver the same envelope over both a direct channel and the
-    /// SFU, so redelivery is routine now rather than exceptional. Persistence
+    /// A live envelope and a sync page, or a resync after a link moved, can
+    /// carry the same item, so redelivery is routine rather than exceptional. Persistence
     /// already drops the duplicate by row id — but the outward `onEnvelope`
     /// publish would still fire twice, and the app turns that into a second
     /// user-facing notification. Kinds that can no-op report `false` so the

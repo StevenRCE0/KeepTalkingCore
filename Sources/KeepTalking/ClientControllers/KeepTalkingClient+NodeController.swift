@@ -649,7 +649,7 @@ extension KeepTalkingClient {
     public func announceCurrentNode() async throws {
         let node = try await getCurrentNodeInstance()
         try await node.save(on: localStore.database)
-        try rtcClient.sendEnvelope(node)
+        try sendEnvelope(node)
     }
 
     // TODO: Add online filter
@@ -674,7 +674,7 @@ extension KeepTalkingClient {
                 continue
             }
             do {
-                rtcClient.debug(
+                debug(
                     "[broadcastCurrentNodeStatus] recipient=\(recipientNodeID.uuidString.lowercased()) "
                         + String(
                             decoding: try! JSONEncoder().encode(status),
@@ -685,11 +685,11 @@ extension KeepTalkingClient {
                     status,
                     recipientNodeID: recipientNodeID
                 )
-                try rtcClient.sendEnvelope(
+                try sendEnvelope(
                     KeepTalkingEncryptedNodeStatusEnvelope(encryptedEnvelope)
                 )
             } catch {
-                rtcClient.debug(
+                debug(
                     "encrypted node status send failed node=\(recipientNodeID.uuidString.lowercased()) error=\(error.localizedDescription)"
                 )
             }
@@ -1217,9 +1217,9 @@ extension KeepTalkingClient {
 
             try await announceCurrentNode()
             try await broadcastCurrentNodeStatus(in: currentContext)
-            rtcClient.debug("node state broadcast complete reason=\(reason)")
+            debug("node state broadcast complete reason=\(reason)")
         } catch {
-            rtcClient.debug(
+            debug(
                 "node state broadcast failed reason=\(reason) error=\(error.localizedDescription)"
             )
         }
@@ -1311,7 +1311,7 @@ extension KeepTalkingClient {
         do {
             try await markNodeDiscovered(presence.node)
         } catch {
-            rtcClient.debug(
+            debug(
                 "mark node discovered failed node=\(nodeIDText) error=\(error.localizedDescription)"
             )
         }

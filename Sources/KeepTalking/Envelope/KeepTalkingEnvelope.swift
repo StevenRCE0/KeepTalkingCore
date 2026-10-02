@@ -10,14 +10,6 @@ public protocol KeepTalkingEnvelope: Codable, Sendable {
 extension KeepTalkingEnvelope {
     public var kind: KeepTalkingEnvelopeKind { Self.kind }
 
-    public var allowsDirect: Bool {
-        kind.allowsDirect
-    }
-
-    public var channel: KeepTalkingEnvelopeChannel {
-        kind.channel
-    }
-
     public var targetPeerNodeID: UUID? { nil }
     public var transportContextID: UUID? { nil }
 }

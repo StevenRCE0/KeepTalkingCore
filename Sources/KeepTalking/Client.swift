@@ -54,9 +54,8 @@ public enum KeepTalkingClientError: LocalizedError {
     /// In-flight call/sync/request rejected because the client is being
     /// torn down (e.g. `disconnect()`).
     case clientDisconnected
-    /// `makeVoiceSession` was called but the client has no SFU endpoint
-    /// configured. Voice requires SFU presence + signaling.
-    case noSFUEndpointConfigured
+    /// `connect()` while a connect is in flight or the client is connected.
+    case alreadyConnected
     case invalidSideNote(String)
     /// Message content exceeds what a single envelope can carry. Refused at
     /// creation: transport no longer fragments, so a message this large could
@@ -155,8 +154,8 @@ public enum KeepTalkingClientError: LocalizedError {
                     "Trust scope must include at least one context (or use \"all contexts\")."
             case .clientDisconnected:
                 return "Client is disconnecting; in-flight operation cancelled."
-            case .noSFUEndpointConfigured:
-                return "No SFU endpoint is configured for this client; voice requires SFU presence + signaling."
+            case .alreadyConnected:
+                return "The client is already connected or connecting."
             case .invalidSideNote(let detail):
                 return "Side note is invalid: \(detail)"
         }
@@ -233,7 +232,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let voiceCalls = KeepTalkingVoiceCallRegistry()
     var activeVoiceSession: KeepTalkingVoiceSession?
     let config: KeepTalkingConfig
-    let rtcClient: any KeepTalkingTransportClient
+    /// The process-wide transport this client attaches its context to.
+    let transport: KeepTalkingTransport
     let kvService: (any KeepTalkingKVService)?
     public let localStore: any KeepTalkingLocalStore
     public let keychain: any KeepTalkingKeychainStore
@@ -360,9 +360,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
     var handledTrustRequestSessionIDs: Set<UUID> = []
 
     // MARK: Blob request/response properties
-    let blobTransportQueue = KeepTalkingBlobTransportQueue()
-
-    let blobFrameProcessor = KeepTalkingBlobFrameProcessor()
+    /// Attachment blobs this client is pulling, and from whom.
+    let blobPulls = KeepTalkingBlobPullTracker()
+    /// One-time blobs this node holds for their recipients to pull.
+    let oneTimeBlobOutbox = KeepTalkingOneTimeBlobOutbox()
 
     /// Reassembles inbound one-time-blob (OTB) transfers — ephemeral, encrypted,
     /// point-to-point file payloads carried alongside action calls.
@@ -380,7 +381,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     /// Inbound attachment DTOs whose parent message hasn't been persisted yet.
     /// Message and attachment arrive as *separate* envelopes, each handled in
-    /// its own Task (see `rtcClient.onEnvelope`), so an attachment can land
+    /// its own Task (see `KeepTalkingClientConnection`), so an attachment can land
     /// before its message. Rather than drop it (which left live-received
     /// attachments missing until a later full resync repopulated them via
     /// `saveContext`), buffer it here keyed by `parentMessageID` and re-drive
@@ -388,11 +389,15 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let orphanAttachmentLock = NSLock()
     var orphanAttachmentsByParentMessageID: [UUID: [KeepTalkingContextAttachmentDTO]] = [:]
 
-    /// Creates a client with its transport and storage. AI runs take their
-    /// models per run — see `KeepTalkingAgentConfiguration`.
+    /// Creates a client for one context. AI runs take their models per run —
+    /// see `KeepTalkingAgentConfiguration`.
     ///
     /// - Parameters:
     ///   - config: Session configuration for the local node.
+    ///   - transport: The process-wide transport `connect()` attaches this
+    ///                context to. The host app owns one and hands it to every
+    ///                client; `.unavailable` (the default) suits a client
+    ///                that only reads the store and never connects.
     ///   - kvService: Optional KV backend used for node discovery and metadata.
     ///   - stdioTransportLauncher: Optional stdio transport launcher used for
     ///     MCP stdio actions.
@@ -410,8 +415,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     ///               keys, and credentials. Defaults to an in-memory store, which
     ///               forgets every secret on process exit; shipping hosts should
     ///               pass a persistent implementation.
-    public convenience init(
+    public init(
         config: KeepTalkingConfig,
+        transport: KeepTalkingTransport = .unavailable,
         kvService: (any KeepTalkingKVService)? = nil,
         stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
             DefaultMCPStdioTransportLauncher.current,
@@ -424,66 +430,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         localStore: any KeepTalkingLocalStore,
         keychain: any KeepTalkingKeychainStore = KeepTalkingInMemoryKeychainStore()
     ) {
-        self.init(
-            config: config,
-            kvService: kvService,
-            stdioTransportLauncher: stdioTransportLauncher,
-            skillScriptExecutor: skillScriptExecutor,
-            primitiveRegistry: primitiveRegistry,
-            logon: logon,
-            localStore: localStore,
-            keychain: keychain,
-            transport: nil
-        )
-    }
-
-    #if canImport(IrohLib)
-    /// Lab-only: a client whose transport is this context's attachment on a
-    /// shared iroh host (presence through the Rust `kt-sfu` hub, payloads
-    /// over iroh peer connections). Not a supported production path yet.
-    @_spi(TransportLab)
-    public convenience init(
-        config: KeepTalkingConfig,
-        kvService: (any KeepTalkingKVService)? = nil,
-        primitiveRegistry: KeepTalkingPrimitiveRegistry? = nil,
-        logon: UUID = UUID(),
-        localStore: any KeepTalkingLocalStore,
-        keychain: any KeepTalkingKeychainStore = KeepTalkingInMemoryKeychainStore(),
-        irohHost: KeepTalkingIrohTransportHost
-    ) {
-        self.init(
-            config: config,
-            kvService: kvService,
-            primitiveRegistry: primitiveRegistry,
-            logon: logon,
-            localStore: localStore,
-            keychain: keychain,
-            transport: KeepTalkingIrohContextTransport(
-                host: irohHost,
-                contextID: config.contextID,
-                nodeID: config.node
-            )
-        )
-    }
-    #endif
-
-    /// Designated initializer with the transport seam: `nil` builds the
-    /// production `KeepTalkingContextTransport`; tests inject a fake.
-    init(
-        config: KeepTalkingConfig,
-        kvService: (any KeepTalkingKVService)? = nil,
-        stdioTransportLauncher: (any MCPStdioTransportLaunching)? =
-            DefaultMCPStdioTransportLauncher.current,
-        skillScriptExecutor: (any SkillScriptExecuting)? =
-            DefaultSkillScriptExecutor.current,
-        primitiveRegistry: KeepTalkingPrimitiveRegistry? = nil,
-        logon: UUID = UUID(),
-        // No default: constructing a store is now async, and a default argument
-        // cannot await. Callers build the store first and inject it.
-        localStore: any KeepTalkingLocalStore,
-        keychain: any KeepTalkingKeychainStore = KeepTalkingInMemoryKeychainStore(),
-        transport: (any KeepTalkingTransportClient)?
-    ) {
+        self.transport = transport
         self.config = config
         self.kvService = kvService
         self.localStore = localStore
@@ -494,17 +441,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         livenessState = KeepTalkingContextLivenessState(
             localNode: config.node
         )
-        let rtcClient =
-            transport
-            ?? KeepTalkingContextTransport(
-                config: config,
-                livenessState: livenessState
-            )
-        self.rtcClient = rtcClient
-        (rtcClient as? any KeepTalkingLivenessBindableTransport)?.bindLiveness(livenessState)
-        // The box needs the transport's first stats sample, so it is built
-        // right after the transport and before anything that logs.
-        let signals = KeepTalkingClientSignals(initialTransportStats: rtcClient.runtimeStats())
+        let signals = KeepTalkingClientSignals()
         self.signals = signals
         self.onLog = { [log = signals.log] in log.send($0) }
         self.agentCoordinator = AgentCoordinator(runs: signals.agentRuns)
@@ -590,7 +527,6 @@ public final class KeepTalkingClient: @unchecked Sendable {
             }
         }
 
-        rtcClient.onLog = onLog
         Task { [weak self] in
             guard let self else { return }
             await self.skillManager.setLogHandler(self.onLog)
@@ -598,9 +534,8 @@ public final class KeepTalkingClient: @unchecked Sendable {
         }
 
         // Resolve the lazy connection on the init thread for the same reason
-        // as the delegation coordinator, then hand it the transport callbacks.
+        // as the delegation coordinator.
         _ = connection
-        connection.bindTransport()
     }
 
     public func isNodeOnline(_ node: UUID) -> Bool {
@@ -682,31 +617,27 @@ public final class KeepTalkingClient: @unchecked Sendable {
         }
     }
 
-    /// Starts transports and persists local node state. `lifecycle` reports
-    /// every step; see `KeepTalkingClientConnection` for the sequence.
+    /// Attaches this context to the process-wide transport and persists
+    /// local node state. `lifecycle` reports every step; see
+    /// `KeepTalkingClientConnection` for the sequence. Throws
+    /// `KeepTalkingClientError.alreadyConnected` when already connected or
+    /// connecting.
     ///
     /// Registering local action executors is intentionally NOT part of connect:
     /// a failing executor (e.g. an HTTP MCP server that needs re-auth) must never
-    /// block bringing the transport up or pop a blocking auth prompt as a side
-    /// effect of connecting. Callers that want executors live should invoke
+    /// block connecting or pop a blocking auth prompt as a side effect of
+    /// connecting. Callers that want executors live should invoke
     /// `registerLocalActionsInExecutors()` explicitly (the App and CLI do, off
     /// the connection path); the daemon opts out.
     public func connect() async throws {
         try await connection.connect()
     }
 
-    /// Stops transports and fails any pending remote requests. Returns before
-    /// the WebRTC teardown completes (it joins worker threads, so it runs on a
-    /// detached task); `lifecycle` publishes `.idle` once it has, and a
-    /// subsequent `connect()` awaits it. Silent on an already-idle client.
+    /// Detaches this context from the shared transport and fails any pending
+    /// remote requests. Synchronous: `lifecycle` reads `idle` when it
+    /// returns. Silent on an already-idle client.
     public func disconnect() {
         connection.disconnect()
-    }
-
-    /// Awaitable variant of `disconnect()` that returns once the transport
-    /// has fully torn down (`signals.lifecycle.current.phase == .idle`).
-    public func disconnectAndWait() async {
-        await connection.disconnectAndWait()
     }
 
     /// Installs a callback for HTTP-based MCP authorization flows.
@@ -757,40 +688,16 @@ public final class KeepTalkingClient: @unchecked Sendable {
     }
     #endif
 
-    /// Returns the current transport statistics for diagnostics and UI.
+    /// This context's traffic on the shared transport, for diagnostics and UI.
     public func runtimeStats() -> KeepTalkingRuntimeStats {
-        rtcClient.runtimeStats()
+        connection.runtimeStats()
     }
 
-    /// Asks the transport to attempt a direct P2P connection.
-    public func requestP2PTrial() {
-        rtcClient.requestP2PTrial()
-    }
-
-    // MARK: - Transport health
-
-    /// Reads `TransportHealth` from the transport's current broadcast state.
-    /// Pure read, no I/O. `signals.lifecycle.current.transport` is the last *reported*
-    /// state; this is the live one.
-    public func transportHealth() -> TransportHealth {
-        connection.transportHealth()
-    }
-
-    /// Actively confirms a `.healthy` backbone is really carrying bytes, not
-    /// wedged open (e.g. the keepalive task starved across a long suspend).
-    /// Returns `true` if inbound traffic advanced within `timeout`, `false`
-    /// on timeout (wedged → caller should re-establish). Only worth calling
-    /// when `transportHealth() == .healthy`.
-    public func probeTransport(timeout: Duration = .milliseconds(2500)) async -> Bool {
-        await connection.probeTransport(timeout: timeout)
-    }
-
-    /// Tears the transport down and brings it back up **on this same client
-    /// instance**, preserving every object that captured the client — most
-    /// importantly an `activeVoiceSession`. `lifecycle` reads
-    /// `disconnecting → connecting → connected` with no `idle` in between.
-    public func reestablishTransport() async throws {
-        try await connection.reestablishTransport()
+    /// How this context's room is doing now. `signals.lifecycle.current.transport`
+    /// is the last *reported* status; this is the live one. Recovery is the
+    /// shared transport's job, never a client's.
+    public func transportStatus() -> KeepTalkingTransportStatus {
+        connection.transportStatus()
     }
 
     func isConnectionActive(_ generation: UInt64) -> Bool {
@@ -802,7 +709,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     }
 
     func debug(_ message: String) {
-        rtcClient.debug(message)
+        onLog?("[client \(config.contextID.uuidString.prefix(8))] \(message)")
     }
 
     /// Waits for the background work `init` started against the store. Call

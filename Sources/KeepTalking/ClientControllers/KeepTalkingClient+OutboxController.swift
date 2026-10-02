@@ -4,7 +4,7 @@ import Foundation
 /// Low-level delivery ledger for messages that already exist locally.
 /// `KeepTalkingClient.persistAndBroadcastMessage` creates an entry after
 /// persisting the outgoing message and its attachments; the entry is removed
-/// once `rtcClient.sendEnvelope` accepts the envelopes.
+/// once the room accepts the envelopes.
 ///
 /// The send pipeline attempts an immediate push after enqueueing — the row
 /// only survives while channels are not open, or indefinitely if delivery
@@ -43,7 +43,7 @@ extension KeepTalkingClient {
         }
     }
 
-    /// Removes the outbox row after a successful `rtcClient.sendEnvelope`.
+    /// Removes the outbox row after the room accepted its envelopes.
     func clearOutboxEntry(contextMessageID: UUID) async {
         do {
             try await KeepTalkingOutboxEntry.query(on: localStore.database)
@@ -58,9 +58,10 @@ extension KeepTalkingClient {
 
     // MARK: - Drain
 
-    /// Re-attempts delivery for every queued row. Called on transport state
-    /// changes (peer connect, broadcast ready) and after each fresh enqueue.
-    /// Failures are logged but don't stop the drain.
+    /// Re-attempts delivery for every queued row. Called when the room can
+    /// take sends again (`readyToSend`), on a peer coming online, and after
+    /// each fresh enqueue. A room that can't take sends stops the drain; the
+    /// next `readyToSend` resumes it. Other failures are logged per row.
     func drainOutbox() async {
         let rows: [KeepTalkingOutboxEntry]
         do {
@@ -88,9 +89,9 @@ extension KeepTalkingClient {
                 // row (the message row itself stays) so the drain stays honest.
                 guard case .envelopeTooLarge(_, let bytes, let limit) = error else {
                     onLog?(
-                        "[outbox] redelivery failed messageID=\(messageID.uuidString.lowercased()) error=\(error.localizedDescription)"
+                        "[outbox] drain paused messageID=\(messageID.uuidString.lowercased()) error=\(error.localizedDescription)"
                     )
-                    continue
+                    return
                 }
                 onLog?(
                     "[outbox] dropping undeliverable entry messageID=\(messageID.uuidString.lowercased()) bytes=\(bytes) limit=\(limit) — exceeds the envelope ceiling and cannot succeed on retry"
@@ -116,16 +117,15 @@ extension KeepTalkingClient {
         else {
             throw KeepTalkingOutboxError.messageNotFound(messageID)
         }
-        try rtcClient.sendEnvelope(message)
+        try sendEnvelope(message)
 
         try await message.$attachments.load(on: localStore.database)
         for attachment in message.attachments {
             guard let dto = KeepTalkingContextAttachmentDTO(attachment) else {
                 continue
             }
-            try rtcClient.sendEnvelope(dto)
+            try sendEnvelope(dto)
         }
-        scheduleOutgoingBlobTransfers(for: message.attachments)
     }
 }
 

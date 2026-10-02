@@ -11,7 +11,7 @@ extension KeepTalkingEnvelopeAsyncHandlers {
     mutating func registerMessagingHandlers(for client: KeepTalkingClient) {
         onMessage { (message: KeepTalkingContextMessage) async throws -> Bool in
             let applied = try await client.handleIncomingMessage(message)
-            client.rtcClient.debug("Message cast to envelope")
+            client.debug("Message cast to envelope")
             return applied
         }
         onAttachment {

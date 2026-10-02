@@ -32,7 +32,7 @@ struct KeepTalkingPendingTrustSession: @unchecked Sendable {
 }
 
 extension KeepTalkingClient {
-    // MARK: Receive entry point (called from ContextTransport via Client.swift)
+    // MARK: Receive entry point (called for trust kinds by `handleTransportEnvelope`)
 
     func handleIncomingTrustEnvelope(_ envelope: any KeepTalkingEnvelope) async {
         do {
@@ -77,7 +77,7 @@ extension KeepTalkingClient {
         guard let handler = trustQueue.sync(execute: { incomingTrustHandler }) else {
             // No app handler installed: explicitly reject so the peer doesn't
             // hang waiting for a TTL.
-            try? rtcClient.sendEnvelope(
+            try? sendEnvelope(
                 KeepTalkingTrustRejectPayload(
                     sessionID: payload.sessionID,
                     from: config.node,
@@ -102,7 +102,7 @@ extension KeepTalkingClient {
             handledTrustRequestSessionIDs.insert(payload.sessionID).inserted
         }
         guard claimed else {
-            rtcClient.debug(
+            debug(
                 "duplicate trust request ignored session=\(payload.sessionID.uuidString.prefix(8))"
             )
             return
@@ -127,7 +127,7 @@ extension KeepTalkingClient {
 
         switch decision {
             case .decline:
-                try rtcClient.sendEnvelope(
+                try sendEnvelope(
                     KeepTalkingTrustRejectPayload(
                         sessionID: payload.sessionID,
                         from: config.node,
@@ -208,7 +208,7 @@ extension KeepTalkingClient {
             responderEphemeralPub: ephemeral.publicKeyBytes,
             sealedIdentity: sealedIdentity
         )
-        try rtcClient.sendEnvelope(acceptEnvelope)
+        try sendEnvelope(acceptEnvelope)
     }
 
     private func onTrustAccept(_ payload: KeepTalkingTrustAcceptPayload) async throws {
@@ -290,7 +290,7 @@ extension KeepTalkingClient {
             contextID: session.contextID,
             sealedIdentity: mySealed
         )
-        try rtcClient.sendEnvelope(complete)
+        try sendEnvelope(complete)
 
         settleSession(
             sessionID: session.sessionID,

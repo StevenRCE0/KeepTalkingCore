@@ -4,6 +4,9 @@ import KeepTalkingSDK
 final class KeepTalkingCLIController {
     let cliConfig: CliConfig
     let localStore: any KeepTalkingLocalStore
+    /// The process-wide transport every context's client attaches to.
+    /// Switching contexts swaps clients; the transport stays up.
+    let transport: KeepTalkingTransport
 
     var currentConfig: KeepTalkingConfig
     var client: KeepTalkingClient
@@ -13,13 +16,28 @@ final class KeepTalkingCLIController {
     init(cliConfig: CliConfig, localStore: any KeepTalkingLocalStore) {
         self.cliConfig = cliConfig
         self.localStore = localStore
+        self.transport = Self.makeTransport(cliConfig)
         self.currentConfig = cliConfig.sdkConfig
         self.agentSelection = KeepTalkingCLIAgentSelection(cliConfig: cliConfig)
         self.client = KeepTalkingClient(
             config: cliConfig.sdkConfig,
+            transport: transport,
             localStore: localStore
         )
         self.activeContext = KeepTalkingContext(id: cliConfig.sdkConfig.contextID)
+    }
+
+    private static func makeTransport(_ cliConfig: CliConfig) -> KeepTalkingTransport {
+        #if canImport(IrohLib)
+        guard let relayURL = cliConfig.relayURL else { return .unavailable }
+        return .iroh(
+            KeepTalkingIrohTransportHost(
+                configuration: .init(relayURL: relayURL, sfuEndpointID: cliConfig.sfuEndpointID)
+            )
+        )
+        #else
+        return .unavailable
+        #endif
     }
 
     static func writeStderr(_ message: String) {
@@ -29,10 +47,6 @@ final class KeepTalkingCLIController {
     static func main() async {
         do {
             let cliConfig = try CliConfig.parse()
-            if let sfuJuice = cliConfig.sfuJuiceEndpoint {
-                await SFUJuiceCommand.run(cliConfig: cliConfig, endpoint: sfuJuice)
-                return  // SFUJuiceCommand exits the process; unreachable
-            }
             let localStore = try await makeLocalStore(
                 databaseURL: cliConfig.databaseURL)
             let controller = KeepTalkingCLIController(
@@ -62,10 +76,6 @@ final class KeepTalkingCLIController {
     private func run() async throws {
         bindCallbacks(to: client)
 
-        if cliConfig.diagnose {
-            await runDiagnose()
-            return  // runDiagnose() exits the process; this is unreachable
-        }
         if let mcpCommand = cliConfig.mcpCommand {
             try await runMCPManagementCommand(mcpCommand)
             return
@@ -128,24 +138,17 @@ final class KeepTalkingCLIController {
                 print(renderMessage(message))
             }
         }
-        targetClient.rawMessages.observe { raw in
-            print("[remote/raw] \(raw)")
-        }
     }
 
     func printRuntimeConfig(_ config: KeepTalkingConfig) {
-        if let endpoint = config.sfuEndpoint {
-            print("Connecting to KeepTalkingSFU \(endpoint.host):\(endpoint.port)")
+        if let relayURL = cliConfig.relayURL {
+            print("Transport: iroh via \(relayURL)\(cliConfig.sfuEndpointID.map { ", SFU \($0.prefix(10))" } ?? "")")
         } else {
-            print("KeepTalkingSFU endpoint is not configured")
+            print("Transport: none (no --relay); local commands only")
         }
         print(
-            "Session=\(config.scopedSessionID) Node=\(config.node.uuidString.lowercased()) Context=\(config.contextID.uuidString.lowercased())"
+            "Node=\(config.node.uuidString.lowercased()) Context=\(config.contextID.uuidString.lowercased())"
         )
-        print(
-            "Channels: signaling=\(config.signalingChannelLabel) chat=\(config.chatChannelLabel) action_call=\(config.actionCallChannelLabel)"
-        )
-        print("P2P HTTP/2 upgrade timeout=\(Int(config.p2pAttemptTimeoutSeconds))s")
         if let databaseURL = cliConfig.databaseURL {
             print("DB=\(databaseURL.path)")
         }
@@ -156,7 +159,7 @@ final class KeepTalkingCLIController {
 
     func printConnectedBanner() {
         print(
-            "Connected. Commands: /new, /join <context-id>, /trust <node-id> [all|context|<context-id>], /lure <node-id> <pubkey>, /actions list, /actions grant <node-id> <action-id> [context|all], /mcp add http <name> <url> [--header KEY=VALUE ...] [description], /mcp add stdio <name> [--env KEY=VALUE ...] -- <command> [args...], /mcp list, /mcp remove <action-id>, /skill add directory <name> <path> [description], /skill list, /skill remove <action-id>, /p2p, /stats, /quit, /ai <message>, /model [act] [<id>|reset]."
+            "Connected. Commands: /new, /join <context-id>, /trust <node-id> [all|context|<context-id>], /lure <node-id> <pubkey>, /actions list, /actions grant <node-id> <action-id> [context|all], /mcp add http <name> <url> [--header KEY=VALUE ...] [description], /mcp add stdio <name> [--env KEY=VALUE ...] -- <command> [args...], /mcp list, /mcp remove <action-id>, /skill add directory <name> <path> [description], /skill list, /skill remove <action-id>, /stats, /quit, /ai <message>, /model [act] [<id>|reset]."
         )
     }
 }

@@ -2,22 +2,25 @@
 import Foundation
 import IrohLib
 
-/// Peer links: dialling, accepting, the per-link pump that drains member
-/// queues, reading frames, hellos, and what happens when a link closes or
-/// loses its paths.
+/// Peer links (`keeptalking/peer/2`): dialling, accepting, a pump per lane
+/// that drains member queues, reading lane and blob streams, hellos, blob
+/// transfers, and what happens when a link closes or loses its paths.
 extension KeepTalkingIrohTransportHost {
     typealias LinkKind = KeepTalkingIrohLinkTable.Kind
 
     // MARK: - Dialling
 
-    /// Dials `endpointID` when it's wanted, it's our turn and backoff allows;
-    /// the other side waits for us.
+    /// Dials `endpointID` when a link is wanted (its room is on the mesh, or
+    /// something demands one), it's our turn and backoff allows; the other
+    /// side waits for us.
     func ensureLink(to endpointID: Data, kind: LinkKind) {
         let now = clock.now
         let token = state.withLockedValue { state -> UInt64? in
             let myID = kind == .network ? state.myEndpointID : state.bluetooth.myID
             let endpoint = kind == .network ? state.endpoint : state.bluetooth.endpoint
-            guard !state.isShutDown, endpoint != nil, let myID, state.isWanted(endpointID) else { return nil }
+            guard !state.isShutDown, endpoint != nil, let myID, state.wantsDial(endpointID, now: now) else {
+                return nil
+            }
             return state.table.beginDial(to: endpointID, kind: kind, myID: myID, now: now)
         }
         guard let token else { return }
@@ -31,8 +34,9 @@ extension KeepTalkingIrohTransportHost {
     private func dialLoop(_ endpointID: Data, kind: LinkKind, token: UInt64) async {
         var attempt = 0
         while !Task.isCancelled {
+            let now = clock.now
             let endpoint = state.withLockedValue { state -> Endpoint? in
-                guard state.table.ownsDial(endpointID, token: token), state.isWanted(endpointID) else {
+                guard state.table.ownsDial(endpointID, token: token), state.wantsDial(endpointID, now: now) else {
                     return nil
                 }
                 state.table.noteDialAttempt(endpointID, token: token)
@@ -119,7 +123,13 @@ extension KeepTalkingIrohTransportHost {
     ) {
         let stableID = connection.stableId()
         let now = clock.now
-        let (doorbell, bell) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        var doorbells: [Lane: AsyncStream<Void>] = [:]
+        var bells: [Lane: AsyncStream<Void>.Continuation] = [:]
+        for lane in Lane.allCases {
+            let (doorbell, bell) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+            doorbells[lane] = doorbell
+            bells[lane] = bell
+        }
         let outcome = mutateLinks(touching: [endpointID]) { state -> (installed: Bool, replaced: LinkIO?) in
             guard !state.isShutDown, kind == .network || state.bluetooth.endpoint != nil else {
                 return (false, nil)
@@ -137,21 +147,35 @@ extension KeepTalkingIrohTransportHost {
             let previous = state.io[endpointID]
             // A dial slot's io holds only the dial task, which is finishing.
             let replaced = replacedID == nil ? nil : previous
-            state.io[endpointID] = LinkIO(connection: connection, doorbell: bell)
+            state.io[endpointID] = LinkIO(connection: connection, doorbells: bells)
             return (true, replaced)
         }
         guard outcome.installed else {
-            bell.finish()
+            bells.values.forEach { $0.finish() }
             try? connection.close(errorCode: 0, reason: Data("unwanted".utf8))
             return
         }
         if let replaced = outcome.replaced { Self.tearDown(replaced, reason: "superseded") }
 
+        // Two long-lived lanes plus bulk and blob streams in flight.
+        try? connection.setMaxConcurrentUniStreams(count: 64)
         let watcher = LinkPathWatcher(host: self, endpointID: endpointID, stableID: stableID)
         let watch = connection.watchPathEvents(callback: watcher)
-        let tasks = [
-            Task { await self.pump(endpointID, stableID: stableID, connection: connection, doorbell: doorbell) },
-            Task { await self.readLoop(endpointID, stableID: stableID, connection: connection) },
+        let laneDoorbells = doorbells
+        var tasks = Lane.allCases.map { lane in
+            let doorbell = laneDoorbells[lane]!
+            return Task {
+                await self.lanePump(
+                    endpointID,
+                    stableID: stableID,
+                    connection: connection,
+                    lane: lane,
+                    doorbell: doorbell
+                )
+            }
+        }
+        tasks += [
+            Task { await self.acceptStreams(endpointID, connection: connection) },
             Task { await self.datagramLoop(endpointID, connection: connection) },
             Task { await self.watchClosed(endpointID, connection: connection) },
         ]
@@ -168,30 +192,37 @@ extension KeepTalkingIrohTransportHost {
         log(
             "\(kind.rawValue) peer \(Self.hex(endpointID).prefix(10)) \(side.rawValue) in \(Self.ms(now - started)) via \(Self.selectedPath(connection))"
         )
-        bell.yield()
+        bells.values.forEach { $0.yield() }
         sendHello(to: [endpointID])
     }
 
-    // MARK: - Pump, read, datagrams
+    // MARK: - Pumps, streams, datagrams
 
-    /// Writes what's queued for this link: its own frames (hellos), then the
-    /// queues of the members it carries. Wakes on its doorbell.
-    private func pump(
+    /// Writes one lane of this link: control carries the link's own frames
+    /// (hellos) first, then each lane carries the queues of the members this
+    /// link carries. Control and interactive ride one long-lived stream each;
+    /// every bulk frame gets a stream of its own.
+    private func lanePump(
         _ endpointID: Data,
         stableID: UInt64,
         connection: Connection,
+        lane: Lane,
         doorbell: AsyncStream<Void>
     ) async {
+        let streamType = KeepTalkingIrohPeerFrame.StreamType.lane(lane)
+        var stream: SendStream?
         do {
-            let send = try await connection.openUni()
             for await _ in doorbell {
                 while true {
                     let batch = state.withLockedValue { state -> [Data]? in
                         guard state.table.isCurrent(endpointID, stableID: stableID) else { return nil }
-                        let own = state.outbound.drain(Self.linkQueue(endpointID))
-                        if !own.isEmpty { return own }
+                        let limit = lane == .bulk ? 1 : 512 * 1024
+                        if lane == .control {
+                            let own = state.outbound.drain(Self.linkQueue(endpointID), upTo: limit)
+                            if !own.isEmpty { return own }
+                        }
                         for main in state.carried(by: endpointID) {
-                            let batch = state.outbound.drain(main)
+                            let batch = state.outbound.drain(Self.memberQueue(main, lane), upTo: limit)
                             if !batch.isEmpty { return batch }
                         }
                         return []
@@ -199,7 +230,22 @@ extension KeepTalkingIrohTransportHost {
                     guard let batch else { return }
                     if batch.isEmpty { break }
                     for frame in batch {
-                        try await send.writeAll(buf: frame)
+                        if lane == .bulk {
+                            let bulk = try await connection.openUni()
+                            try await bulk.setPriority(p: KeepTalkingIrohPeerFrame.priority(streamType))
+                            var bytes = Data([streamType.preamble])
+                            bytes.append(frame)
+                            try await bulk.writeAll(buf: bytes)
+                            try await bulk.finish()
+                        } else {
+                            if stream == nil {
+                                let opened = try await connection.openUni()
+                                try await opened.setPriority(p: KeepTalkingIrohPeerFrame.priority(streamType))
+                                try await opened.writeAll(buf: Data([streamType.preamble]))
+                                stream = opened
+                            }
+                            try await stream?.writeAll(buf: frame)
+                        }
                     }
                     let bytes = batch.reduce(0) { $0 + $1.count }
                     state.withLockedValue { state in
@@ -210,7 +256,7 @@ extension KeepTalkingIrohTransportHost {
                     }
                 }
             }
-            try? await send.finish()
+            try? await stream?.finish()
         } catch {
             if connection.closeReason() == nil {
                 log("peer \(Self.hex(endpointID).prefix(10)) write: \(error.localizedDescription)")
@@ -219,22 +265,51 @@ extension KeepTalkingIrohTransportHost {
         }
     }
 
-    private func readLoop(_ endpointID: Data, stableID: UInt64, connection: Connection) async {
+    /// Takes the peer's streams as they open and reads each by its preamble.
+    private func acceptStreams(_ endpointID: Data, connection: Connection) async {
+        while !Task.isCancelled {
+            guard let recv = try? await connection.acceptUni() else { return }
+            Task { await self.readStream(recv, from: endpointID, connection: connection) }
+        }
+    }
+
+    private func readStream(_ recv: RecvStream, from endpointID: Data, connection: Connection) async {
         do {
-            let recv = try await connection.acceptUni()
-            while !Task.isCancelled {
-                let prefix = try await recv.readExact(size: 4)
-                // Until a link shows it shares a context, its frames stay small.
-                let proven = state.withLockedValue { $0.membership.isMember(endpointID) }
-                guard let length = KeepTalkingIrohPeerFrame.bodyLength(fromPrefix: prefix, proven: proven) else {
-                    throw HostError.malformedFrame
-                }
-                let body = try await recv.readExact(size: UInt32(length))
-                handlePeerFrame(body, from: endpointID)
+            guard let preamble = try await recv.readExact(size: 1).first,
+                let type = KeepTalkingIrohPeerFrame.StreamType(preamble: preamble)
+            else { throw HostError.malformedFrame }
+            switch type {
+                case .lane(let lane):
+                    while let prefix = try await Self.readPrefixOrEnd(recv) {
+                        // Until a link shows it shares a context, its frames
+                        // stay small.
+                        let proven = state.withLockedValue { $0.membership.isMember(endpointID) }
+                        guard
+                            let length = KeepTalkingIrohPeerFrame.bodyLength(fromPrefix: prefix, proven: proven)
+                        else { throw HostError.malformedFrame }
+                        let body = try await recv.readExact(size: UInt32(length))
+                        handlePeerFrame(body, from: endpointID)
+                        if lane == .bulk { return }
+                    }
+                case .blob:
+                    let topic = try await recv.readExact(size: UInt32(KeepTalkingIrohSFUFrame.topicLength))
+                    let route = state.withLockedValue { state -> (KeepTalkingIrohAttachment, UUID)? in
+                        guard let sink = state.attachments[topic]?.sink,
+                            let nodeID = state.membership.nodeID(for: endpointID, in: topic)
+                        else { return nil }
+                        return (sink, nodeID)
+                    }
+                    // Only members of the topic may hand us blob bytes.
+                    guard let route else {
+                        try? await recv.stop(errorCode: 1)
+                        return
+                    }
+                    route.0.deliverBlobStream(KeepTalkingIrohBlobStream.Reader(recv), from: route.1)
             }
         } catch {
-            // Without its read side the peer's writes go nowhere: end the
-            // connection so the link falls back and redials.
+            // A broken long-lived lane leaves the peer's writes going nowhere:
+            // end the connection so the link falls back and redials.
+            try? await recv.stop(errorCode: 1)
             if connection.closeReason() == nil {
                 log("peer \(Self.hex(endpointID).prefix(10)) read: \(error.localizedDescription)")
                 try? connection.close(errorCode: 1, reason: Data("read failed".utf8))
@@ -242,12 +317,21 @@ extension KeepTalkingIrohTransportHost {
         }
     }
 
+    /// The next 4-byte length prefix, or nil when the stream ended cleanly
+    /// between frames.
+    static func readPrefixOrEnd(_ recv: RecvStream) async throws -> Data? {
+        let first = try await recv.read(sizeLimit: 4)
+        if first.isEmpty { return nil }
+        if first.count == 4 { return first }
+        return first + (try await recv.readExact(size: UInt32(4 - first.count)))
+    }
+
     private func datagramLoop(_ endpointID: Data, connection: Connection) async {
         while !Task.isCancelled {
             guard let datagram = try? await connection.readDatagram() else { return }
             guard let split = KeepTalkingIrohSFUFrame.splitDatagram(datagram) else { continue }
             let (topic, payload) = split
-            let route = state.withLockedValue { state -> (KeepTalkingIrohContextTransport, UUID?)? in
+            let route = state.withLockedValue { state -> (KeepTalkingIrohAttachment, UUID?)? in
                 state.table.update(endpointID) { $0.datagramsReceived += 1 }
                 guard let sink = state.attachments[topic]?.sink else { return nil }
                 return (sink, state.membership.nodeID(for: endpointID, in: topic))
@@ -274,7 +358,7 @@ extension KeepTalkingIrohTransportHost {
         }
         guard let closed else { return }
         let (io, redial) = closed
-        io?.doorbell?.finish()
+        io?.doorbells.values.forEach { $0.finish() }
         io?.tasks.forEach { $0.cancel() }
         log("peer \(Self.hex(endpointID).prefix(10)) closed: \(reason)")
         if let redial { ensureLink(to: endpointID, kind: redial) }
@@ -331,7 +415,7 @@ extension KeepTalkingIrohTransportHost {
             handleHello(frame.payload, from: endpointID)
             return
         }
-        let route = state.withLockedValue { state -> (KeepTalkingIrohContextTransport, UUID?)? in
+        let route = state.withLockedValue { state -> (KeepTalkingIrohAttachment, UUID?)? in
             state.table.update(endpointID) {
                 $0.framesReceived += 1
                 $0.bytesReceived += body.count + 4
@@ -373,7 +457,7 @@ extension KeepTalkingIrohTransportHost {
             endpointIDs.compactMap { id -> AsyncStream<Void>.Continuation? in
                 guard state.table.links[id]?.isConnected == true else { return nil }
                 state.outbound.enqueue(frame, for: Self.linkQueue(id))
-                return state.io[id]?.doorbell
+                return state.io[id]?.doorbells[.control]
             }
         }
         doorbells.forEach { $0.yield() }
@@ -459,7 +543,7 @@ extension KeepTalkingIrohTransportHost {
         var learned: [(nodeID: UUID, main: Data, bluetooth: Data?, isNew: Bool)] = []
         var rejected: [String] = []
         var departures: [KeepTalkingIrohMembership.Departure] = []
-        var departedSinks: [KeepTalkingIrohContextTransport?] = []
+        var departedSinks: [KeepTalkingIrohAttachment?] = []
         var stranger = false
         var orphans: [LinkIO] = []
     }
