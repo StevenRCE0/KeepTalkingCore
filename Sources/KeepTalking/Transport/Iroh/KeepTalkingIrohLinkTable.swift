@@ -2,7 +2,8 @@ import Foundation
 
 /// Peer-link bookkeeping without the iroh objects: whose turn it is to dial,
 /// which dial attempt may fill a slot, which connection is current, path
-/// loss, redial backoff and hello pacing. Pure, so it is unit-tested.
+/// loss, silence, redial backoff, and hello and ping pacing. Pure, so it is
+/// unit-tested.
 ///
 /// iroh calls can't be cancelled from Swift, so a dial or accept may finish
 /// after the host stopped wanting it. Every dial owns its slot through a
@@ -24,7 +25,14 @@ struct KeepTalkingIrohLinkTable: Sendable {
         /// Every path of the connection closed: it carries nothing until one
         /// reopens or QUIC gives up on it.
         var pathless = false
+        /// A network link nothing came over for `silenceAfter`, pings
+        /// included: the peer is gone though QUIC hasn't noticed yet (it
+        /// keeps a relay path for 30 s). It carries nothing until a frame
+        /// arrives.
+        var silent = false
         var connectedAt: Instant?
+        var lastHeardAt: Instant?
+        var lastPingAt: Instant?
         var lastHelloAt: Instant?
         var dialAttempts = 0
         var connectLatency: Duration?
@@ -65,7 +73,7 @@ struct KeepTalkingIrohLinkTable: Sendable {
     }
 
     func isCarrying(_ id: Data) -> Bool {
-        links[id].map { $0.isConnected && !$0.pathless } ?? false
+        links[id].map { $0.isConnected && !$0.pathless && !$0.silent } ?? false
     }
 
     func isCurrent(_ id: Data, stableID: UInt64) -> Bool {
@@ -118,6 +126,7 @@ struct KeepTalkingIrohLinkTable: Sendable {
         var link = Link(kind: kind, side: side)
         link.stableID = stableID
         link.connectedAt = now
+        link.lastHeardAt = now
         link.connectLatency = latency
         link.dialAttempts = previous?.dialAttempts ?? 0
         links[id] = link
@@ -151,6 +160,43 @@ struct KeepTalkingIrohLinkTable: Sendable {
         guard isCurrent(id, stableID: stableID), links[id]?.pathless != pathless else { return false }
         links[id]?.pathless = pathless
         return true
+    }
+
+    /// Something arrived on the link. Returns whether it was silent, so the
+    /// caller flips it back with `setSilent` where reroutes are tracked.
+    mutating func heard(_ id: Data, now: Instant) -> Bool {
+        guard links[id]?.isConnected == true else { return false }
+        links[id]?.lastHeardAt = now
+        return links[id]?.silent == true
+    }
+
+    /// Returns whether it changed.
+    mutating func setSilent(_ id: Data, _ silent: Bool) -> Bool {
+        guard links[id]?.isConnected == true, links[id]?.silent != silent else { return false }
+        links[id]?.silent = silent
+        return true
+    }
+
+    /// Connected network links nothing came over for `after`, not yet
+    /// marked silent.
+    func gone(now: Instant, after: Duration) -> [Data] {
+        links.compactMap { id, link in
+            guard link.kind == .network, link.isConnected, !link.silent,
+                let heard = link.lastHeardAt, now - heard >= after
+            else { return nil }
+            return id
+        }
+    }
+
+    /// Connected network links due a ping; marks them pinged.
+    mutating func pingsDue(now: Instant, every interval: Duration) -> [Data] {
+        let due = links.compactMap { id, link -> Data? in
+            guard link.kind == .network, link.isConnected else { return nil }
+            if let last = link.lastPingAt, now - last < interval { return nil }
+            return id
+        }
+        for id in due { links[id]?.lastPingAt = now }
+        return due
     }
 
     /// Whether to take in a hello now; at most one per `interval` per link.

@@ -3,6 +3,7 @@ import Foundation
 import IrohLib
 import NIOConcurrencyHelpers
 import Network
+import os
 
 /// The process-wide transport: one per process, owned by the host app and
 /// handed to every client as `KeepTalkingTransport.iroh(host)`. Each client's
@@ -162,6 +163,11 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     static let helloInterval: Duration = .seconds(1)
     /// An SFU write making no progress this long means a dead session.
     static let sfuStallTimeout: Duration = .seconds(20)
+    /// Network links ping this often…
+    static let pingInterval: Duration = .seconds(2)
+    /// …and one that heard nothing for this long stops carrying, and counts
+    /// as a failing network for the Bluetooth gate. QUIC alone takes 30 s.
+    static let silenceAfter: Duration = .seconds(6)
     /// Bytes of the key a Bluetooth advert carries.
     static let bluetoothPrefixLength = 12
     /// A nearby device that served no identity is asked again after this.
@@ -532,7 +538,12 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     // MARK: - Log
 
+    static let logger = Logger(subsystem: "KeepTalkingSDK", category: "transport")
+
+    /// Records an event for `instruments()`, and in the system log (Xcode's
+    /// console) under KeepTalkingSDK / transport.
     func log(_ text: String) {
+        Self.logger.info("\(text, privacy: .public)")
         state.withLockedValue { state in
             state.nextEventID += 1
             state.events.append(.init(id: state.nextEventID, at: Date(), text: text))

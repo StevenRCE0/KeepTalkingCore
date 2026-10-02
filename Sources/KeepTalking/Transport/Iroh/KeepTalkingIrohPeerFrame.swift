@@ -24,7 +24,12 @@ enum KeepTalkingIrohPeerFrame {
     enum Kind: UInt8, Sendable {
         case envelope = 0x01
         case hello = 0x05
+        /// Empty, no topic, every `pingInterval` on network links: proves the
+        /// peer is still there faster than QUIC notices it isn't.
+        case ping = 0x06
     }
+
+    static let ping = encode(kind: .ping, topic: Data(count: KeepTalkingIrohSFUFrame.topicLength), payload: Data())
 
     typealias Lane = KeepTalkingEnvelopeDelivery.Lane
 

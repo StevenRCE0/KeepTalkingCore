@@ -60,7 +60,9 @@ extension KeepTalkingIrohTransportHost {
                 log(
                     "dial \(kind.rawValue) \(Self.hex(endpointID).prefix(10)) failed (#\(attempt)): \(error.localizedDescription)"
                 )
-                try? await Task.sleep(for: .seconds(min(1 << min(attempt, 4), 16)))
+                // A Bluetooth dial fails at once while the other side's radio
+                // is paused, and that side may claim it any second.
+                try? await Task.sleep(for: kind == .bluetooth ? .seconds(3) : .seconds(min(1 << min(attempt, 4), 16)))
             }
         }
         state.withLockedValue { state in
@@ -329,6 +331,7 @@ extension KeepTalkingIrohTransportHost {
     private func datagramLoop(_ endpointID: Data, connection: Connection) async {
         while !Task.isCancelled {
             guard let datagram = try? await connection.readDatagram() else { return }
+            noteHeard(endpointID)
             guard let split = KeepTalkingIrohSFUFrame.splitDatagram(datagram) else { continue }
             let (topic, payload) = split
             let route = state.withLockedValue { state -> (KeepTalkingIrohAttachment, UUID?)? in
@@ -407,10 +410,20 @@ extension KeepTalkingIrohTransportHost {
 
     // MARK: - Frames
 
+    /// Something arrived from `endpointID`: a silent link carries again.
+    private func noteHeard(_ endpointID: Data) {
+        let now = clock.now
+        guard state.withLockedValue({ $0.table.heard(endpointID, now: now) }) else { return }
+        let changed = mutateLinks(touching: [endpointID]) { $0.table.setSilent(endpointID, false) }
+        if changed { log("peer \(Self.hex(endpointID).prefix(10)) heard again") }
+    }
+
     /// Delivered for any attached topic: the payload only opens for holders
     /// of the topic's key.
     private func handlePeerFrame(_ body: Data, from endpointID: Data) {
         guard let frame = KeepTalkingIrohPeerFrame.decode(body) else { return }
+        noteHeard(endpointID)
+        if frame.kind == .ping { return }
         if frame.kind == .hello {
             handleHello(frame.payload, from: endpointID)
             return

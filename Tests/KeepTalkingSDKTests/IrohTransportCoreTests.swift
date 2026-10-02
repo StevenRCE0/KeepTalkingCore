@@ -259,6 +259,40 @@ struct IrohLinkTableTests {
         #expect(table.beginDial(to: high, kind: .network, myID: low, now: start + .seconds(2)) != nil)
     }
 
+    @Test("A network link that hears nothing goes silent and stops carrying; a frame brings it back")
+    func silence() {
+        var table = KeepTalkingIrohLinkTable()
+        _ = table.install(low, kind: .network, side: .accepted, stableID: 1, token: nil, now: start, latency: .zero)
+        #expect(table.gone(now: start + .seconds(5), after: .seconds(6)).isEmpty)
+        let heardEarly = table.heard(low, now: start + .seconds(5))
+        #expect(!heardEarly)
+        #expect(table.gone(now: start + .seconds(10), after: .seconds(6)).isEmpty)
+        #expect(table.gone(now: start + .seconds(11), after: .seconds(6)) == [low])
+        let silenced = table.setSilent(low, true)
+        #expect(silenced)
+        #expect(!table.isCarrying(low))
+        #expect(table.gone(now: start + .seconds(20), after: .seconds(6)).isEmpty)
+        let wasSilent = table.heard(low, now: start + .seconds(21))
+        #expect(wasSilent)
+        let revived = table.setSilent(low, false)
+        #expect(revived)
+        #expect(table.isCarrying(low))
+    }
+
+    @Test("Network links are pinged once per interval; Bluetooth links aren't")
+    func pings() {
+        var table = KeepTalkingIrohLinkTable()
+        _ = table.install(low, kind: .network, side: .accepted, stableID: 1, token: nil, now: start, latency: .zero)
+        _ = table.install(high, kind: .bluetooth, side: .accepted, stableID: 2, token: nil, now: start, latency: .zero)
+        let first = table.pingsDue(now: start, every: .seconds(2))
+        #expect(first == [low])
+        let tooSoon = table.pingsDue(now: start + .seconds(1), every: .seconds(2))
+        #expect(tooSoon.isEmpty)
+        let next = table.pingsDue(now: start + .seconds(2), every: .seconds(2))
+        #expect(next == [low])
+        #expect(table.gone(now: start + .seconds(30), after: .seconds(6)) == [low])
+    }
+
     @Test("Only a dialed, still-wanted link redials")
     func redial() {
         var table = KeepTalkingIrohLinkTable()

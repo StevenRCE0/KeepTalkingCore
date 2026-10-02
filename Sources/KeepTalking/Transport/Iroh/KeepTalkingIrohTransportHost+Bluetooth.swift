@@ -16,6 +16,7 @@ extension KeepTalkingIrohTransportHost {
         while !Task.isCancelled, !state.withLockedValue({ $0.isShutDown }) {
             let now = clock.now
             sweep(now: now)
+            keepLinksAlive(now: now)
             keepMeshLinks(now: now)
             if let stalled = stalledSFU(now: now) {
                 log("SFU writes stalled for \(Self.sfuStallTimeout); reconnecting")
@@ -49,6 +50,26 @@ extension KeepTalkingIrohTransportHost {
         for (departure, sink) in departures {
             log("member \(departure.nodeID.uuidString.prefix(8)) unreached for \(Self.memberRetention): forgotten")
             sink?.memberLeft(departure.nodeID)
+        }
+    }
+
+    /// Pings every network link, and stops routing through one that heard
+    /// nothing for `silenceAfter`: the peer went away (out of range, airplane
+    /// mode) and QUIC would take 30 s to say so. Its members move to
+    /// Bluetooth, or wait in their queues, and the gate counts it as a
+    /// failing network.
+    private func keepLinksAlive(now: Instant) {
+        let doorbells = state.withLockedValue { state -> [AsyncStream<Void>.Continuation] in
+            state.table.pingsDue(now: now, every: Self.pingInterval).compactMap { id in
+                state.outbound.enqueue(KeepTalkingIrohPeerFrame.ping, for: Self.linkQueue(id))
+                return state.io[id]?.doorbells[.control]
+            }
+        }
+        doorbells.forEach { $0.yield() }
+        let gone = state.withLockedValue { $0.table.gone(now: now, after: Self.silenceAfter) }
+        for id in gone {
+            let changed = mutateLinks(touching: [id]) { $0.table.setSilent(id, true) }
+            if changed { log("peer \(Self.hex(id).prefix(10)) silent for \(Self.silenceAfter)") }
         }
     }
 
