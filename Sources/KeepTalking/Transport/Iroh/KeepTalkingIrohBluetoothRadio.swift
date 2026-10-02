@@ -38,8 +38,9 @@ final class KeepTalkingIrohBluetoothRadio: @unchecked Sendable {
     private struct State {
         var bind: Task<Endpoint, Error>?
         weak var holder: KeepTalkingIrohTransportHost?
-        /// The last pause/resume; each one waits for the one before.
-        var radioSwitch: Task<Void, Never>?
+        /// The last pause/resume and its error; each one waits for the one
+        /// before.
+        var radioSwitch: Task<(any Error)?, Never>?
         #if canImport(CoreBluetooth)
         var identityReader: KeepTalkingIrohBluetoothIdentityReader?
         #endif
@@ -62,10 +63,9 @@ final class KeepTalkingIrohBluetoothRadio: @unchecked Sendable {
             state.bind = bind
             return bind
         }
+        let endpoint: Endpoint
         do {
-            let endpoint = try await bind.value
-            await switchRadio(endpoint, active: true).value
-            return endpoint
+            endpoint = try await bind.value
         } catch {
             state.withLockedValue { state in
                 state.bind = nil
@@ -73,6 +73,15 @@ final class KeepTalkingIrohBluetoothRadio: @unchecked Sendable {
             }
             throw error
         }
+        // A radio that didn't come back (adapter not on yet) fails the claim,
+        // so the host says so and claims again; the bound endpoint stays.
+        if let failure = await switchRadio(endpoint, active: true).value {
+            state.withLockedValue { state in
+                if state.holder === host { state.holder = nil }
+            }
+            throw failure
+        }
+        return endpoint
     }
 
     /// The full Bluetooth endpoint id a nearby device serves (see
@@ -102,14 +111,19 @@ final class KeepTalkingIrohBluetoothRadio: @unchecked Sendable {
 
     /// Queues a pause or resume behind the previous one, so a release then
     /// claim can't end with the radio paused while held.
-    private func switchRadio(_ endpoint: Endpoint, active: Bool) -> Task<Void, Never> {
+    private func switchRadio(_ endpoint: Endpoint, active: Bool) -> Task<(any Error)?, Never> {
         state.withLockedValue { state in
             let previous = state.radioSwitch
-            let task = Task {
-                await previous?.value
+            let task = Task { () -> (any Error)? in
+                _ = await previous?.value
                 // A claim may have come in since a release queued its pause.
-                if !active, self.state.withLockedValue({ $0.holder != nil }) { return }
-                try? await endpoint.bleSetRadioActive(active: active)
+                if !active, self.state.withLockedValue({ $0.holder != nil }) { return nil }
+                do {
+                    try await endpoint.bleSetRadioActive(active: active)
+                    return nil
+                } catch {
+                    return error
+                }
             }
             state.radioSwitch = task
             return task
