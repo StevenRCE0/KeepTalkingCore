@@ -1,20 +1,24 @@
 import Foundation
 
-/// A reading of a `KeepTalkingIrohTransportHost`: endpoint, hub session,
+/// A reading of a `KeepTalkingIrohTransportHost`: endpoint, SFU session,
 /// attached contexts, peer links and recent events. Values are plain data so
 /// a lab can poll and diff them.
 @_spi(TransportLab)
 public struct KeepTalkingIrohInstruments: Sendable {
-    public struct Hub: Sendable {
+    public struct SFU: Sendable {
         public var status: String
-        /// Configured, or looked up at `<relay>/kt/hub`; nil until known.
-        public var hubID: String?
+        /// Configured, or looked up at `<relay>/kt/sfu`; nil until known.
+        public var sfuID: String?
         /// Connect attempts so far, including the current one.
         public var attempts: Int
         public var connectLatencyMs: Double?
         public var connectedSince: Date?
         public var selectedPath: String?
         public var rttMs: UInt64?
+        /// Bytes waiting in the SFU queue.
+        public var queuedBytes: Int
+        /// Frames from the SFU that didn't parse and were skipped.
+        public var skippedFrames: Int
     }
 
     public struct Member: Sendable, Hashable {
@@ -22,9 +26,11 @@ public struct KeepTalkingIrohInstruments: Sendable {
         public var endpointID: String
         /// The member's Bluetooth endpoint, if its presence announced one.
         public var bluetoothEndpointID: String?
-        /// False once the hub stopped listing the member; it stays while a
+        /// False while the SFU doesn't list the member; it stays while a
         /// link reaches it or Bluetooth may.
-        public var isListedByHub: Bool
+        public var isListedBySFU: Bool
+        /// Bytes waiting in the member's queue.
+        public var queuedBytes: Int
     }
 
     public struct Context: Sendable, Identifiable {
@@ -32,18 +38,18 @@ public struct KeepTalkingIrohInstruments: Sendable {
         /// The routing key (hex) derived from the context secret.
         public var topic: String
         public var nodeID: UUID
-        /// The hub's snapshot for this topic has arrived.
+        /// The SFU's snapshot for this topic has arrived.
         public var joined: Bool
         /// Members whose sealed presence opened with the context secret.
         public var members: [Member]
-        /// Publishes sent over the mesh / through the hub.
+        /// Publishes sent over the mesh / through the SFU.
         public var meshPublished: Int
-        public var hubPublished: Int
-        /// Frames received from peer links / delivered by the hub.
+        public var sfuPublished: Int
+        /// Frames received from peer links / delivered by the SFU.
         public var meshReceived: Int
-        public var hubReceived: Int
-        public var hubDatagramsSent: Int
-        public var hubDatagramsReceived: Int
+        public var sfuReceived: Int
+        public var sfuDatagramsSent: Int
+        public var sfuDatagramsReceived: Int
 
         public var shortTopic: String { String(topic.prefix(10)) }
     }
@@ -63,7 +69,8 @@ public struct KeepTalkingIrohInstruments: Sendable {
         /// `network` (relay/IP endpoint) or `bluetooth` (Bluetooth-only endpoint).
         public var link: String
         public var nodeIDs: [UUID]
-        /// `dialed` (we hold the lower id) or `accepted`.
+        /// `dialed` (our turn: the lower id on the network, the higher over
+        /// Bluetooth) or `accepted`.
         public var side: String
         public var status: String
         public var connectLatencyMs: Double?
@@ -99,6 +106,8 @@ public struct KeepTalkingIrohInstruments: Sendable {
         public var starts: Int
         /// Adapter on and permission granted (false while stopped).
         public var powered: Bool
+        /// The radio is paused: no scanning or advertising.
+        public var radioPaused: Bool
         public var txBytes: UInt64
         public var rxBytes: UInt64
         public var retransmits: UInt64
@@ -133,7 +142,7 @@ public struct KeepTalkingIrohInstruments: Sendable {
     public var boundSockets: [String]
     /// Human-readable `DeliveryPolicy`.
     public var policy: String
-    public var hub: Hub
+    public var sfu: SFU
     public var contexts: [Context]
     public var peers: [Peer]
     public var bluetooth: Bluetooth?

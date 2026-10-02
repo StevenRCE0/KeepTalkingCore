@@ -1,18 +1,19 @@
 import Crypto
 import Foundation
 
-/// The presence blob a node publishes to the hub for one context: its node
-/// UUID, its current (ephemeral) iroh endpoint id and, when it runs one, its
-/// Bluetooth endpoint id — sealed with the context's group secret.
+/// The presence blob a node publishes for one context — to the SFU and in
+/// hellos on peer links: its node UUID, its current (ephemeral) iroh
+/// endpoint id and, when it runs one, its Bluetooth endpoint id, sealed with
+/// the context's group secret.
 ///
-/// Peers dial the endpoint ids found *inside* the seal, never the one the hub
-/// reports — the hub can relay or drop presence but cannot substitute its own
-/// key, which is the anti-MITM rule of the iroh transport. The opener also
-/// requires the sealed network id to match the hub-reported one, so a member
-/// cannot replay someone else's blob under its own connection.
+/// Peers dial the endpoint ids found *inside* the seal, never the one the SFU
+/// reports — the SFU can relay or drop presence but cannot substitute its own
+/// key, which is the anti-MITM rule of the iroh transport. Whoever learns
+/// from a blob also requires the sealed id to match the connection it came
+/// on, so a member cannot replay someone else's blob as its own.
 ///
-/// The Bluetooth id is announced while the hub is still reachable, so peers
-/// already know it when they fall back to Bluetooth with the hub gone.
+/// The Bluetooth id is announced while the SFU is still reachable, so peers
+/// already know it when they fall back to Bluetooth with the SFU gone.
 enum KeepTalkingIrohPresenceSeal {
     /// `ktp2 ‖ node(16) ‖ endpoint(32) [‖ bluetooth endpoint(32)]`;
     /// `ktp1` blobs (no Bluetooth id) still open.
@@ -20,6 +21,20 @@ enum KeepTalkingIrohPresenceSeal {
     static let legacyMagic = Data("ktp1".utf8)
     private static let salt = Data("KTIrohPresence".utf8)
     private static let aad = Data("keeptalking/iroh-presence/1".utf8)
+
+    /// A context's presence key, derived once per attachment.
+    struct Key: Sendable {
+        fileprivate let key: SymmetricKey
+
+        init(contextID: UUID, secret: Data) {
+            key = HKDF<SHA256>.deriveKey(
+                inputKeyMaterial: SymmetricKey(data: secret),
+                salt: KeepTalkingIrohPresenceSeal.salt,
+                info: contextID.rfc4122Bytes,
+                outputByteCount: 32
+            )
+        }
+    }
 
     struct Presence: Equatable, Sendable {
         let nodeID: UUID
@@ -35,15 +50,25 @@ enum KeepTalkingIrohPresenceSeal {
         contextID: UUID,
         secret: Data
     ) throws -> Data {
+        try seal(
+            nodeID: nodeID,
+            endpointID: endpointID,
+            bluetoothEndpointID: bluetoothEndpointID,
+            key: Key(contextID: contextID, secret: secret)
+        )
+    }
+
+    static func seal(
+        nodeID: UUID,
+        endpointID: Data,
+        bluetoothEndpointID: Data? = nil,
+        key: Key
+    ) throws -> Data {
         var plaintext = magic
         plaintext.append(nodeID.rfc4122Bytes)
         plaintext.append(endpointID)
         if let bluetoothEndpointID { plaintext.append(bluetoothEndpointID) }
-        let box = try AES.GCM.seal(
-            plaintext,
-            using: key(contextID: contextID, secret: secret),
-            authenticating: aad
-        )
+        let box = try AES.GCM.seal(plaintext, using: key.key, authenticating: aad)
         guard let combined = box.combined else {
             throw KeepTalkingFrameTransportCryptoError.encryptionFailed
         }
@@ -53,14 +78,14 @@ enum KeepTalkingIrohPresenceSeal {
     /// Returns nil for blobs this context's secret does not open, or whose
     /// contents are malformed.
     static func open(_ blob: Data, contextID: UUID, secret: Data) -> Presence? {
-        let idLength = KeepTalkingIrohHubFrame.endpointIDLength
+        open(blob, key: Key(contextID: contextID, secret: secret))
+    }
+
+    static func open(_ blob: Data, key: Key) -> Presence? {
+        let idLength = KeepTalkingIrohSFUFrame.endpointIDLength
         guard
             let box = try? AES.GCM.SealedBox(combined: blob),
-            let plaintext = try? AES.GCM.open(
-                box,
-                using: key(contextID: contextID, secret: secret),
-                authenticating: aad
-            ),
+            let plaintext = try? AES.GCM.open(box, using: key.key, authenticating: aad),
             plaintext.count >= 4
         else { return nil }
         let head = plaintext.prefix(4)
@@ -77,14 +102,5 @@ enum KeepTalkingIrohPresenceSeal {
             default:
                 return nil
         }
-    }
-
-    private static func key(contextID: UUID, secret: Data) -> SymmetricKey {
-        HKDF<SHA256>.deriveKey(
-            inputKeyMaterial: SymmetricKey(data: secret),
-            salt: salt,
-            info: contextID.rfc4122Bytes,
-            outputByteCount: 32
-        )
     }
 }

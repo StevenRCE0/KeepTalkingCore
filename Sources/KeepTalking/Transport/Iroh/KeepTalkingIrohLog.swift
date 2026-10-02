@@ -45,7 +45,9 @@ public final class KeepTalkingIrohLog: LogSink, @unchecked Sendable {
     public func install(directives: String = KeepTalkingIrohLog.bluetoothDirectives, stderr: Bool = true) -> Bool {
         guard !isInstalled else { return false }
         let installed = setLogSink(directives: directives, sink: self, stderr: stderr)
-        buffer.withLockedValue { $0.installed = installed }
+        // A concurrent install that lost the race must not mark us
+        // uninstalled after the winner succeeded.
+        if installed { buffer.withLockedValue { $0.installed = true } }
         return installed
     }
 

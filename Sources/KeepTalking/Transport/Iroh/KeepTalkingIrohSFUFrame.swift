@@ -1,21 +1,26 @@
 import Foundation
 
-/// Wire format of the hub protocol spoken with the Rust `kt-sfu`
-/// (ALPN `keeptalking/hub/1`; `KeepTalkingSFU` branch `iroh-sfu`,
+/// Wire format of the SFU protocol spoken with the Rust `kt-sfu`
+/// (ALPN `keeptalking/sfu/1`; `KeepTalkingSFU` branch `iroh-sfu`,
 /// `src/proto.rs`). The client opens one bidirectional stream and speaks
 /// first; both directions carry `[u32 BE length = 1 + body][u8 tag][body]`.
 ///
 /// Rooms are keyed by a 32-byte topic derived from the context secret
-/// (`KeepTalkingIrohTopic`), so the hub never sees a context id. Member ids
+/// (`KeepTalkingIrohTopic`), so the SFU never sees a context id. Member ids
 /// are 32-byte ed25519 endpoint ids. Announced blobs and published payloads
-/// are opaque to the hub.
-enum KeepTalkingIrohHubFrame {
-    static let alpn = Data("keeptalking/hub/1".utf8)
+/// are opaque to the SFU.
+///
+/// A frame whose length prefix is in range but whose tag or body doesn't
+/// parse is skipped; only a bad length prefix ends the session.
+enum KeepTalkingIrohSFUFrame {
+    static let alpn = Data("keeptalking/sfu/1".utf8)
     static let maxPublishLength = 1 << 20
     static let maxFrameLength = maxPublishLength + 64 * 1024
-    static let maxAnnounceLength = 16 * 1024
+    static let maxAnnounceLength = 1024
     static let topicLength = 32
     static let endpointIDLength = 32
+    /// The topic of an error that isn't about one room.
+    static let noTopic = Data(count: topicLength)
 
     enum Tag {
         static let subscribe: UInt8 = 0x21
@@ -30,6 +35,9 @@ enum KeepTalkingIrohHubFrame {
         static let error: UInt8 = 0x3F
     }
 
+    /// SNAPSHOT flag: more chunks of this room's snapshot follow.
+    static let snapshotMore: UInt8 = 0x01
+
     struct Member: Equatable, Sendable {
         let endpointID: Data
         /// Empty until the member has announced.
@@ -40,19 +48,22 @@ enum KeepTalkingIrohHubFrame {
         case subscribe(topic: Data)
         case unsubscribe(topic: Data)
         case announce(topic: Data, blob: Data)
-        /// Reliable fan-out: the hub sends it to every other subscriber.
+        /// Reliable fan-out: the SFU sends it to every other subscriber.
         case publish(topic: Data, payload: Data)
     }
 
     enum Server: Equatable, Sendable {
-        case snapshot(topic: Data, members: [Member])
+        /// One chunk of a room's snapshot. The union of the chunks up to the
+        /// first without `more` is the whole room.
+        case snapshot(topic: Data, members: [Member], more: Bool)
         case joined(topic: Data, endpointID: Data)
         case left(topic: Data, endpointID: Data)
         case presence(topic: Data, endpointID: Data, blob: Data)
-        /// A payload another subscriber published; the hub doesn't name the
+        /// A payload another subscriber published; the SFU doesn't name the
         /// sender (the sealed payload does).
         case deliver(topic: Data, payload: Data)
-        case error(reason: String)
+        /// `topic` is `noTopic` when the error isn't about one room.
+        case error(topic: Data, reason: String)
     }
 
     enum DecodeError: Error, Equatable {
@@ -90,8 +101,9 @@ enum KeepTalkingIrohHubFrame {
         var body = Data()
         let tag: UInt8
         switch frame {
-            case .snapshot(let topic, let members):
+            case .snapshot(let topic, let members, let more):
                 body.append(topic)
+                body.append(more ? snapshotMore : 0)
                 body.appendBigEndian(UInt16(members.count))
                 for member in members {
                     body.append(member.endpointID)
@@ -116,7 +128,8 @@ enum KeepTalkingIrohHubFrame {
                 body.append(topic)
                 body.append(payload)
                 tag = Tag.deliver
-            case .error(let reason):
+            case .error(let topic, let reason):
+                body.append(topic)
                 body.append(Data(reason.utf8))
                 tag = Tag.error
         }
@@ -131,7 +144,7 @@ enum KeepTalkingIrohHubFrame {
         return out
     }
 
-    /// A hub datagram: `topic ‖ payload`, forwarded as-is to the room.
+    /// An SFU datagram: `topic ‖ payload`, forwarded as-is to the room.
     static func datagram(topic: Data, payload: Data) -> Data {
         var out = Data(capacity: topic.count + payload.count)
         out.append(topic)
@@ -158,20 +171,21 @@ enum KeepTalkingIrohHubFrame {
 
     /// Decodes `[tag][body]` (the bytes after the length prefix).
     static func decodeServer(_ frame: Data) throws -> Server {
-        var reader = Reader(frame)
+        var reader = ByteReader(frame)
         let tag = try reader.byte()
         switch tag {
             case Tag.snapshot:
                 let topic = try reader.bytes(topicLength)
+                let flags = try reader.byte()
                 let count = Int(try reader.uint16())
                 var members: [Member] = []
-                members.reserveCapacity(count)
+                members.reserveCapacity(min(count, 1024))
                 for _ in 0..<count {
                     let id = try reader.bytes(endpointIDLength)
                     let length = Int(try reader.uint32())
                     members.append(Member(endpointID: id, blob: try reader.bytes(length)))
                 }
-                return .snapshot(topic: topic, members: members)
+                return .snapshot(topic: topic, members: members, more: flags & snapshotMore != 0)
             case Tag.joined:
                 return .joined(
                     topic: try reader.bytes(topicLength),
@@ -191,45 +205,52 @@ enum KeepTalkingIrohHubFrame {
             case Tag.deliver:
                 return .deliver(topic: try reader.bytes(topicLength), payload: reader.rest())
             case Tag.error:
-                return .error(reason: String(decoding: reader.rest(), as: UTF8.self))
+                return .error(
+                    topic: try reader.bytes(topicLength),
+                    reason: String(decoding: reader.rest(), as: UTF8.self)
+                )
             default:
                 throw DecodeError.unknownTag(tag)
         }
     }
+}
 
-    private struct Reader {
-        private let data: Data
-        private var offset: Data.Index
+/// Reads big-endian fields off `Data` without trusting its indices to
+/// start at zero.
+struct ByteReader {
+    private let data: Data
+    private var offset: Data.Index
 
-        init(_ data: Data) {
-            self.data = data
-            self.offset = data.startIndex
+    init(_ data: Data) {
+        self.data = data
+        self.offset = data.startIndex
+    }
+
+    var remaining: Int { data.endIndex - offset }
+
+    mutating func bytes(_ count: Int) throws -> Data {
+        guard count >= 0, data.endIndex - offset >= count else {
+            throw KeepTalkingIrohSFUFrame.DecodeError.truncated
         }
+        defer { offset += count }
+        return Data(data[offset..<offset + count])
+    }
 
-        mutating func bytes(_ count: Int) throws -> Data {
-            guard count >= 0, data.endIndex - offset >= count else {
-                throw DecodeError.truncated
-            }
-            defer { offset += count }
-            return Data(data[offset..<offset + count])
-        }
+    mutating func byte() throws -> UInt8 { try bytes(1)[0] }
 
-        mutating func byte() throws -> UInt8 { try bytes(1)[0] }
+    mutating func uint16() throws -> UInt16 {
+        let raw = try bytes(2)
+        return UInt16(raw[raw.startIndex]) << 8 | UInt16(raw[raw.startIndex + 1])
+    }
 
-        mutating func uint16() throws -> UInt16 {
-            let raw = try bytes(2)
-            return UInt16(raw[raw.startIndex]) << 8 | UInt16(raw[raw.startIndex + 1])
-        }
+    mutating func uint32() throws -> UInt32 {
+        let raw = try bytes(4)
+        return raw.readBigEndianUInt32(at: raw.startIndex)
+    }
 
-        mutating func uint32() throws -> UInt32 {
-            let raw = try bytes(4)
-            return raw.readBigEndianUInt32(at: raw.startIndex)
-        }
-
-        mutating func rest() -> Data {
-            defer { offset = data.endIndex }
-            return Data(data[offset..<data.endIndex])
-        }
+    mutating func rest() -> Data {
+        defer { offset = data.endIndex }
+        return Data(data[offset..<data.endIndex])
     }
 }
 

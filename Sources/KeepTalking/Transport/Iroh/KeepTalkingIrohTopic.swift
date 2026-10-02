@@ -3,8 +3,8 @@ import Foundation
 
 /// A context's identity on the iroh transport, derived from its group secret:
 ///
-/// - **topic** — the 32-byte routing key. Hub rooms, peer frames and
-///   datagrams carry it instead of the context id, so the hub and any
+/// - **topic** — the 32-byte routing key. SFU rooms, peer frames and
+///   datagrams carry it instead of the context id, so the SFU and any
 ///   non-member on a link see opaque bytes.
 /// - **payload key** — seals everything published to the topic (envelopes
 ///   and blob frames). It replaces `KeepTalkingPacketTransportCrypto`'s
@@ -29,7 +29,7 @@ struct KeepTalkingIrohTopic: Sendable {
             inputKeyMaterial: ikm,
             salt: Self.topicSalt,
             info: info,
-            outputByteCount: KeepTalkingIrohHubFrame.topicLength
+            outputByteCount: KeepTalkingIrohSFUFrame.topicLength
         ).withUnsafeBytes { Data($0) }
         self.payloadKey = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: ikm,

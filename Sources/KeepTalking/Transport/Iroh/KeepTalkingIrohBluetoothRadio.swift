@@ -5,21 +5,17 @@ import NIOConcurrencyHelpers
 
 /// The process's one Bluetooth endpoint, lent to one transport host at a time.
 ///
-/// `iroh-ble-transport` 0.5.1 cannot shut down: closing the iroh endpoint
-/// leaves its BLE stack running until the process exits — still advertising,
-/// scanning and serving its GATT service — because the crate's watchdog and
-/// event tasks keep its registry and CoreBluetooth managers alive. Binding a
-/// fresh endpoint per gate cycle therefore stacked radios with identical
-/// service UUIDs (and, with a reused key, identical adverts); a peer's GATT
-/// subscribe could land on a dead stack, so the pipe connected, carried
-/// nothing and drained after 45 s.
+/// `iroh-ble-transport` can't be torn down: closing the iroh endpoint leaves
+/// its BLE stack — advertising, scanning, serving its GATT service — running
+/// until the process exits, and blew can't remove services, so a rebound
+/// endpoint would stack a second GATT table that a peer's subscribe could
+/// land on (the pipe connected, carried nothing, drained after 45 s).
 ///
 /// So the endpoint is bound once, with a key fixed for the process, and never
 /// closed. A host `claim`s it while it wants Bluetooth and `release`s it
 /// after; incoming connections go to the current holder and are refused
-/// otherwise. The gate decides whether a host *uses* Bluetooth, not whether
-/// the radio runs: once started, the radio stays on until the process exits.
-/// Turning it off for real needs a crate-level shutdown.
+/// otherwise. With no holder the radio is paused — no scanning, no
+/// advertising — and the next claim resumes it.
 final class KeepTalkingIrohBluetoothRadio: @unchecked Sendable {
     static let shared = KeepTalkingIrohBluetoothRadio()
 
@@ -42,6 +38,8 @@ final class KeepTalkingIrohBluetoothRadio: @unchecked Sendable {
     private struct State {
         var bind: Task<Endpoint, Error>?
         weak var holder: KeepTalkingIrohTransportHost?
+        /// The last pause/resume; each one waits for the one before.
+        var radioSwitch: Task<Void, Never>?
         #if canImport(CoreBluetooth)
         var identityReader: KeepTalkingIrohBluetoothIdentityReader?
         #endif
@@ -53,8 +51,8 @@ final class KeepTalkingIrohBluetoothRadio: @unchecked Sendable {
         endpointID = key.public().toBytes()
     }
 
-    /// Lends the endpoint to `host`, binding it (and starting the radio) on
-    /// first use. Fails while another live host holds it.
+    /// Lends the endpoint to `host`, binding it on first use and resuming the
+    /// radio. Fails while another live host holds it.
     func claim(for host: KeepTalkingIrohTransportHost) async throws -> Endpoint {
         let bind = try state.withLockedValue { state -> Task<Endpoint, Error> in
             if let holder = state.holder, holder !== host { throw RadioError.inUse }
@@ -65,7 +63,9 @@ final class KeepTalkingIrohBluetoothRadio: @unchecked Sendable {
             return bind
         }
         do {
-            return try await bind.value
+            let endpoint = try await bind.value
+            await switchRadio(endpoint, active: true).value
+            return endpoint
         } catch {
             state.withLockedValue { state in
                 state.bind = nil
@@ -86,10 +86,33 @@ final class KeepTalkingIrohBluetoothRadio: @unchecked Sendable {
         #endif
     }
 
-    /// Gives the endpoint back. The radio keeps running.
+    /// Gives the endpoint back; with no holder left the radio pauses.
     func release(from host: KeepTalkingIrohTransportHost) {
+        let endpoint = state.withLockedValue { state -> Task<Endpoint, Error>? in
+            guard state.holder === host else { return nil }
+            state.holder = nil
+            return state.bind
+        }
+        guard let endpoint else { return }
+        Task {
+            guard let endpoint = try? await endpoint.value else { return }
+            _ = self.switchRadio(endpoint, active: false)
+        }
+    }
+
+    /// Queues a pause or resume behind the previous one, so a release then
+    /// claim can't end with the radio paused while held.
+    private func switchRadio(_ endpoint: Endpoint, active: Bool) -> Task<Void, Never> {
         state.withLockedValue { state in
-            if state.holder === host { state.holder = nil }
+            let previous = state.radioSwitch
+            let task = Task {
+                await previous?.value
+                // A claim may have come in since a release queued its pause.
+                if !active, self.state.withLockedValue({ $0.holder != nil }) { return }
+                try? await endpoint.bleSetRadioActive(active: active)
+            }
+            state.radioSwitch = task
+            return task
         }
     }
 

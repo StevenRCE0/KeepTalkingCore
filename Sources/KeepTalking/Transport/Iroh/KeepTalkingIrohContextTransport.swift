@@ -9,17 +9,22 @@ import NIOConcurrencyHelpers
 ///   secret). Every payload is sealed with the topic's key: envelopes as a
 ///   `KeepTalkingEnvelopePacket`, blob frames as-is. No context or sender id
 ///   travels in the clear.
-/// - **Delivery** — the host picks hub or mesh per publish; a directed
-///   envelope goes straight to its target when that member is connected.
+/// - **Delivery** — the host picks SFU or mesh per publish; a directed
+///   envelope goes to its target's queue when the target is a known member.
 ///   Inbound frames arrive from either route and are accepted if they open.
-/// - **Backbone state** — the hub session, but a context with a connected
-///   member counts as ready while the hub reconnects.
+/// - **Backbone state** — the SFU session, but a context with a connected
+///   member counts as ready while the SFU reconnects.
 /// - **Route** — `.p2p` when some member talks over a direct path, `.sfu`
-///   while everything rides the relay or the hub.
+///   while everything rides the relay or the SFU.
 /// - **Liveness** — the KeepTalking heartbeat (`p2pPresence`) is published
-///   to the topic every 13 s, as the old backbone did; inbound heartbeats
-///   and link-up events feed the client's `KeepTalkingContextLivenessState`,
-///   so `onPeerConnect` fires on real edges whichever route carried them.
+///   to the topic every 13 s; inbound heartbeats and link events feed the
+///   client's `KeepTalkingContextLivenessState`. A member's link coming up,
+///   or its traffic moving to another link, runs the node-online resync
+///   with it (`onPeerConnect`) even when liveness never saw it go away:
+///   whatever a dying connection swallowed comes back that way.
+/// - **Probes** — pings and pongs are sealed like everything else and name
+///   their sender, so only members can answer and a pong goes back only to
+///   the pinger.
 final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
     KeepTalkingLivenessBindableTransport, @unchecked Sendable
 {
@@ -144,7 +149,7 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
                 }
                 try host.attach(self, topic: topic, nodeID: nodeID, secret: secret)
                 state.topic = topic
-                state.heartbeat = Task { [weak self] in await self?.heartbeatLoop(generation) }
+                state.heartbeat = Self.heartbeat(for: self, generation: generation)
             }
             debug("attached to iroh host on topic \(KeepTalkingIrohTransportHost.hex(topic.topic).prefix(10))")
             reportState()
@@ -152,15 +157,19 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
     }
 
     func stop() {
-        let heartbeat = state.withLockedValue { state -> Task<Void, Never>? in
+        let (heartbeat, liveness) = state.withLockedValue {
+            state -> (Task<Void, Never>?, KeepTalkingContextLivenessState?) in
             state.generation &+= 1
             state.isActive = false
-            if let topic = state.topic { host.detach(topic: topic.topic) }
+            if let topic = state.topic { host.detach(self, topic: topic.topic) }
             state.topic = nil
             defer { state.heartbeat = nil }
-            return state.heartbeat
+            return (state.heartbeat, state.liveness)
         }
         heartbeat?.cancel()
+        // A restart then sees every peer come online again, which is what
+        // drives the resync after a transport bounce.
+        liveness?.reset()
         debug("detached from iroh host")
     }
 
@@ -168,13 +177,23 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
         state.withLockedValue { $0.isActive ? $0.topic : nil }
     }
 
-    /// The KeepTalking heartbeat, published to the topic like the old
-    /// backbone's; it's what tells hub-only peers we're here.
-    private func heartbeatLoop(_ generation: UInt64) async {
-        while !Task.isCancelled {
-            guard state.withLockedValue({ $0.isActive && $0.generation == generation }) else { return }
-            sendHeartbeat()
-            try? await Task.sleep(for: .seconds(Self.heartbeatSeconds))
+    /// The KeepTalking heartbeat, published to the topic; it's what tells
+    /// SFU-only peers we're here. Holds the transport only while sending, so
+    /// a transport dropped without `stop()` doesn't heartbeat on.
+    private static func heartbeat(
+        for transport: KeepTalkingIrohContextTransport,
+        generation: UInt64
+    ) -> Task<Void, Never> {
+        Task { [weak transport] in
+            while !Task.isCancelled {
+                do {
+                    guard let transport,
+                        transport.state.withLockedValue({ $0.isActive && $0.generation == generation })
+                    else { return }
+                    transport.sendHeartbeat()
+                }
+                try? await Task.sleep(for: .seconds(heartbeatSeconds))
+            }
         }
     }
 
@@ -187,12 +206,18 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
     func sendEnvelope(_ envelope: any KeepTalkingEnvelope) throws {
         guard let topic = activeTopic else { throw TransportError.notStarted }
         let packet = try JSONEncoder().encode(KeepTalkingEnvelopePacket(envelope))
-        try host.publish(
-            .envelope,
-            topic: topic.topic,
-            payload: try topic.seal(packet),
-            to: envelope.targetPeerNodeID
-        )
+        do {
+            try host.publish(
+                .envelope,
+                topic: topic.topic,
+                payload: try topic.seal(packet),
+                to: envelope.targetPeerNodeID
+            )
+        } catch KeepTalkingIrohTransportHost.HostError.frameTooLarge(let bytes, let limit) {
+            // The outbox drops a row only for this error; anything else it
+            // keeps retrying.
+            throw KeepTalkingTransportError.envelopeTooLarge(kind: envelope.kind, bytes: bytes, limit: limit)
+        }
         state.withLockedValue { $0.sent += 1 }
     }
 
@@ -207,7 +232,7 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
     }
 
     /// Voice frames are already sealed with the call's key; they go out as
-    /// datagrams through the hub or the mesh like any publish.
+    /// datagrams through the SFU or the mesh like any publish.
     func sendRealtimeDataViaBroadcast(_ data: Data) throws {
         guard let topic = activeTopic else { throw TransportError.notStarted }
         try host.sendDatagram(topic: topic.topic, payload: data)
@@ -222,7 +247,7 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
 
     func broadcastState() -> BroadcastChannelState {
         if let topic = activeTopic, !host.connectedMemberNodes(of: topic.topic).isEmpty { return .ready }
-        return host.hubChannelState()
+        return host.sfuChannelState()
     }
 
     func runtimeStats() -> KeepTalkingRuntimeStats {
@@ -243,8 +268,8 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
     /// Pings the topic; pongs advance `received`, which is what
     /// `KeepTalkingClient.probeTransport()` watches.
     func sendLivenessProbe() {
-        guard let topic = activeTopic else { return }
-        _ = try? host.publish(.ping, topic: topic.topic, payload: Data(), to: nil)
+        guard let topic = activeTopic, let payload = try? topic.seal(nodeID.rfc4122Bytes) else { return }
+        _ = try? host.publish(.ping, topic: topic.topic, payload: payload, to: nil)
     }
 
     /// Path upgrades are iroh's job; nothing to trial.
@@ -260,24 +285,24 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
 
     // MARK: - From the host
 
-    func hubJoined() {
-        debug("hub snapshot received")
+    func sfuJoined() {
+        debug("SFU snapshot received")
         sendHeartbeat()
         onBroadcastReady?()
         reportState()
     }
 
-    func hubStateChanged() {
-        // A hub that came back can take what the outbox holds.
-        if host.hubChannelState() == .ready { onBroadcastReady?() }
+    func sfuStateChanged() {
+        // An SFU that came back can take what the outbox holds.
+        if host.sfuChannelState() == .ready { onBroadcastReady?() }
         reportState()
     }
 
+    /// A link to the member came up. The node-online resync with it also
+    /// drains the outbox, so there's no context-wide maintenance here.
     func peerLinkUp(_ node: UUID) {
-        guard activeTopic != nil else { return }
-        observe(node)
-        // A new member is reachable directly: let the outbox drain to it.
-        onBroadcastReady?()
+        guard activeTopic != nil, node != nodeID else { return }
+        if !observe(node) { onPeerConnect?(node) }
         reportState()
     }
 
@@ -318,11 +343,15 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
                 // The host consumes hellos; they belong to no topic.
                 return
             case .ping:
+                guard let pinger = topic.open(payload).flatMap(Self.node(from:)), pinger != nodeID,
+                    let pong = try? topic.seal(nodeID.rfc4122Bytes)
+                else { return }
                 state.withLockedValue { $0.received += 1 }
-                _ = try? host.publish(.pong, topic: topic.topic, payload: Data(), to: node)
+                _ = try? host.publish(.pong, topic: topic.topic, payload: pong, to: pinger)
             case .pong:
+                guard let ponger = topic.open(payload).flatMap(Self.node(from:)), ponger != nodeID else { return }
                 state.withLockedValue { $0.received += 1 }
-                if let node { observe(node) }
+                observe(ponger)
             case .blob:
                 guard let opened = topic.open(payload) else { return }
                 state.withLockedValue { $0.received += 1 }
@@ -337,6 +366,10 @@ final class KeepTalkingIrohContextTransport: KeepTalkingTransportClient,
                 if let node { observe(node) }
                 deliverEnvelope(opened)
         }
+    }
+
+    private static func node(from bytes: Data) -> UUID? {
+        bytes.count == 16 ? UUID(rfc4122Bytes: bytes) : nil
     }
 
     func deliverRealtime(_ payload: Data, from node: UUID?) {
