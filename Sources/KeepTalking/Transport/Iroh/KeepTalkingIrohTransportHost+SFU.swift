@@ -311,8 +311,9 @@ extension KeepTalkingIrohTransportHost {
             throw HostError.sfuInfo("\(url) answered \((response as? HTTPURLResponse)?.statusCode ?? -1)")
         }
         let info = try JSONDecoder().decode(SFUInfo.self, from: data)
-        guard info.alpn == nil || info.alpn.map({ Data($0.utf8) }) == KeepTalkingIrohSFUFrame.alpn else {
-            throw HostError.sfuInfo("SFU speaks \(info.alpn ?? "?")")
+        guard info.alpn.map({ Data($0.utf8) }) == KeepTalkingIrohSFUFrame.alpn else {
+            let ours = String(decoding: KeepTalkingIrohSFUFrame.alpn, as: UTF8.self)
+            throw HostError.sfuInfo("the SFU speaks \(info.alpn ?? "an unnamed protocol"), this build \(ours)")
         }
         if configuration.relayQUICPort == nil, let port = info.qadPort {
             try? await endpoint.insertRelay(
