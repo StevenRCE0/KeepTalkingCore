@@ -50,7 +50,7 @@ task; `send` is a synchronous, non-blocking yield. Three consequences follow:
   `current` can never disagree with the last value a subscriber saw.
 - A slow handler delays the values behind it for *every* subscriber of that signal.
   Handlers are synchronous; a host that drives UI hops off the pump instead —
-  ``KeepTalkingObservable/observeOnMain(_:)`` does the `Task { @MainActor in … }` for
+  ``KeepTalkingObservable/observeOnMain(lane:_:)`` does the `Task { @MainActor in … }` for
   you and lets the handler await, at the cost that a suspended handler can be
   overtaken by the next value's hop.
 
@@ -241,37 +241,39 @@ to return something, it is a handler — see the request/response seams listed a
 
 ``KeepTalkingClientSignals/lifecycle`` is a state signal of ``KeepTalkingClientLifecycle``:
 the connection ``KeepTalkingClientLifecycle/phase`` (`idle`, `connecting`, `connected`,
-`disconnecting`), the lifecycle ``KeepTalkingClientLifecycle/generation``, the last
-reported ``KeepTalkingClientLifecycle/transport`` health and
-``KeepTalkingClientLifecycle/route``, and the ``KeepTalkingClientLifecycle/cause`` that
-produced the value.
+`disconnecting`), the lifecycle ``KeepTalkingClientLifecycle/generation``, the room's
+``KeepTalkingClientLifecycle/transport`` status — a ``KeepTalkingTransportStatus`` — and
+the ``KeepTalkingClientLifecycle/cause`` that produced the value.
 
 The sequences a host can rely on:
 
 - ``KeepTalkingClient/connect()`` → `connecting` (`connectRequested`) → `connected`
-  (`connected`). A connect that fails before the transport started goes straight to
-  `idle` with `connectFailed(message)`; one that fails after it goes through
-  `disconnecting` first, both values carrying `connectFailed`.
+  (`connected`). A connect that fails goes through `disconnecting` to `idle`, both values
+  carrying `connectFailed(message)`. A connect refused outright — the client's transport
+  is `.unavailable`, or it is already connecting or connected — throws and publishes
+  nothing.
 - ``KeepTalkingClient/disconnect()`` → `disconnecting` (`disconnectRequested`) →
-  `idle` (`tornDown`) once the transport has actually stopped. The moment
-  ``KeepTalkingClient/disconnectAndWait()`` returns, `current.phase` is `idle`.
-  Calling `disconnect()` on an idle client publishes nothing.
-- ``KeepTalkingClient/reestablishTransport()`` → `disconnecting` → `connecting` →
-  `connected`, with no `idle` in between: the new generation supersedes the old
-  teardown before it completes.
-- While `connected`, a transport health or route change republishes `connected`
-  with `transportChanged`. `transport` reads `.recovering` throughout `connecting`
-  (the backbone is being brought up) and `.down` in every other phase; `route` is
-  `.sfu` outside `connected`.
+  `idle` (`tornDown`). Detaching is synchronous, so both values are published before
+  `disconnect()` returns, and `current.phase` is `idle` the moment it does. Calling
+  `disconnect()` on an idle client publishes nothing.
+- ``KeepTalkingClient/setGroupChatSecret(_:for:)`` with a new secret on a connected client
+  → `connecting` (`connectRequested`) → `connected`, with no `idle` in between: the secret
+  addresses the room, so the client detaches and attaches again under a new generation.
+- While `connected`, a change in the room's status republishes `connected` with
+  `transportChanged`. `transport` reads `connecting` throughout the `connecting` phase and
+  `offline` in `idle` and `disconnecting`; only a `connected` value tracks later changes.
 
-``KeepTalkingClient/transportHealth()`` remains the live read of the backbone;
-`lifecycle.current.transport` is the last state the transport *reported*.
+``KeepTalkingClient/transportStatus()`` is the live read of the room;
+`lifecycle.current.transport` is the last status the room *reported*. There is no
+transport to restart from here: recovery belongs to the process-wide transport, and the
+lifecycle only reports what it sees. See <doc:Transport>.
 
 ### presence
 
 ``KeepTalkingClientSignals/presence`` is a state signal of ``KeepTalkingClientPresence``: the
 set of reachable remote peers and the ``KeepTalkingClientPresence/change`` that
-produced it. `online` follows the transport's connect edge immediately; `offline`
+produced it. `online` follows the client's reachability edge immediately — the first
+presence heartbeat, envelope, link, or blob stream from a peer after a gap; `offline`
 comes from a sweep that runs every ten seconds while connected and diffs the liveness
 window, so a peer that stopped announcing is reported within the 40-second window plus
 one sweep. Teardown publishes `reset` with an empty set.
@@ -279,8 +281,10 @@ one sweep. Teardown publishes `reset` with an empty set.
 ### transportStats
 
 ``KeepTalkingClientSignals/transportStats`` is a state signal of ``KeepTalkingRuntimeStats``,
-sampled once a second while connected and published only when the counters changed.
-It replaces polling ``KeepTalkingClient/runtimeStats()`` from a UI timer.
+sampled once a second while connected and published only when the sample changed: the
+room's envelope and datagram counters, its known and reachable members, the bytes
+waiting in its queues, and its status. It replaces polling
+``KeepTalkingClient/runtimeStats()`` from a UI timer, and resets to zero on disconnect.
 
 ### executorRegistration
 
@@ -298,12 +302,9 @@ then `idle`.
 per event. It fires from three places — the tail of inbound envelope handling, after
 the SDK's own handlers ran and only when the envelope changed something locally; the
 local echo of an outgoing message and each of its attachments; and the re-publish of a
-continuation message whose state moved. Every payload is `Sendable`.
-
-### rawMessages
-
-``KeepTalkingClientSignals/rawMessages`` carries the transport's raw inbound text, for
-diagnostics.
+continuation message whose state moved. Every payload is `Sendable`. Blob negotiation
+never appears here; its outcome is reported through
+``KeepTalkingClientSignals/blobAvailabilityChanges``.
 
 ## Agent runs
 
@@ -381,7 +382,7 @@ handed the same sink at init, so nothing has to be forwarded by hand.
 
 - ``KeepTalkingClientSignals/lifecycle``
 - ``KeepTalkingClientLifecycle``
-- ``KeepTalkingClient/TransportHealth``
+- ``KeepTalkingTransportStatus``
 - ``KeepTalkingClientSignals/presence``
 - ``KeepTalkingClientPresence``
 - ``KeepTalkingClientSignals/transportStats``
@@ -391,7 +392,6 @@ handed the same sink at init, so nothing has to be forwarded by hand.
 ### Message flow
 
 - ``KeepTalkingClientSignals/envelopes``
-- ``KeepTalkingClientSignals/rawMessages``
 
 ### Agent runs
 

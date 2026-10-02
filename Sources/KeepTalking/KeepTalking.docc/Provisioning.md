@@ -5,7 +5,7 @@ bundle so a node can be configured in one step instead of by hand.
 
 ## Overview
 
-A fresh node needs an SFU endpoint, often a PassKV server, usually at least one
+A fresh node needs a relay for its transport, often a PassKV server, usually at least one
 AI provider's API key, and a handful of preferences before it is worth using.
 Typing all of that in by hand on every device — or walking a non-technical
 user through it — does not scale past "one person, one laptop." Provisioning
@@ -24,7 +24,8 @@ fields: everything in it is settings, never key material.
 
 ``KeepTalkingProvisionBundle`` groups its fields by concern — topology
 (``KeepTalkingProvisionBundle/passKVServerURL``,
-``KeepTalkingProvisionBundle/sfuHost``, ``KeepTalkingProvisionBundle/sfuPort``),
+``KeepTalkingProvisionBundle/relayURL``,
+``KeepTalkingProvisionBundle/sfuEndpointID``),
 AI (``KeepTalkingProvisionBundle/providers``,
 ``KeepTalkingProvisionBundle/roleAssignments``,
 ``KeepTalkingProvisionBundle/webSearch``), and preferences (wake keyword,

@@ -6,7 +6,11 @@ name: Documentation
 # The build has to happen here rather than on Vercel: DocC compiles the target
 # to extract symbol graphs, which needs a Swift toolchain with Apple SDKs, and
 # Package.swift resolves two dependencies by relative path, so the build needs
-# AIProxySwift-MultiPlatform and KeepTalkingSFU checked out as siblings.
+# AIProxySwift-MultiPlatform and iroh-ffi checked out as siblings.
+#
+# iroh-ffi's Iroh.xcframework is a gitignored local build (the KeepTalking fork
+# always uses it; see its KEEPTALKING.md), so a plain checkout has no binary
+# and this job cannot build until the fork provides a prebuilt xcframework.
 
 on:
   push:
@@ -36,7 +40,7 @@ jobs:
     steps:
       # The three checkouts must be siblings under $GITHUB_WORKSPACE, and the
       # two dependency directories must keep these exact names — Package.swift
-      # references them as ../AIProxySwift-MultiPlatform and ../KeepTalkingSFU.
+      # references them as ../AIProxySwift-MultiPlatform and ../iroh-ffi.
       - name: Check out KeepTalkingCore
         uses: actions/checkout@v4
         with:
@@ -48,11 +52,11 @@ jobs:
           repository: StevenRCE0/AIProxySwift-MultiPlatform
           path: AIProxySwift-MultiPlatform
 
-      - name: Check out KeepTalkingSFU
+      - name: Check out iroh-ffi
         uses: actions/checkout@v4
         with:
-          repository: StevenRCE0/KeepTalkingSFU
-          path: KeepTalkingSFU
+          repository: StevenRCE0/iroh-ffi
+          path: iroh-ffi
 
       - name: Report toolchain
         run: swift --version

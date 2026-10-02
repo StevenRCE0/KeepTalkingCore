@@ -9,17 +9,19 @@ more *nodes*. A node is a participating device identity; a context is the unit o
 membership, history, and encryption. Messages published into a context reach every
 other node that holds the context's group secret.
 
-``KeepTalkingClient`` is the single entry point. One client instance drives one
+``KeepTalkingClient`` is the entry point. One client instance drives one
 context — hosts that present several conversations at once keep a pool of clients
-keyed by context identifier. The client owns transport, persistence, AI
-orchestration, and skill execution behind one surface, and reports everything that
-happens asynchronously through a set of callback properties.
+keyed by context identifier, all attached to one process-wide transport. The client
+owns persistence, AI orchestration, and skill execution behind one surface, and
+reports everything that happens asynchronously through signals.
 
 The SDK is deliberately layered so each concern can be replaced independently:
 
-- **Transport** is protocol-abstracted. The routing orchestrator has no knowledge
-  of ICE, WebRTC, or data channels; it only sees channels, and picks a send shape
-  from properties of the envelope kind itself.
+- **Transport** is process-wide and sits behind a transport-neutral seam. The host
+  app builds one ``KeepTalkingIrohTransportHost`` and hands it to every client as
+  ``KeepTalkingTransport``; a client attaches its context as a room and never
+  starts, stops, or restarts the transport. How an envelope travels — its lane and
+  whether it may be delivered twice — is a property of its kind.
 - **AI providers** sit behind a single ``AIConnector`` seam. Call sites never touch
   vendor wire formats.
 - **Persistence** is a protocol (``KeepTalkingLocalStore``), so a host may supply
@@ -32,9 +34,11 @@ A host application observes the client rather than polling it. See
 
 ### Platform Requirements
 
-iOS 17+, macOS 14+, visionOS 1+, Swift 6.1+.
+iOS 17.5+, macOS 14.5+, visionOS 1+, Swift 6.1+.
 
-Transport requires a reachable KeepTalkingSFU signalling server; see <doc:Transport>.
+The transport needs a reachable iroh relay, which also names the KeepTalking SFU; see
+<doc:Transport>. visionOS builds without a transport: clients there use the local
+store and never connect.
 
 ## Topics
 
@@ -80,7 +84,9 @@ Transport requires a reachable KeepTalkingSFU signalling server; see <doc:Transp
 ### Networking
 
 - <doc:Transport>
-- ``KeepTalkingContextTransport``
+- ``KeepTalkingTransport``
+- ``KeepTalkingIrohTransportHost``
+- ``KeepTalkingTransportStatus``
 
 ### Persistence and Secrets
 

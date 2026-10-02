@@ -6,7 +6,7 @@ import Foundation
 ///
 /// - unquoted whitespace (space, tab, newline) separates words, so a command
 ///   pasted across several lines still parses;
-/// - `'…'` is literal; `"…"` honours `\"`, `\\`, `\$`, `` \` `` and a
+/// - `'…'` is literal; `"…"` honours `\"`, `\\`, `\$`, a backslash-escaped backtick, and a
 ///   backslash-newline continuation; an unquoted `\` escapes the next character;
 /// - nothing is expanded — no globs, variables, comments, pipes or redirections.
 ///   The result is an argv, not a script.

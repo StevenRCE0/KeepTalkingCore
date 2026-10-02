@@ -48,7 +48,7 @@ public enum KeepTalkingLoginShellEnvironment {
     private static let cache = Cache()
     private static let logger = Logger(label: "keepTalking.process.loginShellEnvironment")
 
-    /// The login shell's exported variables (minus ``excludedVariables``), or an
+    /// The login shell's exported variables (minus `excludedVariables`), or an
     /// empty dictionary when they could not be resolved. Blocks the first caller
     /// for the duration of one shell start-up; later calls return the cache.
     public static func resolve() -> [String: String] {
@@ -208,7 +208,7 @@ public enum KeepTalkingLoginShellEnvironment {
 
     /// Extracts `KEY=VALUE` entries from the NUL-separated dump between the two
     /// markers. Anything outside the markers (profile chatter) is ignored, as
-    /// are entries without a key and the ``excludedVariables``.
+    /// are entries without a key and the `excludedVariables`.
     static func parse(_ data: Data, marker: String) -> [String: String] {
         guard let markerData = marker.data(using: .utf8),
             let first = data.range(of: markerData),

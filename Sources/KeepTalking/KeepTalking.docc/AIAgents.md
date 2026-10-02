@@ -145,7 +145,7 @@ Publishing comes in two shapes. ``AIOrchestrator/AssistantPublisher`` writes ord
 
 **The ACT agent** — action-calling-turn — is reached exclusively through the `kt_run_action` tool, modelled as ``AIOrchestrator/ACTAgent``: a `canHandle` predicate and an executor. When the main model has chosen an action, it calls `kt_run_action` with the action ID and a natural-language task, plus optional input handles for files to feed in and output slots for files it wants back. The ACT agent then runs its own short loop against the selected action alone: it resolves that action's tools, calls the appropriate one with arguments derived from the task, and distils the result into a short summary. This is why the main loop stays meta-tool only — schema resolution and argument construction happen one level down, against one action, instead of flooding the primary context with every tool on every node.
 
-The ACT agent runs at `.planning` stage, uses the `actConnector` and `actModel` when configured, and publishes trace rows through the same ``AIOrchestrator/ToolHintPublisher`` the main loop uses, so each inner step folds into the parent tool-call row in the conversation and its arguments are sealed on the way in. It also aggregates the `produced_resources` its inner calls emit and passes them up, so files an action produced reach the main agent by handle rather than being lost inside prose. ``KeepTalkingClient/makeSkillPlannerACTAgent(contextID:actModel:)`` builds the same agent bound to a context for use inside the skill planner, with a no-op publisher.
+The ACT agent runs at `.planning` stage, uses the `actConnector` and `actModel` when configured, and publishes trace rows through the same ``AIOrchestrator/ToolHintPublisher`` the main loop uses, so each inner step folds into the parent tool-call row in the conversation and its arguments are sealed on the way in. It also aggregates the `produced_resources` its inner calls emit and passes them up, so files an action produced reach the main agent by handle rather than being lost inside prose. ``KeepTalkingClient/makeSkillPlannerACTAgent(contextID:)`` builds the same agent bound to a context for use inside the skill planner, with a no-op publisher.
 
 **The audio agent**, ``AudioInterfaceAgent``, is explicitly not a standalone agent — it is a voice-to-text bridge with the main agent behind it. Its run has three phases. First it sends the user's audio to an audio-capable model with one tool available, `delegate_to_agent`, and asks it to respond briefly in speech and extract an intent; greetings and small talk are answered directly and never delegated. Second, it hands the extracted ``AudioInterfaceAgent/DelegationRequest`` to the main agent through the ``AudioInterfaceAgent/Delegate`` closure — and because audio models emit speech or a tool call but not both, a delegating turn produces no audio, so the bridge speaks a short acknowledgement concurrently with the (often slow) delegation. Third, it rephrases the answer for spoken delivery.
 
@@ -291,7 +291,7 @@ The responding side calls ``KeepTalkingClient/respondToAgentTurnContinuation(con
 ### The ACT agent
 
 - ``AIOrchestrator/ACTAgent``
-- ``KeepTalkingClient/makeSkillPlannerACTAgent(contextID:actModel:)``
+- ``KeepTalkingClient/makeSkillPlannerACTAgent(contextID:)``
 
 ### The audio interface agent
 

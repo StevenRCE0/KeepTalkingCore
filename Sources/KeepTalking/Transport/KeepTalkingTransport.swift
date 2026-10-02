@@ -20,7 +20,7 @@ import Foundation
 ///
 /// `unavailable` is for clients that never connect (façades that read the
 /// store) and for platforms without a transport (visionOS). Connecting such a
-/// client throws ``KeepTalkingTransportError/unavailable``.
+/// client throws `KeepTalkingTransportError.unavailable`.
 public struct KeepTalkingTransport: Sendable {
     let multiplexer: (any KeepTalkingTransportMultiplexer)?
 

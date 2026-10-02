@@ -26,19 +26,32 @@ below name them in prose rather than with symbol links.
 ### What the app supplies
 
 - **Node identity.** A `SelfNode` model (SwiftData) persists the UUID that
-  becomes ``KeepTalkingConfig/node``, along with each identity's SFU and
-  PassKV endpoints. An identity registry lets one device hold several such
-  identities side by side — a personal account and a provisioned work
-  account, say — and switch the active one without losing the others' state.
+  becomes ``KeepTalkingConfig/node``, along with each identity's relay,
+  Bluetooth mode, and PassKV endpoint. An identity registry lets one device
+  hold several such identities side by side — a personal account and a
+  provisioned work account, say — and switch the active one without losing
+  the others' state.
+- **The transport.** One `AppTransport` owns the process's
+  ``KeepTalkingIrohTransportHost``, built from the active identity's settings
+  before any client exists, and every context's client is handed it as
+  ``KeepTalkingTransport``. Clients that only read the store get
+  ``KeepTalkingTransport/unavailable``. Changing the relay or the Bluetooth
+  mode replaces the host — the old one shuts down first, since the Bluetooth
+  radio serves one host at a time — and rebuilds the clients on it. Bluetooth
+  permission is asked once; the answer is stored, and after a denial
+  Bluetooth is only a Settings choice. On foreground the app reconnects only
+  contexts that are not connected: recovery is the transport's job.
 - **Secrets.** The app injects the SDK's own `KeepTalkingSecItemKeychainStore`
   rather than the in-memory default, and shares it across the main app and
   its extensions through a common `keychain-access-groups` entitlement — the
   concrete answer to ``KeepTalkingKeychainStore``'s "letting each platform
   bind to its own secure enclave" promise in <doc:GettingStarted>.
 - **AI credentials.** Provider configuration lives in its own SwiftData model,
-  one row per configured provider with one marked active, editable in a
-  dedicated settings tab. That active row is what drives the API key, model,
-  and backend a client is constructed with.
+  one row per configured provider, editable in a dedicated settings tab.
+  Which provider and model drive each agent role is a separate node-wide
+  assignment that a conversation can override. Nothing about models is
+  client state: the app resolves an ``KeepTalkingAgentConfiguration`` per run
+  (see <doc:AIAgents>), so changing a model never rebuilds a client.
 - **Semantic storage.** ``KeepTalkingSemanticStore`` has no bundled backend,
   by design — see <doc:RuntimeIO> and <doc:Architecture>. The app's own
   `VecturaSemanticStore` wraps VecturaKit to fill that seam, kept at the app
@@ -75,6 +88,7 @@ guide, including how that loop is wired together in this app specifically.
 ### Seams the app fills in
 
 - ``KeepTalkingConfig``
+- ``KeepTalkingTransport``
 - ``KeepTalkingKeychainStore``
 - ``KeepTalkingSemanticStore``
 - ``AIConnector``

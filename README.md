@@ -1,6 +1,6 @@
 # KeepTalking SDK
 
-Swift package providing the core engine for KeepTalking — a distributed AI conversation platform with P2P transport, semantic threading, multi-provider AI, MCP-based skill execution, and sandboxed script running.
+Swift package providing the core engine for KeepTalking — a distributed AI conversation platform with an iroh-based P2P transport, semantic threading, multi-provider AI, MCP-based skill execution, and sandboxed script running.
 
 ## Products
 
@@ -11,7 +11,7 @@ Swift package providing the core engine for KeepTalking — a distributed AI con
 
 ## Platforms
 
-iOS 17+, macOS 14+, visionOS 1+ — swift-tools-version 6.1, built with the Swift 6.3.2 toolchain (`.swift-version`).
+iOS 17.5+, macOS 14.5+, visionOS 1+ — swift-tools-version 6.1, built with the Swift 6.3.2 toolchain (`.swift-version`). The iOS and macOS floors are those of the vendored iroh library; visionOS builds without a transport.
 
 ## Architecture
 
@@ -79,9 +79,9 @@ Sources/KeepTalking/
 │   │   ├── DefaultMCPStdioTransportLauncher*.swift # Sandboxed MCP stdio launch
 │   │   └── DefaultSkillScriptExecutor*.swift # Process-backed skill script executor
 │   ├── SkillPlanner.swift          # Multi-step, resumable skill planning (+Probe)
-│   ├── BlobStorage/                # Blob store, chunked transfer queue, one-time blobs (OTB)
+│   ├── BlobStorage/                # Blob store, pull tracker, one-time blobs (OTB) + holder outbox
 │   │   └── KeepTalkingBlobReferenceIndex.swift # Which blob files the DB still references
-│   ├── VoiceSession/               # Group (N-peer) voice session over P2P
+│   ├── VoiceSession/               # Group (N-peer) voice session: sealed datagrams on the room
 │   ├── ContextLiveness/            # Edge-triggered peer liveness (last-seen, connect edges)
 │   ├── ContextSyncing/             # Message / voice-transcript / side-note reconciliation
 │   │   ├── ContextSyncSingleFlight.swift # One reconcile in flight per peer
@@ -90,21 +90,21 @@ Sources/KeepTalking/
 │   └── SemanticStore/              # Host-injected hybrid (semantic + keyword) search protocol
 │       └── SemanticIndexTrace.swift # DEBUG-only index tracing
 ├── Transport/
-│   ├── ContextTransport.swift      # Fan-out orchestrator — broadcast / directed / fan-out,
-│   │                               #   chosen from envelope kind; no SFU/ICE/WebRTC knowledge
-│   ├── KeepTalkingTransportClient.swift # Internal transport-client protocol the client talks to
-│   ├── NetworkEnvironment.swift    # Interface digest — re-arms direct-path verdicts on network change
-│   ├── Channels/                   # Channel protocols + pure-value state machines
-│   ├── Models/                     # Route enum, envelope channel, P2P signal payloads, runtime stats
-│   └── Routes/                     # Concrete channel implementations
-│       ├── SFU/                    # SFU broadcast channel (KeepTalkingSFU package)
-│       └── P2P/                    # libjuice ICE + HTTP/2-over-TLS direct channel (SwiftNIO)
-├── Envelope/                       # Wire contract: kinds, kind-tagged packet coding, typed dispatch
+│   ├── KeepTalkingTransport.swift  # The seam: process-wide KeepTalkingTransport handle, room status,
+│   │                               #   multiplexer / attachment / event protocols, blob streams
+│   └── Iroh/                       # The iroh transport (iOS/macOS only)
+│       ├── KeepTalkingIrohTransportHost*.swift # Process-wide host: SFU session, peer links,
+│       │                           #   Bluetooth, per-member lane queues, instruments
+│       ├── KeepTalkingIrohAttachment.swift # One context's room, from attach to detach
+│       ├── KeepTalkingIrohSFUFrame / PeerFrame # Wire formats (keeptalking/sfu/2, peer/2)
+│       ├── KeepTalkingIrohMembership / LinkTable / Delivery / Pacer # Pure, unit-tested cores
+│       └── KeepTalkingIrohBluetooth*.swift # Process-wide Bluetooth radio + identity reader
+├── Envelope/                       # Wire contract: kinds, lanes, kind-tagged packet coding, typed dispatch
 │   ├── Models/                     # Per-kind envelope payload conformances
-│   ├── Controllers/                # Inbound handlers (messaging, node, sync, action call/catalog)
+│   ├── Controllers/                # Inbound handlers (messaging, node, sync, action call/catalog, blobs)
 │   └── Helpers/                    # Advertised actions, node & relation status
 ├── Migrations/                     # SQLite schema (Fluent)
-├── Cryptos/                        # Keychain, node identity, packet/frame ciphers, trust handshake
+├── Cryptos/                        # Keychain, node identity, frame ciphers, trust handshake
 ├── Helpers/                        # Shared utilities (UUIDv7, MIME, patient wait, provisioning)
 └── KeepTalking.docc/               # DocC catalog — `swift package generate-documentation`
 ```
@@ -114,11 +114,9 @@ Sources/KeepTalking/
 | Dependency | Purpose |
 |---|---|
 | `FluentKit` + `FluentSQLiteDriver` | ORM + SQLite persistence |
-| `KeepTalkingSFU` (local, `../KeepTalkingSFU`) | `KeepTalkingSFUClient` + `KeepTalkingSFUProtocol` for the broadcast backbone |
-| `swift-libjuice` / `SwiftJUICE` | ICE/STUN/TURN for P2P direct channels |
-| `swift-nio` / `swift-nio-http2` / `swift-nio-ssl` | Event loops + HTTP/2-over-TLS carrier for the direct P2P channel |
+| `IrohLib` (local fork, `../iroh-ffi`) | iroh bindings + locally built xcframework: QUIC endpoints, relay, hole punching, Bluetooth (iOS/macOS only) |
+| `swift-nio` | Event loops for Fluent and the plugin host; `NIOLockedValueBox` for locks |
 | `swift-crypto` | Cross-platform crypto (Apple-free SDK) |
-| `swift-certificates` + `swift-asn1` | Per-session self-signed X.509 / TLS identity |
 | `swift-sdk` (MCP) | MCP server/client for tool integration |
 | `AIProxyMultiPlatform` (local fork, `../AIProxySwift-MultiPlatform`) | Chat completions + embeddings client (BYOK) |
 | `swift-uuidv7` | Time-ordered (RFC 9562 v7) UUIDs for primary keys |
@@ -174,43 +172,28 @@ The intended rule is simple: resources are emitted and collected through the IO 
 
 ## Transport
 
-The transport layer is protocol-abstracted: `KeepTalkingContextTransport` knows only `KeepTalkingTransportChannelProtocol` and its broadcast/peer refinements — no WebRTC, ICE, SDP, or data-channel vocabulary. It routes on two declarative properties of the envelope's `kind` plus the envelope's optional target.
+One transport per process, owned by the host app. A client never builds, starts, stops or restarts it: `connect()` attaches the client's context as a *room*, `disconnect()` detaches it. Everything below — the SFU session, peer links, Bluetooth, per-member queues, recovery — is shared by every attached context and outlives any one client, so a client rebuilt for a settings change never drops a connection and a hundred contexts cost one SFU session and one link per peer.
 
-Two concrete channel types sit below it:
+```swift
+let host = KeepTalkingIrohTransportHost(configuration: .init(relayURL: "https://relay.example/"))
+let client = KeepTalkingClient(config: config, transport: .iroh(host), localStore: store)
+```
 
-- **SFU broadcast** (`KeepTalkingSFU` package) — always-on backbone over HTTP/2, authenticated per connection with a fresh ephemeral Ed25519 key. Every node stays joined, so every send can fall back to it.
-- **P2P direct** (`SwiftJUICE` + `SwiftNIO`) — optional per-peer upgrade, created lazily on a reachability edge and signaled over the backbone (never a bootstrap dependency). libjuice ICE only proves the path; payload then rides a single long-lived bidirectional HTTP/2 stream over TLS, and the ICE session is closed.
+`KeepTalkingTransport.unavailable` (the default) is for clients that never connect — façades that only read the store — and for visionOS. The client sees the transport through a transport-neutral seam (`Transport/KeepTalkingTransport.swift`): a multiplexer of rooms and an attachment per room that sends envelopes and datagrams, opens blob streams and reports status, with one event stream coming back. Liveness, the 13 s presence heartbeat and resync-on-reachability are the client's; recovery is the host's.
 
-Routing is envelope-level, and the envelope's *kind* — not the call site — declares the policy. `sendEnvelope` picks one of three shapes:
-
-| Shape | Trigger | Behavior |
-|---|---|---|
-| Broadcast only | `kind.allowsDirect == false` | SFU, or throw `.allChannelsUnavailable` when the backbone is down |
-| Directed | `allowsDirect` + `targetPeerNodeID` set | that peer's direct channel when ready, else SFU |
-| Fanned out | `allowsDirect` + no target | every ready direct channel, with SFU covering peers that have none |
-
-| Kind property | Meaning | `true` for |
-|---|---|---|
-| `allowsDirect` | may use a direct channel at all — a permission, not a route | `.message`, `.attachment`, `.voiceCallTranscriptLine`, action-call request/ack/result (plain + encrypted) |
-| `isFanOutEligible` | safe to deliver twice; gates the fan-out shape | `.message`, `.attachment`, `.voiceCallTranscriptLine` |
-
-Signaling, presence, trust, voice-call, `.contextSync`, node-status, action-catalog and agent-continuation kinds are `allowsDirect == false`: they must reach peers no direct channel exists for yet, or have no direct-path delivery ack. An untargeted kind that is direct-capable but not fan-out eligible degrades to broadcast rather than trapping.
-
-Fallback is per-leg. A failed direct send is logged and retried on the SFU; one failed fan-out leg never stops the others; with the backbone down a fan-out succeeds only if at least one leg landed. The one exception is `.envelopeTooLarge`, rethrown as itself — every route fails the same size check.
-
-Blob bytes are never fanned out: `sendBlobData(_:targetPeerNodeID:)` is directed when a target is named and broadcast-only otherwise.
-
-| Concern | Where it lives now |
+| Concern | How it works |
 |---|---|
-| Route label | `KeepTalkingTransportRoute` (`.sfu` / `.p2p`) — physical "which wire carried the bytes" for stats, logs and `currentRoute()`; never a routing decision |
-| Fragmentation | none — one envelope caps at 1 MiB, checked on the sealed bytes (`PacketTransportCrypto.maxOutboundPayloadBytes`); over that fails `.envelopeTooLarge`. Blobs chunk on their own channel |
-| Dedup | none at transport — no sequence numbers, no dedup table. Duplicates are absorbed at persistence by row id, which is why fan-out is restricted to idempotent kinds |
-| Mesh cap | `KeepTalkingConfig.maxDirectMeshSize` (default 4). Exceeding it tears the whole direct mesh down and stays on the SFU; sticky until transport start or a network change |
-| Network change | `KeepTalkingNetworkEnvironment.digest()` fingerprints up, non-loopback interfaces (IPv6 counted by /64 prefix only), sampled each ~13s heartbeat. A change clears the mesh cap and retries abandoned/backing-off channels |
+| Rooms | A context's group secret derives its 32-byte topic and the key that seals every payload; no context or node id travels in the clear. A new secret moves the client to the new room. |
+| Routes | `keeptalking/sfu/2` (one session; the SFU fans each publish out, `PUBLISH_TO` for one member) and `keeptalking/peer/2` links (relay first, direct when hole punching works; the lower id dials). `KeepTalkingIrohDeliveryPolicy.automatic(sfuAtMembers: 4)` puts small rooms on the mesh, larger ones on the SFU. Bluetooth (`off` / `whenNetworkFails` / `always`) carries the mesh offline; voice never rides it. |
+| Membership | Only from presence sealed with the context secret, via the SFU or the hello every link opens with. The SFU roster is discovery, not membership. |
+| Lanes | `KeepTalkingEnvelopeKind.delivery` gives each kind a lane and an idempotence claim: `control` (presence, trust, call state, acks, blob negotiation), `interactive` (messages, attachments, transcript lines, action traffic), `bulk` (context sync, node state; a stream per envelope). Each lane is its own QUIC stream on every route. |
+| Sending | Never waits on a connection: on the mesh every member has a 16 MiB queue per lane, drained by whichever link carries it. Throws only with no route, not connected, or over the 1 MiB frame ceiling (the outbox drops that row; nothing fragments). |
+| Status | `KeepTalkingTransportStatus`: `connecting` / `ready` / `degraded` / `offline` + a display path (`sfu` / `direct` / `relay` / `bluetooth`). `client.transportStatus()`, the `lifecycle` signal, `transportStats`. |
+| Dedup | None at transport. Every kind but the trust request is idempotent; duplicates are absorbed at persistence by row id. Node status carries `issuedAtMs`; receivers keep the newest. |
+| Blobs | Pull-only: `wanted` → `offer` → `pull` from one holder → a blob stream per transfer, point to point, resumable from an offset, digest-checked. One-time blobs are snapshotted into a holder outbox and pulled as soon as the request/result carrying the ref arrives. |
+| Voice | Datagrams only; sender and target ride inside the call's seal. No modes, ICE or SDP. |
 
-Receive is one dispatch on `KeepTalkingEnvelopeChannel`: `.signaling` is consumed inside the transport (trust → trust handler, voice-call forwarded on, p2p signal/presence into the direct channels and liveness state), everything else is delivered to the app.
-
-**Prerequisites:** a reachable KeepTalkingSFU server (see `../KeepTalkingSFU`), configured through `KeepTalkingConfig.sfuEndpoint` — `SFUEndpoint(host:port:)`, port defaults to 9701. Without it the broadcast channel cannot start, and since P2P is signaled over the backbone, no direct channel forms either.
+**Prerequisites:** a reachable iroh relay; the SFU id is looked up at `<relay>/kt/sfu` unless configured. See the DocC article *Transport* for the whole design.
 
 ## SDK Usage
 
@@ -223,32 +206,33 @@ import KeepTalkingSDK
 // 1. Storage. `make` constructs *and* migrates — an unmigrated store must not be queried.
 let store = try await KeepTalkingModelStore.make()
 
-// 2. Configuration. `sfuEndpoint` is not optional in practice: the SFU broadcast
-//    channel is the transport backbone, and `connect()` throws
-//    `KeepTalkingTransportError.sfuEndpointMissing` without it.
-//    Persist and reuse `node` across launches — peers key trust off it.
+// 2. The transport: one per process, shared by every client.
+let host = KeepTalkingIrohTransportHost(configuration: .init(relayURL: "https://relay.example/"))
+
+// 3. Configuration. Persist and reuse `node` across launches — peers key trust off it.
 let config = KeepTalkingConfig(
     contextID: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
-    node: UUID(uuidString: "2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9")!,
-    sfuEndpoint: KeepTalkingConfig.SFUEndpoint(host: "127.0.0.1", port: 9701)
+    node: UUID(uuidString: "2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9")!
 )
 
-// 3. Client. The default keychain is in-memory and forgets every secret on exit;
+// 4. Client. The default keychain is in-memory and forgets every secret on exit;
 //    Apple-platform hosts should pass the SecItem-backed store.
 let client = KeepTalkingClient(
     config: config,
+    transport: .iroh(host),
     localStore: store,
     keychain: KeepTalkingSecItemKeychainStore.shared
 )
 client.log.observe { line in print(line) }
 
-// 4. Bring the transport up, then create a context and send.
-try await client.connect()
+// 5. Create the context (mints its secret), attach its room, and send.
 let context = try await client.createContext(named: "First context")
+try await client.connect()
 try await client.send("Hello from my first node.", in: context)
 
-// 5. Tear down: stop the transport, then drain the store.
-await client.disconnectAndWait()
+// 6. Tear down: detach, stop the transport, then drain the store.
+client.disconnect()
+await host.shutdown()
 await store.shutdown()
 ```
 
@@ -258,6 +242,7 @@ To join a context this node did not create, install the out-of-band secret inste
 
 ```swift
 try await client.setGroupChatSecret(sharedSecret, for: config.contextID)
+try await client.connect()
 try await client.send("Joining in.", in: config.contextID)
 ```
 
@@ -283,25 +268,18 @@ swift package --scratch-path /tmp/kt-docs generate-documentation --target KeepTa
 
 ## CLI
 
-The `KeepTalking` executable is a development tool for exercising the SDK. It has three distinct modes.
+The `KeepTalking` executable is a development tool for exercising the SDK. It builds one iroh transport for the process from `--relay` (or `KT_RELAY`); switching contexts in the interactive client swaps clients while the transport stays up. Without a relay it has no transport and runs local commands only.
 
-**SFU broadcast harness** — any run that configures an SFU endpoint (`--sfu`, `--sfu-juice`, or `KT_SFU`) enters a minimal stdin↔SFU loop: each stdin line is broadcast to the context as opaque bytes and inbound payloads are printed to stderr. Slash commands are not available here.
+**Interactive client:**
 
 ```bash
 swift run KeepTalking \
-  --sfu 127.0.0.1:9701 \
+  --relay https://relay.example/ \
   --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 \
   --context 11111111-2222-3333-4444-555555555555
 ```
 
-**Blob lab** — direct HTTP/2 blob transfer over libjuice-discovered candidates, signaled through the SFU:
-
-```bash
-swift run KeepTalking bloblab listen  --sfu 127.0.0.1:9701 --context <uuid> [--node <uuid>] [--timeout 30]
-swift run KeepTalking bloblab connect --sfu 127.0.0.1:9701 --context <uuid> [--peer <hex>] [--bytes 4096]
-```
-
-**Action management** — runs before the transport comes up, so no SFU endpoint is needed:
+**Action management** — runs before anything connects, so no relay is needed:
 
 ```bash
 swift run KeepTalking --mcp list
@@ -311,21 +289,22 @@ swift run KeepTalking --skill add-directory doc-summarizer ~/.codex/skills/doc-s
 swift run KeepTalking --skill list
 ```
 
-**Flags:** `--sfu host:port` (alias `--sfu-juice`; port defaults to 9701), `--node <uuid>` (alias `--id`), `--context <uuid>`, `--db-path <sqlite-file>`, `--message <text>` (one-shot send, then exit), `--p2p-timeout <seconds>`, `--openai-api-key <key>`, `--openai-endpoint <url>`, `--mcp …`, `--skill …`, `--diagnose`, `--help`.
+**Flags:** `--relay <url>`, `--sfu-id <hex>` (default: looked up at `<relay>/kt/sfu`), `--node <uuid>` (alias `--id`), `--context <uuid>`, `--db-path <sqlite-file>`, `--message <text>` (one-shot send, then exit), `--openai-api-key <key>`, `--openai-endpoint <url>`, `--model <id>`, `--act-model <id>`, `--mcp …`, `--skill …`, `--help`.
 
 **Environment variables:**
 ```bash
-export KT_SFU="127.0.0.1:9701"                           # optional host:port, default port 9701
+export KT_RELAY="https://relay.example/"                 # iroh relay; without it, no transport
+export KT_SFU_ID="…"                                     # optional SFU endpoint id
 export KT_NODE="2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9"    # default: random UUID
 export KT_CONTEXT="11111111-2222-3333-4444-555555555555" # default: all-zero UUID
 export KT_DB_PATH="$HOME/Library/Application Support/KeepTalking/custom.sqlite"
-export KT_P2P_TIMEOUT=5
 export OPENAI_API_KEY="..."             # enables /ai
 export KT_OPENAI_ENDPOINT="..."         # or OPENAI_ENDPOINT / OPENAI_BASE_URL
+export KT_MODEL="..."                   # node-wide main agent model, required for /ai
 swift run KeepTalking
 ```
 
-**Interactive commands.** The full interactive client lives behind `KeepTalkingCLIController`, but is currently unreachable: configuring an SFU endpoint diverts to the broadcast harness above, and omitting one makes `connect()` fail with `sfuEndpointMissing`. The implemented command set is:
+**Interactive commands:**
 
 - `/new` — create and join a new context; prints the invite `/join` line and the base64 key
 - `/join <context-uuid>` — join an existing context (prompts on stdin for the encryption key)
@@ -335,8 +314,8 @@ swift run KeepTalking
 - `/mcp list` · `/mcp remove <action-id>` · `/mcp add http …` · `/mcp add stdio …`
 - `/skill list` · `/skill remove <action-id>` · `/skill add directory <name> <path> [description]`
 - `/ai <prompt>` — run AI tool planning/execution in the active context
-- `/stats` — route, send/receive counters, channel labels and states
-- `/p2p` (alias `/p2p-trial`) — manually start a direct P2P upgrade trial
+- `/model [act] [<id>|reset]` — show or override the active context's models for this session
+- `/stats` — the room's status, path, reachable members and traffic counters
 - `/quit` (alias `/exit`) — disconnect
 - anything else — sent as a chat message
 

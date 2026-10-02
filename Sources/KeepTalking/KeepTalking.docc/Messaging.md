@@ -14,9 +14,10 @@ where.
 ``KeepTalkingClient`` is always scoped to exactly one context, fixed at construction
 through ``KeepTalkingConfig``. That is why "switching contexts" means building a new
 configuration with ``KeepTalkingConfig/withContextID(_:)`` and constructing a second
-client rather than reconfiguring the first — the transport's channel labels are
-derived from the context ID. Hosts that present several conversations at once keep a
-pool of clients keyed by context. See <doc:GettingStarted> for the full setup path.
+client rather than reconfiguring the first — the room the client attaches to on the
+transport is derived from the context. Hosts that present several conversations at
+once keep a pool of clients keyed by context, all attached to one process-wide
+transport. See <doc:GettingStarted> for the full setup path.
 
 ``KeepTalkingContext`` itself carries very little state: an ID, a last-activity
 `updatedAt`, and the list of mark messages this node has already consumed.
@@ -87,17 +88,16 @@ unusable key.
 
 The secret is what makes a context private, and it gates more than chat text:
 
-- **Transport payloads.** Every envelope that declares a transport context ID —
-  context messages, attachment envelopes, context sync, action calls, trust
-  handshake envelopes, voice call envelopes — is sealed with the
-  context secret before it leaves the process, and opened with it on arrival. With
-  no secret, outbound encoding fails with a missing-context-secret error and
-  inbound frames for that context cannot be decoded at all.
-- **Trust handshakes.** ``KeepTalkingClient/requestTrust(with:in:)`` refuses to
+- **Transport payloads.** The secret addresses the context's room on the transport
+  and derives the key that seals every envelope and blob chunk in it, so only nodes
+  holding the secret can read the traffic or even tell which context it belongs to.
+  ``KeepTalkingClient/connect()`` ensures a secret exists before attaching; a node
+  holding a different secret is in a different room and sees nothing that opens.
+- **Trust handshakes.** ``KeepTalkingClient/requestTrust(with:in:claimingSlot:)`` refuses to
   start if the context has no secret, because the handshake itself rides the
-  context's encrypted signaling path.
-- **Voice sessions.** A voice session is created with the context secret as its
-  frame secret, so realtime audio frames are protected by the same key as chat.
+  context's sealed room.
+- **Voice sessions.** A call's audio key is derived from the context secret and the
+  call's session ID, so realtime audio is protected by the same secret as chat.
 - **Push wake previews.** Wake notification payloads are decrypted with the
   context secret to render a preview; without it the preview cannot be recovered.
 
@@ -139,8 +139,8 @@ Only then does transport enter the picture, and from that point failures no long
 throw. The message is already durable, so it is enqueued on the outbox, pushed, and
 cleared from the outbox on success. A transport failure is logged and simply leaves
 the row in place: the outbox records nothing about the attempt — no error, no retry
-count — because it is purely a delivery hint that the next drain retries when
-channels reopen. Even if it never drains, the message still reaches peers through
+count — because it is purely a delivery hint that the next drain retries when the
+room can take sends again. Even if it never drains, the message still reaches peers through
 ordinary context sync. A caller that gets no error back has a persisted message, not
 necessarily a delivered one.
 
@@ -442,18 +442,18 @@ alias when the scope has none.
 - ``KeepTalkingMappingTarget``
 - ``KeepTalkingMappingKind``
 - ``KeepTalkingMappingError``
-- ``KeepTalkingClient/setAlias(_:for:)``
-- ``KeepTalkingClient/setAlias(_:for:on:)``
-- ``KeepTalkingClient/alias(for:)``
-- ``KeepTalkingClient/alias(for:on:)``
+- ``KeepTalkingClient/setAlias(_:for:scopeContextID:)``
+- ``KeepTalkingClient/setAlias(_:for:scopeContextID:on:)``
+- ``KeepTalkingClient/alias(for:scopeContextID:)``
+- ``KeepTalkingClient/alias(for:scopeContextID:on:)``
 - ``KeepTalkingClient/addTag(_:namespace:to:)``
 - ``KeepTalkingClient/addTag(_:namespace:to:on:)``
 - ``KeepTalkingClient/removeTag(_:namespace:from:)``
 - ``KeepTalkingClient/removeTag(_:namespace:from:on:)``
 - ``KeepTalkingClient/tags(for:namespace:)``
 - ``KeepTalkingClient/tags(for:namespace:on:)``
-- ``KeepTalkingClient/mappings(for:includeDeleted:)``
-- ``KeepTalkingClient/mappings(for:includeDeleted:on:)``
+- ``KeepTalkingClient/mappings(for:scopeContextID:includeDeleted:)``
+- ``KeepTalkingClient/mappings(for:scopeContextID:includeDeleted:on:)``
 
 ### Displaying names
 
