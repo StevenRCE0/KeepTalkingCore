@@ -12,13 +12,16 @@ public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     /// Access the user's calendar with read (list events) and write (add event) operations.
     /// Operations are selected by the tool's `operation` argument; per-operation
     /// calendar scope lives on `KeepTalkingPrimitiveBundle.scope` keyed by
-    /// `"read"` / `"write"` (each value is a list of calendar titles). The grant
+    /// `"read"` / `"write"` (each value is a list of calendar titles). No scope
+    /// means no access: a missing or empty key turns that operation off. The grant
     /// further narrows which keys the caller may invoke via the grant scope's
     /// `.named(<key>)` tokens (`KeepTalkingActionScope`).
     case accessCalendar = "access-calendar"
-    /// Add a reminder to one of the user's Reminders lists. Write-only; the
-    /// lists it may touch live on `KeepTalkingPrimitiveBundle.scope` under
-    /// `"lists"` (list titles). An empty scope leaves the action unable to add.
+    /// Read (list reminders) and write (add reminders) on the user's Reminders
+    /// lists. The read scope lives under `"read"` and the write scope under
+    /// `"lists"` on `KeepTalkingPrimitiveBundle.scope` (each a list of list
+    /// titles). No scope means no access: a missing or empty key turns that
+    /// operation off.
     case addToReminders = "add-to-reminders"
 }
 
@@ -34,7 +37,10 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
     /// and the per-tool scope on MCP servers). The keys and value shapes are
     /// defined per `KeepTalkingPrimitiveActionKind`; each handler is responsible
     /// for documenting the scope keys it understands via its `scopeSchema` and
-    /// for enforcing them at call time. `nil` or empty means no scoping.
+    /// for enforcing them at call time. For kinds that declare scope keys
+    /// (calendar, Reminders), no scope means no access: a missing or empty key
+    /// turns that operation off, never "everything". Kinds without scope keys
+    /// ignore it.
     ///
     /// Example (calendar): `["read": ["Work", "Personal"], "write": ["Personal"]]`.
     public var scope: [String: [String]]?
@@ -94,7 +100,7 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
         KeepTalkingPrimitiveBundle(
             name: "add-to-reminders",
             indexDescription:
-                "Add a reminder (title, optional due date, notes, priority) to one of the user's Reminders lists on the action host.",
+                "Read (list reminders) and write (add reminders with title, optional due date, notes, priority) on the user's Reminders lists on the action host.",
             action: .addToReminders
         ),
     ]
@@ -129,19 +135,26 @@ extension KeepTalkingPrimitiveActionKind {
                         "type": .string("array"),
                         "items": .object(["type": .string("string")]),
                         "description": .string(
-                            "Calendar titles this action may add events to. Empty/omitted disables writing entirely — creating events becomes unavailable. When non-empty, the first listed is the default write target; there is no system-default fallback."
+                            "Calendar titles this action may add events to. Empty/omitted disables writing entirely — creating events becomes unavailable (it does not mean \"all calendars\"). Every event names its target calendar; there is no default or system fallback."
                         ),
                     ]),
                 ]
             case .addToReminders:
                 return [
+                    "read": .object([
+                        "type": .string("array"),
+                        "items": .object(["type": .string("string")]),
+                        "description": .string(
+                            "Reminders list titles this action may list reminders from. Empty/omitted disables reading entirely — listing reminders becomes unavailable (it does not mean \"all lists\")."
+                        ),
+                    ]),
                     "lists": .object([
                         "type": .string("array"),
                         "items": .object(["type": .string("string")]),
                         "description": .string(
-                            "Reminders list titles this action may add reminders to. Empty/omitted disables adding entirely — there is no default-list fallback."
+                            "Reminders list titles this action may add reminders to. Empty/omitted disables adding entirely — adding reminders becomes unavailable (it does not mean \"all lists\"). Every reminder names its target list; there is no default or system fallback."
                         ),
-                    ])
+                    ]),
                 ]
             case .openWithURL, .addToReadingList, .askForFile,
                 .getCurrentlyPlayingMusic, .runMacOSShortcut:
