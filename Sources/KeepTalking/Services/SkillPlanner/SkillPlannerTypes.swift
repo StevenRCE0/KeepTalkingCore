@@ -86,7 +86,7 @@ public enum KeepTalkingSkillPlannerEvent: Sendable {
     /// - `nil`: the host did not handle the event; the agent's proposed scope
     ///   is applied as-is.
     /// - JSON-object string: the user's edited scope. An empty object (`{}`)
-    ///   clears the scope (action becomes unscoped).
+    ///   clears the scope, which leaves every scoped operation with no access.
     case proposingPrimitiveScope(
         kind: String, proposedScopeJSON: String, schemaJSON: String)
     /// Free-form clarifying question from the planner. The host should show
