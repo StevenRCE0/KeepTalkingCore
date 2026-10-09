@@ -6,9 +6,10 @@ import PackageDescription
 let package = Package(
     name: "KeepTalking",
     platforms: [
-        // 17.5 / 14.5 are the vendored iroh xcframework's floors (IrohLib).
+        // iOS 17.5 is the vendored iroh xcframework's floor (IrohLib); macOS 15
+        // is gRPC Swift 2's, which the plugin host's wire needs.
         .iOS("17.5"),
-        .macOS("14.5"),
+        .macOS(.v15),
         .visionOS(.v1),
     ],
     products: [
@@ -40,6 +41,12 @@ let package = Package(
         // `KeepTalkingTransport.unavailable`. See Transport/Iroh.
         .package(path: "../iroh-ffi"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
+        // The plugin host's wire (KTPP v2): gRPC over a Unix domain socket with
+        // a JSON codec — no protobuf. Desktop-only, so the SDK takes it
+        // conditionally and iOS/visionOS never build or link it. See
+        // Services/PluginHost/Wire.
+        .package(url: "https://github.com/grpc/grpc-swift-2.git", from: "2.4.0"),
+        .package(url: "https://github.com/grpc/grpc-swift-nio-transport.git", from: "2.10.0"),
         // swift-crypto is the canonical crypto layer so the SDK is Apple-free.
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         // swift-uuidv7: time-ordered (RFC 9562 v7) UUID generation used for
@@ -69,6 +76,16 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "UUIDV7", package: "swift-uuidv7"),
+                .product(
+                    name: "GRPCCore",
+                    package: "grpc-swift-2",
+                    condition: .when(platforms: [.macOS, .linux])
+                ),
+                .product(
+                    name: "GRPCNIOTransportHTTP2Posix",
+                    package: "grpc-swift-nio-transport",
+                    condition: .when(platforms: [.macOS, .linux])
+                ),
             ],
             path: "Sources/KeepTalking"
         ),
@@ -94,6 +111,16 @@ let package = Package(
             dependencies: [
                 .product(name: "Crypto", package: "swift-crypto"),
                 "KeepTalkingSDK",
+                .product(
+                    name: "GRPCCore",
+                    package: "grpc-swift-2",
+                    condition: .when(platforms: [.macOS, .linux])
+                ),
+                .product(
+                    name: "GRPCNIOTransportHTTP2Posix",
+                    package: "grpc-swift-nio-transport",
+                    condition: .when(platforms: [.macOS, .linux])
+                ),
             ],
             path: "Tests/KeepTalkingSDKTests"
         ),

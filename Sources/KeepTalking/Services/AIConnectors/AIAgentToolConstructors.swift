@@ -406,6 +406,39 @@ extension KeepTalkingClient {
         )
     }
 
+    func makePluginResourcesTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.pluginResourcesToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.pluginResources,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "action_id": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "The plugin action whose resources to list or read — copy its `action:` value from the available actions list exactly."
+                        ),
+                    ]),
+                    "uri": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "A uri from the action's `resources:` line. Omit it to list the declared resources."
+                        ),
+                    ]),
+                    "max_characters": .object([
+                        "type": .string("integer"),
+                        "description": .string("Cap on text returned inline (default 12000)."),
+                    ]),
+                ]),
+                "required": .array([.string("action_id")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
     func makeContextAttachmentListingTool() -> KeepTalkingActionToolDefinition {
         .init(
             functionName: Self.contextAttachmentListingToolFunctionName,

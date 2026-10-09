@@ -433,6 +433,12 @@ final class KeepTalkingIOManager {
         fileprivate let stagedInputs: KeepTalkingStagingIOManager.PreparedInputs
         fileprivate let workspaceThreadID: UUID?
         fileprivate let workspaceRunStarted: Bool
+        /// The private directory of a run that does not share a thread
+        /// workspace; removed once its outputs are delivered.
+        fileprivate let runDirectory: URL?
+        /// The workspace's files as the run found them, so the harvest
+        /// delivers only what this run wrote.
+        fileprivate let workspaceBaseline: [String: WorkspaceFileStamp]
     }
 
     /// Stages a call's file inputs, allocates its workspace output slots, and
@@ -446,8 +452,8 @@ final class KeepTalkingIOManager {
     /// Before the body: the call's inputs are staged and its output slots
     /// allocated (`prepareActionRun`), and the body receives that prepared run —
     /// its manifest, sandbox policy, and directories. After the body: whatever
-    /// it wrote to the declared slots is delivered per persistence, anything
-    /// else it left in its workspace is harvested, and the scratch state is
+    /// it wrote to the declared slots is delivered per persistence, any other
+    /// file it wrote to its workspace is harvested, and the scratch state is
     /// torn down on every exit path, so a throwing body still releases its
     /// staging. Every executor that consumes files enters through here, which
     /// is what keeps "stage, run, deliver, harvest, clean up" one sequence
@@ -470,6 +476,7 @@ final class KeepTalkingIOManager {
             await harvestWorkspaceOutputs(
                 workspaceDirectory: run.workspaceDirectory,
                 declaredSlotPaths: Set(run.outputSlots.map(\.path.standardizedFileURL.path)),
+                baseline: run.workspaceBaseline,
                 contextID: request.contextID,
                 callerNodeID: request.callerNodeID))
         return (result, outputs)
@@ -486,15 +493,21 @@ final class KeepTalkingIOManager {
         var workspaceThreadID: UUID?
         var workspaceDir: URL?
         var workspaceRunStarted = false
-        workspaceThreadID =
-            (try? await client.ensureContextMainThread(
-                for: request.contextID))?.id
-        if let threadID = workspaceThreadID {
-            workspaceDir = try? await client.threadWorkspace(for: threadID)
-            if workspaceDir != nil {
-                await client.beginThreadWorkspaceRun(threadID)
-                workspaceRunStarted = true
+        var runDirectory: URL?
+        if action.payload.runsInThreadWorkspace {
+            workspaceThreadID =
+                (try? await client.ensureContextMainThread(
+                    for: request.contextID))?.id
+            if let threadID = workspaceThreadID {
+                workspaceDir = try? await client.threadWorkspace(for: threadID)
+                if workspaceDir != nil {
+                    await client.beginThreadWorkspaceRun(threadID)
+                    workspaceRunStarted = true
+                }
             }
+        } else {
+            runDirectory = try? await client.threadWorkspaces.makeRunDirectory()
+            workspaceDir = runDirectory
         }
 
         let binding = Self.prepareCallBinding(
@@ -551,12 +564,17 @@ final class KeepTalkingIOManager {
             outputSlots: outputSlots,
             stagedInputs: stagedInputs,
             workspaceThreadID: workspaceThreadID,
-            workspaceRunStarted: workspaceRunStarted)
+            workspaceRunStarted: workspaceRunStarted,
+            runDirectory: runDirectory,
+            workspaceBaseline: workspaceDir.map(Self.workspaceFileStamps) ?? [:])
     }
 
     private func cleanup(_ run: PreparedActionRun, consumedInputHandles: [UUID]?) {
         if run.workspaceRunStarted, let threadID = run.workspaceThreadID {
             Task { [weak client] in await client?.endThreadWorkspaceRun(threadID) }
+        }
+        if let runDirectory = run.runDirectory {
+            Task { [weak client] in await client?.threadWorkspaces.discardRunDirectory(runDirectory) }
         }
         staging.cleanup(run.stagedInputs)
 
@@ -673,29 +691,68 @@ final class KeepTalkingIOManager {
                 + "collections=\(outputSlots.filter { $0.isDirectory }.count)")
     }
 
+    /// When a workspace file was last written, and how big it was.
+    struct WorkspaceFileStamp: Equatable {
+        let modified: Date?
+        let size: Int?
+    }
+
+    /// The workspace's top-level files, stamped, keyed by standardized path.
+    /// Taken as a run starts: a thread workspace outlives its runs, and a file
+    /// an earlier run left there is not this run's output.
+    static func workspaceFileStamps(in workspace: URL) -> [String: WorkspaceFileStamp] {
+        Dictionary(
+            workspaceFiles(in: workspace).map { ($0.standardizedFileURL.path, stamp(of: $0)) },
+            uniquingKeysWith: { first, _ in first })
+    }
+
+    /// What a run's harvest delivers: top-level files that are not a declared
+    /// slot and are new or rewritten since `baseline`, in path order.
+    static func harvestCandidates(
+        in workspace: URL,
+        declaredSlotPaths: Set<String>,
+        baseline: [String: WorkspaceFileStamp]
+    ) -> [URL] {
+        workspaceFiles(in: workspace)
+            .filter { url in
+                let path = url.standardizedFileURL.path
+                return !declaredSlotPaths.contains(path) && baseline[path] != stamp(of: url)
+            }
+            .sorted { $0.path < $1.path }
+    }
+
+    private static func workspaceFiles(in workspace: URL) -> [URL] {
+        let items =
+            (try? FileManager.default.contentsOfDirectory(
+                at: workspace,
+                includingPropertiesForKeys: [
+                    .isRegularFileKey, .contentModificationDateKey, .fileSizeKey,
+                ],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+        return items.filter {
+            (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+        }
+    }
+
+    private static func stamp(of url: URL) -> WorkspaceFileStamp {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        return WorkspaceFileStamp(modified: values?.contentModificationDate, size: values?.fileSize)
+    }
+
     private func harvestWorkspaceOutputs(
         workspaceDirectory: URL?,
         declaredSlotPaths: Set<String>,
+        baseline: [String: WorkspaceFileStamp],
         contextID: UUID,
         callerNodeID: UUID
     ) async -> DeliveredOutputs {
         guard let workspace = workspaceDirectory else { return DeliveredOutputs() }
-        let fm = FileManager.default
-        let items =
-            (try? fm.contentsOfDirectory(
-                at: workspace,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles]
-            )) ?? []
-
-        let candidates = items.filter { url in
-            let isFile = (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
-            let isSlot = declaredSlotPaths.contains(url.standardizedFileURL.path)
-            return isFile && !isSlot
-        }
+        let candidates = Self.harvestCandidates(
+            in: workspace, declaredSlotPaths: declaredSlotPaths, baseline: baseline)
         guard !candidates.isEmpty else { return DeliveredOutputs() }
 
-        let inputs = candidates.sorted(by: { $0.path < $1.path }).map {
+        let inputs = candidates.map {
             KeepTalkingLocalAttachmentInput(
                 sourceURL: $0,
                 filename: $0.lastPathComponent,

@@ -11,6 +11,7 @@ private struct KeepTalkingQueuedPromptPreparationError: LocalizedError, Sendable
 
 extension KeepTalkingClient {
     static let ktSkillMetainfoToolFunctionName = "kt_skill_metainfo"
+    static let pluginResourcesToolFunctionName = "kt_plugin_resources"
     static let contextAttachmentListingToolFunctionName =
         "kt_list_context_attachments"
     static let resourceReadToolFunctionName =
@@ -389,6 +390,9 @@ extension KeepTalkingClient {
                 makeArchiveSideNoteTool(),
                 makeSendFileTool(),
             ]
+                // Offered only while some local plugin action declares resources.
+                + (modelTakesTools && runtimeCatalog.actionStubs.contains { !$0.resources.isEmpty }
+                    ? [makePluginResourcesTool()] : [])
         let skillNameByActionID = skillNamesByActionID(
             routesByFunctionName: runtimeCatalog.routesByFunctionName
         )
@@ -724,6 +728,7 @@ extension KeepTalkingClient {
             || name == Self.markChitterChatterToolFunctionName
             || name == Self.contextAttachmentUpdateMetadataToolFunctionName
             || name == Self.ktSkillMetainfoToolFunctionName
+            || name == Self.pluginResourcesToolFunctionName
         {
             return ""
         }
@@ -793,6 +798,7 @@ extension KeepTalkingClient {
         }
 
         if name == Self.ktSkillMetainfoToolFunctionName
+            || name == Self.pluginResourcesToolFunctionName
             || name == Self.contextAttachmentUpdateMetadataToolFunctionName
         {
             return nil

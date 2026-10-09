@@ -191,6 +191,18 @@ extension KeepTalkingClient {
                         )
                     )
                     continue
+                } else if functionName == Self.pluginResourcesToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: await executePluginResourcesToolCall(
+                                toolCallID: toolCallID,
+                                rawArguments: toolCall.argumentsJSON,
+                                runtimeCatalog: runtimeCatalog
+                            )
+                        )
+                    )
+                    continue
                 } else if functionName == Self.ktSkillMetainfoToolFunctionName {
                     executions.append(
                         .init(

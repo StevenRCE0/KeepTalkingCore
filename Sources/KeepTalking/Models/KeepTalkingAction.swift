@@ -380,6 +380,21 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
             }
         }
 
+        /// Whether a run works in the thread's shared workspace — its `cwd`,
+        /// `$KT_` output slots, and the harvest of whatever else it leaves
+        /// there. That pipeline belongs to skill execution agents. A plugin
+        /// run gets a private per-run directory instead, so its slots and
+        /// generated files never mix with another run's leftovers.
+        var runsInThreadWorkspace: Bool {
+            switch self {
+                case .plugin:
+                    false
+                case .mcpBundle, .skill, .primitive, .semanticRetrieval, .actionCreation,
+                    .filesystem, .acp:
+                    true
+            }
+        }
+
         /// Whether requested outputs bind to the kind's DECLARED object names
         /// first, position only as a fallback among unclaimed declared
         /// objects. Plugin handlers look outputs up by declared name; skills

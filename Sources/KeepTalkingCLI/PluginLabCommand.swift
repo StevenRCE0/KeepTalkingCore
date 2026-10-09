@@ -4,10 +4,9 @@ import MCP
 
 /// KTPP lab host — the Phase-1 demo driver for plugin action catalogs.
 ///
-/// Serves the plugin attach socket via `KeepTalkingPluginHost`, auto-approves
-/// pairing (printing the identity fingerprint a real UI would show), lists the
-/// kinds a companion registers, and can drive a call end to end — printing the
-/// result, the plugin-signed usage receipt verdict, and a ledger verification.
+/// Serves the plugin socket via `KeepTalkingPluginHost`, lists the plugins
+/// that connect and the kinds they push, and can drive a call end to end —
+/// printing the result, the reported usage, and the attestation verdict.
 ///
 ///     KeepTalking pluginlab [--socket <path>] [--call <kind>] [--args <json>]
 ///                           [--scope <json>] [--wait <secs>] [--stay]
@@ -52,15 +51,6 @@ enum PluginLabCommand {
                 case .listening(let socketPath):
                     print("[pluginlab] listening socket=\(socketPath)")
                     print("[pluginlab] discovery=\((socketPath as NSString).deletingLastPathComponent)/ktpp.json")
-                case .paired(let catalogID, let info, let fingerprint, let endorsedBy):
-                    print("[pluginlab] paired catalog=\(catalogID.uuidString.lowercased())")
-                    print("            plugin=\(info.name) v\(info.version) by \(info.vendor)")
-                    print("            fingerprint=\(fingerprint)")
-                    if let endorsedBy {
-                        print(
-                            "            endorsed by companion \(endorsedBy.uuidString.lowercased()) — no prompt needed"
-                        )
-                    }
                 case .kindsRegistered(let catalogID, let kinds):
                     print(
                         "[pluginlab] kinds registered catalog=\(catalogID.uuidString.lowercased()) manifest=\(kinds.manifestVersion)"
@@ -74,20 +64,16 @@ enum PluginLabCommand {
                     for meter in kinds.meters ?? [] {
                         print("            meter \(meter.name) (per \(meter.quantum))")
                     }
-                case .sessionOpened(let catalogID):
-                    print("[pluginlab] session opened catalog=\(catalogID.uuidString.lowercased())")
-                case .sessionClosed(let catalogID):
-                    print("[pluginlab] session closed catalog=\(catalogID.uuidString.lowercased())")
+                case .connected(let catalogID, let info, let role):
+                    print("[pluginlab] connected catalog=\(catalogID.uuidString.lowercased())")
+                    print(
+                        "            plugin=\(info.name) v\(info.version) by \(info.vendor)\(role.map { " (\($0))" } ?? "")"
+                    )
+                case .disconnected(let catalogID):
+                    print("[pluginlab] disconnected catalog=\(catalogID.uuidString.lowercased())")
                 case .log(let message):
                     print("[pluginlab] \(message)")
             }
-        }
-
-        // The lab stands in for the app's pairing consent UI: show the
-        // fingerprint, approve automatically.
-        await host.setPairingApprovalHandler { info, fingerprint in
-            print("[pluginlab] pairing request from \(info.name) (\(fingerprint)) — auto-approving (lab)")
-            return true
         }
 
         // Stands in for the app's confirmation sheet: accept plugin-proposed
@@ -149,26 +135,11 @@ enum PluginLabCommand {
             print("=== call result (isError=\(outcome.isError)) ===")
             printContent(outcome.content)
             print("")
-            print("=== receipt ===")
-            switch outcome.receiptStatus {
-                case .valid:
-                    print("receipt: VALID (plugin-signed, bound to this authorization + result)")
-                case .missing:
-                    print("receipt: MISSING (recorded; v0 policy is record-only)")
-                case .invalid(let reason):
-                    print("receipt: INVALID — \(reason)")
-            }
+            print("=== usage ===")
             for entry in outcome.usage {
-                print("usage: \(entry.meter) = \(entry.units)")
+                print("\(entry.meter) = \(entry.units)")
             }
-
-            let report = await host.verifyLedger()
-            print("")
-            print("=== ledger ===")
-            print("records=\(report.recordCount) sound=\(report.isSound)")
-            for issue in report.issues {
-                print("issue: \(issue)")
-            }
+            print("attestation: \(outcome.record.verdict)")
 
             if !args.stay {
                 await host.stop()

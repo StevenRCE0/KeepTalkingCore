@@ -6,41 +6,55 @@ import Testing
 
 #if os(macOS)
 
-/// LIVE end-to-end coverage of KTPP v1.1 over the real Unix socket: the actual
+/// LIVE end-to-end coverage of KTPP v2 over the real Unix socket: the actual
 /// `KeepTalkingPluginHost` actor on one side, the actual Python plugin SDK
 /// (`CompanionRuntime/keeptalking_plugin.py`) as a subprocess on the other.
 ///
-/// Proves the full loop the design doc promises: pair (auto-approved) → kind
-/// registration carrying `objects`/`usesACT` → a call whose signed
-/// authorization binds `resourcesHash` (the Python side REJECTS the call if
-/// the hash doesn't match what it received) → handler streams the source in
-/// and the result out through slot resources → elucidations arrive live and
-/// aggregated → ACT is denied without consent, served with it → the receipt
-/// verifies and the ledger stays sound.
+/// Proves the full loop the design doc promises: connect → kind
+/// registration carrying `objects`/capabilities → a call whose handler streams
+/// the source in and the result out through slot resources → elucidations
+/// arrive live and aggregated → ACT is denied without consent, served with it.
 ///
-/// Skipped (not failed) on machines without `python3` + `cryptography` or the
-/// CompanionRuntime checkout beside this package.
+/// Runs on the Companion's own runtime interpreter (`companion.py
+/// --runtime-python` sets it up; `KT_E2E_PYTHON` overrides). Skipped (not
+/// failed) unless that interpreter has grpcio and the CompanionRuntime checkout
+/// beside this package speaks KTPP v2.
 @Suite(.serialized)
 struct PluginSocketE2ETests {
 
     // MARK: Environment
 
-    /// `<workspace>/CompanionRuntime`, resolved relative to this source file.
+    /// The CompanionRuntime submodule checkout inside the app repo, resolved
+    /// relative to this source file.
     static let companionRuntimeDir: URL = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()  // KeepTalkingSDKTests
         .deletingLastPathComponent()  // Tests
         .deletingLastPathComponent()  // KeepTalking
         .deletingLastPathComponent()  // workspace root
-        .appendingPathComponent("CompanionRuntime", isDirectory: true)
+        .appendingPathComponent(
+            "KeepTalkingApp/KeepTalkingCompanion/CompanionRuntime", isDirectory: true)
+
+    /// The Companion runtime's interpreter, from the developer's REAL home
+    /// (resolved before any test isolates `HOME`).
+    static let runtimePython: String =
+        ProcessInfo.processInfo.environment["KT_E2E_PYTHON"]
+        ?? FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".keeptalking-plugin/kt-companion/venv/bin/python").path
 
     static let environmentReady: Bool = {
         guard
             FileManager.default.fileExists(
-                atPath: companionRuntimeDir.appendingPathComponent("plugin_host.py").path)
+                atPath: companionRuntimeDir.appendingPathComponent("plugin_host.py").path),
+            FileManager.default.isExecutableFile(atPath: runtimePython)
         else { return false }
         let probe = Process()
-        probe.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        probe.arguments = ["python3", "-c", "import cryptography"]
+        probe.executableURL = URL(fileURLWithPath: runtimePython)
+        probe.arguments = [
+            "-c",
+            "import sys, grpc; sys.path.insert(0, sys.argv[1]); import keeptalking_plugin as k; "
+                + "sys.exit(0 if k.PROTOCOL_VERSION == \(KTPPWire.protocolVersion) else 1)",
+            companionRuntimeDir.path,
+        ]
         probe.standardOutput = FileHandle.nullDevice
         probe.standardError = FileHandle.nullDevice
         do {
@@ -53,25 +67,6 @@ struct PluginSocketE2ETests {
     }()
 
     // MARK: Harness
-
-    /// The user site-packages of the REAL home. The harness points `HOME` at a
-    /// scratch directory so plugin state stays isolated, which also hides a
-    /// user-installed `cryptography` from the system python — so the plugin
-    /// is handed the real location explicitly.
-    static let realUserSitePackages: String? = {
-        let probe = Process()
-        let pipe = Pipe()
-        probe.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        probe.arguments = ["python3", "-c", "import site; print(site.getusersitepackages())"]
-        probe.standardOutput = pipe
-        probe.standardError = FileHandle.nullDevice
-        guard (try? probe.run()) != nil else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        probe.waitUntilExit()
-        let path = String(decoding: data, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return path.isEmpty ? nil : path
-    }()
 
     /// Collects live elucidation callbacks across concurrency domains.
     final class NoteCollector: @unchecked Sendable {
@@ -102,7 +97,7 @@ struct PluginSocketE2ETests {
     }
 
     /// Starts a host on a fresh socket and launches `moduleFile` through the
-    /// real `plugin_host.py` with an ISOLATED $HOME (the SDK keys/pairs into
+    /// real `plugin_host.py` with an ISOLATED $HOME (the SDK keeps its state in
     /// `~/.keeptalking-plugin/…`, which must never touch the developer's real
     /// companion state).
     static func startHarness(moduleFile: URL) async throws -> Harness {
@@ -117,13 +112,11 @@ struct PluginSocketE2ETests {
             hostNodeID: UUID.v7(),
             socketPath: socketPath,
             catalogue: KeepTalkingPluginCatalogueStore(fileURL: nil))
-        await host.setPairingApprovalHandler { _, _ in true }
         try await host.start()
 
         let plugin = Process()
-        plugin.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        plugin.executableURL = URL(fileURLWithPath: runtimePython)
         plugin.arguments = [
-            "python3",
             companionRuntimeDir.appendingPathComponent("plugin_host.py").path,
             "--module", moduleFile.path,
             "--socket", socketPath,
@@ -132,10 +125,6 @@ struct PluginSocketE2ETests {
         environment["HOME"] = home.path
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        if let userSite = realUserSitePackages {
-            environment["PYTHONPATH"] = [userSite, environment["PYTHONPATH"]]
-                .compactMap { $0 }.joined(separator: ":")
-        }
         plugin.environment = environment
         // As the companion does: plugin_host.py exits on stdin EOF, so hand it
         // a pipe we own instead of whatever stdin the test runner has.
@@ -148,8 +137,8 @@ struct PluginSocketE2ETests {
         return Harness(host: host, plugin: plugin, scratch: scratch)
     }
 
-    /// Waits until pairing has landed in the catalogue store (commitPairing
-    /// persists on a detached task, so the row can trail the session by a beat).
+    /// Waits until the catalog row has landed in the catalogue store (kept as a
+    /// guard: the row is written as the plugin connects, before its kinds).
     static func waitForCatalogue(
         _ host: KeepTalkingPluginHost, catalogID: UUID, timeout: TimeInterval = 10
     ) async throws {
@@ -188,7 +177,7 @@ struct PluginSocketE2ETests {
     // MARK: Tests
 
     @Test(
-        "markitdown plugin over the live socket: pair, declare, convert into a slot",
+        "markitdown plugin over the live socket: open, declare, convert into a slot",
         .enabled(if: PluginSocketE2ETests.environmentReady))
     func markitdownRoundTrip() async throws {
         let harness = try await Self.startHarness(
@@ -205,7 +194,7 @@ struct PluginSocketE2ETests {
             summary?.kinds?.kinds.first { $0.kindName == "markitdown-convert" })
         #expect(kind.objects?.count == 2)
         #expect(kind.objects?.first?.direction == "input")
-        #expect(kind.usesACT == true)
+        #expect(kind.declaredCapabilities.contains(.act))
 
         let (manifest, _, slotPath) = try Self.sampleManifest(
             scratch: harness.scratch, sourceName: "notes.txt",
@@ -234,7 +223,7 @@ struct PluginSocketE2ETests {
             manifest: manifest,
             onElucidation: { message, _ in live.append(message) })
         #expect(!outcome.isError)
-        #expect(outcome.receiptStatus == .valid)
+        #expect(outcome.record.verdict == .unattested)
         #expect(outcome.elucidations.contains { $0.contains("Converting notes.txt") })
         #expect(live.notes.contains { $0.contains("Converting notes.txt") })
 
@@ -243,16 +232,6 @@ struct PluginSocketE2ETests {
         // the transport, not the converter, is under test).
         let slotText = try String(contentsOf: slotPath, encoding: .utf8)
         #expect(slotText.contains("notes.txt"))
-
-        // The signed authorization carried the resource binding, and the
-        // dual-signed ledger stays sound end to end.
-        if case .object(let fields) = outcome.record.authorization {
-            #expect(fields["resourcesHash"] != nil)
-        } else {
-            Issue.record("authorization is not an object")
-        }
-        let report = await harness.host.verifyLedger()
-        #expect(report.isSound)
     }
 
     @Test(
@@ -384,9 +363,6 @@ struct PluginSocketE2ETests {
         #expect(narrowedSlot == "denied")
         #expect(narrowedOutcome.record.hostActUsage == nil)
 
-        let report = await harness.host.verifyLedger()
-        #expect(report.isSound)
-
         // Reverse-direction UI request: the plugin asks the host to open the
         // add-action sheet; the injected handler must see the names and the
         // plugin must get an ok verdict back.
@@ -478,9 +454,304 @@ struct PluginSocketE2ETests {
     }
 
     @Test(
-        "a session that drops mid-call fails the call at once, not at its timeout",
+        "plugin.scope.options: declared live keys are asked, answers trimmed, refusals surfaced",
         .enabled(if: PluginSocketE2ETests.environmentReady))
-    func droppedSessionFailsInFlightCall() async throws {
+    func scopeOptionsRoundTrip() async throws {
+        let module = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kt-options-probe-\(UUID().uuidString.prefix(8)).py")
+        try """
+        import sys
+        sys.path.insert(0, \(Self.companionRuntimeDir.path.debugDescription))
+        from keeptalking_plugin import Plugin, scope_option
+
+
+        def make_plugin():
+            plugin = Plugin(name="OptionsProbe", vendor="test", version="0.0.1")
+
+            @plugin.kind(
+                "options-probe",
+                description="scope choices",
+                scope_schema={
+                    "apps": {"type": "array", "items": {"type": "string"}},
+                    "mode": {"type": "string", "enum": ["fast", "safe"]},
+                    "broken": {"type": "string"},
+                    "free": {"type": "string"},
+                },
+            )
+            async def probe(args, ctx):
+                return "ok"
+
+            @plugin.scope_options("options-probe", "apps", allows_custom=False)
+            async def apps(request):
+                options = [
+                    scope_option("com.example.one", "One", group="Open now",
+                                 app="com.example.one", caution="careful"),
+                    scope_option("com.example.two", "Two\\nlines " + "x" * 300),
+                    {"value": {"nested": True}, "label": "not a scalar"},
+                    scope_option("echo", f"{request.query}|{request.scope.get('mode')}"),
+                ]
+                return options
+
+            @plugin.scope_options("options-probe", "broken")
+            async def broken(request):
+                raise RuntimeError("dependency missing")
+
+            return plugin
+        """.data(using: .utf8)!.write(to: module)
+        defer { try? FileManager.default.removeItem(at: module) }
+
+        let harness = try await Self.startHarness(moduleFile: module)
+        defer { Task { await harness.tearDown() } }
+        let host = harness.host
+        let catalogID = try await host.waitForKind("options-probe", timeout: 30)
+        try await Self.waitForCatalogue(host, catalogID: catalogID)
+
+        // The declaration carries the keyword; fixed enums parse without it.
+        let summary = try #require(
+            await host.catalogue.summary(catalogID: catalogID, kindName: "options-probe"))
+        let apps = try #require(summary.scopeOptionsSpec(for: "apps"))
+        #expect(apps.isLive && apps.isMultiple && !apps.allowsCustom)
+        let mode = try #require(summary.scopeOptionsSpec(for: "mode"))
+        #expect(!mode.isLive && !mode.allowsCustom)
+        #expect(mode.fixedChoices == [.string("fast"), .string("safe")])
+        #expect(summary.scopeOptionsSpec(for: "free") == nil)
+
+        let options = try await host.scopeOptions(
+            catalogID: catalogID, kindName: "options-probe", key: "apps",
+            scope: ["mode": .string("safe")], query: "sa")
+        #expect(
+            options.map(\.value) == [
+                .string("com.example.one"), .string("com.example.two"), .string("echo"),
+            ])
+        #expect(options[0].group == "Open now")
+        #expect(options[0].icon?.app == "com.example.one")
+        #expect(options[0].caution == "careful")
+        #expect(options[1].label.count == 120 && !options[1].label.contains("\n"))
+        #expect(options[2].label == "sa|safe")
+
+        // A provider's own failure comes back as the plugin's message.
+        let refusal = await #expect(throws: KTPPHostError.self) {
+            try await host.scopeOptions(
+                catalogID: catalogID, kindName: "options-probe", key: "broken")
+        }
+        #expect(refusal?.errorDescription == "dependency missing")
+
+        // Keys without live options are never asked.
+        await #expect(throws: KTPPHostError.self) {
+            try await host.scopeOptions(
+                catalogID: catalogID, kindName: "options-probe", key: "free")
+        }
+    }
+
+    @Test(
+        "declared resources: catalogued with the kind, read as MCP contents; call-returned contents map into requested outputs",
+        .enabled(if: PluginSocketE2ETests.environmentReady))
+    func declaredResourcesRoundTrip() async throws {
+        let module = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kt-resource-probe-\(UUID().uuidString.prefix(8)).py")
+        try """
+        import base64
+        import sys
+        sys.path.insert(0, \(Self.companionRuntimeDir.path.debugDescription))
+        from keeptalking_plugin import Plugin, resource
+
+        PNG = base64.b64encode(b"\\x89PNG").decode()
+
+
+        def make_plugin():
+            plugin = Plugin(name="ResourceProbe", vendor="test", version="0.0.1")
+
+            @plugin.kind(
+                "resource-probe",
+                description="declares resources, returns files",
+                resources=[
+                    resource("mem://guide.md", "guide.md", mime_type="text/markdown"),
+                    resource("mem://pixel.png", "pixel.png", mime_type="image/png"),
+                    resource("mem://broken.md", "broken.md"),
+                ],
+            )
+            async def probe(args, ctx):
+                return [
+                    {"type": "text", "text": "done"},
+                    {"type": "resource", "resource": {
+                        "uri": "mem://report.txt", "mimeType": "text/plain", "text": "report"}},
+                    {"type": "resource", "resource": {
+                        "uri": "mem://shot.png", "mimeType": "image/png", "blob": PNG}},
+                    {"type": "image", "data": PNG, "mimeType": "image/png"},
+                    {"type": "resource_link", "uri": "mem://guide.md", "name": "guide.md"},
+                ]
+
+            @plugin.resource_reader
+            async def read(uri):
+                if uri == "mem://guide.md":
+                    return [{"uri": uri, "mimeType": "text/markdown", "text": "# Guide\\nhi"}]
+                if uri == "mem://pixel.png":
+                    return [{"uri": uri, "mimeType": "image/png", "blob": PNG}]
+                raise ValueError("cannot read " + uri)
+
+            return plugin
+        """.data(using: .utf8)!.write(to: module)
+        defer { try? FileManager.default.removeItem(at: module) }
+
+        let harness = try await Self.startHarness(moduleFile: module)
+        defer { Task { await harness.tearDown() } }
+        let host = harness.host
+        let catalogID = try await host.waitForKind("resource-probe", timeout: 30)
+        try await Self.waitForCatalogue(host, catalogID: catalogID)
+
+        // Declared beside the tools, catalogued with the kind.
+        let declared = await host.catalogue.kind(catalogID: catalogID, kindName: "resource-probe")?
+            .resources?.map(\.uri)
+        #expect(declared == ["mem://guide.md", "mem://pixel.png", "mem://broken.md"])
+
+        // Read: MCP `resources/read` contents, verbatim.
+        let guide = try await host.readResource(
+            catalogID: catalogID, kindName: "resource-probe", uri: "mem://guide.md")
+        #expect(guide.first?.text == "# Guide\nhi")
+        let pixel = try await host.readResource(
+            catalogID: catalogID, kindName: "resource-probe", uri: "mem://pixel.png")
+        #expect(pixel.first?.blob.flatMap { Data(base64Encoded: $0) } == Data([0x89, 0x50, 0x4E, 0x47]))
+
+        // Undeclared uris are refused host-side; a reader's refusal is its message.
+        await #expect(throws: KTPPHostError.self) {
+            try await host.readResource(
+                catalogID: catalogID, kindName: "resource-probe", uri: "mem://secret")
+        }
+        let refusal = await #expect(throws: KTPPHostError.self) {
+            try await host.readResource(
+                catalogID: catalogID, kindName: "resource-probe", uri: "mem://broken.md")
+        }
+        #expect(refusal?.errorDescription == "cannot read mem://broken.md")
+
+        // Call IO maps to KTRM: every file the result carries becomes a resource.
+        let outcome = try await host.callKind(
+            catalogID: catalogID, kindName: "resource-probe", arguments: [:],
+            instanceID: UUID.v7(), instanceScope: nil)
+        let content = try JSONDecoder().decode(
+            [Tool.Content].self, from: JSONEncoder().encode(outcome.content))
+        #expect(
+            KeepTalkingPluginHost.mappingGeneratedContents(content, into: nil, runDirectory: nil)
+                == content)
+        let png = Data([0x89, 0x50, 0x4E, 0x47])
+
+        // Nothing requested: files go to the run's directory (delivered as
+        // private OTBs); images stay visible beside their note; text stays inline.
+        let runDirectory = harness.scratch.appendingPathComponent("run", isDirectory: true)
+        let spilled = KeepTalkingPluginHost.mappingGeneratedContents(
+            content, into: nil, runDirectory: runDirectory)
+        #expect(try Data(contentsOf: runDirectory.appendingPathComponent("shot.png")) == png)
+        #expect(try Data(contentsOf: runDirectory.appendingPathComponent("image-4.png")) == png)
+        #expect(spilled.count == 7)
+        #expect(spilled[1] == content[1])
+        #expect(spilled[2] == content[2] && spilled[4] == content[3])
+        guard case .text(let shotNote, _, _) = spilled[3], case .text(let imageNote, _, _) = spilled[5]
+        else {
+            Issue.record("generated files carry no note: \(spilled)")
+            return
+        }
+        #expect(shotNote.contains("shot.png") && shotNote.contains("produced_resources"))
+        #expect(imageNote.contains("image-4.png") && imageNote.contains("produced_resources"))
+        #expect(spilled[6] == content[4])  // links stay links
+
+        // Requested outputs claim them first: one file per single slot, the rest
+        // into a collection.
+        let fileSlot = harness.scratch.appendingPathComponent("slots/result")
+        let collection = harness.scratch.appendingPathComponent("slots/files", isDirectory: true)
+        let manifest = KTResourceManifest.build(
+            grantedCandidates: [
+                .init(
+                    kind: .otb, id: UUID.v7(), path: fileSlot, direction: .write,
+                    displayName: "result", isDirectory: false, objectName: "result"),
+                .init(
+                    kind: .otb, id: UUID.v7(), path: collection, direction: .write,
+                    displayName: "files", isDirectory: true, objectName: "files"),
+            ],
+            umbrellaAttachmentsDir: nil)
+        let mapped = KeepTalkingPluginHost.mappingGeneratedContents(
+            content, into: manifest, runDirectory: runDirectory)
+        #expect(try String(contentsOf: fileSlot, encoding: .utf8) == "report")
+        #expect(try Data(contentsOf: collection.appendingPathComponent("shot.png")) == png)
+        #expect(try Data(contentsOf: collection.appendingPathComponent("image-4.png")) == png)
+        guard case .text(let report, _, _) = mapped[1], case .text(let shot, _, _) = mapped[3],
+            case .text(let image, _, _) = mapped[5]
+        else {
+            Issue.record("requested outputs carry no note: \(mapped)")
+            return
+        }
+        let resultURI = KTResourceManifest.resourceURI(handle: manifest.entries[0].envKey)
+        let filesURI = KTResourceManifest.resourceURI(handle: manifest.entries[1].envKey)
+        #expect(report.contains("report.txt") && report.contains(resultURI))
+        #expect(shot.contains(filesURI + "/shot.png"))
+        #expect(image.contains(filesURI + "/image-4.png"))
+    }
+
+    @Test("kt-resource:// URIs: arguments resolve to this call's paths, result paths map back")
+    func resourceURIMapping() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kt-uri-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        let output = root.appendingPathComponent("out")
+        let shots = root.appendingPathComponent("shots", isDirectory: true)
+        let input = root.appendingPathComponent("in.txt")
+        let manifest = KTResourceManifest.build(
+            grantedCandidates: [
+                .init(
+                    kind: .otb, id: UUID.v7(), path: output, direction: .write,
+                    displayName: "result", isDirectory: false, objectName: "result"),
+                .init(
+                    kind: .otb, id: UUID.v7(), path: shots, direction: .write,
+                    displayName: "shots", isDirectory: true, objectName: "shots"),
+                .init(
+                    kind: .otb, id: UUID.v7(), path: input, direction: .read,
+                    displayName: "in.txt", isDirectory: false),
+            ],
+            umbrellaAttachmentsDir: nil)
+        let (out, coll, inp) = (manifest.entries[0], manifest.entries[1], manifest.entries[2])
+
+        #expect(KTResourceManifest.parseResourceURI("kt-resource://\(out.envKey)")?.handle == out.envKey)
+        #expect(KTResourceManifest.parseResourceURI("kt-resource://x/../etc") == nil)
+        #expect(KTResourceManifest.parseResourceURI("https://example.com") == nil)
+
+        let resolved = try KeepTalkingPluginHost.resolvingResourceURIs(
+            [
+                "screenshot_out_file": .string("kt-resource://\(out.envKey)"),
+                "files": .array([.string("kt-resource://\(inp.envKey.lowercased())")]),
+                "nested": .object(["frame": .string("kt-resource://\(coll.envKey)/frame.png")]),
+                "plain": .string("hello"),
+            ],
+            manifest: manifest)
+        #expect(resolved["screenshot_out_file"] == .string(out.path!.path))
+        #expect(resolved["files"] == .array([.string(inp.path!.path)]))
+        #expect(resolved["nested"] == .object(["frame": .string(coll.path!.appendingPathComponent("frame.png").path)]))
+        #expect(resolved["plain"] == .string("hello"))
+
+        // Anything that is not one of this call's resources refuses the call.
+        #expect(throws: KTPPHostError.self) {
+            try KeepTalkingPluginHost.resolvingResourceURIs(
+                ["f": .string("kt-resource://KT_OTB_NOT_THIS_CALL")], manifest: manifest)
+        }
+        #expect(throws: KTPPHostError.self) {
+            try KeepTalkingPluginHost.resolvingResourceURIs(
+                ["f": .string("kt-resource://\(out.envKey)/child.png")], manifest: manifest)
+        }
+
+        let back = KeepTalkingPluginHost.mappingResourcePaths(
+            [
+                .text(
+                    text: "saved \(out.path!.path) and \(coll.path!.path)/frame.png",
+                    annotations: nil, _meta: nil)
+            ],
+            manifest: manifest)
+        guard case .text(let text, _, _) = back[0] else {
+            Issue.record("expected text")
+            return
+        }
+        #expect(text == "saved kt-resource://\(out.envKey) and kt-resource://\(coll.envKey)/frame.png")
+    }
+
+    @Test(
+        "a plugin that drops mid-call fails the call at once, not at its timeout",
+        .enabled(if: PluginSocketE2ETests.environmentReady))
+    func droppedConnectionFailsInFlightCall() async throws {
         let module = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("kt-hang-probe-\(UUID().uuidString.prefix(8)).py")
         try """
@@ -516,8 +787,8 @@ struct PluginSocketE2ETests {
         harness.plugin.terminate()
 
         let error = await #expect(throws: KTPPHostError.self) { try await call.value }
-        guard case .sessionUnavailable? = error else {
-            Issue.record("expected sessionUnavailable, got \(String(describing: error))")
+        guard case .notConnected? = error else {
+            Issue.record("expected notConnected, got \(String(describing: error))")
             return
         }
         #expect(Date().timeIntervalSince(started) < 10)

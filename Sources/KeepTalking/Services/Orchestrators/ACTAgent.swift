@@ -56,14 +56,21 @@ extension KeepTalkingClient {
                 with `kt_send_file` (returns a `KT_OTB_<HEX>` handle); that
                 handle resolves only on the node you staged it to.
 
-                To capture a file the action PRODUCES: request it in `outputs`.
-                Each entry needs a `name` and a `persistence`:
-                - `otb` (private): delivered only to you as a `KT_OTB_<HEX>`
-                  handle. Default for intermediate files.
-                - `attachment` (shared): becomes a durable context attachment
-                  (`KT_ATTACHMENT_<HEX>`), visible to all participants.
-                The inner skill/action receives an exact `$KT_...` write
-                variable for each requested output. After the call returns, its
+                Files the action PRODUCES (a screenshot, a converted document)
+                come back as resources on their own — private `KT_OTB_<HEX>`
+                handles unless you say otherwise in `outputs`. Each entry needs a
+                `name` and a `persistence`:
+                - `attachment` (preserved): becomes a durable context attachment
+                  (`KT_ATTACHMENT_<HEX>`), visible to all participants. Use it
+                  WHENEVER the file needs to be preserved — other peers should
+                  see or assess it, or a later step is likely to need it again.
+                - `otb` (throwaway): delivered only to you as a `KT_OTB_<HEX>`
+                  handle that lives about 10 minutes on the producing node. Only
+                  for a file you use once, right away, and then drop.
+                Decide BEFORE the call: a produced file you did not request as an
+                attachment arrives as an OTB and cannot become one later short of
+                running the action again.
+                After the call returns, its
                 result carries a `produced_resources` array listing each produced
                 file by handle, and the bytes are injected into your next turn
                 automatically — so normally do NOT call a tool to fetch them.
@@ -103,14 +110,14 @@ extension KeepTalkingClient {
                                 "name": .object([
                                     "type": .string("string"),
                                     "description": .string(
-                                        "Logical name for this output (e.g. \"result\"). The executor will expose the concrete write path in the inner action's KeepTalking resources block as an exact `$KT_...` variable; the action must write to that listed variable."
+                                        "Logical name for this output (e.g. \"result\", or an `out` object named on the action's `objects:` line)."
                                     ),
                                 ]),
                                 "persistence": .object([
                                     "type": .string("string"),
                                     "enum": .array([.string("attachment"), .string("otb")]),
                                     "description": .string(
-                                        "otb = private, ephemeral, delivered only to you as a KT_OTB_<HEX> handle (default; use for intermediate files you'll feed into a later action). attachment = durable, shared context attachment (KT_ATTACHMENT_<HEX>), visible to all participants via attachment tools (use only for a shared, durable artifact)."
+                                        "attachment = durable, shared context attachment (KT_ATTACHMENT_<HEX>), visible to all participants. Choose it whenever the file needs to be preserved: other peers should see or assess it, or a later step is likely to need it again. otb = private KT_OTB_<HEX> handle that lives about 10 minutes on the producing node; only for a file you use once, right away, and then drop."
                                     ),
                                 ]),
                                 "multiple": .object([
@@ -123,7 +130,7 @@ extension KeepTalkingClient {
                             "required": .array([.string("name"), .string("persistence")]),
                         ]),
                         "description": .string(
-                            "Optional outputs you want this action to PRODUCE. Each becomes a write handle the action fills; KeepTalking delivers it as a durable attachment or a private file per `persistence`. Use this to capture an action's file output (and later reference it)."
+                            "How the files this action produces are delivered. Each entry claims one produced file (several with `multiple`) and delivers it per `persistence`; files no entry claims come back as throwaway private OTBs. Request `attachment` up front whenever a produced file needs to be preserved — for other peers to see or assess, or for later steps — because an OTB cannot become an attachment afterwards."
                         ),
                     ]),
                 ]),
@@ -444,23 +451,11 @@ extension KeepTalkingClient {
         let selfNodeName = aliasLookup.resolve(.node(config.node)).primary()
 
         let typeGuidance = AIPromptPresets.actAgentTypeGuidance(for: stub.kind)
-        let resourceBlock = await describeDelegatedInputResources(
-            resolvedInputHandles, in: context)
-        let systemPrompt = """
-            You are an Action Execution Agent (ACT agent) for the KeepTalking platform.
-
-            Your mission:
-            1. Review the action tools available to you.
-            2. Call the most appropriate tool with arguments that fulfil the user's task.
-            3. Once you have a result, reply with a concise 1–3 sentence summary of the
-               useful information returned by the tool.
-
-            Context: \(contextID)
-            Current node: \(selfNodeName)
-            Action: \(stub.name) (id: \(actionID.uuidString.lowercased()), type: \(stub.kind.rawValue), node: \(ownerNodeName))
-            Task: \(task.isEmpty ? "(no specific task provided — use your best judgment)" : task)
-            \(resolvedAction.promptContext.isEmpty ? "" : "\nAction metadata:\n\(resolvedAction.promptContext)\n")\(resourceBlock)
-            \(typeGuidance)
+        // `$KT_` variables, the sandbox, and output-slot variables are the
+        // skill execution agent's pipeline; no other kind runs a shell.
+        let sandboxGuidance =
+            stub.kind == .skill
+            ? """
 
             Sandbox & resource handles:
             You execute inside a SANDBOX. The outside world reaches you only through the
@@ -480,6 +475,25 @@ extension KeepTalkingClient {
               (`$KT_<KIND>_<HEX>` from the outputs block), not to an arbitrary path. A
               file written anywhere else is invisible to the caller and will be lost.
 
+            """ : ""
+        let resourceBlock = await describeDelegatedInputResources(
+            resolvedInputHandles, kind: stub.kind, in: context)
+        let systemPrompt = """
+            You are an Action Execution Agent (ACT agent) for the KeepTalking platform.
+
+            Your mission:
+            1. Review the action tools available to you.
+            2. Call the most appropriate tool with arguments that fulfil the user's task.
+            3. Once you have a result, reply with a concise 1–3 sentence summary of the
+               useful information returned by the tool.
+
+            Context: \(contextID)
+            Current node: \(selfNodeName)
+            Action: \(stub.name) (id: \(actionID.uuidString.lowercased()), type: \(stub.kind.rawValue), node: \(ownerNodeName))
+            Task: \(task.isEmpty ? "(no specific task provided — use your best judgment)" : task)
+            \(resolvedAction.promptContext.isEmpty ? "" : "\nAction metadata:\n\(resolvedAction.promptContext)\n")\(resourceBlock)
+            \(typeGuidance)
+            \(sandboxGuidance)
             Privacy and confidentiality: Do not disclose, summarize, or infer the user's environment in user-facing answers, including local machine or system state, filesystem paths, connected devices or nodes, credentials or configuration, screen contents, network details, or other ambient context. This applies especially to ACT agents, which may encounter such context while executing actions. You may disclose only information contained in explicitly provided or returned resources, information necessary to complete or accurately report the requested action, or information the node owner or action description explicitly authorizes or asks you to disclose.
 
             Be factual and direct. Only report what the tool returned. Do not speculate.
@@ -683,6 +697,7 @@ extension KeepTalkingClient {
     /// resolvable, the filename. Returns "" when no handles were relayed.
     private func describeDelegatedInputResources(
         _ handles: [(kind: KTResourceManifest.Kind?, id: UUID)],
+        kind: KeepTalkingActionStub.Kind,
         in context: KeepTalkingContext
     ) async -> String {
         guard !handles.isEmpty else { return "" }
@@ -704,6 +719,15 @@ extension KeepTalkingClient {
             lines.append(
                 name.map { "- \(token)  (\(friendly)) — \"\($0)\"" }
                     ?? "- \(token)  (\(friendly))")
+        }
+        if kind == .plugin {
+            return """
+
+                Resources provided for this run — the file(s) the task refers to. When a tool
+                argument needs one of these files, pass `\(KTResourceManifest.uriScheme)://<handle>`;
+                KeepTalking hands the plugin the file itself.
+                \(lines.joined(separator: "\n"))
+                """
         }
         return """
 

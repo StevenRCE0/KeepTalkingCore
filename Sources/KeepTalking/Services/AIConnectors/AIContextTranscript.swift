@@ -376,6 +376,27 @@ extension KeepTalkingClient {
         return "Conversation thread topics (oldest→newest): \(labels)"
     }
 
+    static func renderActionResources(
+        _ resources: [KeepTalkingActionResourceContract]
+    ) -> String {
+        resources.map { resource in
+            var entry = "\(resource.name) <\(resource.uri)>"
+            var facts: [String] = []
+            if let mime = resource.mimeType { facts.append(mime) }
+            if let size = resource.size {
+                facts.append(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
+            }
+            if !facts.isEmpty { entry += " (\(facts.joined(separator: ", ")))" }
+            if let description = resource.description, !description.isEmpty {
+                entry +=
+                    " — "
+                    + (description.count > 90
+                        ? String(description.prefix(89)) + "…" : description)
+            }
+            return entry
+        }.joined(separator: "; ")
+    }
+
     func renderActionNodeSummary(
         _ stubs: [KeepTalkingActionStub],
         aliasLookup: KeepTalkingAliasLookup
@@ -394,6 +415,9 @@ extension KeepTalkingClient {
             if !stub.objectContracts.isEmpty {
                 line += "\n    objects: \(Self.renderObjectContracts(stub.objectContracts))"
             }
+            if !stub.resources.isEmpty {
+                line += "\n    resources: \(Self.renderActionResources(stub.resources))"
+            }
             return line
         }
 
@@ -401,6 +425,7 @@ extension KeepTalkingClient {
             \(AIPromptPresets.actionCatalogHeading) (use \(Self.runActionToolFunctionName) to execute, \(Self.ktSkillMetainfoToolFunctionName) to inspect skill manifests):
             Pass an action's `action:` word-name as `action_id` — copy it exactly. It is three words because words survive copying: a mistyped word is caught and corrected, whereas a mistyped hex digit silently becomes a valid-looking id for nothing.
             Types: mcp=external server tools · skill=directory-based agent skill · primitive=built-in operation · filesystem=sandboxed file access + context blob bridge · semanticretrieval=remote thread-memory search
+            A `resources:` line lists documents a plugin action declares (its guides and references, by uri): read one with \(Self.pluginResourcesToolFunctionName)(action_id, uri) before delegating when it would help frame the task.
             An `objects:` line lists an action's declared inputs/outputs (direction + whether it's a file) so you can plan data flow BETWEEN actions — feed one action's `out` to another's `in`. You never see or pass provider file paths; reference a produced file by the handle the action returns.
             A file `in` is REQUIRED and is never filled implicitly: an action does not see this conversation's attachments. You must pass that file's handle in `input_handles` on \(Self.runActionToolFunctionName) — get it from \(Self.contextAttachmentListingToolFunctionName) for a file already attached here, or from `kt_send_file` for a local file you hold. Calling such an action without a handle fails with "could not resolve its SOURCE".
             \(lines.joined(separator: "\n"))

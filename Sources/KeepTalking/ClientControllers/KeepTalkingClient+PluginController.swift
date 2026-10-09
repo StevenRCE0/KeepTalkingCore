@@ -3,7 +3,7 @@
 //  KeepTalking
 //
 //  Public surface for the Catalogue: enabling the plugin host, browsing the
-//  kinds paired plugins provide, and minting action instances from them —
+//  kinds connected plugins provide, and minting action instances from them —
 //  the plugin analogue of the primitive creation flow.
 //
 
@@ -86,7 +86,7 @@ extension KeepTalkingClient {
     public func enablePluginHost() async throws {
         await pluginHost.setACTHandler { [weak self] request, callContext in
             guard let self else {
-                throw KTPPHostError.sessionUnavailable(callContext.catalogID)
+                throw KTPPHostError.notConnected(callContext.catalogID)
             }
             return try await self.performPluginACTTurn(request, boundTo: callContext)
         }
@@ -180,7 +180,7 @@ extension KeepTalkingClient {
     /// time, in two ways:
     /// 1. **Catalog aliasing** — an instance minted against a pairing that was
     ///    later deduped away (the re-pair-per-relaunch era) re-targets the
-    ///    canonical catalog, so its calls reach the live session again.
+    ///    canonical catalog, so its calls reach the connected plugin again.
     /// 2. **Descriptor staleness** — an instance minted before kind
     ///    declarations carried `objects` (pre-v1.1) re-materializes its
     ///    descriptor from the CURRENT declaration; without that,
@@ -203,10 +203,19 @@ extension KeepTalkingClient {
             mutated = true
         }
 
-        if action.descriptor?.objects?.isEmpty != false,
-            let kind = await pluginHost.catalogue.kind(
-                catalogID: bundle.catalogID, kindName: bundle.kindName),
-            kind.objects?.isEmpty == false
+        // Re-materialize whenever the declared objects or the kind's
+        // description and the instance's differ — added (pre-v1.1 instances)
+        // or dropped/renamed/reworded by a newer declaration — so the agent
+        // never plans around a stale object or instruction.
+        if let kind = await pluginHost.catalogue.kind(
+            catalogID: bundle.catalogID, kindName: bundle.kindName),
+            Set((kind.objects ?? []).map { "\($0.name)|\($0.direction)" })
+                != Set(
+                    (action.descriptor?.objects ?? []).map {
+                        "\($0.name ?? "")|\($0.direction.rawValue)"
+                    })
+                || KeepTalkingPluginHost.descriptor(for: bundle, kind: kind).action?.description
+                    != action.descriptor?.action?.description
         {
             action.descriptor = KeepTalkingPluginHost.descriptor(for: bundle, kind: kind)
             onLog?(
@@ -239,10 +248,10 @@ extension KeepTalkingClient {
         await pluginHost.stop()
     }
 
-    public func setPluginPairingApprovalHandler(
-        _ handler: @escaping @Sendable (KTPPPluginInfo, String) async -> Bool
-    ) async {
-        await pluginHost.setPairingApprovalHandler(handler)
+    /// Makes plugin calls verifiable — see `KeepTalkingCallAttestor`. Calls
+    /// are unattested until one is set.
+    public func setPluginCallAttestor(_ attestor: any KeepTalkingCallAttestor) async {
+        await pluginHost.setAttestor(attestor)
     }
 
     public func setPluginEventHandler(
@@ -253,7 +262,7 @@ extension KeepTalkingClient {
 
     // MARK: Catalogue
 
-    /// Paired plugin catalogs and their declared kinds — persisted, so this
+    /// Known plugin catalogs and their declared kinds — persisted, so this
     /// answers even while every plugin is offline.
     public func pluginCatalogues() async -> [KeepTalkingPluginCatalogueEntry] {
         await pluginHost.catalogue.catalogues()
@@ -270,6 +279,20 @@ extension KeepTalkingClient {
         catalogID: UUID, kindName: String
     ) async -> KeepTalkingPluginActionKindSummary? {
         await pluginHost.catalogue.summary(catalogID: catalogID, kindName: kindName)
+    }
+
+    /// The choices `kind`'s plugin offers right now for one scope key (keys
+    /// whose `scopeOptionsSpec(for:)` is live), for the instance form.
+    /// `scope` is the form's current bag; `query` narrows long lists.
+    public func pluginScopeOptions(
+        for kind: KeepTalkingPluginActionKindSummary,
+        key: String,
+        scope: [String: Value] = [:],
+        query: String? = nil
+    ) async throws -> [KTPPScopeOption] {
+        try await pluginHost.scopeOptions(
+            catalogID: await pluginHost.catalogue.canonicalCatalogID(kind.catalogID),
+            kindName: kind.kindName, key: key, scope: scope, query: query)
     }
 
     // MARK: Instantiation

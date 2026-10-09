@@ -127,6 +127,12 @@ public struct KeepTalkingPluginActionKindSummary: Codable, Sendable, Identifiabl
         guard case .object(let fields)? = scopeSchema else { return [] }
         return fields.keys.sorted()
     }
+
+    /// How `key` offers choices in the instance form — live from the plugin,
+    /// fixed in the schema, or nil for free entry.
+    public func scopeOptionsSpec(for key: String) -> KTPPScopeOptionsSpec? {
+        KTPPScopeOptionsSpec.parse(scopeSchema: scopeSchema, key: key)
+    }
 }
 
 /// A plugin's *request* that the user create an instance of one of its kinds —

@@ -60,6 +60,17 @@ enum MIMEType {
         }
     }
 
+    /// The usual file extension for `mimeType`; nil when it is not one the
+    /// lookup above knows.
+    static func preferredExtension(forMIMEType mimeType: String) -> String? {
+        let mime = mimeType.lowercased()
+        return [
+            "png", "jpg", "gif", "webp", "heic", "bmp", "tiff", "svg", "pdf", "txt", "md",
+            "html", "csv", "json", "xml", "mp3", "wav", "m4a", "ogg", "flac", "opus", "mp4",
+            "mov", "webm", "zip",
+        ].first { preferredMIMEType(forExtension: $0) == mime }
+    }
+
     static func inferredMIMEType(
         forFileAt url: URL,
         filename: String? = nil,
