@@ -2,7 +2,7 @@
 //  KTPPWireMessages.swift
 //  KeepTalking
 //
-//  KTPP v2 — the plugin protocol carried over gRPC, with JSON messages and no
+//  KTPP — the plugin protocol carried over gRPC, with JSON messages and no
 //  protobuf (the transport lives in KTPPWireService.swift, desktop builds
 //  only). This file holds the typed messages: the two `Connect` envelopes and
 //  the hello/welcome/goodbye messages. Kind, call, scope and resource payloads
@@ -20,7 +20,7 @@ import MCP
 
 public enum KTPPWire {
     /// `Hello.protocolVersion` / `Welcome.protocolVersion` for this protocol.
-    public static let protocolVersion = 2
+    public static let protocolVersion = 0
 }
 
 // MARK: - Hello, welcome, goodbye

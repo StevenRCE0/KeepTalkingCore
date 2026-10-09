@@ -4,7 +4,7 @@
 //
 //  KTPP payload models — kinds, scope options, resources, calls, ACT — shared
 //  by the host actor and (as the normative reference) the companion SDKs.
-//  The v2 session envelopes that carry them over gRPC are in
+//  The envelopes that carry them over gRPC are in
 //  Wire/KTPPWireMessages.swift.
 //
 

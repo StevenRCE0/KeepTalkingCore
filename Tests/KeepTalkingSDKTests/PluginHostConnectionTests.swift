@@ -7,7 +7,7 @@ import Testing
 #if canImport(GRPCCore) && canImport(GRPCNIOTransportHTTP2Posix)
 import GRPCCore
 
-/// The KTPP v2 host end to end, with a Swift client standing in for a plugin:
+/// The KTPP host end to end, with a Swift client standing in for a plugin:
 /// connecting, kind registration, a call through an injected attestor,
 /// replacement by a newer copy, and ACT refusals. (The Python SDK's side is covered by
 /// PluginSocketE2ETests.)

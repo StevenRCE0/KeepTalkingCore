@@ -2,7 +2,7 @@
 //  PluginHost.swift
 //  KeepTalking
 //
-//  KTPP v2 host — an optionally-enabled actor serving `PluginHost` (gRPC,
+//  KTPP host — an optionally-enabled actor serving `PluginHost` (gRPC,
 //  JSON-coded) on the plugin Unix socket. Desktop platforms only; nothing
 //  listens until `start()`. A plugin connects and says `Hello` — no pairing
 //  and no sessions: whoever reaches the socket is this user, and the plugin's

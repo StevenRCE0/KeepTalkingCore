@@ -161,7 +161,7 @@ public actor KeepTalkingPluginCatalogueStore {
     /// A stable catalog id for a plugin name: the same name always maps to the
     /// same id (UUID version 8 over SHA-256 of a domain-separated name).
     public static func derivedCatalogID(pluginName: String) -> UUID {
-        var bytes = Array(SHA256.hash(data: Data("kt.plugin.catalog.v2:\(pluginName)".utf8)).prefix(16))
+        var bytes = Array(SHA256.hash(data: Data("kt.plugin.catalog:\(pluginName)".utf8)).prefix(16))
         bytes[6] = (bytes[6] & 0x0F) | 0x80  // version 8
         bytes[8] = (bytes[8] & 0x3F) | 0x80  // RFC 9562 variant
         return UUID(

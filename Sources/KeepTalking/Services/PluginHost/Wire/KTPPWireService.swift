@@ -2,12 +2,12 @@
 //  KTPPWireService.swift
 //  KeepTalking
 //
-//  KTPP v2 transport: gRPC over a Unix domain socket, JSON-coded (the
+//  KTPP transport: gRPC over a Unix domain socket, JSON-coded (the
 //  messages are in KTPPWireMessages.swift). Desktop builds only — the SDK
 //  takes gRPC as a macOS/Linux-conditional dependency, so iOS and visionOS
 //  never compile this file's body.
 //
-//  Service `keeptalking.plugin.v2.PluginHost`:
+//  Service `keeptalking.plugin.PluginHost`:
 //    Connect        bidi   the plugin's connection: hello, kinds, and the
 //                          host's calls to it with their answers
 //    RequestAct     unary  plugin → host, one ACT turn for an in-flight call
@@ -31,7 +31,7 @@ import GRPCNIOTransportHTTP2Posix
 extension KTPPWire {
     public enum Method {
         /// The gRPC service name; a method's path is `/<service>/<method>`.
-        public static let service = "keeptalking.plugin.v2.PluginHost"
+        public static let service = "keeptalking.plugin.PluginHost"
 
         public static let connect = MethodDescriptor(
             fullyQualifiedService: service, method: "Connect", type: .bidirectionalStreaming)

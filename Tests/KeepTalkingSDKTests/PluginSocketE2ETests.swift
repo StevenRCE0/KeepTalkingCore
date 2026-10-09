@@ -6,7 +6,7 @@ import Testing
 
 #if os(macOS)
 
-/// LIVE end-to-end coverage of KTPP v2 over the real Unix socket: the actual
+/// LIVE end-to-end coverage of KTPP over the real Unix socket: the actual
 /// `KeepTalkingPluginHost` actor on one side, the actual Python plugin SDK
 /// (`CompanionRuntime/keeptalking_plugin.py`) as a subprocess on the other.
 ///
@@ -18,7 +18,7 @@ import Testing
 /// Runs on the Companion's own runtime interpreter (`companion.py
 /// --runtime-python` sets it up; `KT_E2E_PYTHON` overrides). Skipped (not
 /// failed) unless that interpreter has grpcio and the CompanionRuntime checkout
-/// beside this package speaks KTPP v2.
+/// beside this package speaks KTPP.
 @Suite(.serialized)
 struct PluginSocketE2ETests {
 

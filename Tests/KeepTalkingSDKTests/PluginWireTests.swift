@@ -8,7 +8,7 @@ import Testing
 import GRPCCore
 #endif
 
-/// KTPP v2: the JSON envelopes, and presence over the real gRPC transport on
+/// KTPP: the JSON envelopes, and presence over the real gRPC transport on
 /// a Unix domain socket. See Services/PluginHost/Wire.
 struct PluginWireTests {
 
