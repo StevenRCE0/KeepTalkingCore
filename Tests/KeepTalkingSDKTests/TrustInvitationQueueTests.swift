@@ -15,6 +15,18 @@ struct TrustInvitationQueueTests {
         #expect(!relationship.allowsGrantStaging(context: KeepTalkingContext(id: UUID())))
     }
 
+    @Test("trusted relation stages grants in any context but trusts only its own")
+    func trustedRelationStagesGrantsInAnyContext() {
+        let context = KeepTalkingContext(id: UUID())
+        let elsewhere = KeepTalkingContext(id: UUID())
+        let relationship = KeepTalkingRelationship.trusted([context])
+
+        #expect(relationship.allows(context: context))
+        #expect(!relationship.allows(context: elsewhere))
+        #expect(relationship.allowsGrantStaging(context: elsewhere))
+        #expect(!relationship.allowsGrantStaging(context: nil))
+    }
+
     @Test("trust invitation upsert is idempotent per context, pair, and direction")
     func upsertIsIdempotent() async throws {
         let store = try await KeepTalkingInMemoryStore.make()
@@ -248,6 +260,37 @@ struct TrustInvitationQueueTests {
 
         #expect(try await fixture.pendingInvitationCount() == 1)
         #expect(try await fixture.relationship() == .preTrusted([fixture.context]))
+    }
+
+    @Test("grants stage behind an invitation for a peer trusted only elsewhere")
+    func grantsStageForAPeerTrustedElsewhere() async throws {
+        let fixture = try await GrantFixture.make()
+        let elsewhere = KeepTalkingContext(id: UUID())
+        try await elsewhere.save(on: fixture.store.database)
+        try await KeepTalkingNodeRelation(
+            from: fixture.owner,
+            to: fixture.recipient,
+            relationship: .trusted([elsewhere])
+        ).save(on: fixture.store.database)
+
+        try await fixture.stageActionGrant()
+
+        // The invitation is what extends trust here; the relation itself is
+        // left alone, so the grant is staged but not yet usable.
+        #expect(try await fixture.pendingInvitationCount() == 1)
+        #expect(try await fixture.relationship() == .trusted([elsewhere]))
+        let usable = try await KeepTalkingClient.allowedActionScope(
+            node: fixture.recipient,
+            action: fixture.action,
+            context: fixture.context,
+            on: fixture.store.database
+        )
+        #expect(usable == nil)
+
+        try await fixture.revokeActionGrant()
+
+        #expect(try await fixture.pendingInvitationCount() == 0)
+        #expect(try await fixture.relationship() == .trusted([elsewhere]))
     }
 
     @Test("terminal invitations are history and survive reconciliation")

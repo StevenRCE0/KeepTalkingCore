@@ -2,8 +2,8 @@
 //  PluginCatalogueStore.swift
 //  KeepTalking
 //
-//  The **Catalogue** — persisted registry of paired plugin catalogs and the
-//  action *kinds* they provide.
+//  The **Catalogue** — persisted registry of plugin catalogs (one per plugin
+//  name) and the action *kinds* they provide.
 //
 //  Why this is its own store rather than `kt_actions` rows: kinds are
 //  templates, not callable actions (design doc §4.3). Only instances the user
@@ -19,24 +19,26 @@
 //  nothing can serve.
 //
 
+import Crypto
 import Foundation
 import MCP
 
-/// One paired plugin catalog plus the kinds it last declared.
+/// One plugin catalog plus the kinds it last declared. A catalog is known by
+/// its plugin's name: there is no pairing, so the name a session gives in
+/// `Hello` is the identity.
 public struct KeepTalkingPluginCatalogueEntry: Codable, Sendable, Identifiable, Equatable {
     public var id: UUID { catalogID }
     public var catalogID: UUID
     public var name: String
     public var vendor: String
     public var version: String
-    public var identityPublicKey: String
     /// "companion" for the runtime app; nil for ordinary plugins.
     public var role: String?
-    /// Companion catalog that endorsed this pairing, when it wasn't interactive.
-    public var endorsedBy: UUID?
     public var kinds: [KTPPKindDeclaration]
     public var meters: [KTPPMeterDeclaration]
     public var manifestVersion: String?
+    /// When this catalog was first seen (named for the pairing era; kept so
+    /// existing catalogue files decode).
     public var pairedAt: Date
     public var lastSeenAt: Date
     /// Consent: may this catalog's plugins use the host's AI provider
@@ -44,10 +46,6 @@ public struct KeepTalkingPluginCatalogueEntry: Codable, Sendable, Identifiable, 
     /// flips it per catalog; enforcement happens in the host actor on every
     /// act request. Optional so pre-existing catalogue files keep decoding.
     public var allowsACT: Bool?
-
-    public var fingerprint: String {
-        KTPPCrypto.fingerprint(publicKeyB64: identityPublicKey)
-    }
 }
 
 /// Persisted, queryable Catalogue. Actor-isolated; writes are debounced onto a
@@ -68,12 +66,11 @@ public actor KeepTalkingPluginCatalogueStore {
     public init(fileURL: URL?) {
         self.fileURL = fileURL
         let loaded = Self.load(from: fileURL)
-        // Historical repair + ongoing hygiene: before pairings were rehydrated
-        // into the host actor, EVERY app relaunch re-paired every plugin under
-        // a fresh catalog id — one machine accumulated ~50 duplicate rows per
-        // plugin. Coalesce duplicates (same identity key + name) into the
-        // EARLIEST pairing; the rest become aliases so old references resolve.
-        let deduped = Self.dedupeByIdentity(entries: loaded.entries, aliases: loaded.aliases)
+        // A plugin's name is its identity. Rows from the pairing era can hold
+        // several catalogs for one name (re-pairs under new keys, relaunches
+        // before pairings were rehydrated): coalesce them into the EARLIEST,
+        // and keep the rest as aliases so instances minted against them heal.
+        let deduped = Self.dedupeByName(entries: loaded.entries, aliases: loaded.aliases)
         self.entries = deduped.entries
         self.aliases = deduped.aliases
         if deduped.changed, fileURL != nil {
@@ -84,48 +81,43 @@ public actor KeepTalkingPluginCatalogueStore {
     /// Immediate flush; also the deferred-persist hop the init dedupe uses.
     func persistNow() { persist() }
 
-    private static func dedupeByIdentity(
+    private static func dedupeByName(
         entries initial: [UUID: KeepTalkingPluginCatalogueEntry],
         aliases initialAliases: [UUID: UUID]
     ) -> (entries: [UUID: KeepTalkingPluginCatalogueEntry], aliases: [UUID: UUID], changed: Bool) {
         var entries = initial
         var aliases = initialAliases
-        var canonicalByIdentity: [String: KeepTalkingPluginCatalogueEntry] = [:]
+        var canonicalByName: [String: KeepTalkingPluginCatalogueEntry] = [:]
         var changed = false
         for entry in entries.values.sorted(by: { $0.pairedAt < $1.pairedAt }) {
-            let identity = "\(entry.identityPublicKey)|\(entry.name)"
-            if var canonical = canonicalByIdentity[identity] {
+            if var canonical = canonicalByName[entry.name] {
                 // Merge what the duplicate knows into the canonical row: the
                 // freshest declaration wins, an ACT consent granted anywhere
                 // survives, and the duplicate becomes an alias.
                 //
                 // Consent merges because the principal the user granted is the
-                // plugin IDENTITY (its Ed25519 key), not a catalog row. The
-                // duplicates are all one identity re-paired across relaunches,
-                // rows the user never chose between and never saw — so dropping
-                // the grant because the dedupe happened to crown a different row
-                // would revoke a consent the user really did give, for reasons
-                // invisible to them. Losing it is not the "safe" direction here;
-                // it is an arbitrary one.
+                // plugin, not a catalog row: the duplicates are rows the user
+                // never chose between and never saw, so dropping the grant
+                // because the dedupe crowned a different row would revoke a
+                // consent the user really did give.
                 if entry.lastSeenAt > canonical.lastSeenAt {
                     canonical.kinds = entry.kinds
                     canonical.meters = entry.meters
                     canonical.manifestVersion = entry.manifestVersion
                     canonical.lastSeenAt = entry.lastSeenAt
                     canonical.version = entry.version
-                    canonical.endorsedBy = entry.endorsedBy
                 }
                 if entry.allowsACT == true { canonical.allowsACT = true }
-                canonicalByIdentity[identity] = canonical
+                canonicalByName[entry.name] = canonical
                 aliases[entry.catalogID] = canonical.catalogID
                 entries[entry.catalogID] = nil
                 changed = true
             } else {
-                canonicalByIdentity[identity] = entry
+                canonicalByName[entry.name] = entry
             }
         }
-        for identity in canonicalByIdentity.values {
-            entries[identity.catalogID] = identity
+        for canonical in canonicalByName.values {
+            entries[canonical.catalogID] = canonical
         }
         // Aliases must land on a surviving row even when chained.
         for (old, target) in aliases {
@@ -158,14 +150,25 @@ public actor KeepTalkingPluginCatalogueStore {
         entries[id] != nil ? id : resolveAlias(id)
     }
 
-    /// The canonical catalog for a plugin IDENTITY — the resume anchor when a
-    /// plugin's claimed catalog id is stale or unknown (its Ed25519 key, not
-    /// any id, is what actually identifies it).
-    public func catalogID(identityPublicKey: String, name: String) -> UUID? {
-        entries.values
-            .first { $0.identityPublicKey == identityPublicKey && $0.name == name }?
-            .catalogID
-            ?? entries.values.first { $0.identityPublicKey == identityPublicKey }?.catalogID
+    /// The catalog a session named `pluginName` speaks for: the existing row
+    /// for that name — so instances minted in the pairing era keep resolving —
+    /// or, for a plugin never seen before, an id derived from the name.
+    public func catalogID(forPluginName pluginName: String) -> UUID {
+        entries.values.first { $0.name == pluginName }?.catalogID
+            ?? Self.derivedCatalogID(pluginName: pluginName)
+    }
+
+    /// A stable catalog id for a plugin name: the same name always maps to the
+    /// same id (UUID version 8 over SHA-256 of a domain-separated name).
+    public static func derivedCatalogID(pluginName: String) -> UUID {
+        var bytes = Array(SHA256.hash(data: Data("kt.plugin.catalog.v2:\(pluginName)".utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x80  // version 8
+        bytes[8] = (bytes[8] & 0x3F) | 0x80  // RFC 9562 variant
+        return UUID(
+            uuid: (
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+            ))
     }
 
     /// Default location beside the node's other application state.
@@ -183,13 +186,7 @@ public actor KeepTalkingPluginCatalogueStore {
 
     // MARK: Registration (driven by the plugin host)
 
-    public func upsertCatalog(
-        catalogID: UUID,
-        info: KTPPPluginInfo,
-        identityPublicKey: String,
-        role: String?,
-        endorsedBy: UUID?
-    ) {
+    public func upsertCatalog(catalogID: UUID, info: KTPPPluginInfo, role: String?) {
         var entry =
             entries[catalogID]
             ?? KeepTalkingPluginCatalogueEntry(
@@ -197,9 +194,7 @@ public actor KeepTalkingPluginCatalogueStore {
                 name: info.name,
                 vendor: info.vendor,
                 version: info.version,
-                identityPublicKey: identityPublicKey,
                 role: role,
-                endorsedBy: endorsedBy,
                 kinds: [],
                 meters: [],
                 manifestVersion: nil,
@@ -210,9 +205,7 @@ public actor KeepTalkingPluginCatalogueStore {
         entry.name = info.name
         entry.vendor = info.vendor
         entry.version = info.version
-        entry.identityPublicKey = identityPublicKey
         entry.role = role
-        entry.endorsedBy = endorsedBy
         entry.lastSeenAt = .now
         entries[catalogID] = entry
         persist()
@@ -295,12 +288,12 @@ public actor KeepTalkingPluginCatalogueStore {
     }
 
     /// Kinds the user can instantiate right now: **connected catalogs only**.
-    /// Companion-role catalogs are skipped — the runtime app is a trust anchor,
-    /// not a capability provider.
+    /// Companion-role catalogs are skipped — the runtime app supervises
+    /// plugins; it is not a capability provider.
     public func availableKinds() -> [KeepTalkingPluginActionKindSummary] {
         entries.values
             .filter { connected.contains($0.catalogID) }
-            .filter { $0.role != KTPPConstants.companionRole }
+            .filter { $0.role != KTPPWire.Role.companion.rawValue }
             .sorted { $0.name < $1.name }
             .flatMap { entry in
                 entry.kinds.map { kind in

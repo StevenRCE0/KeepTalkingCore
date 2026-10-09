@@ -4,10 +4,15 @@ import Testing
 
 @testable import KeepTalkingSDK
 
-/// KTPP v1.1 resources: the manifest → wire projection, its authorization
-/// hash, and the kind-object → descriptor materialization that gates file IO
-/// for Catalogue (plugin) instances. See DESIGN_PLUGIN_RESOURCES_ACT.md §3.
+/// KTPP resources: the manifest → wire projection, its canonical-JSON form,
+/// and the kind-object → descriptor materialization that gates file IO for
+/// Catalogue (plugin) instances. See DESIGN_PLUGIN_RESOURCES_ACT.md §3.
 struct PluginResourcesWireTests {
+
+    /// An encodable payload as the JSON value a signing attestor would see.
+    private func jsonValue(_ payload: some Encodable) throws -> Value {
+        try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(payload))
+    }
 
     private func sampleManifest(
         workspace: URL = URL(fileURLWithPath: "/tmp/kt-test-workspace")
@@ -65,27 +70,28 @@ struct PluginResourcesWireTests {
         #expect(KTPPResources(manifest: empty) == nil)
     }
 
-    @Test("resourcesHash is deterministic and binds the concrete paths offered")
+    @Test("the resources block hashes deterministically and binds the concrete paths offered")
     func resourcesHash() throws {
         let a = try #require(KTPPResources(manifest: sampleManifest()))
         let b = try #require(KTPPResources(manifest: sampleManifest()))
-        let hashA = try KTPPCanonicalJSON.sha256Hex(try .wrap(a))
-        let hashB = try KTPPCanonicalJSON.sha256Hex(try .wrap(b))
+        let hashA = try KeepTalkingCanonicalJSON.sha256Hex(try jsonValue(a))
+        let hashB = try KeepTalkingCanonicalJSON.sha256Hex(try jsonValue(b))
         #expect(hashA == hashB)
 
         let other = try #require(
             KTPPResources(
                 manifest: sampleManifest(
                     workspace: URL(fileURLWithPath: "/tmp/kt-other-workspace"))))
-        let hashOther = try KTPPCanonicalJSON.sha256Hex(try .wrap(other))
+        let hashOther = try KeepTalkingCanonicalJSON.sha256Hex(try jsonValue(other))
         #expect(hashA != hashOther)
     }
 
-    @Test("resourcesHash matches the Python SDK's canonicalization (conformance vector)")
+    @Test("canonical JSON matches the Python SDK's byte for byte (conformance vector)")
     func crossLanguageHashVector() throws {
         // Pinned from CompanionRuntime/keeptalking_plugin.py's sha256_hex over
         // the identical block (non-ASCII name exercises ensure_ascii=False
-        // parity). If this breaks, the SDK's pre-call verification breaks.
+        // parity). If this breaks, any attestation scheme signing across the
+        // two SDKs breaks with it.
         let resources = KTPPResources(entries: [
             KTPPResourceEntry(
                 handle: "KT_ATTACHMENT_5B2A93C41F0E4D6AA1B2C3D4E5F60718",
@@ -104,20 +110,20 @@ struct PluginResourcesWireTests {
                 path: "/private/tmp/ws/markdown",
                 isDirectory: false),
         ])
-        let hash = try KTPPCanonicalJSON.sha256Hex(try .wrap(resources))
+        let hash = try KeepTalkingCanonicalJSON.sha256Hex(try jsonValue(resources))
         #expect(hash == "861692e2ea1e6838f3dd41dc7079153000d6a661da6915e448607462b5f85f9a")
     }
 
-    @Test("KTPPCallRequest without a resources field decodes with nil (wire compat)")
-    func callRequestBackwardCompatibility() throws {
+    @Test("a call without resources or evidence decodes with both nil")
+    func callRequestOptionalFields() throws {
         let json = """
             {"requestID":"r1","contextID":"c1","callerNodeID":"n1",
-             "kindName":"k","arguments":{},"instance":{"id":"i1","scopeHash":"h"},
-             "authorization":{}}
+             "kindName":"k","arguments":{},"instance":{"id":"i1"}}
             """
         let request = try JSONDecoder().decode(
             KTPPCallRequest.self, from: Data(json.utf8))
         #expect(request.resources == nil)
+        #expect(request.authorization == nil)
     }
 
     @Test("kind objects materialize onto the descriptor and flip acceptsFileInput")
@@ -139,7 +145,6 @@ struct PluginResourcesWireTests {
                 KTPPObjectDeclaration(name: "   ", direction: "input"),
             ],
             capabilities: nil,
-            usesACT: true,
             remoteAuthorisable: true,
             blockingAuthorisation: false)
         let bundle = KeepTalkingPluginBundle(
@@ -180,7 +185,6 @@ struct PluginResourcesWireTests {
                 KTPPObjectDeclaration(name: "markdown", direction: "output"),
             ],
             capabilities: ["act"],
-            usesACT: nil,
             remoteAuthorisable: nil,
             blockingAuthorisation: nil)
         let bundle = KeepTalkingPluginBundle(
@@ -280,28 +284,7 @@ struct PluginResourcesWireTests {
         #expect(note.detail == nil)
     }
 
-    @Test("usesACT survives the declaration round trip and old JSON decodes without it")
-    func usesACTDeclaration() throws {
-        // What the Python SDK emits for a uses_act kind.
-        let declared = try JSONDecoder().decode(
-            KTPPKindDeclaration.self,
-            from: Data(
-                """
-                {"kindName":"markitdown-convert","displayName":"Convert",
-                 "indexDescription":"d","usesACT":true,
-                 "objects":[{"name":"source","direction":"input"}]}
-                """.utf8))
-        #expect(declared.usesACT == true)
-        #expect(declared.objects?.count == 1)
-
-        // Pre-v1.1 stored declaration: both fields absent.
-        let legacy = try JSONDecoder().decode(
-            KTPPKindDeclaration.self,
-            from: Data(#"{"kindName":"k","displayName":"K","indexDescription":""}"#.utf8))
-        #expect(legacy.usesACT == nil && legacy.objects == nil)
-    }
-
-    @Test("capabilities are a fixed vocabulary: unknown tokens drop, usesACT aliases act")
+    @Test("capabilities are a fixed vocabulary: unknown tokens drop")
     func capabilityVocabulary() throws {
         // What a newer/buggy plugin might declare: only "act" is recognized.
         let declared = try JSONDecoder().decode(
@@ -313,11 +296,7 @@ struct PluginResourcesWireTests {
                 """.utf8))
         #expect(declared.declaredCapabilities == [.act])
 
-        // Legacy usesACT still implies act; nothing declared means nothing.
-        let legacy = try JSONDecoder().decode(
-            KTPPKindDeclaration.self,
-            from: Data(#"{"kindName":"k","displayName":"K","indexDescription":"","usesACT":true}"#.utf8))
-        #expect(legacy.declaredCapabilities == [.act])
+        // Nothing declared means nothing.
         let bare = try JSONDecoder().decode(
             KTPPKindDeclaration.self,
             from: Data(#"{"kindName":"k","displayName":"K","indexDescription":""}"#.utf8))
@@ -413,45 +392,40 @@ struct PluginResourcesWireTests {
         await store.upsertCatalog(
             catalogID: catalogID,
             info: KTPPPluginInfo(name: "MarkItDown", vendor: "kt", version: "0.1.0"),
-            identityPublicKey: "AA==",
-            role: nil,
-            endorsedBy: nil)
-        // Paired but untoggled: still false (off by default).
+            role: nil)
+        // Known but untoggled: still false (off by default).
         #expect(await store.allowsACT(catalogID) == false)
         await store.setAllowsACT(true, catalogID: catalogID)
         #expect(await store.allowsACT(catalogID) == true)
-        // Re-pairing (upsert) must not reset the user's choice.
+        // A new session (upsert) must not reset the user's choice.
         await store.upsertCatalog(
             catalogID: catalogID,
             info: KTPPPluginInfo(name: "MarkItDown", vendor: "kt", version: "0.2.0"),
-            identityPublicKey: "AA==",
-            role: nil,
-            endorsedBy: nil)
+            role: nil)
         #expect(await store.allowsACT(catalogID) == true)
         await store.setAllowsACT(false, catalogID: catalogID)
         #expect(await store.allowsACT(catalogID) == false)
     }
 
-    @Test("catalogue dedupes re-pair duplicates into the earliest catalog with aliases")
+    @Test("catalogue merges same-name catalogs into the earliest, with aliases")
     func catalogueDedupe() async throws {
         let file = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("kt-cat-\(UUID().uuidString.prefix(8)).json")
         defer { try? FileManager.default.removeItem(at: file) }
 
-        // The observed live pathology: one identity re-paired on every app
+        // What the pairing era left behind: one plugin re-paired on every app
         // relaunch, one catalog row per relaunch (legacy bare-array format).
-        let key = "SkePW+w46ag5C+sd"
         let ids = [UUID.v7(), UUID.v7(), UUID.v7()]
         let entries = ids.enumerated().map { index, id in
             KeepTalkingPluginCatalogueEntry(
                 catalogID: id, name: "MarkItDown", vendor: "kt", version: "0.1.0",
-                identityPublicKey: key, role: nil, endorsedBy: nil,
+                role: nil,
                 kinds: [
                     KTPPKindDeclaration(
                         kindName: "markitdown-convert", displayName: "Convert",
                         indexDescription: "", inputSchema: nil, scopeSchema: nil,
                         defaultScope: nil, subTools: nil, objects: nil,
-                        capabilities: nil, usesACT: nil, remoteAuthorisable: nil,
+                        capabilities: nil, remoteAuthorisable: nil,
                         blockingAuthorisation: nil)
                 ],
                 meters: [], manifestVersion: "0.1.0",
@@ -470,10 +444,10 @@ struct PluginResourcesWireTests {
         for id in ids {
             #expect(await store.canonicalCatalogID(id) == ids[0])
         }
-        // Consent granted on ANY duplicate survives the merge; identity lookup
-        // resolves the canonical row.
+        // Consent granted on ANY duplicate survives the merge; a session
+        // named "MarkItDown" resolves to the canonical row.
         #expect(await store.allowsACT(ids[0]) == true)
-        #expect(await store.catalogID(identityPublicKey: key, name: "MarkItDown") == ids[0])
+        #expect(await store.catalogID(forPluginName: "MarkItDown") == ids[0])
         #expect(await store.kind(catalogID: ids[0], kindName: "markitdown-convert") != nil)
 
         // The dedupe persists: a reload sees one entry and the alias map.
@@ -481,6 +455,18 @@ struct PluginResourcesWireTests {
         let reloaded = KeepTalkingPluginCatalogueStore(fileURL: file)
         #expect(await reloaded.catalogues().count == 1)
         #expect(await reloaded.canonicalCatalogID(ids[2]) == ids[0])
+    }
+
+    @Test("a plugin never seen before gets a stable catalog id derived from its name")
+    func derivedCatalogID() async {
+        let store = KeepTalkingPluginCatalogueStore(fileURL: nil)
+        let first = await store.catalogID(forPluginName: "computeruse")
+        #expect(first == KeepTalkingPluginCatalogueStore.derivedCatalogID(pluginName: "computeruse"))
+        #expect(first == KeepTalkingPluginCatalogueStore.derivedCatalogID(pluginName: "computeruse"))
+        #expect(first != KeepTalkingPluginCatalogueStore.derivedCatalogID(pluginName: "browseruse"))
+        // RFC 9562 version 8, variant 10.
+        #expect(first.uuid.6 >> 4 == 0x8)
+        #expect(first.uuid.8 >> 6 == 0b10)
     }
 
     @Test("a kind with no declared objects leaves acceptsFileInput false")
@@ -503,7 +489,6 @@ struct PluginResourcesWireTests {
             subTools: nil,
             objects: [KTPPObjectDeclaration(name: "result", direction: "output")],
             capabilities: nil,
-            usesACT: nil,
             remoteAuthorisable: nil,
             blockingAuthorisation: nil)
         action.descriptor = KeepTalkingPluginHost.descriptor(for: bundle, kind: outputOnly)

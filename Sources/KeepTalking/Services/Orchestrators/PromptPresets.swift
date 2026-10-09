@@ -139,9 +139,10 @@ public enum AIPromptPresets {
             If an action reports that it could not resolve its input, that is this mistake: get the handle and call it again. Do not ask the user to re-attach a file that is already in the conversation.
 
             Capturing a file an action PRODUCES (outputs):
-            When you need an action to produce a file for you, request an entry in `outputs` on \(ktRunActionToolFunctionName). Each entry needs a `name` and a `persistence`:
-            - `persistence = "otb"` (default, private) — the produced file is delivered only to you, as a `KT_OTB_<HEX>` handle. Use this for intermediate files you'll feed into a later action or inspect yourself.
-            - `persistence = "attachment"` (shared) — the produced file becomes a durable context attachment (a `KT_ATTACHMENT_<HEX>` handle), visible and retrievable by all participants via attachment tools. Use this only when the file should be a shared, durable artifact of the conversation.
+            Files an action produces come back to you as resources on their own — as throwaway private `KT_OTB_<HEX>` handles unless you request otherwise in `outputs` on \(ktRunActionToolFunctionName). Each entry needs a `name` and a `persistence`:
+            - `persistence = "attachment"` (preserved) — the produced file becomes a durable context attachment (a `KT_ATTACHMENT_<HEX>` handle), visible and retrievable by all participants. Make it an attachment WHENEVER the file needs to be preserved: other peers should see or assess it (e.g. the user asked for it "in the conversation", or several participants will review it), or a later step is likely to need it again (you'll compare against it, revise it, or feed it to more actions).
+            - `persistence = "otb"` (throwaway) — the produced file is delivered only to you, as a `KT_OTB_<HEX>` handle that stays readable for about 10 minutes on the node that produced it. Use it only for a file you consume once, right away, and then drop.
+            Decide before the call: a file that arrives as an OTB cannot be turned into an attachment afterwards — you would have to run the action again with `outputs`.
             After the action returns, its tool result carries a `produced_resources` array listing each produced file by handle. The bytes of each produced resource are ALSO injected into your very next turn as a user message — so in the normal case you already have the content and should NOT call a tool to fetch what `produced_resources` lists. If that injection did not arrive, or you need the file again in a later turn, read it by handle with \(attachmentReaderToolFunctionName) rather than telling the user you cannot see it. The handle is the stable identity for that file: mention it in chat, or pass it in `input_handles` to a later action.
             A run's command output (stdout/stderr) is returned to you inline as text — that is the run's report, not a file. Never fabricate or guess absolute paths; refer to a file by its handle, its name, or the action that owns it.
 
@@ -422,6 +423,9 @@ public enum AIPromptPresets {
         public static let ktSkillMetainfo =
             "Read a skill action's manifest and instructions: returns its metadata, references, scripts, assets, and configured parameter/directory names so you can frame a precise task. This tool only returns information — the skill's own file/metadata/execution tools run inside the ACT agent, so to actually run the skill call kt_run_action(action_id, task)."
 
+        public static let pluginResources =
+            "List or read the resources a plugin action declares — the guides and references its MCP server publishes (see the action's `resources:` line). Without `uri` it lists them; with `uri` it returns the resource: text inline, other content as a KT_OTB handle you can read with kt_get_resource or pass in input_handles. Information only — to run the action, call kt_run_action."
+
         public static let contextAttachmentListing =
             "List durable context attachments stored in the active KeepTalking context, including ids, filenames, mime types, availability, and derived metadata. Returns handles of the form KT_ATTACHMENT_<HEX>. This listing covers durable attachments ONLY — KT_OTB_<HEX> handles (private one-time blobs from kt_send_file or produced_resources) are never listed here, because they are point-to-point and private to you. They are still readable by handle with kt_get_resource. Use this only when you need a different earlier attachment or need to confirm attachment identity/metadata not already present in the current turn. Do not call this just to verify a file or image that was already attached or injected into the same turn."
 
@@ -520,7 +524,7 @@ public enum AIPromptPresets {
                     "ACP action — delegates to an external coding agent (Agent Client Protocol). Pass a single clear `prompt` describing the whole task; the agent works autonomously (reading/writing files, running tools) and returns its final result. Call it once with a complete brief rather than many small prompts."
             case .plugin:
                 return
-                    "Catalogue action — provided by a plugin in the user's Companion app. It is already scoped to a specific boundary the user configured (a directory, a set of domains, an account), and the plugin enforces that boundary itself: a request outside it comes back refused, which is expected, not a fault to work around. Pass the arguments its schema describes and call it once."
+                    "Catalogue action — provided by a plugin in the user's Companion app. It is already scoped to a specific boundary the user configured (a directory, a set of domains, an account), and the plugin enforces that boundary itself: a request outside it comes back refused, which is expected, not a fault to work around. Pass the arguments its schema describes and call it once. Files a tool returns (screenshots, images, audio, documents) reach the caller as KeepTalking resources on their own — you never save them anywhere."
         }
     }
 

@@ -28,10 +28,12 @@ extension KeepTalkingPluginHost {
     /// `performActionCallRequest` calls, shaped like every other manager's
     /// `callAction`.
     ///
-    /// The instance's stored scope bag is what gets bound into the signed
-    /// authorization, so the receipt records which *scoped* instance ran, not
-    /// merely which kind. `manifest` (staged inputs + output slots) projects
-    /// into the frame's `resources` block and binds as `resourcesHash`.
+    /// The instance's stored scope bag travels with the call (and is what an
+    /// injected attestor binds), so a record says which *scoped* instance ran,
+    /// not merely which kind. `manifest` (staged inputs + output slots)
+    /// projects into the call's `resources` block; `runDirectory` receives the
+    /// files the result carries that no requested output claimed (see
+    /// `mappingGeneratedContents`).
     public func callActionDetailed(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
@@ -39,6 +41,7 @@ extension KeepTalkingPluginHost {
         callerNodeID: UUID,
         contextID: UUID,
         manifest: KTResourceManifest? = nil,
+        runDirectory: URL? = nil,
         onElucidation: (@Sendable (String, String?) -> Void)? = nil
     ) async throws -> ActionCallOutput {
         guard case .plugin(let bundle) = action.payload else {
@@ -60,11 +63,21 @@ extension KeepTalkingPluginHost {
         // Instances can hold a catalog id the store has since merged away;
         // dispatch-time healing usually rewrites them, but canonicalize here
         // too so no caller can race a stale id into a session lookup.
+        let catalogID = await catalogue.canonicalCatalogID(bundle.catalogID)
+        let arguments: [String: Value]
+        do {
+            arguments = try Self.resolvingResourceURIs(
+                Self.callArguments(call), manifest: manifest)
+        } catch {
+            return ActionCallOutput(
+                content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)],
+                isError: true, elucidations: [])
+        }
         let outcome = try await callKind(
-            catalogID: await catalogue.canonicalCatalogID(bundle.catalogID),
+            catalogID: catalogID,
             kindName: bundle.kindName,
             tool: requestedTool,
-            arguments: Self.callArguments(call),
+            arguments: arguments,
             instanceID: bundle.id,
             instanceScope: bundle.scopeValue,
             contextID: contextID,
@@ -73,7 +86,11 @@ extension KeepTalkingPluginHost {
             onElucidation: onElucidation
         )
         return ActionCallOutput(
-            content: Self.toolContent(from: outcome.content),
+            content: Self.mappingResourcePaths(
+                Self.mappingGeneratedContents(
+                    Self.toolContent(from: outcome.content), into: manifest,
+                    runDirectory: runDirectory),
+                manifest: manifest),
             isError: outcome.isError,
             elucidations: outcome.elucidations
         )
@@ -95,6 +112,84 @@ extension KeepTalkingPluginHost {
             return inner
         }
         return call.arguments.filter { $0.key != "tool" }
+    }
+
+    /// Tool-call IO mapped to KTRM before the call: every `kt-resource://`
+    /// string in the arguments — at any depth — that names one of THIS call's
+    /// resources (a staged input, or an output the caller requested) becomes
+    /// that resource's path, with `/<child>` naming a file inside a collection
+    /// output. The plugin and the server it wraps get resolved paths, never a
+    /// handle to resolve and never a path the caller made up: a URI naming
+    /// anything else refuses the call.
+    static func resolvingResourceURIs(
+        _ arguments: [String: Value], manifest: KTResourceManifest?
+    ) throws -> [String: Value] {
+        let entries = (manifest?.entries ?? []).filter { $0.path != nil }
+        func resolve(_ value: Value) throws -> Value {
+            switch value {
+                case .string(let text):
+                    guard let (handle, child) = KTResourceManifest.parseResourceURI(text) else {
+                        return value
+                    }
+                    let entry =
+                        entries.first { $0.envKey.uppercased() == handle }
+                        ?? entries.first {
+                            handle == "KT_\(($0.objectName ?? "").uppercased())"
+                                || $0.displayName.uppercased() == handle
+                        }
+                    guard let entry, var path = entry.path else {
+                        throw KTPPHostError.callRefused(
+                            "\(text) is not one of this call's resources: request outputs on kt_run_action (otb or attachment) or pass inputs in input_handles, then use the kt-resource:// handles listed for this call."
+                        )
+                    }
+                    if let child {
+                        guard entry.isDirectory else {
+                            throw KTPPHostError.callRefused(
+                                "\(text) names a file inside \(entry.envKey), which is a single file, not a collection."
+                            )
+                        }
+                        path = path.appendingPathComponent(child)
+                    }
+                    return .string(path.path)
+                case .array(let items):
+                    return .array(try items.map(resolve))
+                case .object(let fields):
+                    return .object(try fields.mapValues(resolve))
+                default:
+                    return value
+            }
+        }
+        return try arguments.mapValues(resolve)
+    }
+
+    /// The reverse mapping on the way out: any of this call's resource paths
+    /// a result's text mentions (a server reporting where it wrote a file)
+    /// becomes its `kt-resource://` URI, so the caller sees KTRM, not paths.
+    static func mappingResourcePaths(
+        _ content: [Tool.Content], manifest: KTResourceManifest?
+    ) -> [Tool.Content] {
+        let entries = (manifest?.entries ?? [])
+            .compactMap { entry in entry.path.map { (entry, $0.path) } }
+            .sorted { $0.1.count > $1.1.count }
+        guard !entries.isEmpty else { return content }
+        return content.map { item in
+            guard case .text(let text, let annotations, let meta) = item else { return item }
+            var mapped = text
+            for (entry, path) in entries where mapped.contains(path) {
+                if entry.isDirectory,
+                    let pattern = try? NSRegularExpression(
+                        pattern: NSRegularExpression.escapedPattern(for: path) + "/([^\\s\"'/]+)")
+                {
+                    mapped = pattern.stringByReplacingMatches(
+                        in: mapped, range: NSRange(mapped.startIndex..., in: mapped),
+                        withTemplate: NSRegularExpression.escapedTemplate(
+                            for: KTResourceManifest.resourceURI(handle: entry.envKey)) + "/$1")
+                }
+                mapped = mapped.replacingOccurrences(
+                    of: path, with: KTResourceManifest.resourceURI(handle: entry.envKey))
+            }
+            return .text(text: mapped, annotations: annotations, _meta: meta)
+        }
     }
 
     /// Converts the wire content array into MCP `Tool.Content`. Falls back to a
@@ -130,9 +225,8 @@ extension KeepTalkingPluginHost {
     /// step, mirroring `KeepTalkingPrimitiveBundle.assigningNewID()`.
     ///
     /// Validation is intentionally shallow (declared keys only): the plugin
-    /// re-enforces its own scope at call time, and the signed authorization
-    /// binds whatever bag ends up stored, so a wrong value can never be
-    /// silently swapped for a different one later.
+    /// re-enforces its own scope at call time against the stored bag every
+    /// call carries.
     public func makeInstanceBundle(
         catalogID: UUID,
         kindName: String,

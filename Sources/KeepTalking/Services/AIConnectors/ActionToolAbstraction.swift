@@ -29,6 +29,9 @@ public struct KeepTalkingActionStub: Sendable {
     /// main agent plans data flow BETWEEN actions from these contracts; the
     /// provider's ACT agent sees the resolved `KTResourceManifest` (with paths).
     public let objectContracts: [KeepTalkingObjectContract]
+    /// Resources a plugin action declares (its MCP server's guides and
+    /// references), read with the plugin-resources meta tool.
+    public let resources: [KeepTalkingActionResourceContract]
 
     public init(
         actionID: UUID,
@@ -38,7 +41,8 @@ public struct KeepTalkingActionStub: Sendable {
         description: String,
         supportsWakeAssist: Bool,
         isCurrentNode: Bool,
-        objectContracts: [KeepTalkingObjectContract] = []
+        objectContracts: [KeepTalkingObjectContract] = [],
+        resources: [KeepTalkingActionResourceContract] = []
     ) {
         self.actionID = actionID
         self.ownerNodeID = ownerNodeID
@@ -48,7 +52,17 @@ public struct KeepTalkingActionStub: Sendable {
         self.supportsWakeAssist = supportsWakeAssist
         self.isCurrentNode = isCurrentNode
         self.objectContracts = objectContracts
+        self.resources = resources
     }
+}
+
+/// A declared resource as the main agent's action listing shows it.
+public struct KeepTalkingActionResourceContract: Sendable {
+    public let uri: String
+    public let name: String
+    public let description: String?
+    public let mimeType: String?
+    public let size: Int?
 }
 
 // MARK: - Lazy tool registry

@@ -40,7 +40,13 @@ public enum KeepTalkingRelationship: Codable, Sendable, Equatable {
         switch self {
             case .owner, .trustedInAllContext:
                 return true
-            case .trusted(let contexts), .preTrusted(let contexts):
+            case .trusted:
+                // Trusted elsewhere: the pending invitation can't be folded
+                // into a trusted relation the way `.preTrusted` folds it, so
+                // any context stages. The grant stays inert until the
+                // handshake extends trust here — execution asks `allows`.
+                return context != nil
+            case .preTrusted(let contexts):
                 guard let context else { return false }
                 return contexts.contains(context)
             case .pending:

@@ -81,6 +81,21 @@ public actor KeepTalkingThreadWorkspaceManager {
         return dir.resolvingSymlinksInPath().standardizedFileURL
     }
 
+    /// A private directory for ONE run that must not share a thread workspace
+    /// (plugin calls). The caller removes it with `discardRunDirectory`; a
+    /// crash leftover is swept by `reapOrphans`. It lives under `runs/`, a
+    /// name that is no thread id, so thread bookkeeping never sees it.
+    public func makeRunDirectory() throws -> URL {
+        let dir = runsDirectory.appendingPathComponent(
+            UUID().uuidString.lowercased(), isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.resolvingSymlinksInPath().standardizedFileURL
+    }
+
+    public func discardRunDirectory(_ dir: URL) {
+        try? FileManager.default.removeItem(at: dir)
+    }
+
     /// Mark a run active so `seal` defers until it drains. Pair with `endRun`
     /// (the executor brackets each run: begin → run → end).
     public func beginRun(threadID: UUID) {
@@ -132,6 +147,18 @@ public actor KeepTalkingThreadWorkspaceManager {
             if let modified, now.timeIntervalSince(modified) < maxAge { continue }
             try? fileManager.removeItem(at: entry)
         }
+        let runs =
+            (try? fileManager.contentsOfDirectory(
+                at: runsDirectory,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles])) ?? []
+        for entry in runs {
+            let modified =
+                (try? entry.resourceValues(
+                    forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let modified, now.timeIntervalSince(modified) < maxAge { continue }
+            try? fileManager.removeItem(at: entry)
+        }
     }
 
     /// Threads that have a workspace directory on disk — the file tree standing
@@ -163,6 +190,10 @@ public actor KeepTalkingThreadWorkspaceManager {
     }
 
     // MARK: - Private
+
+    private var runsDirectory: URL {
+        baseDirectory.appendingPathComponent("runs", isDirectory: true)
+    }
 
     private func directory(for threadID: UUID) -> URL {
         baseDirectory.appendingPathComponent(

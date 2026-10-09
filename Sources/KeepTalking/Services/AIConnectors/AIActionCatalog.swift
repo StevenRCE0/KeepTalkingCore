@@ -238,6 +238,12 @@ extension KeepTalkingClient {
 
             switch action.payload {
                 case .plugin(let bundle):
+                    var resources: [KeepTalkingActionResourceContract] = []
+                    #if os(macOS)
+                    if isCurrentNode {
+                        resources = await declaredResourceContracts(for: bundle)
+                    }
+                    #endif
                     // Catalogue instances expose one agent tool each; the
                     // instance label (not the kind) is what distinguishes two
                     // differently-scoped rows to the model.
@@ -251,7 +257,8 @@ extension KeepTalkingClient {
                                 ?? bundle.indexDescription,
                             supportsWakeAssist: supportsWakeAssist,
                             isCurrentNode: isCurrentNode,
-                            objectContracts: objectContracts
+                            objectContracts: objectContracts,
+                            resources: resources
                         ))
                     // The dormancy check is about the LOCAL plugin host, so it
                     // may only be asked about a LOCAL instance. A remote
@@ -520,3 +527,24 @@ extension KeepTalkingClient {
         )
     }
 }
+
+#if os(macOS)
+extension KeepTalkingClient {
+    /// The resources a local plugin action's kind declares, for the action
+    /// listing — straight from the catalogued declaration, no plugin round-trip.
+    func declaredResourceContracts(
+        for bundle: KeepTalkingPluginBundle
+    ) async -> [KeepTalkingActionResourceContract] {
+        let kind = await pluginHost.catalogue.kind(
+            catalogID: bundle.catalogID, kindName: bundle.kindName)
+        return (kind?.resources ?? []).compactMap { $0.sanitized() }.map { resource in
+            KeepTalkingActionResourceContract(
+                uri: resource.uri,
+                name: resource.displayName,
+                description: resource.description,
+                mimeType: resource.mimeType,
+                size: resource.size)
+        }
+    }
+}
+#endif

@@ -277,6 +277,50 @@ public struct KTResourceManifest: Sendable {
         return s.replacingOccurrences(of: "-", with: "")
     }
 
+    // MARK: - Resource URI
+
+    /// The URI scheme for a KeepTalking resource, everywhere one is named
+    /// outside a path: tool-call IO (an argument naming one of the call's
+    /// resources, a result naming a produced file) and resources embedded in
+    /// chat. `kt-resource://<handle>[/<child>]` — the handle is the canonical
+    /// `KT_<KIND>_<WORDS>` token or the exact legacy `KT_<KIND>_<32-hex>`
+    /// form; `child` names a file inside a directory resource.
+    public static let uriScheme = "kt-resource"
+
+    /// The exact handle for a known id — `KT_<FAMILY>_<32-hex>`, resolvable
+    /// without a candidate set. Native surfaces (chat embeds) use it: they
+    /// address one specific resource, not an agent-typed one. `family` may
+    /// name more than run-manifest kinds, e.g. `MESSAGE` for what a message
+    /// carries inline.
+    public static func exactHandle(family: String, id: UUID) -> String {
+        "KT_\(family.uppercased())_"
+            + id.uuidString.replacingOccurrences(of: "-", with: "").uppercased()
+    }
+
+    public static func exactHandle(kind: Kind, id: UUID) -> String {
+        exactHandle(family: kind.rawValue, id: id)
+    }
+
+    public static func resourceURI(handle: String, child: String? = nil) -> String {
+        "\(uriScheme)://\(handle)" + (child.map { "/\($0)" } ?? "")
+    }
+
+    /// Splits a `kt-resource://` URI into its handle and optional child file
+    /// name; nil for any other string. A child must be one plain file name.
+    public static func parseResourceURI(_ text: String) -> (handle: String, child: String?)? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = "\(uriScheme)://"
+        guard trimmed.lowercased().hasPrefix(prefix) else { return nil }
+        let body = trimmed.dropFirst(prefix.count)
+        let parts = body.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
+        guard let handle = parts.first.map({ String($0).uppercased() }), handle.hasPrefix("KT_")
+        else { return nil }
+        guard parts.count == 2 else { return (handle, nil) }
+        let child = String(parts[1])
+        guard !child.contains("/"), !child.hasPrefix("."), !child.contains("\\") else { return nil }
+        return (handle, child)
+    }
+
     // MARK: - Build
 
     /// Builds a manifest from already-granted candidates. Each entry's env key is

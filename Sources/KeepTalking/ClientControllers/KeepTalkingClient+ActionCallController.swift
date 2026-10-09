@@ -212,8 +212,11 @@ extension KeepTalkingClient {
                     #if os(macOS)
                     // Same IO lifecycle as skills, but the manifest rides the
                     // KTPP call frame (resources block + signed resourcesHash)
-                    // instead of a subprocess env, and no sandbox policy is
-                    // compiled (KT never launches plugin processes).
+                    // instead of a subprocess env, no sandbox policy is
+                    // compiled (KT never launches plugin processes), and the
+                    // run gets a private directory, not the thread workspace:
+                    // files the result carries land there unless a requested
+                    // output claims them, and come back as private OTBs.
                     await refreshPluginInstanceDescriptorIfStale(action)
                     let (pluginOutput, produced) = try await KeepTalkingIOManager(client: self)
                         .withActionRun(action: action, request: request, grant: grant) { run in
@@ -223,7 +226,8 @@ extension KeepTalkingClient {
                                 scope: grant,
                                 callerNodeID: request.callerNodeID,
                                 contextID: request.contextID,
-                                manifest: run.manifest
+                                manifest: run.manifest,
+                                runDirectory: run.workspaceDirectory
                             )
                         }
                     callResult = (content: pluginOutput.content, isError: pluginOutput.isError)
