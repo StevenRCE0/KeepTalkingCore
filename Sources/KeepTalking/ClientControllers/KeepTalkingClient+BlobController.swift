@@ -49,9 +49,11 @@ extension KeepTalkingClient {
         try await record.save(on: localStore.database)
     }
 
-    /// The distinct blob IDs referenced by every attachment belonging to
-    /// `contextID`. Capture this *before* deleting the context — the cascade on
-    /// `kt_context_attachments` wipes the rows, after which the link is gone.
+    /// The distinct blob IDs `contextID` references: its attachments', plus
+    /// the avatars (own and suggested) of mappings that name the context or
+    /// are scoped to it.
+    /// Capture this *before* deleting the context — the cascade wipes those
+    /// rows, after which the link is gone.
     public static func blobIDsReferenced(
         byContextID contextID: UUID,
         on database: any Database
@@ -59,14 +61,69 @@ extension KeepTalkingClient {
         let blobIDs = try await KeepTalkingContextAttachment.query(on: database)
             .filter(\.$context.$id, .equal, contextID)
             .all(\.$blobID)
-        return Set(blobIDs)
+        let mappingBlobIDs = try await mappingBlobIDs(
+            KeepTalkingMapping.query(on: database)
+                .group(.or) { group in
+                    group.filter(\.$context.$id == contextID)
+                    group.filter(\.$scopeContext.$id == contextID)
+                }
+        )
+        return mappingBlobIDs.union(blobIDs)
     }
 
-    /// Given blob IDs that *were* referenced by a now-deleted context, delete the
-    /// record + on-disk bytes for any that no longer have a single referencing
-    /// attachment anywhere in the store. Blobs are shared across contexts by
-    /// `blob_id` string alone (no FK), so deleting one context can strand a blob
-    /// that another context still uses — hence the per-blob reference check.
+    /// Stores `data` in the blob store, outside any context, and returns its
+    /// blob ID — the write behind a mapping avatar. The blob lives while a
+    /// live mapping's appearance references it; until one does, a stray-blob
+    /// sweep may take it, so reference it right away.
+    public static func storeBlob(
+        _ data: Data,
+        mimeType: String,
+        pathExtension: String? = nil,
+        on database: any Database,
+        blobStore: KeepTalkingBlobStore
+    ) async throws -> String {
+        let blobID = hexDigest(for: data)
+        let stored = try blobStore.put(data: data, blobID: blobID, pathExtension: pathExtension)
+        let record =
+            try await KeepTalkingBlobRecord.query(on: database)
+            .filter(\.$id, .equal, blobID)
+            .first()
+            ?? KeepTalkingBlobRecord(
+                blobID: blobID,
+                availability: .ready,
+                mimeType: mimeType,
+                byteCount: data.count,
+                receivedBytes: data.count
+            )
+        record.relativePath = stored.relativePath
+        record.availability = .ready
+        record.mimeType = mimeType
+        record.byteCount = data.count
+        record.receivedBytes = data.count
+        record.lastAccessedAt = Date()
+        try await record.save(on: database)
+        return blobID
+    }
+
+    public func storeBlob(
+        _ data: Data,
+        mimeType: String,
+        pathExtension: String? = nil
+    ) async throws -> String {
+        try await Self.storeBlob(
+            data,
+            mimeType: mimeType,
+            pathExtension: pathExtension,
+            on: localStore.database,
+            blobStore: blobStore
+        )
+    }
+
+    /// Given blob IDs that *were* referenced by something now deleted, delete
+    /// the record + on-disk bytes for any that nothing references any more — no
+    /// attachment anywhere in the store, and no live mapping appearance. Blobs
+    /// are shared by `blob_id` string alone (no FK), so deleting one owner can
+    /// strand a blob another still uses — hence the per-blob reference check.
     /// Returns the blob IDs that were pruned.
     @discardableResult
     public static func pruneStrayBlobs(
@@ -75,7 +132,11 @@ extension KeepTalkingClient {
         blobStore: KeepTalkingBlobStore
     ) async throws -> [String] {
         var pruned: [String] = []
-        for blobID in candidateBlobIDs {
+        let appearanceBlobIDs = try await appearanceBlobIDs(
+            among: candidateBlobIDs,
+            on: database
+        )
+        for blobID in candidateBlobIDs where !appearanceBlobIDs.contains(blobID) {
             let remainingReferences =
                 try await KeepTalkingContextAttachment
                 .query(on: database)
@@ -96,8 +157,9 @@ extension KeepTalkingClient {
         return pruned
     }
 
-    /// Sweep the entire store for stray blobs — records with no referencing
-    /// attachment anywhere — and delete each one's record + on-disk bytes.
+    /// Sweep the entire store for stray blobs — records no attachment and no
+    /// live mapping appearance references — and delete each one's record +
+    /// on-disk bytes.
     /// Unscoped counterpart to the per-context prune; use it for an explicit
     /// "reclaim space" action or a periodic housekeeping pass. Returns the
     /// pruned blob IDs.
@@ -120,7 +182,7 @@ extension KeepTalkingClient {
     /// when a record was removed without its file (or a write landed without being
     /// recorded), plus partial bytes from transfers that no record ever indexed.
     /// Counterpart to `pruneAllStrayBlobs`, which prunes the *records* (and files)
-    /// no attachment references; this catches *files* with no backing record at
+    /// nothing references; this catches *files* with no backing record at
     /// all. Returns the count removed and bytes freed.
     @discardableResult
     public static func pruneOrphanBlobFiles(
@@ -258,7 +320,7 @@ extension KeepTalkingClient {
         }
     }
 
-    func hexDigest(for data: Data) -> String {
+    static func hexDigest(for data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -492,7 +554,7 @@ extension KeepTalkingClient {
             stored = try blobStore.put(data: Data(), blobID: blobID, pathExtension: pathExtension)
         } else {
             let partial = try blobStore.partialData(blobID: blobID)
-            guard partial.count == byteCount, hexDigest(for: partial) == blobID else {
+            guard partial.count == byteCount, Self.hexDigest(for: partial) == blobID else {
                 try? blobStore.removePartial(blobID: blobID)
                 try await upsertBlobRecord(
                     blobID: blobID,

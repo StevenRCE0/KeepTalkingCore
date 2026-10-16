@@ -699,7 +699,7 @@ extension KeepTalkingClient {
 
         for attachmentInput in attachments {
             let data = try Data(contentsOf: attachmentInput.sourceURL)
-            let blobID = hexDigest(for: data)
+            let blobID = Self.hexDigest(for: data)
             let filename = resolvedAttachmentFilename(attachmentInput)
             let mimeType = resolvedAttachmentMimeType(
                 attachmentInput,

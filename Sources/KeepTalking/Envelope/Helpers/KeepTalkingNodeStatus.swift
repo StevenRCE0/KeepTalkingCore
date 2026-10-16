@@ -13,30 +13,31 @@ public struct KeepTalkingNodeStatus: Codable, Sendable {
     public let node: KeepTalkingNode
     public let contextID: UUID
     public let nodeRelations: [KeepTalkingNodeRelationStatus]
-    /// When the sender built this snapshot, in its own milliseconds, strictly
-    /// increasing per sender process. Snapshots ride the bulk lane, a stream
-    /// each, so two can arrive out of order: receivers keep the newest.
-    public let issuedAtMs: UInt64
+    /// Which snapshot this is, strictly increasing per sender process (its
+    /// wall clock in milliseconds, never stepping back). Snapshots ride the
+    /// bulk lane, a stream each, so two can arrive out of order: receivers
+    /// keep the newest.
+    public let revision: UInt64
 
     public init(
         node: KeepTalkingNode,
         contextID: UUID,
         nodeRelations: [KeepTalkingNodeRelationStatus],
-        issuedAtMs: UInt64 = KeepTalkingNodeStatus.nextIssuedAtMs()
+        revision: UInt64 = KeepTalkingNodeStatus.nextRevision()
     ) {
         self.node = node
         self.contextID = contextID
         self.nodeRelations = nodeRelations
-        self.issuedAtMs = issuedAtMs
+        self.revision = revision
     }
 
-    private static let lastIssuedAtMs = NIOLockedValueBox<UInt64>(0)
+    private static let lastRevision = NIOLockedValueBox<UInt64>(0)
 
     /// Wall-clock milliseconds, nudged forward so a clock that steps back
     /// never makes a newer snapshot look older.
-    public static func nextIssuedAtMs(now: Date = Date()) -> UInt64 {
+    public static func nextRevision(now: Date = Date()) -> UInt64 {
         let wall = UInt64(max(now.timeIntervalSince1970, 0) * 1000)
-        return lastIssuedAtMs.withLockedValue { last in
+        return lastRevision.withLockedValue { last in
             last = max(last + 1, wall)
             return last
         }
@@ -59,8 +60,8 @@ final class KeepTalkingNodeStatusWatermarks: Sendable {
         guard let node = status.node.id else { return true }
         let key = Key(node: node, context: status.contextID)
         return applied.withLockedValue { applied in
-            guard (applied[key] ?? 0) < status.issuedAtMs else { return false }
-            applied[key] = status.issuedAtMs
+            guard (applied[key] ?? 0) < status.revision else { return false }
+            applied[key] = status.revision
             return true
         }
     }

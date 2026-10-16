@@ -320,7 +320,8 @@ never appears here; its outcome is reported through
 ## Threads, mappings, and notes
 
 **Invalidation pings** carry little. ``KeepTalkingClientSignals/mappingChanges`` says "that
-table moved" and expects the host to re-read; ``KeepTalkingClientSignals/threadChanges``
+table moved" and expects the host to re-read — sent by thread re-naming and by the instance
+`setAppearance`; ``KeepTalkingClientSignals/threadChanges``
 names the context whose threads changed, so a host re-reads that context's thread rows
 and boundaries and nothing else. The SDK does not diff Fluent models across a
 concurrency domain.

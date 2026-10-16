@@ -4,24 +4,47 @@ public struct KeepTalkingAliasResolution: Sendable, Hashable {
 
     public enum IDDisplayMode: Sendable, Hashable {
         case uppercase, lowercase, friendly, raw
-        /// `amber-swift-koala` — the friendly name as a single hyphenated
-        /// token. This is the form for anything an agent reads and types back:
-        /// one word-shaped token with no spaces to lose, and exactly what
-        /// `UUIDFriendlyName.resolve` matches on.
         case friendlyToken
     }
 
     public let alias: String?
     public let id: UUID?
     public let fallback: String?
+    public let appearance: KeepTalkingMappingAppearance?
+    public let suggestion: Suggestion?
 
-    public init(alias: String?, id: UUID?, fallback: String? = nil) {
+    public struct Suggestion: Sendable, Hashable {
+        public let name: String?
+        public let appearance: KeepTalkingMappingAppearance?
+
+        public init(name: String?, appearance: KeepTalkingMappingAppearance?) {
+            self.name = name
+            self.appearance = appearance
+        }
+
+        func overlaying(_ base: Self?) -> Self {
+            guard let base else { return self }
+            return Self(
+                name: name ?? base.name,
+                appearance: appearance.map { $0.overlaying(base.appearance) } ?? base.appearance
+            )
+        }
+    }
+
+    public init(
+        alias: String?,
+        id: UUID?,
+        fallback: String? = nil,
+        appearance: KeepTalkingMappingAppearance? = nil,
+        suggestion: Suggestion? = nil
+    ) {
         self.alias = alias
         self.id = id
         self.fallback = fallback
+        self.appearance = appearance
+        self.suggestion = suggestion
     }
 
-    /// True when no explicit alias was set — the displayed name is a fallback (friendly name or UUID).
     public var isFallback: Bool { alias == nil }
 
     public func idText(_ mode: IDDisplayMode = .friendly) -> String? {
@@ -57,63 +80,96 @@ public struct KeepTalkingAliasResolution: Sendable, Hashable {
 }
 
 public struct KeepTalkingAliasLookup: Sendable {
-    /// Global aliases (`scope_context IS NULL`).
-    private let aliases: [KeepTalkingMappingTarget: String]
-    /// Context-scoped aliases, bucketed by scope context id. Scoped rows never
-    /// enter the global map — callers opt in via `alias(for:in:)` or a
-    /// `scoped(to:)` view.
-    private let scopedAliases: [UUID: [KeepTalkingMappingTarget: String]]
+    /// What one alias row says, the parts it leaves unset nil.
+    private struct Entry: Sendable {
+        var alias: String?
+        var appearance: KeepTalkingMappingAppearance?
+        var suggestion: KeepTalkingAliasResolution.Suggestion?
+
+        /// `self` over `base`, property by property.
+        func overlaying(_ base: Entry?) -> Entry {
+            guard let base else { return self }
+            return Entry(
+                alias: alias ?? base.alias,
+                appearance: appearance.map { $0.overlaying(base.appearance) } ?? base.appearance,
+                suggestion: suggestion.map { $0.overlaying(base.suggestion) } ?? base.suggestion
+            )
+        }
+    }
+
+    /// Global alias rows (`scope_context IS NULL`).
+    private let entries: [KeepTalkingMappingTarget: Entry]
+    /// Context-scoped alias rows
+    private let scopedEntries: [UUID: [KeepTalkingMappingTarget: Entry]]
 
     public init(mappings: [KeepTalkingMapping]) {
-        var aliases: [KeepTalkingMappingTarget: String] = [:]
-        var scopedAliases: [UUID: [KeepTalkingMappingTarget: String]] = [:]
+        var entries: [KeepTalkingMappingTarget: Entry] = [:]
+        var scopedEntries: [UUID: [KeepTalkingMappingTarget: Entry]] = [:]
         for mapping in mappings where mapping.kind == .alias && mapping.deletedAt == nil {
             guard let target = mapping.target else {
                 continue
             }
-            let alias = KeepTalkingMapping.normalizeStoredValue(mapping.value)
-            guard !alias.isEmpty else {
+            let entry = Entry(
+                alias: KeepTalkingMapping.normalizeOptional(mapping.value),
+                appearance: mapping.appearance,
+                suggestion: mapping.suggestion.map {
+                    .init(name: $0.alias.name, appearance: $0.alias.appearance)
+                }
+            )
+            guard entry.alias != nil || entry.appearance != nil || entry.suggestion != nil else {
                 continue
             }
             if let scope = mapping.$scopeContext.id {
-                scopedAliases[scope, default: [:]][target] = alias
+                scopedEntries[scope, default: [:]][target] = entry
             } else {
-                aliases[target] = alias
+                entries[target] = entry
             }
         }
-        self.aliases = aliases
-        self.scopedAliases = scopedAliases
+        self.entries = entries
+        self.scopedEntries = scopedEntries
     }
 
     private init(
-        aliases: [KeepTalkingMappingTarget: String],
-        scopedAliases: [UUID: [KeepTalkingMappingTarget: String]]
+        entries: [KeepTalkingMappingTarget: Entry],
+        scopedEntries: [UUID: [KeepTalkingMappingTarget: Entry]]
     ) {
-        self.aliases = aliases
-        self.scopedAliases = scopedAliases
+        self.entries = entries
+        self.scopedEntries = scopedEntries
     }
 
     /// A lookup whose plain accessors resolve as seen from the given context —
-    /// that context's scoped aliases overlaid on the global map. Scope one
+    /// that context's scoped rows overlaid on the global map. Scope one
     /// lookup at construction instead of threading a context id through every
     /// downstream helper. `nil` (or an unknown scope) returns self, so the
     /// call is always safe.
     public func scoped(to scopeContextID: UUID?) -> KeepTalkingAliasLookup {
         guard
             let scopeContextID,
-            let bucket = scopedAliases[scopeContextID],
+            let bucket = scopedEntries[scopeContextID],
             !bucket.isEmpty
         else {
             return self
         }
         return KeepTalkingAliasLookup(
-            aliases: aliases.merging(bucket) { _, scoped in scoped },
-            scopedAliases: scopedAliases
+            entries: entries.merging(bucket) { global, scoped in scoped.overlaying(global) },
+            scopedEntries: scopedEntries
         )
     }
 
+    /// The target's row as seen from `scopeContextID`: the scoped row over the
+    /// global one, property by property.
+    private func entry(
+        for target: KeepTalkingMappingTarget,
+        in scopeContextID: UUID?
+    ) -> Entry? {
+        guard let scopeContextID, let scoped = scopedEntries[scopeContextID]?[target] else {
+            return entries[target]
+        }
+        return scoped.overlaying(entries[target])
+    }
+
     public func alias(for target: KeepTalkingMappingTarget) -> String? {
-        aliases[target]
+        entries[target]?.alias
     }
 
     /// Scoped-first resolution: the context's alias for the target if one
@@ -122,10 +178,29 @@ public struct KeepTalkingAliasLookup: Sendable {
         for target: KeepTalkingMappingTarget,
         in scopeContextID: UUID?
     ) -> String? {
-        if let scopeContextID, let scoped = scopedAliases[scopeContextID]?[target] {
-            return scoped
-        }
-        return aliases[target]
+        entry(for: target, in: scopeContextID)?.alias
+    }
+
+    public func appearance(for target: KeepTalkingMappingTarget) -> KeepTalkingMappingAppearance? {
+        entries[target]?.appearance
+    }
+
+    /// Scoped-first per property: what the context's alias row sets, with
+    /// every property it leaves unset taken from the global row.
+    public func appearance(
+        for target: KeepTalkingMappingTarget,
+        in scopeContextID: UUID?
+    ) -> KeepTalkingMappingAppearance? {
+        entry(for: target, in: scopeContextID)?.appearance
+    }
+
+    /// What the target shared about itself, as seen from `scopeContextID`:
+    /// the context's shared alias over the global one, property by property.
+    public func suggestion(
+        for target: KeepTalkingMappingTarget,
+        in scopeContextID: UUID? = nil
+    ) -> KeepTalkingAliasResolution.Suggestion? {
+        entry(for: target, in: scopeContextID)?.suggestion
     }
 
     /// Every context-scoped alias the target carries, keyed by scope context
@@ -133,7 +208,7 @@ public struct KeepTalkingAliasLookup: Sendable {
     public func contextAliases(
         for target: KeepTalkingMappingTarget
     ) -> [UUID: String] {
-        scopedAliases.compactMapValues { $0[target] }
+        scopedEntries.compactMapValues { $0[target]?.alias }
     }
 
     public func resolve(
@@ -148,10 +223,13 @@ public struct KeepTalkingAliasLookup: Sendable {
         in scopeContextID: UUID?,
         fallback: String? = nil
     ) -> KeepTalkingAliasResolution {
-        KeepTalkingAliasResolution(
-            alias: alias(for: target, in: scopeContextID),
+        let entry = entry(for: target, in: scopeContextID)
+        return KeepTalkingAliasResolution(
+            alias: entry?.alias,
             id: target.id,
-            fallback: fallback
+            fallback: fallback,
+            appearance: entry?.appearance,
+            suggestion: entry?.suggestion
         )
     }
 

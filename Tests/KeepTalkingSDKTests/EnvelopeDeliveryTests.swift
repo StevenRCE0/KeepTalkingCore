@@ -65,7 +65,7 @@ struct EnvelopeDeliveryTests {
 /// arrive out of order.
 struct NodeStatusOrderingTests {
     private func status(node: UUID, context: UUID, at ms: UInt64) -> KeepTalkingNodeStatus {
-        KeepTalkingNodeStatus(node: KeepTalkingNode(id: node), contextID: context, nodeRelations: [], issuedAtMs: ms)
+        KeepTalkingNodeStatus(node: KeepTalkingNode(id: node), contextID: context, nodeRelations: [], revision: ms)
     }
 
     @Test("An older snapshot arriving after a newer one is dropped; other senders and contexts are separate")
@@ -81,10 +81,10 @@ struct NodeStatusOrderingTests {
         #expect(marks.admit(status(node: node, context: UUID(), at: 5)))
     }
 
-    @Test("Issue times strictly increase even when the clock steps back")
-    func issueTimes() {
-        let later = KeepTalkingNodeStatus.nextIssuedAtMs(now: Date(timeIntervalSince1970: 2_000_000_000))
-        let earlier = KeepTalkingNodeStatus.nextIssuedAtMs(now: Date(timeIntervalSince1970: 1_000_000_000))
+    @Test("Revisions strictly increase even when the clock steps back")
+    func revisions() {
+        let later = KeepTalkingNodeStatus.nextRevision(now: Date(timeIntervalSince1970: 2_000_000_000))
+        let earlier = KeepTalkingNodeStatus.nextRevision(now: Date(timeIntervalSince1970: 1_000_000_000))
         #expect(earlier > later)
     }
 }

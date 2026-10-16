@@ -187,7 +187,7 @@ message, and neither holds up an ack or a voice heartbeat.
 
 The cost is ordering across lanes and between bulk envelopes, which receivers absorb. Node
 status is the case that needed care: two snapshots from one sender can arrive out of
-order, so each carries ``KeepTalkingNodeStatus/issuedAtMs``, strictly increasing per sender
+order, so each carries ``KeepTalkingNodeStatus/revision``, strictly increasing per sender
 process, and a receiver keeps only the newest per sender and context.
 
 ``KeepTalkingEnvelopeDelivery/isIdempotent`` states whether a kind is safe to deliver more
@@ -408,7 +408,10 @@ that is not a single-database question: the directory is shared and deduplicated
 identities, so a file is reachable from any identity holding a record for it.
 ``KeepTalkingBlobReferenceIndex`` answers "which blobs is this database still referencing?"
 against one `Database` handle at a time, so a caller can open each identity, collect, and
-release rather than holding every store open at once. Availability changes, including
+release rather than holding every store open at once. Within one database a blob record
+lives while something owns it — a context attachment, or the avatar in a live mapping's
+appearance, written through `KeepTalkingClient.storeBlob` outside any context — and
+`pruneStrayBlobs` asks both before deleting. Availability changes, including
 visible receive-progress steps, are reported through
 ``KeepTalkingClientSignals/blobAvailabilityChanges``.
 

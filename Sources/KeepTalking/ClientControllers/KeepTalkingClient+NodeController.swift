@@ -479,12 +479,20 @@ extension KeepTalkingClient {
     ///
     /// The node may reappear as `.pending` the next time it is encountered —
     /// that's by design.
+    ///
+    /// Pass `blobStore` to delete avatar blobs the node's mappings leave
+    /// unreferenced once the cascade removes them.
     public static func deleteNodeLocally(
         _ nodeID: UUID,
         localNodeID: UUID,
-        on database: any Database
+        on database: any Database,
+        blobStore: KeepTalkingBlobStore? = nil
     ) async throws {
         guard nodeID != localNodeID else { return }
+
+        let avatarBlobIDs = try await mappingBlobIDs(
+            KeepTalkingMapping.query(on: database).filter(\.$node.$id == nodeID)
+        )
 
         try await database.transaction { database in
             // Relations in either direction, plus their identity keys and
@@ -530,6 +538,10 @@ extension KeepTalkingClient {
             if let node = try await KeepTalkingNode.find(nodeID, on: database) {
                 try await node.delete(on: database)
             }
+        }
+
+        if let blobStore, !avatarBlobIDs.isEmpty {
+            try await pruneStrayBlobs(among: avatarBlobIDs, on: database, blobStore: blobStore)
         }
     }
 

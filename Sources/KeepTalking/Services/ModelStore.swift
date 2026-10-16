@@ -272,6 +272,8 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             AddContextDeletedMessagesMigration(),
             AddLinkPreviewsMigration(),
             AddQueryIndexesMigration(),
+            AddKeepTalkingMappingAppearanceMigration(),
+            AddKeepTalkingMappingSharingMigration(),
             to: databaseID
         )
     }
