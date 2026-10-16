@@ -97,13 +97,13 @@ struct ActivityReportingDatabase: Database, SQLDatabase {
         gated(isWrite: true) { base.execute(enum: `enum`) }
     }
 
-    func transaction<T>(
+    func transaction<T: Sendable>(
         _ closure: @escaping @Sendable (any Database) -> EventLoopFuture<T>
     ) -> EventLoopFuture<T> {
         gated(isWrite: true) { base.transaction(Self.holdingPermit(closure)) }
     }
 
-    func withConnection<T>(
+    func withConnection<T: Sendable>(
         _ closure: @escaping @Sendable (any Database) -> EventLoopFuture<T>
     ) -> EventLoopFuture<T> {
         gated(isWrite: true) { base.withConnection(Self.holdingPermit(closure)) }
@@ -157,7 +157,7 @@ struct ActivityReportingDatabase: Database, SQLDatabase {
         }
     }
 
-    private func gated<T>(
+    private func gated<T: Sendable>(
         isWrite: Bool,
         _ operation: @escaping @Sendable () -> EventLoopFuture<T>
     ) -> EventLoopFuture<T> {

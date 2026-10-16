@@ -84,12 +84,12 @@ extension KeepTalkingMappingAppearance {
         public let value: Value
         /// Nil applies everywhere. Kept sorted and unique, so equal variants
         /// encode identically.
-        public let platforms: [KeepTalkingPlatform]?
+        public let platforms: Set<KeepTalkingPlatform>?
 
         /// An empty set would apply nowhere; it means "everywhere" instead.
         public init(_ value: Value, platforms: Set<KeepTalkingPlatform>? = nil) {
             self.value = value
-            self.platforms = platforms.flatMap { $0.isEmpty ? nil : $0.sorted() }
+            self.platforms = platforms.flatMap { $0.isEmpty ? nil : $0 }
         }
 
         public func applies(to platform: KeepTalkingPlatform) -> Bool {
