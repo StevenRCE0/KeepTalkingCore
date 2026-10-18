@@ -988,6 +988,22 @@ public actor MCPManager {
         return Self.httpTransport(endpoint: url, authorizer: authorizer, headers: sanitizedHeaders)
     }
 
+    /// How long the HTTP pre-flight handshake may take.
+    ///
+    /// On Linux the stream-only authorization probe is skipped (see
+    /// `resolveStreamAuthorizationChallenge`), so a server's sign-in runs
+    /// inside this handshake — a 401, the authorizer, the browser — and it
+    /// gets the budget the live connect does. Elsewhere the probe meets the
+    /// challenge first, and the handshake keeps the short connect timeout, so
+    /// a server that never answers still fails fast.
+    private nonisolated func preflightTimeoutSeconds(hasAuthorizer: Bool) -> TimeInterval {
+        #if canImport(FoundationNetworking)
+        return hasAuthorizer ? interactiveConnectTimeoutSeconds : connectTimeoutSeconds
+        #else
+        return connectTimeoutSeconds
+        #endif
+    }
+
     /// The Streamable HTTP transport for this platform.
     ///
     /// On Linux, swift-sdk's `HTTPClientTransport` cannot stream: corelibs
@@ -1369,14 +1385,10 @@ public actor MCPManager {
                 endpoint: endpoint, authorizer: authorizer, headers: headers)
 
             do {
-                // With an authorizer attached the handshake can run the
-                // interactive sign-in (a 401 → the authorizer → the browser),
-                // so it gets the same budget the live connect does.
                 let initialization = try await Self.connectClient(
                     client,
                     transport: IncrementingRequestIDTransport(base: transport),
-                    timeoutSeconds: authorizer == nil
-                        ? connectTimeoutSeconds : interactiveConnectTimeoutSeconds
+                    timeoutSeconds: preflightTimeoutSeconds(hasAuthorizer: authorizer != nil)
                 )
                 if attempt == 0, let authorizer,
                     let challenge = Self.authorizationChallenge(
