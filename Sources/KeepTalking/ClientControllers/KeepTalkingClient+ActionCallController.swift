@@ -552,10 +552,21 @@ extension KeepTalkingClient {
         // to normal execution in that case (local callers still use the approval
         // handler).
         if action.blockingAuthorisation == true,
-            request.callerNodeID == config.node,
-            let context,
-            let actionApprovalHandler
+            request.callerNodeID == config.node
         {
+            // Fail closed. An action that declares blockingAuthorisation must
+            // not execute unattended, so a missing handler — or a context we
+            // could not resolve to show the user what they are approving —
+            // denies rather than silently permitting. A host that genuinely
+            // wants unattended execution installs a handler returning `true`,
+            // which is greppable; an absent handler is not.
+            guard let context, let actionApprovalHandler else {
+                throw KeepTalkingClientError.actionCallNotAuthorized(
+                    action: request.call.action,
+                    caller: request.callerNodeID,
+                    context: request.contextID
+                )
+            }
             let approved = await actionApprovalHandler(
                 request,
                 action,
