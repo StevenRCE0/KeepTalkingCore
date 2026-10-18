@@ -3,11 +3,15 @@ import Foundation
 
 public enum KeepTalkingMappingError: LocalizedError {
     case emptyValue
+    /// A sharing decision names an alias the local node doesn't have yet.
+    case missingAlias
 
     public var errorDescription: String? {
         switch self {
             case .emptyValue:
                 return "Value must not be empty."
+            case .missingAlias:
+                return "There is no such alias to share."
         }
     }
 }
@@ -74,9 +78,6 @@ public final class KeepTalkingMapping: Model, @unchecked Sendable {
     @Field(key: "normalized_value")
     public var normalizedValue: String
 
-    @OptionalField(key: "color_hex")
-    public var colorHex: String?
-
     /// How this mapping looks. Nil when nothing is set — an empty appearance
     /// is never stored. An alias row may carry one with an empty `value`:
     /// a face without a name, the friendly name still showing.
@@ -87,11 +88,6 @@ public final class KeepTalkingMapping: Model, @unchecked Sendable {
     /// Never the user's own choice — that's `value` and `appearance`.
     @OptionalField(key: "suggestion")
     public var suggestion: KeepTalkingAliasSuggestion?
-
-    /// On the local node's own global alias row: the contexts this alias is
-    /// shared into. Nil everywhere else, and when shared nowhere.
-    @OptionalField(key: "shared_in_contexts")
-    public var sharedInContexts: [UUID]?
 
     @Timestamp(key: "created_at", on: .create)
     public var createdAt: Date?
@@ -111,7 +107,6 @@ public final class KeepTalkingMapping: Model, @unchecked Sendable {
         kind: KeepTalkingMappingKind,
         namespace: String? = nil,
         value: String,
-        colorHex: String? = nil,
         appearance: KeepTalkingMappingAppearance? = nil,
         deletedAt: Date? = nil
     ) {
@@ -131,7 +126,6 @@ public final class KeepTalkingMapping: Model, @unchecked Sendable {
         self.namespace = Self.normalizeOptional(namespace)
         self.value = Self.normalizeStoredValue(value)
         self.normalizedValue = Self.normalizeLookupValue(value)
-        self.colorHex = Self.normalizeOptional(colorHex)
         self.appearance = Self.normalizeAppearance(appearance)
         self.deletedAt = deletedAt
     }
@@ -171,11 +165,10 @@ extension KeepTalkingMapping {
     }
 
     /// True when the row holds nothing but possibly an empty name — it can
-    /// go. A row stays while any of name, appearance, suggestion or sharing
-    /// remains, whoever set it.
+    /// go. A row stays while any of name, appearance or suggestion remains,
+    /// whoever set it.
     var isVacant: Bool {
         value.isEmpty && appearance == nil && suggestion == nil
-            && (sharedInContexts ?? []).isEmpty
     }
 
     /// Blobs this row keeps alive: its own avatar and the suggested one.

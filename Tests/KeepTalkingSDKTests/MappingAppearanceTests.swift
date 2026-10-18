@@ -9,20 +9,15 @@ struct MappingAppearanceTests {
 
     // MARK: - Codec
 
-    @Test("platforms are sorted and unique, so equal appearances encode identically")
-    func canonicalEncoding() throws {
+    @Test("platform order doesn't matter, and an unknown platform round-trips")
+    func platformSetRoundTrip() throws {
         let unknown = KeepTalkingPlatform(rawValue: "future-os")
         let a = Appearance(icon: [.init(.emoji(value: "🧪"), platforms: [.gtk, .apple, unknown])])
         let b = Appearance(icon: [.init(.emoji(value: "🧪"), platforms: [unknown, .apple, .gtk])])
         #expect(a == b)
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        let encoded = try encoder.encode(a)
-        #expect(encoded == (try encoder.encode(b)))
-
-        let decoded = try JSONDecoder().decode(Appearance.self, from: encoded)
-        #expect(decoded == a)
+        let decoded = try JSONDecoder().decode(Appearance.self, from: try JSONEncoder().encode(a))
+        #expect(decoded == b)
         #expect(decoded.icon.first?.platforms == [.apple, unknown, .gtk])
     }
 

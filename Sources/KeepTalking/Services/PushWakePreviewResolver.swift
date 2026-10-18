@@ -6,12 +6,34 @@ public struct KeepTalkingResolvedPushWakePreview: Sendable, Hashable {
     public var body: String
     public var contextID: UUID
     public var messageID: UUID?
+    /// Who sent it, and how they resolve in the context — for a host that
+    /// draws the sender (a communication notification's person).
+    public var sender: KeepTalkingContextMessage.Sender?
+    public var senderResolution: KeepTalkingAliasResolution?
+    /// The node the sender is, or — for an agent — runs on, resolved in the
+    /// context. An agent's avatar is drawn from its node's.
+    public var senderNodeResolution: KeepTalkingAliasResolution?
+    /// How the context itself resolves — its name and appearance.
+    public var conversation: KeepTalkingAliasResolution?
 
-    public init(title: String, body: String, contextID: UUID, messageID: UUID? = nil) {
+    public init(
+        title: String,
+        body: String,
+        contextID: UUID,
+        messageID: UUID? = nil,
+        sender: KeepTalkingContextMessage.Sender? = nil,
+        senderResolution: KeepTalkingAliasResolution? = nil,
+        senderNodeResolution: KeepTalkingAliasResolution? = nil,
+        conversation: KeepTalkingAliasResolution? = nil
+    ) {
         self.title = title
         self.body = body
         self.contextID = contextID
         self.messageID = messageID
+        self.sender = sender
+        self.senderResolution = senderResolution
+        self.senderNodeResolution = senderNodeResolution
+        self.conversation = conversation
     }
 }
 
@@ -19,15 +41,39 @@ public struct KeepTalkingResolvedPushWakeAction: Sendable, Hashable {
     public var title: String
     public var body: String
     public var contextID: UUID
+    /// The node asking to run the action, and how it resolves in the context
+    /// — for a host that draws the caller.
+    public var callerNodeID: UUID?
+    public var callerResolution: KeepTalkingAliasResolution?
+    /// How the context itself resolves — its name and appearance.
+    public var conversation: KeepTalkingAliasResolution?
 
-    public init(title: String, body: String, contextID: UUID) {
+    public init(
+        title: String,
+        body: String,
+        contextID: UUID,
+        callerNodeID: UUID? = nil,
+        callerResolution: KeepTalkingAliasResolution? = nil,
+        conversation: KeepTalkingAliasResolution? = nil
+    ) {
         self.title = title
         self.body = body
         self.contextID = contextID
+        self.callerNodeID = callerNodeID
+        self.callerResolution = callerResolution
+        self.conversation = conversation
     }
 }
 
 public enum KeepTalkingPushWakePreviewResolver {
+    /// The node a sender is, or an agent runs on.
+    private static func senderNode(of sender: KeepTalkingContextMessage.Sender) -> UUID? {
+        switch sender {
+            case .node(let node): node
+            case .autonomous(_, let node, _): node
+        }
+    }
+
     public static func resolve(
         _ envelope: KeepTalkingPushWakeContextEnvelope,
         on database: any Database,
@@ -45,9 +91,9 @@ public enum KeepTalkingPushWakePreviewResolver {
         let mappings = try await KeepTalkingMapping.query(on: database)
             .filter(\.$deletedAt == nil)
             .all()
-        let senderLabel = KeepTalkingAliasLookup(mappings: mappings)
-            .resolve(sender: preview.sender, in: envelope.contextID)
-            .primary()
+        let lookup = KeepTalkingAliasLookup(mappings: mappings)
+        let senderResolution = lookup.resolve(sender: preview.sender, in: envelope.contextID)
+        let senderLabel = senderResolution.primary()
         let body =
             if preview.isTruncated, !preview.content.isEmpty {
                 preview.content + "…"
@@ -59,7 +105,13 @@ public enum KeepTalkingPushWakePreviewResolver {
             title: senderLabel,
             body: body,
             contextID: envelope.contextID,
-            messageID: preview.messageID
+            messageID: preview.messageID,
+            sender: preview.sender,
+            senderResolution: senderResolution,
+            senderNodeResolution: senderNode(of: preview.sender).map {
+                lookup.resolve(.node($0), in: envelope.contextID)
+            },
+            conversation: lookup.resolve(.context(envelope.contextID))
         )
     }
 
@@ -110,9 +162,9 @@ public enum KeepTalkingPushWakeActionResolver {
         let mappings = try await KeepTalkingMapping.query(on: database)
             .filter(\.$deletedAt == nil)
             .all()
-        let callerLabel = KeepTalkingAliasLookup(mappings: mappings)
-            .resolve(sender: .node(node: payload.senderNodeID), in: payload.contextID)
-            .primary()
+        let lookup = KeepTalkingAliasLookup(mappings: mappings)
+        let callerResolution = lookup.resolve(.node(payload.senderNodeID), in: payload.contextID)
+        let callerLabel = callerResolution.primary()
         var actionDescription =
             try await KeepTalkingAction.query(on: database)
             .filter(\.$id, .equal, payload.actionID)
@@ -125,7 +177,10 @@ public enum KeepTalkingPushWakeActionResolver {
         return KeepTalkingResolvedPushWakeAction(
             title: callerLabel,
             body: actionDescription,
-            contextID: payload.contextID
+            contextID: payload.contextID,
+            callerNodeID: payload.senderNodeID,
+            callerResolution: callerResolution,
+            conversation: lookup.resolve(.context(payload.contextID))
         )
     }
 }

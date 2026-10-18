@@ -212,7 +212,9 @@ extension KeepTalkingIOManager {
                                 "Attachment bytes exist in metadata but are not ready locally.",
                         ])
                 }
-                guard attachment.byteCount <= KeepTalkingClient.maxAINativeAttachmentBytes else {
+                let maxSourceBytes = KeepTalkingClient.maxAINativeSourceBytes(
+                    forMIMEType: attachment.mimeType)
+                guard attachment.byteCount <= maxSourceBytes else {
                     return failedToolResult(
                         "attachment_too_large",
                         functionName: functionName,
@@ -221,7 +223,7 @@ extension KeepTalkingIOManager {
                             "mode": mode.rawValue,
                             "attachment": attachmentJSON,
                             "error_message": "Attachment exceeds the native AI input budget.",
-                            "max_native_bytes": KeepTalkingClient.maxAINativeAttachmentBytes,
+                            "max_native_bytes": maxSourceBytes,
                         ])
                 }
 
@@ -488,7 +490,9 @@ extension KeepTalkingIOManager {
         var messages: [AIMessage] = []
         for resource in producedResources(from: executions) {
             if let byteCount = resource.byteCount,
-                byteCount > KeepTalkingClient.maxAINativeAttachmentBytes
+                byteCount
+                    > KeepTalkingClient.maxAINativeSourceBytes(
+                        forMIMEType: resource.mimeType ?? "")
             {
                 client.debug(
                     "[io/inject] skipped oversized produced resource handle=\(resource.handle) bytes=\(byteCount)"

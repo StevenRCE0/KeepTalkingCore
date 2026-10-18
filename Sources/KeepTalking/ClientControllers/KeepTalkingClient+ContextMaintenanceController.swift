@@ -165,10 +165,14 @@ extension KeepTalkingClient {
         }
     }
 
-    /// Recover attachment records (orphans) then missing blob bytes. Extracted
-    /// from `syncCurrentContext` so it's a first-class maintenance task that also
+    /// Recover attachment records (orphans) then missing blob bytes, and the
+    /// avatars of shared aliases whose blobs haven't arrived. Extracted from
+    /// `syncCurrentContext` so it's a first-class maintenance task that also
     /// runs on the heartbeat, not just on connect.
     private func recoverAttachments(with node: UUID) async {
+        if let avatars = try? await missingSuggestionAvatarBlobIDs() {
+            await requestBlobsIfMissing(avatars, in: config.contextID)
+        }
         guard config.recentAttachmentSyncLookback > 0 else { return }
         let since = Date(timeIntervalSinceNow: -config.recentAttachmentSyncLookback)
         do {

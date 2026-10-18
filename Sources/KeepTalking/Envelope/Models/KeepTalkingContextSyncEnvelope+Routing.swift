@@ -27,7 +27,7 @@ extension KeepTalkingContextSyncEnvelope {
                 return request.recipient
             case .transcriptLinesResult(let result):
                 return result.requester
-            case .sideNotesPush, .messageDeletionsPush:
+            case .sideNotesPush, .messageDeletionsPush, .aliasPush:
                 return nil
             case .sideNotesPageRequest(let request):
                 return request.recipient
@@ -71,6 +71,8 @@ extension KeepTalkingContextSyncEnvelope {
             case .sideNotesPush(let push):
                 return push.context
             case .messageDeletionsPush(let push):
+                return push.context
+            case .aliasPush(let push):
                 return push.context
             case .sideNotesPageRequest(let request):
                 return request.context

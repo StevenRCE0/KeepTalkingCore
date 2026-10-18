@@ -98,16 +98,49 @@ struct MappingTests {
         try await client.addTag("shared", to: contextTarget)
         try await client.addTag("shared", to: nodeTarget)
 
-        let contextColor = try #require(
-            try await client.tags(for: contextTarget).first?.colorHex
+        let contextAppearance = try #require(
+            try await client.tags(for: contextTarget).first?.appearance
         )
-        let nodeColor = try #require(
-            try await client.tags(for: nodeTarget).first?.colorHex
+        let nodeAppearance = try #require(
+            try await client.tags(for: nodeTarget).first?.appearance
         )
 
-        #expect(contextColor == nodeColor)
-        #expect(contextColor.hasPrefix("#"))
-        #expect(contextColor.count == 7)
+        #expect(contextAppearance == nodeAppearance)
+        let color = try #require(contextAppearance.color(for: .apple))
+        #expect(color.hasPrefix("#"))
+        #expect(color.count == 7)
+    }
+
+    @Test("tag appearance repaints every row and survives removing the tag")
+    func tagAppearanceRepaintsAndSurvives() async throws {
+        let localStore = try await KeepTalkingInMemoryStore.make()
+        let context = KeepTalkingContext(id: UUID())
+        try await context.save(on: localStore.database)
+        let node = KeepTalkingNode(id: UUID())
+        try await node.save(on: localStore.database)
+        let client = KeepTalkingClient(
+            config: KeepTalkingConfig(contextID: UUID(), node: UUID()),
+            localStore: localStore
+        )
+        let contextTarget = KeepTalkingMappingTarget.context(try #require(context.id))
+        let nodeTarget = KeepTalkingMappingTarget.node(try #require(node.id))
+        let appearance = KeepTalkingMappingAppearance(
+            color: [.init("#112233")],
+            icon: [.init(.emoji(value: "🏷️"))]
+        )
+
+        try await client.addTag("shared", to: contextTarget)
+        try await client.addTag("shared", to: nodeTarget)
+        try await client.setTagAppearance(appearance, forTag: "SHARED")
+        #expect(try await client.tags(for: contextTarget).first?.appearance == appearance)
+        #expect(try await client.tags(for: nodeTarget).first?.appearance == appearance)
+
+        try await client.removeTag("shared", from: contextTarget)
+        try await client.removeTag("shared", from: nodeTarget)
+        try await client.addTag("shared", to: contextTarget)
+        #expect(try await client.tags(for: contextTarget).first?.appearance == appearance)
+
+        await localStore.shutdown()
     }
 
     @Test("actions use the existing mapping tag model")

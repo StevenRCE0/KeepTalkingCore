@@ -350,7 +350,11 @@ while a call is live; ``KeepTalkingContextSyncSnapshot`` and
 ``KeepTalkingVoiceTranscriptSyncSnapshot`` are the two streams it operates on. Side notes
 have no request of their own: the summary result carries the peer's whole set when the
 digests disagree, and a local edit is pushed to the context as a fire-and-forget
-``KeepTalkingContextSyncSideNotesPush``. Both merge by key and version. Attachment recovery
+``KeepTalkingContextSyncSideNotesPush``. Both merge by key and version. What each member
+calls itself here — its scoped alias, or an empty one when it shares none — rides both
+halves of every summary exchange and goes out as a ``KeepTalkingContextSyncAliasPush`` when
+it changes; its global alias rides ``KeepTalkingNodeStatus/alias`` instead, so only members
+it trusts get it. Attachment recovery
 runs as its own maintenance pass rather than nested inside the reconcile: missing attachment
 *records* are requested by message ID through context sync, and missing *bytes* are pulled
 through blob negotiation (below). Sync envelopes ride the bulk lane, each on a stream of its
@@ -507,6 +511,7 @@ says a peer is in the chat, not in the call. ``KeepTalkingVoiceSession/PeerState
 - ``KeepTalkingContextSyncMessagesResult``
 - ``KeepTalkingContextSyncPageKey``
 - ``KeepTalkingContextSyncSideNotesPush``
+- ``KeepTalkingContextSyncAliasPush``
 - ``KeepTalkingContextSyncAttachmentRecordsRequest``
 - ``KeepTalkingContextSyncAttachmentRecordsResult``
 - ``KeepTalkingContextSyncFailureResult``

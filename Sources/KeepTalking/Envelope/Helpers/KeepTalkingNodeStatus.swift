@@ -18,17 +18,24 @@ public struct KeepTalkingNodeStatus: Codable, Sendable {
     /// bulk lane, a stream each, so two can arrive out of order: receivers
     /// keep the newest.
     public let revision: UInt64
+    /// The sender's global alias, for a recipient it trusts here: what it
+    /// calls itself everywhere, or an empty one once it has none. Absent when
+    /// it doesn't share it in this context — that says nothing about other
+    /// contexts, so it never clears.
+    public let alias: KeepTalkingSharedAlias?
 
     public init(
         node: KeepTalkingNode,
         contextID: UUID,
         nodeRelations: [KeepTalkingNodeRelationStatus],
-        revision: UInt64 = KeepTalkingNodeStatus.nextRevision()
+        revision: UInt64 = KeepTalkingNodeStatus.nextRevision(),
+        alias: KeepTalkingSharedAlias? = nil
     ) {
         self.node = node
         self.contextID = contextID
         self.nodeRelations = nodeRelations
         self.revision = revision
+        self.alias = alias
     }
 
     private static let lastRevision = NIOLockedValueBox<UInt64>(0)

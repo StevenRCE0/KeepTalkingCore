@@ -626,7 +626,7 @@ extension KeepTalkingClient {
 
     private func imagePart(base64: String, mimeType: String) -> AIMessage.Part? {
         // Extract the raw base64 + mime (input may be a `data:` URL or bare base64),
-        // then cap the longest side at 4000px before handing the image to a model.
+        // then normalise it like every other image handed to a model.
         var rawBase64 = base64
         var effectiveMime = mimeType
         if base64.hasPrefix("data:") {
@@ -641,21 +641,14 @@ extension KeepTalkingClient {
             }
         }
         let cleaned = rawBase64.replacingOccurrences(of: "\n", with: "")
-        // If we can decode the bytes, downscale; otherwise fall back to the raw payload.
-        let (outData, outMime): (String, String)
-        if let data = Data(base64Encoded: cleaned) {
-            let scaled = KeepTalkingImageDownscaler.downscaledIfNeeded(
-                data, mimeType: effectiveMime)
-            outData = scaled.data.base64EncodedString()
-            outMime = scaled.mimeType
-        } else {
-            outData = cleaned
-            outMime = effectiveMime
+        // Bytes that decode get normalised; anything else goes as it came, and
+        // the connector drops it if the provider couldn't take it.
+        if let data = Data(base64Encoded: cleaned),
+            let inlined = KeepTalkingClient.inlinedImagePart(mimeType: effectiveMime, data: data)
+        {
+            return inlined.part
         }
-        guard let url = URL(string: "data:\(outMime);base64,\(outData)") else {
-            return nil
-        }
-        return .imageURL(url)
+        return URL(string: "data:\(effectiveMime);base64,\(cleaned)").map { .imageURL($0) }
     }
 
     private func inlineUserMessage(

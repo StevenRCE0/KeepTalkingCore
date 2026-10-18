@@ -74,6 +74,9 @@ public struct KeepTalkingContextSyncSummaryRequest: Codable, Sendable,
     public let sideNoteDigest: Data?
     /// Our message-tombstone digest, compared the same way.
     public let messageDeletionDigest: Data?
+    /// What we call ourselves in this context: our scoped alias if we share
+    /// it here, else an empty one that clears what the responder kept.
+    public let alias: KeepTalkingSharedAlias?
 
     public init(
         request: UUID = UUID(),
@@ -81,7 +84,8 @@ public struct KeepTalkingContextSyncSummaryRequest: Codable, Sendable,
         requester: UUID,
         recipient: UUID,
         sideNoteDigest: Data? = nil,
-        messageDeletionDigest: Data? = nil
+        messageDeletionDigest: Data? = nil,
+        alias: KeepTalkingSharedAlias? = nil
     ) {
         self.request = request
         self.context = context
@@ -89,6 +93,7 @@ public struct KeepTalkingContextSyncSummaryRequest: Codable, Sendable,
         self.recipient = recipient
         self.sideNoteDigest = sideNoteDigest
         self.messageDeletionDigest = messageDeletionDigest
+        self.alias = alias
     }
 }
 
@@ -115,6 +120,9 @@ public struct KeepTalkingContextSyncSummaryResult: Codable, Sendable,
     /// Our tombstone digest, so a requester holding tombstones we lack can
     /// push them back in the same round.
     public let messageDeletionDigest: Data?
+    /// The responder's scoped alias here, as the request carries the
+    /// requester's — so each heartbeat sync catches both up.
+    public let alias: KeepTalkingSharedAlias?
 
     public init(
         request: UUID,
@@ -126,7 +134,8 @@ public struct KeepTalkingContextSyncSummaryResult: Codable, Sendable,
         sideNotesNextBefore: KeepTalkingSideNotePageKey? = nil,
         messageDeletions: [KeepTalkingMessageTombstone]? = nil,
         messageDeletionsNextBefore: KeepTalkingContextSyncPageKey? = nil,
-        messageDeletionDigest: Data? = nil
+        messageDeletionDigest: Data? = nil,
+        alias: KeepTalkingSharedAlias? = nil
     ) {
         self.request = request
         self.context = context
@@ -138,6 +147,7 @@ public struct KeepTalkingContextSyncSummaryResult: Codable, Sendable,
         self.messageDeletions = messageDeletions
         self.messageDeletionsNextBefore = messageDeletionsNextBefore
         self.messageDeletionDigest = messageDeletionDigest
+        self.alias = alias
     }
 }
 
@@ -159,6 +169,24 @@ public struct KeepTalkingContextSyncSideNotesPush: Codable, Sendable, Equatable 
         self.context = context
         self.origin = origin
         self.sideNotes = sideNotes
+    }
+}
+
+/// A fire-and-forget push of what the sender calls itself in this context,
+/// sent when its scoped alias or its sharing here changes.
+///
+/// Broadcast like `KeepTalkingContextSyncSideNotesPush`; the alias on the
+/// summary exchange is the catch-up. An empty alias means the sender stopped
+/// sharing one here.
+public struct KeepTalkingContextSyncAliasPush: Codable, Sendable, Equatable {
+    public let context: UUID
+    public let origin: UUID
+    public let alias: KeepTalkingSharedAlias
+
+    public init(context: UUID, origin: UUID, alias: KeepTalkingSharedAlias) {
+        self.context = context
+        self.origin = origin
+        self.alias = alias
     }
 }
 
@@ -852,6 +880,9 @@ public enum KeepTalkingContextSyncEnvelope: Codable, Sendable {
     /// Message tombstones the sender just learned of. Broadcast; the tombstone
     /// digest on the summary exchange is the catch-up path.
     case messageDeletionsPush(KeepTalkingContextSyncMessageDeletionsPush)
+    /// The sender's scoped alias, just changed. Broadcast; the alias on the
+    /// summary exchange is the catch-up path.
+    case aliasPush(KeepTalkingContextSyncAliasPush)
 
     // Whole-set pages: the rest of a set whose first page rode `summaryResult`.
     case sideNotesPageRequest(KeepTalkingContextSyncSideNotesPageRequest)

@@ -333,29 +333,26 @@ extension KeepTalkingClient {
         .filter(\.$namespace == normalizedNamespace)
         .filter(\.$normalizedValue == normalizedValue)
         .first()
-        let colorHex = try await tagColorHex(
-            namespace: normalizedNamespace,
-            normalizedValue: normalizedValue,
-            on: database
-        )
-
         let mapping =
             existing
             ?? KeepTalkingMapping(
                 target: target,
                 kind: .tag,
                 namespace: normalizedNamespace,
-                value: storedValue,
-                colorHex: colorHex
+                value: storedValue
             )
         mapping.namespace = normalizedNamespace
         if existing == nil || mapping.deletedAt != nil {
             mapping.value = storedValue
             mapping.normalizedValue = normalizedValue
         }
-        mapping.colorHex = KeepTalkingMapping.normalizeOptional(
-            mapping.colorHex ?? colorHex
-        )
+        if mapping.appearance == nil {
+            mapping.appearance = try await tagAppearance(
+                namespace: normalizedNamespace,
+                normalizedValue: normalizedValue,
+                on: database
+            )
+        }
         mapping.deletedAt = nil
         try await mapping.save(on: database)
     }
@@ -373,14 +370,18 @@ extension KeepTalkingClient {
         )
     }
 
-    /// Repaints every mapping row that carries the given tag — colour is a
+    /// Repaints every mapping row that carries the given tag — appearance is a
     /// property of the tag itself, not of any one target, so all rows (including
     /// soft-deleted ones, which `addTag` revives in place) move together.
-    public static func setTagColor(
-        _ colorHex: String?,
+    ///
+    /// Pass `blobStore` to delete an avatar blob the change leaves
+    /// unreferenced; without one it waits for the next stray-blob sweep.
+    public static func setTagAppearance(
+        _ appearance: KeepTalkingMappingAppearance?,
         forTag value: String,
         namespace: String? = nil,
-        on database: any Database
+        on database: any Database,
+        blobStore: KeepTalkingBlobStore? = nil
     ) async throws {
         let normalizedValue = KeepTalkingMapping.normalizeLookupValue(value)
         guard !normalizedValue.isEmpty else {
@@ -388,30 +389,37 @@ extension KeepTalkingClient {
         }
 
         let normalizedNamespace = KeepTalkingMapping.normalizeOptional(namespace)
-        let color = KeepTalkingMapping.normalizeOptional(colorHex)
+        let appearance = KeepTalkingMapping.normalizeAppearance(appearance)
         let mappings = try await KeepTalkingMapping.query(on: database)
             .filter(\.$kind, .equal, .tag)
             .filter(\.$namespace == normalizedNamespace)
             .filter(\.$normalizedValue == normalizedValue)
             .all()
 
-        for mapping in mappings where mapping.colorHex != color {
-            mapping.colorHex = color
+        var released = Set<String>()
+        for mapping in mappings where mapping.appearance != appearance {
+            released.formUnion(mapping.appearance?.blobIDs ?? [])
+            mapping.appearance = appearance
             try await mapping.save(on: database)
         }
+        released.subtract(appearance?.blobIDs ?? [])
+        try await pruneReleasedBlobs(released, on: database, blobStore: blobStore)
     }
 
-    public func setTagColor(
-        _ colorHex: String?,
+    /// Repaints the tag; see the static form. Emits `mappingChanges`.
+    public func setTagAppearance(
+        _ appearance: KeepTalkingMappingAppearance?,
         forTag value: String,
         namespace: String? = nil
     ) async throws {
-        try await Self.setTagColor(
-            colorHex,
+        try await Self.setTagAppearance(
+            appearance,
             forTag: value,
             namespace: namespace,
-            on: localStore.database
+            on: localStore.database,
+            blobStore: blobStore
         )
+        signals.mappingChanges.send(())
     }
 
     public static func removeTag(
@@ -495,9 +503,9 @@ extension KeepTalkingClient {
         return scopedQuery.filter(\.$deletedAt == nil)
     }
 
-    /// Soft-deletes `mappings`, dropping everything but the name: a deleted
-    /// row references no blob, and a revived one never points at bytes swept
-    /// in between. Returns the avatar blobs that were released.
+    /// Soft-deletes `mappings`. An alias row drops everything but its name: a
+    /// deleted alias references no blob, and a revived one never points at
+    /// bytes swept in between. Returns the avatar blobs that were released.
     @discardableResult
     static func softDeleteMappings(
         _ mappings: [KeepTalkingMapping],
@@ -510,28 +518,34 @@ extension KeepTalkingClient {
         let deletedAt = Date()
         var released = Set<String>()
         for mapping in mappings {
-            released.formUnion(mapping.blobIDs)
-            mapping.appearance = nil
-            mapping.suggestion = nil
-            mapping.sharedInContexts = nil
+            // A tag's appearance belongs to the tag, not this row: keep it, so
+            // re-adding the tag here brings it back.
+            if mapping.kind == .alias {
+                released.formUnion(mapping.blobIDs)
+                mapping.appearance = nil
+                mapping.suggestion = nil
+            }
             mapping.deletedAt = deletedAt
             try await mapping.save(on: database)
         }
         return released
     }
 
-    private static func tagColorHex(
+    /// The tag's appearance, from its oldest row that has one — deleted rows
+    /// included — else a fresh random colour.
+    private static func tagAppearance(
         namespace: String?,
         normalizedValue: String,
         on database: any Database
-    ) async throws -> String {
+    ) async throws -> KeepTalkingMappingAppearance {
         try await KeepTalkingMapping.query(on: database)
             .filter(\.$kind, .equal, .tag)
             .filter(\.$namespace == namespace)
             .filter(\.$normalizedValue == normalizedValue)
+            .filter(\.$appearance != nil)
             .sort(\.$createdAt, .ascending)
             .first()?
-            .colorHex
-            ?? KeepTalkingMapping.randomColorHex()
+            .appearance
+            ?? KeepTalkingMappingAppearance(color: [.init(KeepTalkingMapping.randomColorHex())])
     }
 }

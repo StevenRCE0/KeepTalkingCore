@@ -648,12 +648,27 @@ extension KeepTalkingClient {
             )
         }
 
+        // The global alias goes only to a recipient trusted here — which the
+        // relations above are already narrowed to.
+        let revision = KeepTalkingNodeStatus.nextRevision()
+        var alias: KeepTalkingSharedAlias?
+        if let recipientNodeID, relations.contains(where: { $0.$to.id == recipientNodeID }) {
+            alias = try await Self.outgoingGlobalAlias(
+                in: try currentContext.requireID(),
+                localNodeID: config.node,
+                revision: revision,
+                on: localStore.database
+            )
+        }
+
         return KeepTalkingNodeStatus(
             node: node,
             contextID: try currentContext.requireID(),
             nodeRelations: relationStatuses.sorted {
                 $0.toNodeID.uuidString < $1.toNodeID.uuidString
-            }
+            },
+            revision: revision,
+            alias: alias
         )
     }
 
@@ -718,7 +733,9 @@ extension KeepTalkingClient {
         )
     }
 
-    func mergeDiscoveredNodeStatus(_ status: KeepTalkingNodeStatus) async throws {
+    /// `sealed`: it came encrypted to us, so its sender is who it says —
+    /// only then is the global alias it carries kept.
+    func mergeDiscoveredNodeStatus(_ status: KeepTalkingNodeStatus, sealed: Bool = false) async throws {
         guard nodeStatusWatermarks.admit(status) else {
             debug("dropped stale node status node=\(status.node.id?.uuidString.lowercased() ?? "unknown")")
             return
@@ -731,6 +748,9 @@ extension KeepTalkingClient {
 
         try await mergeNodeActions(advertisedActions)
         try await mergeIncomingActionAuthorisations(from: status)
+        if sealed, let alias = status.alias, let sender = status.node.id {
+            try await receiveGlobalAlias(alias, from: sender)
+        }
         await invalidateActionToolCatalog(
             contextID: status.contextID,
             reason: "merge_discovered_node_status node=\(status.node.id?.uuidString.lowercased() ?? "unknown")"

@@ -23,7 +23,6 @@ struct CreateKeepTalkingMappingsMigration: AsyncMigration {
             .field("namespace", .string)
             .field("value", .string, .required)
             .field("normalized_value", .string, .required)
-            .field("color_hex", .string)
             .field("created_at", .datetime, .required)
             .field("updated_at", .datetime)
             .field("deleted_at", .datetime)
@@ -91,27 +90,47 @@ struct AddKeepTalkingMappingAppearanceMigration: AsyncMigration {
     }
 }
 
-/// Adds the alias-sharing columns: `suggestion` (what a target shared about
-/// itself) and `shared_in_contexts` (where the local node's own alias is
-/// shared). Both JSON.
+/// Adds `suggestion` (JSON): what a target shared about itself. Where the
+/// local node's own alias is shared lives in
+/// `KeepTalkingContextWiseAliasRelation`, not on the row.
 struct AddKeepTalkingMappingSharingMigration: AsyncMigration {
     func prepare(on database: any Database) async throws {
         try await database.schema(KeepTalkingMapping.schema)
             .field("suggestion", .json)
             .update()
-        try await database.schema(KeepTalkingMapping.schema)
-            .field("shared_in_contexts", .json)
-            .update()
     }
 
-    /// One `.update()` per column: SQLite takes a single `DROP COLUMN` per
-    /// `ALTER TABLE`.
     func revert(on database: any Database) async throws {
-        try await database.schema(KeepTalkingMapping.schema)
-            .deleteField("shared_in_contexts")
-            .update()
         try await database.schema(KeepTalkingMapping.schema)
             .deleteField("suggestion")
             .update()
+    }
+}
+
+/// The context ↔ own-alias sharing decisions. One row per context and alias
+/// row; either side's deletion takes the row with it.
+struct CreateKeepTalkingContextWiseAliasRelationsMigration: AsyncMigration {
+    func prepare(on database: any Database) async throws {
+        try await database.schema(KeepTalkingContextWiseAliasRelation.schema)
+            .id()
+            .field(
+                "context",
+                .uuid,
+                .required,
+                .references(KeepTalkingContext.schema, "id", onDelete: .cascade)
+            )
+            .field(
+                "alias",
+                .uuid,
+                .required,
+                .references(KeepTalkingMapping.schema, "id", onDelete: .cascade)
+            )
+            .field("is_shared", .bool, .required)
+            .unique(on: "context", "alias")
+            .create()
+    }
+
+    func revert(on database: any Database) async throws {
+        try await database.schema(KeepTalkingContextWiseAliasRelation.schema).delete()
     }
 }

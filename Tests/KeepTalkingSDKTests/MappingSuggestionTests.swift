@@ -82,7 +82,7 @@ struct MappingSuggestionTests {
 
     // MARK: - Reviewing
 
-    @Test("accepting copies the suggestion into the user's global alias; a later change is pending again")
+    @Test("accepting adopts the suggestion in its own scope; a later change is pending again")
     func acceptAdopts() async throws {
         try await withStore { database, _ in
             let peer = try await makeNode(on: database)
@@ -92,9 +92,14 @@ struct MappingSuggestionTests {
                 shared(context: context, name: "Alice", appearance: appearance, revision: 1),
                 from: peer, on: database)
 
+            // Shared in a context, adopted in that context only.
             try await KeepTalkingClient.acceptAliasSuggestion(for: .node(peer), scopeContextID: context, on: database)
-            #expect(try await KeepTalkingClient.alias(for: .node(peer), on: database) == "Alice")
-            #expect(try await KeepTalkingClient.appearance(for: .node(peer), on: database) == appearance)
+            #expect(
+                try await KeepTalkingClient.alias(for: .node(peer), scopeContextID: context, on: database) == "Alice")
+            #expect(
+                try await KeepTalkingClient.appearance(for: .node(peer), scopeContextID: context, on: database)
+                    == appearance)
+            #expect(try await KeepTalkingClient.alias(for: .node(peer), on: database) == nil)
             #expect(try await KeepTalkingClient.pendingAliasSuggestions(scopeContextID: context, on: database).isEmpty)
 
             try await KeepTalkingClient.applySharedAlias(
@@ -139,8 +144,43 @@ struct MappingSuggestionTests {
             try await KeepTalkingClient.applySharedAlias(
                 shared(context: context, name: "Bobby", revision: 2), from: bob, on: database)
             try await KeepTalkingClient.acceptAllAliasSuggestions(scopeContextID: context, on: database)
-            #expect(try await KeepTalkingClient.alias(for: .node(alice), on: database) == "Alicia")
-            #expect(try await KeepTalkingClient.alias(for: .node(bob), on: database) == "Bobby")
+            #expect(
+                try await KeepTalkingClient.alias(for: .node(alice), scopeContextID: context, on: database) == "Alicia")
+            #expect(
+                try await KeepTalkingClient.alias(for: .node(bob), scopeContextID: context, on: database) == "Bobby")
+        }
+    }
+
+    @Test("the user's own devices are named as they name themselves")
+    func ownDevicesAdoptedOnArrival() async throws {
+        try await withStore { database, _ in
+            let me = KeepTalkingNode(id: UUID())
+            try await me.save(on: database)
+            let phone = KeepTalkingNode(id: UUID())
+            try await phone.save(on: database)
+            try await KeepTalkingNodeRelation(from: me, to: phone, relationship: .owner).save(on: database)
+            let phoneID = try #require(phone.id)
+
+            try await KeepTalkingClient.applySharedAlias(
+                shared(name: "Steven's iPhone", revision: 1), from: phoneID, on: database)
+            #expect(try await KeepTalkingClient.alias(for: .node(phoneID), on: database) == "Steven's iPhone")
+            #expect(try await KeepTalkingClient.pendingAliasSuggestions(scopeContextID: nil, on: database).isEmpty)
+        }
+    }
+
+    @Test("revoking trust drops the global suggestion and keeps the scoped one")
+    func dropGlobalOnUntrust() async throws {
+        try await withStore { database, _ in
+            let peer = try await makeNode(on: database)
+            let context = try await makeContext(on: database)
+            try await KeepTalkingClient.applySharedAlias(shared(name: "Ada", revision: 1), from: peer, on: database)
+            try await KeepTalkingClient.applySharedAlias(
+                shared(context: context, name: "Nick", revision: 1), from: peer, on: database)
+
+            try await KeepTalkingClient.dropGlobalAliasSuggestion(from: peer, on: database)
+            let lookup = try await lookup(on: database)
+            #expect(lookup.suggestion(for: .node(peer)) == nil)
+            #expect(lookup.suggestion(for: .node(peer), in: context)?.name == "Nick")
         }
     }
 
@@ -163,23 +203,52 @@ struct MappingSuggestionTests {
 
     // MARK: - Sharing the local alias
 
-    @Test("sharing into contexts is recorded on the local node's global row")
-    func sharingContexts() async throws {
+    @Test("sharing decisions are recorded per context and alias layer")
+    func sharingDecisions() async throws {
         try await withStore { database, _ in
             let me = try await makeNode(on: database)
-            let first = try await makeContext(on: database)
-            let second = try await makeContext(on: database)
+            let context = try await makeContext(on: database)
 
-            try await KeepTalkingClient.setAliasShared(true, in: first, localNodeID: me, on: database)
-            try await KeepTalkingClient.setAliasShared(true, in: second, localNodeID: me, on: database)
-            #expect(try await KeepTalkingClient.aliasSharedContexts(localNodeID: me, on: database) == [first, second])
-            // Sharing alone gives no name.
-            #expect(try await KeepTalkingClient.alias(for: .node(me), on: database) == nil)
+            // No alias yet: nothing to share, nothing to decide.
+            var sharing = try await KeepTalkingClient.aliasSharing(in: context, localNodeID: me, on: database)
+            #expect(!sharing.hasGlobal && !sharing.hasScoped && !sharing.isDecided)
+            await #expect(throws: KeepTalkingMappingError.self) {
+                try await KeepTalkingClient.setAliasShared(true, .global, in: context, localNodeID: me, on: database)
+            }
 
-            try await KeepTalkingClient.setAliasShared(false, in: first, localNodeID: me, on: database)
-            try await KeepTalkingClient.setAliasShared(false, in: second, localNodeID: me, on: database)
-            #expect(try await KeepTalkingClient.aliasSharedContexts(localNodeID: me, on: database).isEmpty)
-            #expect(try await aliasRows(for: me, on: database).isEmpty)
+            // An alias, undecided: shared by default.
+            try await KeepTalkingClient.setAlias("Ada", for: .node(me), on: database)
+            sharing = try await KeepTalkingClient.aliasSharing(in: context, localNodeID: me, on: database)
+            #expect(sharing.hasGlobal && sharing.sharesGlobal && !sharing.isDecided)
+
+            // Scoped only: a nickname here, the global name turned off here.
+            try await KeepTalkingClient.setAlias("Nick", for: .node(me), scopeContextID: context, on: database)
+            try await KeepTalkingClient.setAliasShared(true, .scoped, in: context, localNodeID: me, on: database)
+            try await KeepTalkingClient.setAliasShared(false, .global, in: context, localNodeID: me, on: database)
+            sharing = try await KeepTalkingClient.aliasSharing(in: context, localNodeID: me, on: database)
+            #expect(sharing.isDecided)
+            #expect(sharing.sharesScoped && !sharing.sharesGlobal)
+            #expect(sharing.global == false && sharing.scoped == true)
+
+            // Changing a decision updates the one row.
+            try await KeepTalkingClient.setAliasShared(true, .global, in: context, localNodeID: me, on: database)
+            #expect(try await KeepTalkingContextWiseAliasRelation.query(on: database).count() == 2)
+            #expect(try await KeepTalkingClient.aliasSharing(in: context, localNodeID: me, on: database).sharesGlobal)
+        }
+    }
+
+    @Test("deleting a context takes its sharing decisions with it")
+    func sharingDecisionsCascade() async throws {
+        try await withStore { database, _ in
+            let me = try await makeNode(on: database)
+            let context = try await makeContext(on: database)
+            try await KeepTalkingClient.setAlias("Ada", for: .node(me), on: database)
+            try await KeepTalkingClient.setAliasShared(false, .global, in: context, localNodeID: me, on: database)
+
+            try await KeepTalkingContext.find(context, on: database)?.delete(on: database)
+            #expect(try await KeepTalkingContextWiseAliasRelation.query(on: database).count() == 0)
+            // The alias itself stays.
+            #expect(try await KeepTalkingClient.alias(for: .node(me), on: database) == "Ada")
         }
     }
 

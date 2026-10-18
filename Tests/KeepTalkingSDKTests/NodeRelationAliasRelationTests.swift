@@ -28,7 +28,7 @@ struct NodeRelationAliasRelationTests {
             kind: .tag,
             namespace: " work ",
             value: " Tools ",
-            colorHex: " #AABBCC "
+            appearance: KeepTalkingMappingAppearance(color: [.init(" #AABBCC ")])
         )
         try await alias.save(on: store.database)
 
@@ -50,7 +50,7 @@ struct NodeRelationAliasRelationTests {
         #expect(storedAlias.namespace == "work")
         #expect(storedAlias.value == "Tools")
         #expect(storedAlias.normalizedValue == "tools")
-        #expect(storedAlias.colorHex == "#AABBCC")
+        #expect(storedAlias.appearance?.color(for: .apple) == "#AABBCC")
         #expect(stored.applicable(in: approved))
         #expect(!stored.applicable(in: unrelated))
         #expect(!stored.applicable(in: nil))

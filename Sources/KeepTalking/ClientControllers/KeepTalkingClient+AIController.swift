@@ -31,6 +31,15 @@ extension KeepTalkingClient {
     static let webSearchFunctionName = "web_search"
     static let maxAgentTurns = 32
     static let maxAINativeAttachmentBytes = 8 * 1024 * 1024
+    /// Images are judged after downscaling, not by their size on disk — a
+    /// 12 MB camera photo ends up a few hundred KB. This ceiling only guards
+    /// memory while decoding.
+    static let maxAINativeImageSourceBytes = 64 * 1024 * 1024
+
+    /// The raw-size gate for reading an attachment into model input.
+    static func maxAINativeSourceBytes(forMIMEType mimeType: String) -> Int {
+        mimeType.hasPrefix("image/") ? maxAINativeImageSourceBytes : maxAINativeAttachmentBytes
+    }
     static let skillManifestPreviewMaxCharacters = 20_000
     static let skillFileMaxCharacters = 30_000
 
@@ -180,8 +189,9 @@ extension KeepTalkingClient {
     ///     its `sourceURL` into the blob store, attached to the prompt message
     ///     row, and included in the model's user message — images inline, other
     ///     types as a text fallback. An attachment larger than
-    ///     `maxAINativeAttachmentBytes` is replaced by an omission note in the
-    ///     model input.
+    ///     `maxAINativeSourceBytes(forMIMEType:)` is replaced by an omission
+    ///     note in the model input; images are then fitted to the provider by
+    ///     its connector.
     ///   - contextID: Identifies the context the prompt message and every
     ///     message the run publishes belong to.
     ///   - agent: The models, reasoning effort and response languages this
@@ -880,7 +890,9 @@ extension KeepTalkingClient {
         let blobRecords = try await blobRecordsByBlobID(attachments.map(\.blobID))
 
         for attachment in attachments {
-            guard attachment.byteCount <= Self.maxAINativeAttachmentBytes else {
+            guard
+                attachment.byteCount <= Self.maxAINativeSourceBytes(forMIMEType: attachment.mimeType)
+            else {
                 contentParts.append(
                     .text(
                         "Attachment '\(attachment.filename)' was omitted because it exceeds the native AI input budget."
@@ -938,20 +950,22 @@ extension KeepTalkingClient {
         return [.text(summary)]
     }
 
-    /// Downscales an image (longest side capped at 4000px) and embeds it as a
-    /// base64 data-URL image part — the ONE image-inlining pipeline, shared by
-    /// context-attachment rendering above and plugin ACT resources
-    /// (`KTPPActAttachmentRendering`). `byteCap` bounds the post-downscale
-    /// payload; nil is uncapped. Returns the part plus the post-downscale MIME
-    /// type (downscaling may transcode), or nil when the image cannot be
-    /// inlined — still over the cap, or the data URL failed to form — so the
-    /// caller renders its own too-large note.
+    /// Normalises an image (`KeepTalkingImageDownscaler.modelInputTarget`) and
+    /// embeds it as a base64 data-URL image part — the ONE image-inlining
+    /// pipeline, shared by context-attachment rendering above, MCP tool
+    /// results and plugin ACT resources (`KTPPActAttachmentRendering`). The
+    /// sending connector fits it to its provider's limits afterwards.
+    /// `byteCap` tightens the normalisation's byte budget. Returns the part
+    /// plus the post-downscale MIME type (downscaling may transcode), or nil
+    /// when the image cannot be inlined — still over the cap, or the data URL
+    /// failed to form — so the caller renders its own too-large note.
     static func inlinedImagePart(
         mimeType: String, data: Data, byteCap: Int? = nil
     ) -> (part: AIMessage.Part, mimeType: String)? {
-        let scaled = KeepTalkingImageDownscaler.downscaledIfNeeded(data, mimeType: mimeType)
-        if let byteCap, scaled.data.count > byteCap { return nil }
+        var target = KeepTalkingImageDownscaler.modelInputTarget
+        if let byteCap { target.maxBytes = min(target.maxBytes ?? byteCap, byteCap) }
         guard
+            let scaled = KeepTalkingImageDownscaler.fitted(data, mimeType: mimeType, target: target),
             let url = URL(
                 string: "data:\(scaled.mimeType);base64,\(scaled.data.base64EncodedString())")
         else { return nil }

@@ -10,46 +10,219 @@ public struct KeepTalkingPendingAliasSuggestion: Hashable, Sendable {
 extension KeepTalkingClient {
     // MARK: - Sharing the local node's alias
 
-    /// The contexts the local node's alias is shared into.
-    public static func aliasSharedContexts(
+    /// The local node's sharing decisions in `contextID`, one per alias row
+    /// it has: its global alias and its alias scoped to the context.
+    public static func aliasSharing(
+        in contextID: UUID,
         localNodeID: UUID,
         on database: any Database
-    ) async throws -> Set<UUID> {
-        let row = try await queryMappings(for: .node(localNodeID), on: database)
-            .filter(\.$kind, .equal, .alias)
-            .first()
-        return Set(row?.sharedInContexts ?? [])
+    ) async throws -> KeepTalkingContextAliasSharing {
+        let target = KeepTalkingMappingTarget.node(localNodeID)
+        let global = try await liveAliasRow(for: target, scopeContextID: nil, on: database)
+        let scoped = try await liveAliasRow(for: target, scopeContextID: contextID, on: database)
+        let rowIDs = [global?.id, scoped?.id].compactMap { $0 }
+        let decisions = try await KeepTalkingContextWiseAliasRelation.query(on: database)
+            .filter(\.$context.$id == contextID)
+            .filter(\.$alias.$id ~~ rowIDs)
+            .all()
+        func decision(for row: KeepTalkingMapping?) -> Bool? {
+            guard let id = row?.id else { return nil }
+            return decisions.first { $0.$alias.id == id }?.isShared
+        }
+        return KeepTalkingContextAliasSharing(
+            hasGlobal: global.map { !$0.isVacant } ?? false,
+            hasScoped: scoped.map { !$0.isVacant } ?? false,
+            global: decision(for: global),
+            scoped: decision(for: scoped)
+        )
     }
 
-    /// Shares (or stops sharing) the local node's alias into `contextID`.
-    /// Recorded on the node's own global alias row, created nameless when
-    /// there is none.
+    /// Records whether the local node's global or scoped alias is shown in
+    /// `contextID`. The alias must exist — create it first.
     public static func setAliasShared(
         _ shared: Bool,
+        _ layer: KeepTalkingAliasLayer,
         in contextID: UUID,
         localNodeID: UUID,
         on database: any Database
     ) async throws {
-        let target = KeepTalkingMappingTarget.node(localNodeID)
-        let existing = try await queryMappings(for: target, includeDeleted: true, on: database)
-            .filter(\.$kind, .equal, .alias)
-            .all()
-        let live = existing.first { $0.deletedAt == nil }
-        var contexts = Set(live?.sharedInContexts ?? [])
-        guard contexts.contains(contextID) != shared else { return }
-        if shared {
-            contexts.insert(contextID)
-        } else {
-            contexts.remove(contextID)
+        guard
+            let row = try await liveAliasRow(
+                for: .node(localNodeID),
+                scopeContextID: layer == .global ? nil : contextID,
+                on: database
+            ),
+            let aliasID = row.id
+        else {
+            throw KeepTalkingMappingError.missingAlias
         }
+        if let existing = try await KeepTalkingContextWiseAliasRelation.query(on: database)
+            .filter(\.$context.$id == contextID)
+            .filter(\.$alias.$id == aliasID)
+            .first()
+        {
+            guard existing.isShared != shared else { return }
+            existing.isShared = shared
+            try await existing.save(on: database)
+        } else {
+            try await KeepTalkingContextWiseAliasRelation(
+                contextID: contextID,
+                aliasID: aliasID,
+                isShared: shared
+            )
+            .create(on: database)
+        }
+    }
 
-        let row = revivedOrNewAliasRow(live: live, existing: existing, target: target, scopeContextID: nil)
-        row.sharedInContexts = contexts.isEmpty ? nil : contexts.sorted { $0.uuidString < $1.uuidString }
-        if row.isVacant {
-            try await softDeleteMappings([row], on: database)
-        } else {
-            try await row.save(on: database)
+    // MARK: - What goes out
+
+    /// The local node's scoped alias as it goes out in `contextID`, stamped
+    /// `revision`. Scoped aliases are per context, so not sharing one here is
+    /// said too: with an empty alias, which clears what members kept.
+    static func outgoingScopedAlias(
+        in contextID: UUID,
+        localNodeID: UUID,
+        revision: UInt64,
+        on database: any Database
+    ) async throws -> KeepTalkingSharedAlias {
+        let sharing = try await aliasSharing(in: contextID, localNodeID: localNodeID, on: database)
+        guard sharing.sharesScoped,
+            let row = try await liveAliasRow(for: .node(localNodeID), scopeContextID: contextID, on: database)
+        else {
+            return KeepTalkingSharedAlias(contextID: contextID, name: nil, appearance: nil, revision: revision)
         }
+        return KeepTalkingSharedAlias(
+            contextID: contextID, name: row.value, appearance: row.appearance, revision: revision)
+    }
+
+    /// The local node's global alias as it goes out from `contextID`, stamped
+    /// `revision` — for trusted recipients only; the caller checks.
+    ///
+    /// The global alias is one for everywhere, so a context that doesn't
+    /// share it has nothing to say (nil): another context may share it. Only
+    /// once it no longer exists does an empty one go out, clearing it.
+    static func outgoingGlobalAlias(
+        in contextID: UUID,
+        localNodeID: UUID,
+        revision: UInt64,
+        on database: any Database
+    ) async throws -> KeepTalkingSharedAlias? {
+        let sharing = try await aliasSharing(in: contextID, localNodeID: localNodeID, on: database)
+        guard sharing.hasGlobal else {
+            return KeepTalkingSharedAlias(contextID: nil, name: nil, appearance: nil, revision: revision)
+        }
+        guard sharing.sharesGlobal,
+            let row = try await liveAliasRow(for: .node(localNodeID), scopeContextID: nil, on: database)
+        else { return nil }
+        return KeepTalkingSharedAlias(contextID: nil, name: row.value, appearance: row.appearance, revision: revision)
+    }
+
+    /// This client's scoped alias for its context, as it goes out now.
+    func ownScopedAlias() async throws -> KeepTalkingSharedAlias {
+        try await Self.outgoingScopedAlias(
+            in: config.contextID,
+            localNodeID: config.node,
+            revision: KeepTalkingNodeStatus.nextRevision(),
+            on: localStore.database
+        )
+    }
+
+    func ownAliasPush() async throws -> KeepTalkingContextSyncAliasPush {
+        KeepTalkingContextSyncAliasPush(
+            context: config.contextID,
+            origin: config.node,
+            alias: try await ownScopedAlias()
+        )
+    }
+
+    /// Shares the local node's aliases in this client's context as they are
+    /// now: the scoped one pushed to the room, the global one in a fresh node
+    /// status to the members trusted here. Call after the user changes either
+    /// alias or what this context shares; the heartbeat sync and the node
+    /// status sent on every connect catch up whoever misses it.
+    public func publishOwnAliases() async {
+        do {
+            try sendEnvelope(KeepTalkingContextSyncEnvelope.aliasPush(try await ownAliasPush()))
+            try await broadcastCurrentNodeStatus(
+                in: try await ensure(config.contextID, for: KeepTalkingContext.self, strict: true)
+            )
+        } catch {
+            debug("alias publish failed error=\(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - What comes in
+
+    /// Keeps what `nodeID` shared about itself in this client's context —
+    /// for this context whatever the alias claims — and fetches its avatar.
+    func receiveScopedAlias(_ alias: KeepTalkingSharedAlias, from nodeID: UUID) async throws {
+        var alias = alias
+        alias.contextID = config.contextID
+        try await receiveSharedAlias(alias, from: nodeID)
+    }
+
+    /// Keeps the global alias `nodeID` sent in its node status, if the user
+    /// trusts it: the global alias only ever travels on trust, and is dropped
+    /// when that trust goes (`dropGlobalAliasSuggestion`).
+    func receiveGlobalAlias(_ alias: KeepTalkingSharedAlias, from nodeID: UUID) async throws {
+        let trusted = try await KeepTalkingNodeRelation.query(on: localStore.database)
+            .filter(\.$from.$id == config.node)
+            .filter(\.$to.$id == nodeID)
+            .all()
+            .contains { $0.relationship.isTrustedOrOwner }
+        guard trusted else { return }
+        var alias = alias
+        alias.contextID = nil
+        try await receiveSharedAlias(alias, from: nodeID)
+    }
+
+    private func receiveSharedAlias(_ alias: KeepTalkingSharedAlias, from nodeID: UUID) async throws {
+        guard nodeID != config.node else { return }
+        _ = try await ensure(nodeID, for: KeepTalkingNode.self)
+        if let contextID = alias.contextID {
+            _ = try await ensure(contextID, for: KeepTalkingContext.self)
+        }
+        guard
+            try await Self.applySharedAlias(
+                alias,
+                from: nodeID,
+                on: localStore.database,
+                blobStore: blobStore
+            )
+        else { return }
+        signals.mappingChanges.send(())
+        if let blobIDs = alias.appearance?.blobIDs, !blobIDs.isEmpty {
+            await requestBlobsIfMissing(blobIDs, in: config.contextID)
+        }
+    }
+
+    /// The avatars of suggestions kept here — shared in this context, or
+    /// globally — whose blobs haven't arrived.
+    func missingSuggestionAvatarBlobIDs() async throws -> Set<String> {
+        let rows = try await KeepTalkingMapping.query(on: localStore.database)
+            .filter(\.$kind, .equal, .alias)
+            .filter(\.$deletedAt == nil)
+            .filter(\.$suggestion != nil)
+            .group(.or) { group in
+                group.filter(\.$scopeContext.$id == config.contextID)
+                group.filter(\.$scopeContext.$id == nil)
+            }
+            .all()
+        var missing = Set<String>()
+        for blobID in Set(rows.flatMap { $0.suggestion?.alias.appearance?.blobIDs ?? [] }) {
+            if try await !isBlobReady(blobID: blobID) { missing.insert(blobID) }
+        }
+        return missing
+    }
+
+    private static func liveAliasRow(
+        for target: KeepTalkingMappingTarget,
+        scopeContextID: UUID?,
+        on database: any Database
+    ) async throws -> KeepTalkingMapping? {
+        try await queryMappings(for: target, scopeContextID: scopeContextID, on: database)
+            .filter(\.$kind, .equal, .alias)
+            .first()
     }
 
     // MARK: - Suggestions from other nodes
@@ -101,10 +274,12 @@ extension KeepTalkingClient {
             )
             released = (row.suggestion?.alias.appearance?.blobIDs ?? [])
                 .subtracting(alias.appearance?.blobIDs ?? [])
-            let own = try await queryMappings(for: target, on: database)
+            // Already the user's own, in this scope or globally: nothing to
+            // review.
+            let global = try await queryMappings(for: target, on: database)
                 .filter(\.$kind, .equal, .alias)
                 .first()
-            let matchesOwn = own.map { Self.isAdopted(alias, by: $0) } ?? false
+            let matchesOwn = [row, global].compactMap { $0 }.contains { Self.isAdopted(alias, by: $0) }
             row.suggestion = KeepTalkingAliasSuggestion(
                 alias: alias,
                 reviewedRevision: matchesOwn ? alias.revision : nil
@@ -112,7 +287,51 @@ extension KeepTalkingClient {
             try await row.save(on: database)
         }
         try await pruneReleasedBlobs(released, on: database, blobStore: blobStore)
+        // The user's own devices name themselves: what they share is taken
+        // as it comes, never left pending.
+        if !alias.isEmpty, try await isOwnDevice(nodeID, on: database) {
+            try await acceptAliasSuggestion(
+                for: target,
+                scopeContextID: alias.contextID,
+                on: database,
+                blobStore: blobStore
+            )
+        }
         return true
+    }
+
+    /// Drops what `nodeID` shared globally — for when the user stops trusting
+    /// it, since the global alias only ever came because of that trust. What
+    /// it shared in contexts stays: that came as a context member.
+    public static func dropGlobalAliasSuggestion(
+        from nodeID: UUID,
+        on database: any Database,
+        blobStore: KeepTalkingBlobStore? = nil
+    ) async throws {
+        guard
+            let row = try await suggestionRow(for: .node(nodeID), scopeContextID: nil, on: database),
+            let suggestion = row.suggestion
+        else { return }
+        var released = suggestion.alias.appearance?.blobIDs ?? []
+        row.suggestion = nil
+        if row.isVacant {
+            released.formUnion(try await softDeleteMappings([row], on: database))
+        } else {
+            try await row.save(on: database)
+        }
+        try await pruneReleasedBlobs(released, on: database, blobStore: blobStore)
+    }
+
+    /// Whether `nodeID` is one of the user's own devices — an owner relation
+    /// either way.
+    private static func isOwnDevice(_ nodeID: UUID, on database: any Database) async throws -> Bool {
+        try await KeepTalkingNodeRelation.query(on: database)
+            .group(.or) { group in
+                group.filter(\.$to.$id == nodeID)
+                group.filter(\.$from.$id == nodeID)
+            }
+            .all()
+            .contains { $0.relationship == .owner }
     }
 
     /// Suggestions in exactly this scope (nil = global) the user hasn't
@@ -134,9 +353,10 @@ extension KeepTalkingClient {
             }
     }
 
-    /// Adopts the suggestion: its name and appearance become the user's own
-    /// global alias for `target` — the user's from now on, so a later change
-    /// arrives as a new suggestion.
+    /// Adopts the suggestion into the user's own alias in the same scope: a
+    /// global suggestion becomes the user's global alias for `target`, one
+    /// shared in a context the user's alias for it there. The user's from now
+    /// on, so a later change arrives as a new suggestion.
     public static func acceptAliasSuggestion(
         for target: KeepTalkingMappingTarget,
         scopeContextID: UUID?,
@@ -148,12 +368,24 @@ extension KeepTalkingClient {
                 .suggestion?.alias
         else { return }
         if let name = alias.name {
-            try await setAlias(name, for: target, on: database, blobStore: blobStore)
+            try await setAlias(
+                name,
+                for: target,
+                scopeContextID: scopeContextID,
+                on: database,
+                blobStore: blobStore
+            )
         }
         if let appearance = alias.appearance {
-            try await setAppearance(appearance, for: target, on: database, blobStore: blobStore)
+            try await setAppearance(
+                appearance,
+                for: target,
+                scopeContextID: scopeContextID,
+                on: database,
+                blobStore: blobStore
+            )
         }
-        // Re-read: with a nil scope the row just written is the same row.
+        // Re-read: the row just written is the suggestion's own row.
         try await markSuggestionReviewed(for: target, scopeContextID: scopeContextID, on: database)
     }
 

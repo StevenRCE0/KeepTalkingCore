@@ -10,18 +10,18 @@ public struct KeepTalkingSemanticMemoryScope: Identifiable, Sendable, Equatable 
         public let namespace: String?
         public let value: String
         public let normalizedValue: String
-        public let colorHex: String?
+        public let appearance: KeepTalkingMappingAppearance?
 
         public init(
             namespace: String?,
             value: String,
             normalizedValue: String,
-            colorHex: String?
+            appearance: KeepTalkingMappingAppearance?
         ) {
             self.namespace = namespace
             self.value = value
             self.normalizedValue = normalizedValue
-            self.colorHex = colorHex
+            self.appearance = appearance
         }
 
         public var title: String {

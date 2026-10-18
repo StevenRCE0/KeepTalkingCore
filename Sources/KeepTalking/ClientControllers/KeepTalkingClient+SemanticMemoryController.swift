@@ -182,7 +182,7 @@ private func semanticMemoryTag(
         namespace: mapping.namespace,
         value: mapping.value,
         normalizedValue: mapping.normalizedValue,
-        colorHex: mapping.colorHex
+        appearance: mapping.appearance
     )
 }
 

@@ -4,7 +4,7 @@ import Foundation
 /// stream of their own, point to point, opened by the holder only when the
 /// node that needs them pulls.
 ///
-/// Attachments:
+/// Attachments, and the avatars shared aliases name:
 /// 1. `wanted` — a node missing attachment blobs broadcasts their ids.
 /// 2. `offer` — each member holding some of them tells the asker.
 /// 3. `pull` — the asker picks one holder per blob and asks it to stream
@@ -17,7 +17,8 @@ import Foundation
 /// reference arrives, before anything asks for the file.
 public struct KeepTalkingBlobTransferEnvelope: Codable, Sendable, Equatable {
     public enum Item: Codable, Hashable, Sendable {
-        /// A context attachment's blob, by content hash.
+        /// A content-addressed blob, by its hash: a context attachment's, or
+        /// the avatar a shared alias names.
         case attachment(blobID: String)
         /// A one-time blob, by transfer id. Only its recipient may pull it.
         case oneTimeBlob(transferID: UUID)

@@ -47,6 +47,7 @@ public actor AnthropicConnector: AIConnector {
     }
 
     private let service: AnthropicService
+    private let imageFitter = AIImageInputFitter()
     private let apiKey: String
     private let modelsURL: URL
 
@@ -104,6 +105,11 @@ public actor AnthropicConnector: AIConnector {
         self.modelsURL = endpointURL.appendingPathComponent("v1/models")
     }
 
+    /// Every Messages endpoint, a proxy included, ends at Anthropic's limits.
+    public nonisolated func imageInputPolicy(forModel model: String) -> AIImageInputPolicy {
+        .anthropic
+    }
+
     // MARK: - listModels
 
     /// Lists models available to the configured API key.
@@ -148,6 +154,7 @@ public actor AnthropicConnector: AIConnector {
             @Sendable ([AIToolCall]) async throws -> [AIMessage]
         )? = nil
     ) async throws -> AITurnResult {
+        let messages = imageFitter.fitted(messages, policy: imageInputPolicy(forModel: model))
         let (system, anthropicMessages) = Self.translateMessages(messages)
         let anthropicTools = tools.map(Self.translateTool(_:))
         // Anthropic rejects `tool_choice` without `tools` (a tool-less model's

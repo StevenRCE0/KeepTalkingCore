@@ -80,6 +80,15 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     @Children(for: \.$context)
     public var sideNotes: [KeepTalkingSideNote]
 
+    /// The local node's alias rows with a sharing decision here; the pivot
+    /// says which way.
+    @Siblings(
+        through: KeepTalkingContextWiseAliasRelation.self,
+        from: \.$context,
+        to: \.$alias
+    )
+    public var aliases: [KeepTalkingMapping]
+
     public init() {
         updatedAt = .now
     }

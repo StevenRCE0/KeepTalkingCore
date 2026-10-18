@@ -20,7 +20,7 @@ extension KeepTalkingEnvelopeAsyncHandlers {
                 return
             }
             let status = try await client.decryptNodeStatusEnvelope(payload)
-            try await client.mergeDiscoveredNodeStatus(status)
+            try await client.mergeDiscoveredNodeStatus(status, sealed: true)
         }
         onP2PPresence { presence in
             guard presence.node != client.config.node else {

@@ -250,6 +250,21 @@ extension KeepTalkingClient {
         return missing
     }
 
+    /// Announces whichever of `blobIDs` aren't here — the avatars shared
+    /// aliases name. Blobs are content-addressed, so any member holding one
+    /// can offer it, the alias's sender among them.
+    func requestBlobsIfMissing(_ blobIDs: some Sequence<String>, in contextID: UUID) async {
+        do {
+            var missing: [String] = []
+            for blobID in Set(blobIDs).sorted() where try await !isBlobReady(blobID: blobID) {
+                missing.append(blobID)
+            }
+            try await announceWantedBlobs(missing, in: contextID)
+        } catch {
+            debug("blob request failed error=\(error.localizedDescription)")
+        }
+    }
+
     private func announceWantedBlobs(_ blobIDs: [String], in contextID: UUID) async throws {
         guard !blobIDs.isEmpty else { return }
         let due = await blobPulls.dueForAnnouncement(blobIDs)
@@ -613,7 +628,7 @@ extension KeepTalkingClient {
             .first()
     }
 
-    private func isBlobReady(blobID: String) async throws -> Bool {
+    func isBlobReady(blobID: String) async throws -> Bool {
         guard let blobRecord = try await blobRecord(for: blobID),
             blobRecord.availability == .ready
         else {

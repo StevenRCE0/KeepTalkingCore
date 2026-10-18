@@ -174,6 +174,10 @@ extension KeepTalkingClient {
             case .messageDeletionsPush(let push):
                 guard push.origin != config.node else { return }
                 try await mergeMessageDeletions(push.tombstones, contextID: push.context)
+            // Alias push: what a member calls itself here. Broadcast too.
+            case .aliasPush(let push):
+                guard push.origin != config.node else { return }
+                try await receiveScopedAlias(push.alias, from: push.origin)
 
             // Requests: respond if addressed to us (execute + send wrapped result).
             case .summaryRequest(let request):
@@ -307,7 +311,9 @@ extension KeepTalkingClient {
             // Computed here rather than by the caller so no dispatch site can
             // forget them and silently disable side-note or deletion sync.
             sideNoteDigest: try await sideNoteDigest(in: contextID),
-            messageDeletionDigest: try await messageDeletionDigest(in: contextID)
+            messageDeletionDigest: try await messageDeletionDigest(in: contextID),
+            // Best effort: an alias that can't be read never holds up a sync.
+            alias: try? await ownScopedAlias()
         )
 
         if node == config.node {
@@ -399,6 +405,10 @@ extension KeepTalkingClient {
     func executeContextSyncSummaryRequest(
         _ request: KeepTalkingContextSyncSummaryRequest
     ) async throws -> KeepTalkingContextSyncSummaryResult {
+        // The requester's alias rides its request; ours rides the result.
+        if let alias = request.alias {
+            try? await receiveScopedAlias(alias, from: request.requester)
+        }
         let snapshot = try await contextSyncSnapshot(for: request.context)
         // Side notes and tombstones ride the summary exchange: send our whole
         // set only when the requester's digest disagrees with ours, so matching
@@ -424,7 +434,8 @@ extension KeepTalkingClient {
             sideNotesNextBefore: sideNotes?.nextBefore,
             messageDeletions: messageDeletions?.items,
             messageDeletionsNextBefore: messageDeletions?.nextBefore,
-            messageDeletionDigest: deletionDigest
+            messageDeletionDigest: deletionDigest,
+            alias: try? await ownScopedAlias()
         )
     }
 
@@ -532,11 +543,15 @@ extension KeepTalkingClient {
 
     /// Requester side: reassemble every whole set a summary result carried.
     ///
-    /// Tombstones and side notes are merged here, each once and whole.
+    /// Tombstones and side notes are merged here, each once and whole; the
+    /// responder's alias is kept too.
     func absorbSummarySets(
         _ result: KeepTalkingContextSyncSummaryResult,
         pages: KeepTalkingContextSyncSetPages
     ) async throws {
+        if let alias = result.alias {
+            try? await receiveScopedAlias(alias, from: result.responder)
+        }
         if let firstPage = result.messageDeletions {
             let remote = try await collectSyncSetPages(
                 firstPage: firstPage,

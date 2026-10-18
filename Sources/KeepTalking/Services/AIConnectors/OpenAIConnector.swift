@@ -73,6 +73,8 @@ public actor OpenAIConnector: AIConnector {
     }
 
     private let service: OpenAIService
+    private let backend: OpenAIConnectorBackend
+    private let imageFitter = AIImageInputFitter()
     private let apiKey: String
     private let modelsURL: URL
     public nonisolated let capabilities: AIConnectorCapabilities = .init(
@@ -127,11 +129,22 @@ public actor OpenAIConnector: AIConnector {
         }
 
         self.apiKey = key
+        self.backend = backend
         self.service = AIProxy.openAIDirectService(
             unprotectedAPIKey: key,
             baseURL: endpointURL.absoluteString
         )
         self.modelsURL = endpointURL.appendingPathComponent("v1/models")
+    }
+
+    /// OpenRouter forwards images to the model's vendor, so its limits are
+    /// that vendor's; an unknown base gets the conservative policy.
+    public nonisolated func imageInputPolicy(forModel model: String) -> AIImageInputPolicy {
+        switch backend {
+            case .openAI: return .openAI
+            case .openRouter: return .routed(model: model)
+            case .custom: return .conservative
+        }
     }
 
     // MARK: - listModels
@@ -174,6 +187,7 @@ public actor OpenAIConnector: AIConnector {
             @Sendable ([AIToolCall]) async throws -> [AIMessage]
         )? = nil
     ) async throws -> AITurnResult {
+        let messages = imageFitter.fitted(messages, policy: imageInputPolicy(forModel: model))
         let openAIMessages = messages.map(Self.translateMessage(_:))
         let openAITools = tools.map(Self.translateTool(_:))
         let resolvedToolChoice: OpenAIChatCompletionRequestBody.ToolChoice? = {
