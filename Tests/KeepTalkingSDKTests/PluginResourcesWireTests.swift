@@ -166,6 +166,8 @@ struct PluginResourcesWireTests {
         #expect(action.acceptsFileInput)
     }
 
+    // Call binding stages through the macOS IO manager.
+    #if os(macOS)
     @Test("binding: attachment input_handles and caller-named outputs reach declared objects")
     func pluginCallBinding() throws {
         // The live-run regression (2026-08-17): a caller passed a context
@@ -248,6 +250,7 @@ struct PluginResourcesWireTests {
             workspaceDir: URL(fileURLWithPath: "/tmp/ws"))
         #expect(skillBinding.outputs.first?.objectName == "catalogue_markdown")
     }
+    #endif
 
     @Test("host.act wire payloads round-trip the Python SDK's shapes")
     func actWireShapes() throws {
@@ -315,6 +318,8 @@ struct PluginResourcesWireTests {
                 instanceScope: .object(["capabilities": .array([.string("act")])])))
     }
 
+    // `KTPPActAttachmentRendering` belongs to the macOS plugin controller.
+    #if os(macOS)
     @Test("act attachments render by content: text trims, binary embeds, images inline")
     func attachmentRendering() throws {
         let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -379,6 +384,7 @@ struct PluginResourcesWireTests {
         }
         #expect(lead.contains("KT_OTB_D") && lead.contains("image/png"))
     }
+    #endif
 
     @Test("ACT consent is per-catalog, fail-closed, and persisted")
     func actConsent() async {

@@ -36,9 +36,10 @@ let package = Package(
         .package(path: "../AIProxySwift-MultiPlatform"),
         // The transport. Vendored iroh-ffi (fork StevenRCE0/iroh-ffi, main): Swift
         // bindings plus a locally built xcframework
-        // (`RUSTUP_TOOLCHAIN=stable ./make_swift.sh`). Apple-only, so the SDK
-        // takes it conditionally; elsewhere clients get
-        // `KeepTalkingTransport.unavailable`. See Transport/Iroh.
+        // (`RUSTUP_TOOLCHAIN=stable ./make_swift.sh`), or on Linux a locally
+        // built static library (`./make_swift_linux.sh`). Elsewhere the SDK
+        // goes without it and clients get `KeepTalkingTransport.unavailable`.
+        // See Transport/Iroh.
         .package(path: "../iroh-ffi"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         // The plugin host's wire (KTPP v2): gRPC over a Unix domain socket with
@@ -71,7 +72,7 @@ let package = Package(
                 .product(
                     name: "IrohLib",
                     package: "iroh-ffi",
-                    condition: .when(platforms: [.iOS, .macOS])
+                    condition: .when(platforms: [.iOS, .macOS, .linux])
                 ),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),

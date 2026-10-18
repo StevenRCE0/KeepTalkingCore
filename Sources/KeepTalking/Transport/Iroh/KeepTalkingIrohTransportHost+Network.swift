@@ -1,10 +1,15 @@
 #if canImport(IrohLib)
 import Foundation
 import IrohLib
+#if canImport(Network)
 import Network
+#endif
 
 /// Network changes. iroh notices few by itself on Apple platforms, so the
-/// host watches the system's network path and tells it. iroh then rebinds
+/// host watches the system's network path and tells it. Off Apple platforms
+/// there is no path monitor: iroh's own watcher reads the kernel's interface
+/// and route changes there (netlink on Linux), and `networkChanged()` is
+/// still the way to say the app came back. iroh then rebinds
 /// its sockets, reconnects to the relay and finds new paths for every
 /// connection, which carry on across the switch. What the host waits on
 /// itself is cut short: the SFU retries now, and links that failed on the
@@ -22,6 +27,7 @@ extension KeepTalkingIrohTransportHost {
         noteNetworkChange("app resumed")
     }
 
+    #if canImport(Network)
     func startPathMonitor() -> NWPathMonitor {
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
@@ -45,6 +51,7 @@ extension KeepTalkingIrohTransportHost {
         guard !first else { return }
         noteNetworkChange(description)
     }
+    #endif
 
     /// Acts on the last of a burst of changes, once they settle.
     private func noteNetworkChange(_ reason: String) {
