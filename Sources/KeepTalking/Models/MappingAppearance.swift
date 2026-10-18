@@ -99,6 +99,25 @@ extension KeepTalkingMappingAppearance {
         func with<Other>(value: Other) -> Variant<Other> {
             Variant<Other>(value, platforms: platforms.map(Set.init))
         }
+
+        private enum CodingKeys: String, CodingKey {
+            case value
+            case platforms
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            value = try container.decode(Value.self, forKey: .value)
+            platforms = try container.decodeIfPresent(Set<KeepTalkingPlatform>.self, forKey: .platforms)
+        }
+
+        /// A set encodes in hash order, which two equal sets needn't share, so
+        /// the platforms go out sorted.
+        public func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(value, forKey: .value)
+            try container.encodeIfPresent(platforms?.sorted { $0.rawValue < $1.rawValue }, forKey: .platforms)
+        }
     }
 
     public enum Glyph: Codable, Hashable, Sendable {
