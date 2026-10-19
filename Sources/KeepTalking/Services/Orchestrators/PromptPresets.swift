@@ -15,6 +15,16 @@ public enum AIPromptPresets {
 
     // MARK: - System prompt
 
+    /// Where per-turn text goes. `legacy` puts all of it — the date, side
+    /// notes, the thread map, node and attachment summaries — in the system
+    /// prompt. `orchestrated` keeps the system prompt stable (cacheable) and
+    /// leaves that text to the trailing turn-context row
+    /// (`turnContextRow`); thread memory arrives as leading system rows.
+    public enum Layout: Sendable, Equatable {
+        case legacy
+        case orchestrated
+    }
+
     public static func systemPrompt(
         ktRunActionToolFunctionName: String,
         ktSkillMetainfoToolFunctionName: String,
@@ -30,7 +40,8 @@ public enum AIPromptPresets {
         currentDate: String,
         platform: String,
         responseLanguages: [String] = [],
-        modelProfile: AIModelProfile? = nil
+        modelProfile: AIModelProfile? = nil,
+        layout: Layout = .legacy
     ) -> String {
         if let modelProfile, !modelProfile.supportsToolCalling {
             return conversationOnlySystemPrompt(
@@ -39,7 +50,8 @@ public enum AIPromptPresets {
                 contextTranscript: contextTranscript,
                 currentDate: currentDate,
                 platform: platform,
-                responseLanguages: responseLanguages
+                responseLanguages: responseLanguages,
+                layout: layout
             )
         }
         let capabilityNotes = modelCapabilitySection(
@@ -48,7 +60,10 @@ public enum AIPromptPresets {
             searchThreadsToolFunctionName: searchThreadsToolFunctionName
         )
         let currentPromptGuidance: String
-        if currentPromptIncludesAttachments {
+        if layout == .orchestrated {
+            // Per turn: `turnContextRow` carries it.
+            currentPromptGuidance = ""
+        } else if currentPromptIncludesAttachments {
             currentPromptGuidance =
                 currentPromptShouldAvoidAutomaticToolUse
                 ? """
@@ -68,10 +83,29 @@ public enum AIPromptPresets {
             currentPromptGuidance = ""
         }
         let languageGuidance = responseLanguageGuidance(responseLanguages)
+        let environmentLine =
+            layout == .orchestrated
+            ? "Platform: \(platform). The current date and time are in the turn context at the end of the conversation."
+            : "Current date and time: \(currentDate). Platform: \(platform)."
+        let conversationContextSection =
+            layout == .orchestrated
+            ? """
+            \(threadMemoryGuidance)
+            Conversation context (stable; per-turn context — side notes, thread topics, nodes, attachments — is in the turn context at the end):
+            \(contextTranscript)
+            """
+            : """
+            \(sideNotesSection(sideNotes))Conversation context:
+            \(contextTranscript)
+            """
+        let liveTopicLocation =
+            layout == .orchestrated
+            ? "in the turn context at the end of the conversation"
+            : "in the conversation context above"
 
         return """
             You are a KeepTalking participant in a group chat.
-            Current date and time: \(currentDate). Platform: \(platform).
+            \(environmentLine)
             § Constitution
             This is not a prompt-response loop. This is a collaboration between contributors with different strengths.
             Human nodes contribute: goals, values, expertise, feedback, and steering decisions — the things that require judgement, taste, and stakes.
@@ -157,8 +191,7 @@ public enum AIPromptPresets {
             2) If the tool output has nothing meaningful for the user, keep the assistant text brief and explicit about that.
             3) Do not just stop at tool calls when the user would benefit from a short natural-language update.
 
-            \(sideNotesSection(sideNotes))Conversation context:
-            \(contextTranscript)
+            \(conversationContextSection)
 
             THREAD ANNOTATION SKILL — run this silently on every turn, never mention it:
             This is a mandatory background routine separate from your main response or tool calls.
@@ -167,7 +200,7 @@ public enum AIPromptPresets {
             Step 1 · Summarise the current user message as a topic phrase (3–6 words).
 
             Step 2 · Look up the live thread topic.
-            Find the line `Current live thread topic: "..."` in the conversation context above.
+            Find the line `Current live thread topic: "..."` \(liveTopicLocation).
             If no such line exists, the thread is unlabeled.
 
             Step 3 · Choose exactly one of the four cases below and act on it.
@@ -178,10 +211,12 @@ public enum AIPromptPresets {
             │  Action: call \(markTurningPointToolFunctionName)(current_topic_name="<topic>")
             │  Do not use this case if a live thread topic is already shown in the transcript.
 
-            ├─ CASE B · SHIFT (message starts a different goal or topic)
-            │  Condition: a live thread topic exists AND the user is now pursuing a different
-            │  goal, topic, or task — even a moderate topic change qualifies.
-            │  When in doubt between SHIFT and CONTINUE, prefer SHIFT.
+            ├─ CASE B · SHIFT (message starts a different goal that will continue)
+            │  Condition: a live thread topic exists AND the user has clearly moved on to a
+            │  different goal or task that the next several messages will be about.
+            │  A passing question about another subject, a quick lookup of something said
+            │  earlier, or a side remark is NOT a shift — the thread stays as it is.
+            │  When in doubt between SHIFT and CONTINUE, prefer CONTINUE.
             │  Action: call \(markTurningPointToolFunctionName)(
             │      previous_topic_name="<current live topic, verbatim or close paraphrase>",
             │      current_topic_name="<new topic>")
@@ -194,9 +229,9 @@ public enum AIPromptPresets {
             │  NOT noise: short messages that set up the next step, express agreement with
             │  ongoing work ("exactly", "right", "I know what you mean"), or continue context.
 
-            └─ CASE D · CONTINUE (same topic, no annotation needed)
-               Condition: a direct follow-up, clarification, deeper dive, wording tweak, or
-               refinement of the exact task already underway — with no change of subject.
+            └─ CASE D · CONTINUE (same goal, no annotation needed)
+               Condition: a follow-up, clarification, deeper dive, wording tweak, refinement
+               of the task already underway, or a brief detour that does not replace it.
                Action: do nothing — call neither tool.
             """
     }
@@ -246,7 +281,8 @@ public enum AIPromptPresets {
         contextTranscript: String,
         currentDate: String,
         platform: String,
-        responseLanguages: [String]
+        responseLanguages: [String],
+        layout: Layout = .legacy
     ) -> String {
         let languageGuidance = responseLanguageGuidance(responseLanguages)
         let attachmentLine =
@@ -257,9 +293,17 @@ public enum AIPromptPresets {
             modelProfile.contextWindow.map {
                 "Your context window is about \(tokenCountDescription($0)) tokens; older conversation history may have been trimmed to fit.\n"
             } ?? ""
+        let environmentLine =
+            layout == .orchestrated
+            ? "Platform: \(platform). The current date and time are in the turn context at the end of the conversation."
+            : "Current date and time: \(currentDate). Platform: \(platform)."
+        let contextSection =
+            layout == .orchestrated
+            ? "Conversation context (stable):\n\(contextTranscript)"
+            : "\(sideNotesSection(sideNotes))Conversation context:\n\(contextTranscript)"
         return """
             You are a KeepTalking participant in a group chat.
-            Current date and time: \(currentDate). Platform: \(platform).
+            \(environmentLine)
 
             § Conversation only
             The model you are running on cannot call tools. In KeepTalking that is a big loss: you cannot run actions on any node, search thread memory, list or read attachments, search the web, update side notes, or annotate threads. All you can do is take part in the conversation itself.
@@ -270,8 +314,66 @@ public enum AIPromptPresets {
 
             \(privacyConfidentialityPolicy)
 
-            \(sideNotesSection(sideNotes))Conversation context:
-            \(contextTranscript)
+            \(contextSection)
+            """
+    }
+
+    // MARK: - Orchestrated layout
+
+    /// How the orchestrated layout presents earlier threads. Part of the
+    /// stable system prompt.
+    static let threadMemoryGuidance = """
+        § Thread memory
+        The conversation is cut into threads at turning points. Only the live thread is replayed verbatim. Before each reply, consultants read the most recent stored threads word for word, and the turn context carries what they found and the rows they cite. Older threads are listed by name only — call \(KeepTalkingClient.searchThreadsToolFunctionName) when one of them matters.
+        """
+
+    /// The trailing system row of an orchestrated request: everything that
+    /// varies turn to turn, rebuilt every turn and never stored in history.
+    static func turnContextRow(
+        currentDate: String,
+        currentPromptGuidance: String,
+        sideNotes: [KeepTalkingSideNoteDTO],
+        perTurnTranscript: String,
+        extraSections: [String] = [],
+        effortOverride: AIReasoning.Effort? = nil
+    ) -> String {
+        var sections = [
+            "Turn context (rebuilt every turn; not part of the conversation):\nCurrent date and time: \(currentDate)."
+        ]
+        if !currentPromptGuidance.isEmpty { sections.append(currentPromptGuidance) }
+        let notes = sideNotesSection(sideNotes)
+        if !notes.isEmpty { sections.append(notes.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        if !perTurnTranscript.isEmpty { sections.append(perTurnTranscript) }
+        sections.append(contentsOf: extraSections.filter { !$0.isEmpty })
+        if let effortOverride {
+            sections.append("Reasoning effort for this reply: \(effortOverride.rawValue).")
+        }
+        return sections.joined(separator: "\n\n")
+    }
+
+    /// The guidance the legacy layout puts in the system prompt when the
+    /// current turn carries attachments; the orchestrated layout sends it in
+    /// the turn context instead.
+    static func currentPromptAttachmentGuidance(
+        attachmentListingToolFunctionName: String,
+        attachmentReaderToolFunctionName: String,
+        includesAttachments: Bool,
+        shouldAvoidAutomaticToolUse: Bool
+    ) -> String {
+        guard includesAttachments else { return "" }
+        return shouldAvoidAutomaticToolUse
+            ? """
+            The current user turn already includes its newly attached files natively.
+            Use those provided files or images directly before considering any tool call.
+            Do not call attachment tools, the action listing tool, or any other tool just to inspect those current attachments.
+            Do not call \(attachmentListingToolFunctionName) or \(attachmentReaderToolFunctionName) to verify a file that is already included in the current turn.
+            Only call a tool if the user explicitly asks for tool/action use, web lookup, or inspection of a different context file that is not already included in the current turn.
+            """
+            : """
+            The current user turn already includes its newly attached files natively.
+            Use those provided files or images directly before considering attachment tools.
+            Do not call attachment tools just to inspect those current attachments.
+            Do not call \(attachmentListingToolFunctionName) or \(attachmentReaderToolFunctionName) to verify a file that is already included in the current turn.
             """
     }
 
@@ -442,7 +544,7 @@ public enum AIPromptPresets {
             "Update metadata on a context attachment — set an image description after inspecting an image, add a text preview for non-text files, or add tags. Fields you omit are left unchanged. Use this after inspecting an attachment with mode=native to persist your understanding of its content."
 
         public static let searchThreads =
-            "Search thread memory in the current context. This is your conversation-memory retrieval tool for earlier threads, prior decisions, recalled facts, user preferences, and unfinished work that may not be visible in the current transcript window. Use it proactively before answering when the user refers to something discussed earlier. Returns the most relevant thread excerpts ranked by semantic similarity."
+            "Search thread memory: earlier threads of this conversation, conversations linked to it, and peers that share theirs. This is your conversation-memory retrieval tool for earlier threads, prior decisions, recalled facts, user preferences, and unfinished work that may not be visible in the current transcript window. Use it proactively before answering when the user refers to something discussed earlier. Returns the best-matching threads themselves, verbatim, oldest first; when they are too long to return whole, consultants read them in full and answer your query instead, citing the rows. So phrase the query as the question you need answered."
 
         public static let evaluateJS = """
             Run JavaScript locally for cheap computation: date arithmetic ("what \

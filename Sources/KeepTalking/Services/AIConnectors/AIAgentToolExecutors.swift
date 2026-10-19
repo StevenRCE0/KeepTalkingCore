@@ -31,7 +31,8 @@ extension KeepTalkingClient {
         inputHandles: [UUID]? = nil,
         outputHandles: [KeepTalkingActionOutputHandle]? = nil,
         assistantPublisher: AIOrchestrator.AssistantPublisher? = nil,
-        toolHintPublisher: AIOrchestrator.ToolHintPublisher? = nil
+        toolHintPublisher: AIOrchestrator.ToolHintPublisher? = nil,
+        threadSearch: ThreadSearchHandOver = .unconsulted
     ) async throws -> [AIOrchestrator.ToolExecution] {
         var executions: [AIOrchestrator.ToolExecution] = []
 
@@ -134,8 +135,10 @@ extension KeepTalkingClient {
                                 toolMessage(
                                     payload: try await executeSearchThreadsToolCall(
                                         rawArguments: toolCall.argumentsJSON,
-                                        runtimeCatalog: runtimeCatalog,
-                                        context: context
+                                        remoteSemanticRetrievalActions: runtimeCatalog.remoteSemanticRetrievalActions,
+                                        context: context,
+                                        handOver: threadSearch,
+                                        publisher: toolHintPublisher
                                     ),
                                     toolCallID: toolCallID
                                 )

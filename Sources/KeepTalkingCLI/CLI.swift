@@ -3,7 +3,15 @@ import KeepTalkingSDK
 
 let keepTalkingUsage = """
     Usage:
-      KeepTalking [--relay <url>] [--sfu-id <hex>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--openai-endpoint <url>] [--openai-api-key <key>] [--model <id>] [--act-model <id>] [--mcp <list|remove|add-http|add-stdio> ...] [--skill <list|remove|add-directory> ...]
+      KeepTalking [--relay <url>] [--sfu-id <hex>] [--node <uuid>] [--context <uuid>] [--db-path <sqlite-file>] [--message <text>] [--ai <prompt>] [--profile <name>] [--provider <openrouter|openai|anthropic|custom>] [--api-key <key>] [--endpoint <url>] [--model <id>] [--act-model <id>] [--effort <level>] [--mcp <list|remove|add-http|add-stdio> ...] [--skill <list|remove|add-directory> ...]
+      KeepTalking profile <list|add|remove|default|test> ...   (provider profiles, see `KeepTalking profile`)
+
+    Providers:
+      --profile <name> picks a saved provider profile (`KeepTalking profile add …`; default: $KT_PROFILE,
+      then the file's default). Without one, --provider/--model/--api-key/--endpoint describe it inline;
+      the key defaults to $OPENROUTER_API_KEY, $OPENAI_API_KEY or $ANTHROPIC_API_KEY by provider.
+      --model, --act-model, --effort and --api-key override the selected profile.
+      --openai-api-key / --openai-endpoint are kept as aliases of --api-key / --endpoint.
 
     Environment fallbacks:
       KT_RELAY      (iroh relay URL; without it the CLI has no transport and stays local)
@@ -11,15 +19,17 @@ let keepTalkingUsage = """
       KT_NODE       (default: random UUID)
       KT_CONTEXT    (default: 00000000-0000-0000-0000-000000000000)
       KT_DB_PATH    (optional, local sqlite file path)
-      OPENAI_API_KEY    (optional, enables /ai)
-      KT_OPENAI_ENDPOINT / OPENAI_ENDPOINT / OPENAI_BASE_URL (optional, OpenAI-compatible API endpoint)
-      KT_MODEL          (node-wide main agent model, required for /ai)
+      KT_PROFILE        (provider profile name, see `KeepTalking profile`)
+      OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY (provider keys, by --provider)
+      KT_OPENAI_ENDPOINT (optional, OpenAI-compatible API endpoint)
+      KT_MODEL          (node-wide main agent model; overrides the profile's)
       KT_ACT_MODEL      (node-wide ACT agent model, default: the main model)
 
     Examples:
       KeepTalking --relay https://signal.example/ --context 11111111-2222-3333-4444-555555555555
       KeepTalking --context 11111111-2222-3333-4444-555555555555 --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9
       KeepTalking --node 2B2F4C53-13E7-4A0A-A1FB-FA460279EEA9 --message "hello"
+      KeepTalking --profile gemini --db-path /tmp/kt.sqlite --ai "summarise this conversation"
       KeepTalking --mcp add-http linear https://mcp.linear.app --header Authorization=Bearer_token
       KeepTalking --mcp add-stdio foo --env OPENAI_API_KEY=sk-... --env MODEL=gpt-4.1 -- npx -y @modelcontextprotocol/server-github
       KeepTalking --skill add-directory doc-summarizer ~/.codex/skills/doc-summarizer "Local documentation summarizer"
@@ -92,6 +102,8 @@ enum CliError: LocalizedError {
     case invalidSkillCommand(String)
     case invalidSkillDirectory(String)
     case conflictingManagementCommands
+    case invalidProvider(String)
+    case invalidEffort(String)
 
     var errorDescription: String? {
         switch self {
@@ -125,6 +137,10 @@ enum CliError: LocalizedError {
                 return "Invalid skill directory: \(raw)"
             case .conflictingManagementCommands:
                 return "Specify at most one management command: --mcp or --skill."
+            case .invalidProvider(let raw):
+                return CLIProfileError.invalidKind(raw).errorDescription
+            case .invalidEffort(let raw):
+                return CLIProfileError.invalidEffort(raw).errorDescription
         }
     }
 }
@@ -133,6 +149,14 @@ struct CliConfig {
     let sdkConfig: KeepTalkingConfig
     let databaseURL: URL?
     let singleMessage: String?
+    /// `--ai <prompt>`: run one agent turn in the context, print the reply, exit.
+    let aiPrompt: String?
+    /// `--profile <name>`; nil falls back to `$KT_PROFILE` / the file default.
+    let profileName: String?
+    /// `--provider <kind>` for an inline (profile-less) provider.
+    let provider: CLIProviderProfile.Kind?
+    /// `--effort <level>`.
+    let effort: AIReasoning.Effort?
     let openAIAPIKey: String?
     let openAIEndpoint: String?
     /// Node-wide main agent model (`--model` / `KT_MODEL`).
@@ -155,11 +179,12 @@ struct CliConfig {
             env["KT_CONTEXT"]
             ?? "00000000-0000-0000-0000-000000000000"
         var databasePathRaw = env["KT_DB_PATH"]
-        var openAIAPIKey = env["OPENAI_API_KEY"]
-        var openAIEndpointRaw =
-            env["KT_OPENAI_ENDPOINT"]
-            ?? env["OPENAI_ENDPOINT"]
-            ?? env["OPENAI_BASE_URL"]
+        var openAIAPIKey: String?
+        var aiPrompt: String?
+        var profileName: String?
+        var providerRaw: String?
+        var effortRaw: String?
+        var openAIEndpointRaw = env["KT_OPENAI_ENDPOINT"]
         var model = env["KT_MODEL"]
         var actModel = env["KT_ACT_MODEL"]
         var singleMessage: String?
@@ -200,11 +225,27 @@ struct CliConfig {
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
                     singleMessage = args[index]
-                case "--openai-api-key":
+                case "--ai":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue(arg) }
+                    aiPrompt = args[index]
+                case "--profile":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue(arg) }
+                    profileName = args[index]
+                case "--provider":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue(arg) }
+                    providerRaw = args[index]
+                case "--effort":
+                    index += 1
+                    guard index < args.count else { throw CliError.missingValue(arg) }
+                    effortRaw = args[index]
+                case "--openai-api-key", "--api-key":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
                     openAIAPIKey = args[index]
-                case "--openai-endpoint":
+                case "--openai-endpoint", "--endpoint":
                     index += 1
                     guard index < args.count else { throw CliError.missingValue(arg) }
                     openAIEndpointRaw = args[index]
@@ -357,6 +398,14 @@ struct CliConfig {
             throw CliError.invalidContextID(contextIDRaw)
         }
         let databaseURL = try resolveDatabaseURL(databasePathRaw)
+        let provider = try providerRaw.map {
+            guard let kind = CLIProviderProfile.Kind(rawValue: $0) else { throw CliError.invalidProvider($0) }
+            return kind
+        }
+        let effort = try effortRaw.map {
+            guard let effort = AIReasoning.Effort(rawValue: $0) else { throw CliError.invalidEffort($0) }
+            return effort
+        }
         let openAIEndpoint = try normalizeOpenAIEndpoint(openAIEndpointRaw)
         let normalizedOpenAIAPIKey =
             openAIAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -365,6 +414,10 @@ struct CliConfig {
             sdkConfig: KeepTalkingConfig(contextID: contextID, node: nodeID),
             databaseURL: databaseURL,
             singleMessage: singleMessage,
+            aiPrompt: aiPrompt,
+            profileName: profileName,
+            provider: provider,
+            effort: effort,
             openAIAPIKey: (normalizedOpenAIAPIKey?.isEmpty == false)
                 ? normalizedOpenAIAPIKey
                 : nil,

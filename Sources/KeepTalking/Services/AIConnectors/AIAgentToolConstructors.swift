@@ -593,7 +593,7 @@ extension KeepTalkingClient {
                     "query": .object([
                         "type": .string("string"),
                         "description": .string(
-                            "Natural-language memory query, phrased as the fact, topic, task, or decision you want to recover from earlier conversation."
+                            "The question you need answered from earlier conversation, with its specifics: the fact, topic, task or decision to recover, and whether you need its latest value. Consultants answer it directly when the matching threads are too long to return."
                         ),
                     ]),
                     "top_k": .object([

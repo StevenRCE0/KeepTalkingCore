@@ -105,6 +105,11 @@ public actor AnthropicConnector: AIConnector {
         self.modelsURL = endpointURL.appendingPathComponent("v1/models")
     }
 
+    /// The Messages API has no mid-conversation system role.
+    public nonisolated func systemRowPlacement(forModel model: String) -> AISystemRowPlacement {
+        .wrappedInUserTurn
+    }
+
     /// Every Messages endpoint, a proxy included, ends at Anthropic's limits.
     public nonisolated func imageInputPolicy(forModel model: String) -> AIImageInputPolicy {
         .anthropic
@@ -156,7 +161,19 @@ public actor AnthropicConnector: AIConnector {
     ) async throws -> AITurnResult {
         let messages = imageFitter.fitted(messages, policy: imageInputPolicy(forModel: model))
         let (system, anthropicMessages) = Self.translateMessages(messages)
-        let anthropicTools = tools.map(Self.translateTool(_:))
+        var anthropicTools = tools.map(Self.translateTool(_:))
+        if let toolsCacheControl = Self.cacheControl(for: configuration?.toolsCacheBoundary),
+            case .customTool(let last)? = anthropicTools.last
+        {
+            anthropicTools[anthropicTools.count - 1] = .customTool(
+                .init(
+                    description: last.description,
+                    inputSchema: last.inputSchema,
+                    name: last.name,
+                    cacheControl: toolsCacheControl
+                )
+            )
+        }
         // Anthropic rejects `tool_choice` without `tools` (a tool-less model's
         // run still carries the orchestrator's `.auto`).
         let anthropicToolChoice =
@@ -194,24 +211,50 @@ public actor AnthropicConnector: AIConnector {
     // MARK: - private translation
 
     /// Splits a KT-native message history into:
-    /// - the Anthropic top-level `system` field (concatenated from `system` messages)
+    /// - the Anthropic top-level `system` field: every `system` row BEFORE the
+    ///   first user/assistant row, one block each
     /// - the user/assistant message list (with tool results modelled as user-role
-    ///   `tool_result` content blocks)
-    private static func translateMessages(
+    ///   `tool_result` content blocks). A `system` row after the first
+    ///   user/assistant row stays where it is, as a user turn wrapped in a
+    ///   `<system>` tag — hoisting it would move per-turn text above the
+    ///   cached prefix.
+    ///
+    /// `cacheBoundary` on a row becomes `cache_control` on that row's last
+    /// block: `durable` → one hour, `rolling` → the default five minutes.
+    static func translateMessages(
         _ messages: [AIMessage]
     ) -> (AnthropicSystemPrompt?, [AnthropicMessageParam]) {
-        var systemBlocks: [String] = []
+        var systemBlocks: [AnthropicSystemTextBlockParam] = []
         var output: [AnthropicMessageParam] = []
+        let firstDialogueIndex = messages.firstIndex { $0.role != .system } ?? messages.endIndex
 
-        for message in messages {
+        for (index, message) in messages.enumerated() {
+            let cacheControl = cacheControl(for: message.cacheBoundary)
             switch message.role {
+                case .system where index < firstDialogueIndex:
+                    systemBlocks.append(
+                        .init(text: message.content?.text ?? "", cacheControl: cacheControl)
+                    )
+
                 case .system:
-                    systemBlocks.append(message.content?.text ?? "")
+                    output.append(
+                        .init(
+                            content: .blocks([
+                                .textBlock(
+                                    .init(
+                                        text: AISystemRowPlacement.wrapped(message.content?.text ?? ""),
+                                        cacheControl: cacheControl
+                                    )
+                                )
+                            ]),
+                            role: .user
+                        )
+                    )
 
                 case .user:
                     output.append(
                         .init(
-                            content: translateUserContent(message.content),
+                            content: translateUserContent(message.content, cacheControl: cacheControl),
                             role: .user
                         )
                     )
@@ -237,7 +280,9 @@ public actor AnthropicConnector: AIConnector {
                         // Anthropic rejects empty assistant turns; emit a placeholder.
                         blocks.append(.textBlock(.init(text: "")))
                     }
-                    output.append(.init(content: .blocks(blocks), role: .assistant))
+                    output.append(
+                        .init(content: .blocks(withCacheControl(cacheControl, onLastOf: blocks)), role: .assistant)
+                    )
 
                 case .tool:
                     // Anthropic models tool results as user-role messages
@@ -248,6 +293,7 @@ public actor AnthropicConnector: AIConnector {
                                 .toolResultBlock(
                                     .init(
                                         toolUseId: message.toolCallID ?? "",
+                                        cacheControl: cacheControl,
                                         content: .text(message.content?.text ?? "")
                                     )
                                 )
@@ -261,10 +307,43 @@ public actor AnthropicConnector: AIConnector {
         let system: AnthropicSystemPrompt?
         if systemBlocks.isEmpty {
             system = nil
+        } else if systemBlocks.allSatisfy({ $0.cacheControl == nil }) {
+            // No breakpoints: the single string the connector always sent.
+            system = .text(systemBlocks.map(\.text).joined(separator: "\n\n"))
         } else {
-            system = .text(systemBlocks.joined(separator: "\n\n"))
+            system = .blocks(systemBlocks)
         }
         return (system, output)
+    }
+
+    static func cacheControl(for boundary: AICacheBoundary?) -> AnthropicCacheControlEphemeral? {
+        switch boundary {
+            case .none: return nil
+            case .durable: return .init(ttl: .oneHour)
+            case .rolling: return .init()
+        }
+    }
+
+    /// `blocks` with `cacheControl` set on the last one that can carry it.
+    private static func withCacheControl(
+        _ cacheControl: AnthropicCacheControlEphemeral?,
+        onLastOf blocks: [AnthropicContentBlockParam]
+    ) -> [AnthropicContentBlockParam] {
+        guard let cacheControl, let last = blocks.last else { return blocks }
+        var blocks = blocks
+        switch last {
+            case .textBlock(let block):
+                blocks[blocks.count - 1] = .textBlock(
+                    .init(text: block.text, cacheControl: cacheControl, citations: block.citations)
+                )
+            case .toolUseBlock(let block):
+                blocks[blocks.count - 1] = .toolUseBlock(
+                    .init(id: block.id, input: block.input, name: block.name, cacheControl: cacheControl)
+                )
+            default:
+                break
+        }
+        return blocks
     }
 
     /// Translates `AIMessage.Content` into Anthropic's user-message body. Image
@@ -272,13 +351,15 @@ public actor AnthropicConnector: AIConnector {
     /// `https://` URLs become URL image sources. Anything else is collapsed to
     /// a text placeholder so we don't silently drop the part.
     private static func translateUserContent(
-        _ content: AIMessage.Content?
+        _ content: AIMessage.Content?,
+        cacheControl: AnthropicCacheControlEphemeral? = nil
     ) -> AnthropicMessageParamContent {
         switch content {
             case .none:
                 return .text("")
             case .text(let s):
-                return .text(s)
+                guard let cacheControl else { return .text(s) }
+                return .blocks([.textBlock(.init(text: s, cacheControl: cacheControl))])
             case .parts(let parts):
                 let blocks: [AnthropicContentBlockParam] = parts.compactMap { part in
                     switch part {
@@ -297,7 +378,7 @@ public actor AnthropicConnector: AIConnector {
                             )
                     }
                 }
-                return .blocks(blocks)
+                return .blocks(withCacheControl(cacheControl, onLastOf: blocks))
         }
     }
 
@@ -405,10 +486,22 @@ public actor AnthropicConnector: AIConnector {
             }
         }
 
+        // Anthropic counts uncached input apart from cache reads and writes;
+        // `AITurnUsage.inputTokens` is the whole prompt.
+        let usage = response.usage
+        let cacheRead = usage.cacheReadInputTokens ?? 0
+        let cacheWrite = usage.cacheCreationInputTokens ?? 0
         return AITurnResult(
             assistantText: assistantText,
             thinking: thinking,
-            toolCalls: toolCalls
+            toolCalls: toolCalls,
+            usage: AITurnUsage(
+                inputTokens: usage.inputTokens + cacheRead + cacheWrite,
+                outputTokens: usage.outputTokens,
+                cacheReadTokens: cacheRead,
+                cacheCreationTokens: cacheWrite,
+                responseID: response.id
+            )
         )
     }
 

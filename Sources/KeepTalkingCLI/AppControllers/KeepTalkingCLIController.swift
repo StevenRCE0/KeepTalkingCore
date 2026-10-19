@@ -99,6 +99,10 @@ final class KeepTalkingCLIController {
             print("[you] \(oneShot)")
             return
         }
+        if let prompt = cliConfig.aiPrompt {
+            try await runOneShotAI(prompt)
+            return
+        }
 
         printConnectedBanner()
         // Profiles (tools, attachments, window, efforts) come from models.dev;
@@ -106,7 +110,7 @@ final class KeepTalkingCLIController {
         Task { [catalog = agentSelection.catalog] in _ = try? await catalog.refresh() }
         if agentSelection.configuration(for: activeContext.id ?? currentConfig.contextID) == nil {
             print(
-                "[ai] not configured: provide OPENAI_API_KEY/--openai-api-key and --model/KT_MODEL (or /model <id> per context)."
+                "[ai] not configured: \(agentSelection.connectorError ?? "pass --profile <name>, or --provider/--model with a key (or /model <id> per context).")"
             )
         }
 
@@ -152,9 +156,26 @@ final class KeepTalkingCLIController {
         if let databaseURL = cliConfig.databaseURL {
             print("DB=\(databaseURL.path)")
         }
-        if let openAIEndpoint = cliConfig.openAIEndpoint {
-            print("OpenAI endpoint=\(openAIEndpoint)")
+        if let profile = agentSelection.profile {
+            print("Provider: \(profile.name) — \(profile.summary)")
+        } else if let error = agentSelection.connectorError {
+            print("Provider: none (\(error))")
         }
+    }
+
+    /// `--ai <prompt>`: the prompt goes into the context as a tagged agent
+    /// prompt (as the app's queue sends it), the reply is printed, and each
+    /// provider call's usage is logged by the SDK.
+    private func runOneShotAI(_ prompt: String) async throws {
+        let contextID = activeContext.id ?? currentConfig.contextID
+        guard let agent = agentSelection.configuration(for: contextID) else {
+            throw CLIProfileError.usage(
+                "[ai] not configured: \(agentSelection.connectorError ?? "pass --profile <name> or --provider/--model")"
+            )
+        }
+        print("[you] \(prompt)")
+        let reply = try await client.runDequeuedAIPrompt(prompt, in: contextID, agent: agent)
+        print("[ai] \(reply)")
     }
 
     func printConnectedBanner() {

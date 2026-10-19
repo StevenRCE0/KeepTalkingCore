@@ -46,13 +46,25 @@ public struct AIMessage: Codable, Sendable, Equatable {
     /// without re-sending the full audio bytes.
     public let audioReference: String?
 
+    /// A prompt-cache breakpoint after this message: the provider may cache
+    /// everything up to and including it. Connectors without explicit cache
+    /// control ignore it.
+    public var cacheBoundary: AICacheBoundary?
+
+    /// A reasoning-effort hint for this one row. Meaningful only on a trailing
+    /// system row: calls that must share a prefix keep their top-level
+    /// reasoning configuration identical and vary effort here instead.
+    public var effortOverride: AIReasoning.Effort?
+
     public init(
         role: Role,
         content: Content?,
         toolCalls: [AIToolCall] = [],
         toolCallID: String? = nil,
         name: String? = nil,
-        audioReference: String? = nil
+        audioReference: String? = nil,
+        cacheBoundary: AICacheBoundary? = nil,
+        effortOverride: AIReasoning.Effort? = nil
     ) {
         self.role = role
         self.content = content
@@ -60,7 +72,27 @@ public struct AIMessage: Codable, Sendable, Equatable {
         self.toolCallID = toolCallID
         self.name = name
         self.audioReference = audioReference
+        self.cacheBoundary = cacheBoundary
+        self.effortOverride = effortOverride
     }
+
+    /// This message with a cache breakpoint after it.
+    public func withCacheBoundary(_ boundary: AICacheBoundary?) -> AIMessage {
+        var copy = self
+        copy.cacheBoundary = boundary
+        return copy
+    }
+}
+
+// MARK: - Cache boundary
+
+/// How long a prompt-cache entry should live. `durable` marks prefix that
+/// changes only on rare events (tools, system, the stale tier); `rolling`
+/// marks the prefix that moves every turn (the live thread). On Anthropic,
+/// `durable` → one-hour TTL and `rolling` → five minutes.
+public enum AICacheBoundary: String, Codable, Sendable, Equatable {
+    case durable
+    case rolling
 }
 
 // MARK: - Content

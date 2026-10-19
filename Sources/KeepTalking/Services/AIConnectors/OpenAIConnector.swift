@@ -37,7 +37,8 @@ public actor OpenAIConnector: AIConnector {
         currentDate: String,
         platform: String,
         responseLanguages: [String] = [],
-        modelProfile: AIModelProfile? = nil
+        modelProfile: AIModelProfile? = nil,
+        layout: AIPromptPresets.Layout = .legacy
     ) -> String {
         AIPromptPresets.systemPrompt(
             ktRunActionToolFunctionName: ktRunActionToolFunctionName,
@@ -54,7 +55,8 @@ public actor OpenAIConnector: AIConnector {
             currentDate: currentDate,
             platform: platform,
             responseLanguages: responseLanguages,
-            modelProfile: modelProfile
+            modelProfile: modelProfile,
+            layout: layout
         )
     }
 
@@ -147,6 +149,31 @@ public actor OpenAIConnector: AIConnector {
         }
     }
 
+    /// OpenAI takes a system row anywhere. OpenRouter folds system rows into
+    /// the vendor's single system prompt for every other vendor (Gemini's
+    /// `systemInstruction`, Anthropic's `system`), and an unknown server may
+    /// reject them mid-conversation, so those get the wrapped user turn.
+    public nonisolated func systemRowPlacement(forModel model: String) -> AISystemRowPlacement {
+        switch backend {
+            case .openAI: return .inline
+            case .openRouter:
+                return model.lowercased().hasPrefix("openai/") ? .inline : .wrappedInUserTurn
+            case .custom: return .wrappedInUserTurn
+        }
+    }
+
+    /// Whether `cacheBoundary` rows go out as `cache_control` breakpoints for
+    /// `model`, and whether a durable one may ask for the one-hour TTL. Only
+    /// OpenRouter forwards them, to Anthropic (TTL honoured) and Gemini (the
+    /// last breakpoint counts); OpenAI and the rest cache prefixes on their own.
+    nonisolated func cacheBreakpoints(forModel model: String) -> (enabled: Bool, ttl: Bool) {
+        guard case .openRouter = backend else { return (false, false) }
+        let vendor = model.lowercased()
+        if vendor.hasPrefix("anthropic/") { return (true, true) }
+        if vendor.hasPrefix("google/") { return (true, false) }
+        return (false, false)
+    }
+
     // MARK: - listModels
 
     public func listModels() async throws -> [String] {
@@ -188,7 +215,18 @@ public actor OpenAIConnector: AIConnector {
         )? = nil
     ) async throws -> AITurnResult {
         let messages = imageFitter.fitted(messages, policy: imageInputPolicy(forModel: model))
-        let openAIMessages = messages.map(Self.translateMessage(_:))
+        let placement = systemRowPlacement(forModel: model)
+        let firstDialogueIndex = messages.firstIndex { $0.role != .system } ?? messages.endIndex
+        let breakpoints = cacheBreakpoints(forModel: model)
+        let openAIMessages = messages.enumerated().map { index, message in
+            let translated = Self.translateMessage(
+                message, followsDialogue: index > firstDialogueIndex, placement: placement)
+            guard breakpoints.enabled, let boundary = message.cacheBoundary else { return translated }
+            return .cacheBreakpoint(
+                translated,
+                cacheControl: breakpoints.ttl && boundary == .durable ? .init(ttl: "1h") : .ephemeral
+            )
+        }
         let openAITools = tools.map(Self.translateTool(_:))
         let resolvedToolChoice: OpenAIChatCompletionRequestBody.ToolChoice? = {
             if openAITools.isEmpty { return nil }
@@ -276,7 +314,20 @@ public actor OpenAIConnector: AIConnector {
             assistantText: turnText,
             thinking: turnThinking,
             toolCalls: turnToolCalls,
-            audioOutput: turnAudio
+            audioOutput: turnAudio,
+            usage: Self.turnUsage(response.usage)
+        )
+    }
+
+    /// The token counts AIProxy decodes from a chat completion.
+    static func turnUsage(_ usage: OpenAIChatUsage?) -> AITurnUsage? {
+        guard let usage else { return nil }
+        return AITurnUsage(
+            inputTokens: usage.promptTokens ?? 0,
+            outputTokens: usage.completionTokens ?? 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            reasoningTokens: usage.completionTokensDetails?.reasoningTokens
         )
     }
 
@@ -367,10 +418,19 @@ public actor OpenAIConnector: AIConnector {
 
     // MARK: - private translation
 
-    private static func translateMessage(
-        _ message: AIMessage
+    /// `followsDialogue`: the row comes after the first user/assistant row,
+    /// where `placement` decides how a system row travels.
+    static func translateMessage(
+        _ message: AIMessage,
+        followsDialogue: Bool = false,
+        placement: AISystemRowPlacement = .inline
     ) -> OpenAIChatCompletionRequestBody.Message {
         switch message.role {
+            case .system where followsDialogue && placement == .wrappedInUserTurn:
+                return .user(
+                    content: .text(AISystemRowPlacement.wrapped(message.content?.text ?? "")),
+                    name: nil
+                )
             case .system:
                 return .system(
                     content: .text(message.content?.text ?? ""),

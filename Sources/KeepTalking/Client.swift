@@ -203,6 +203,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
     // object owns the underlying primitive.
     public let signals: KeepTalkingClientSignals
 
+    /// What the orchestrated prompt layout remembers of each context's last
+    /// run (prefix digest, live rows, the request prefix a freeze reuses).
+    let contextOrchestrationMemory = KeepTalkingContextOrchestrationMemoryStore()
+
     /// Producer-side sink for `log`, handed to the transport and the managers
     /// at init so no early line is lost.
     let onLog: LogHandler?

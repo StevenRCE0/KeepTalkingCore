@@ -3,21 +3,13 @@ import FluentKit
 import Foundation
 import MCP
 
-// Sendable result item used to safely pass data across task boundaries.
-private struct SemanticSearchItem: Sendable {
-    let threadID: String
-    let label: String
-    let score: Double
-    let excerpt: String
-    let nodeID: String
-    let nodeLabel: String
-}
-
 extension KeepTalkingClient {
     func executeSearchThreadsToolCall(
         rawArguments: String,
-        runtimeCatalog: KeepTalkingActionRuntimeCatalog,
-        context: KeepTalkingContext
+        remoteSemanticRetrievalActions remoteEntries: [KeepTalkingSemanticRetrievalCatalogEntry],
+        context: KeepTalkingContext,
+        handOver: ThreadSearchHandOver = .unconsulted,
+        publisher: AIOrchestrator.ToolHintPublisher? = nil
     ) async throws -> String {
         let args = (try? decodeToolArguments(rawArguments)) ?? [:]
         guard
@@ -31,11 +23,50 @@ extension KeepTalkingClient {
             ])
         }
         let topK = args["top_k"]?.intValue ?? 5
+        let aliasLookup = try await aliasLookup()
+        let hits = try await threadSearchHits(
+            query: query, topK: topK, context: context, remoteEntries: remoteEntries, aliasLookup: aliasLookup
+        )
+
+        var read: [String: RetrievedThread] = [:]
+        for hit in hits {
+            guard let threadID = UUID(uuidString: hit.threadID) else { continue }
+            do {
+                read[hit.threadID] = try await retrievedThread(
+                    threadID, score: hit.score, aliasLookup: aliasLookup, ceilingTokens: handOver.readCeilingTokens
+                )
+            } catch {
+                onLog?(
+                    "[search-threads] reading thread \(hit.threadID.prefix(8)) failed error=\(error.localizedDescription)"
+                )
+            }
+        }
+        let deliveries = handOver.deliveries(hits.compactMap { read[$0.threadID] })
+        let consultation = await handOver.consult(
+            deliveries.filter { $0.delivery == .answered }.map(\.thread), query: query, on: self
+        )
+        let result = handOver.toolResult(
+            query: query, hits: hits, read: read, deliveries: deliveries, consultation: consultation
+        )
+        await publishRevealedThreads(
+            deliveries.filter { $0.delivery == .verbatim || $0.delivery == .answered }.map(\.thread.thread.threadID),
+            query: query,
+            publisher: publisher
+        )
+        onLog?("[search-threads] query=\"\(query.prefix(80))\" hits=\(hits.count) \(result.log)")
+        return jsonString(result.payload)
+    }
+
+    /// Ranked hits here and on every peer that shares its thread memory,
+    /// best first, one per thread.
+    private func threadSearchHits(
+        query: String,
+        topK: Int,
+        context: KeepTalkingContext,
+        remoteEntries: [KeepTalkingSemanticRetrievalCatalogEntry],
+        aliasLookup: KeepTalkingAliasLookup
+    ) async throws -> [ThreadSearchHit] {
         let contextID = try context.requireID()
-
-        // MARK: - Local search
-
-        var localItems: [SemanticSearchItem] = []
         let localResults: [KeepTalkingSemanticSearchResult]
         do {
             let scopes = try await Self.retrievableSemanticMemoryScopes(
@@ -54,19 +85,15 @@ extension KeepTalkingClient {
             onLog?("[search-threads] local search failed error=\(error.localizedDescription)")
         }
 
-        let aliasLookup = try await aliasLookup()
         let nodeLabel =
             aliasLookup.alias(for: .node(config.node))
             ?? String(config.node.uuidString.prefix(8).lowercased())
         let nodeID = config.node.uuidString.lowercased()
-
-        localItems = localResults.map { result in
-            let alias =
-                aliasLookup.alias(for: .thread(result.threadID))
-                ?? String(result.threadID.uuidString.prefix(8).lowercased())
-            return SemanticSearchItem(
+        let localHits = localResults.map { result in
+            ThreadSearchHit(
                 threadID: result.threadID.uuidString.lowercased(),
-                label: alias,
+                label: aliasLookup.alias(for: .thread(result.threadID))
+                    ?? String(result.threadID.uuidString.prefix(8).lowercased()),
                 score: Double(result.score),
                 excerpt: String(result.text.prefix(400)),
                 nodeID: nodeID,
@@ -74,54 +101,21 @@ extension KeepTalkingClient {
             )
         }
 
-        // MARK: - Remote fan-out
-
-        let remoteEntries = runtimeCatalog.remoteSemanticRetrievalActions
-        var remoteItems: [SemanticSearchItem] = []
-
-        if !remoteEntries.isEmpty {
-            remoteItems = await withTaskGroup(
-                of: [SemanticSearchItem].self,
-                returning: [SemanticSearchItem].self
-            ) { group in
-                for entry in remoteEntries {
-                    group.addTask {
-                        await self.fetchRemoteSemanticSearchItems(
-                            entry: entry,
-                            query: query,
-                            topK: topK,
-                            context: context
-                        )
-                    }
+        let remoteHits = await withTaskGroup(of: [ThreadSearchHit].self) { group in
+            for entry in remoteEntries {
+                group.addTask {
+                    await self.fetchRemoteSemanticSearchItems(entry: entry, query: query, topK: topK, context: context)
                 }
-                var collected: [SemanticSearchItem] = []
-                for await items in group {
-                    collected.append(contentsOf: items)
-                }
-                return collected
             }
+            var collected: [ThreadSearchHit] = []
+            for await hits in group { collected.append(contentsOf: hits) }
+            return collected
         }
 
-        // MARK: - Merge and sort by score descending
-
-        var allItems = localItems + remoteItems
-        allItems.sort { $0.score > $1.score }
-
-        return jsonString([
-            "ok": true,
-            "query": query,
-            "count": allItems.count,
-            "results": allItems.map {
-                [
-                    "thread_id": $0.threadID,
-                    "label": $0.label,
-                    "score": $0.score,
-                    "excerpt": $0.excerpt,
-                    "node_id": $0.nodeID,
-                    "node_label": $0.nodeLabel,
-                ] as [String: Any]
-            },
-        ])
+        var seen = Set<String>()
+        return (localHits + remoteHits)
+            .sorted { $0.score > $1.score }
+            .filter { seen.insert($0.threadID).inserted }
     }
 
     // MARK: - Private helpers
@@ -131,7 +125,7 @@ extension KeepTalkingClient {
         query: String,
         topK: Int,
         context: KeepTalkingContext
-    ) async -> [SemanticSearchItem] {
+    ) async -> [ThreadSearchHit] {
         let call = KeepTalkingActionCall(
             action: entry.actionID,
             arguments: [
@@ -166,7 +160,7 @@ extension KeepTalkingClient {
     private func parseRemoteSemanticSearchItems(
         _ result: KeepTalkingActionCallResult,
         ownerNodeID: UUID
-    ) -> [SemanticSearchItem] {
+    ) -> [ThreadSearchHit] {
         guard
             let textContent = result.content.compactMap({ content -> String? in
                 if case .text(let text, _, _) = content { return text }
@@ -183,7 +177,7 @@ extension KeepTalkingClient {
         let fallbackNodeLabel = String(ownerNodeID.uuidString.prefix(8).lowercased())
         let nodeID = ownerNodeID.uuidString.lowercased()
 
-        return rawResults.compactMap { item -> SemanticSearchItem? in
+        return rawResults.compactMap { item -> ThreadSearchHit? in
             guard
                 let threadID = item["thread_id"] as? String,
                 let score = item["score"] as? Double
@@ -191,7 +185,7 @@ extension KeepTalkingClient {
             let label = (item["label"] as? String) ?? String(threadID.prefix(8))
             let excerpt = (item["excerpt"] as? String) ?? ""
             let nodeLabel = (item["node_label"] as? String) ?? fallbackNodeLabel
-            return SemanticSearchItem(
+            return ThreadSearchHit(
                 threadID: threadID,
                 label: label,
                 score: score,

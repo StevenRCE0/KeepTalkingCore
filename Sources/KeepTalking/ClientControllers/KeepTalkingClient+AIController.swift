@@ -408,16 +408,6 @@ extension KeepTalkingClient {
         )
         let aliasLookup = try await aliasLookup()
             .scoped(to: try persistedContext.requireID())
-        let contextTranscript = try await agentContextTranscript(
-            persistedContext,
-            actionStubs: runtimeCatalog.actionStubs,
-            remoteActionCreationEntries: runtimeCatalog.remoteActionCreationActions
-        )
-        var contextMessages = try await agentContextMessages(
-            persistedContext,
-            excludingMessageID: promptMessageID,
-            excludingAgentTurnID: checkpoint == nil ? nil : agentTurnID
-        )
         // Attachments this model can't read become placeholders, so the turn
         // no longer "includes" them as far as the prompt is concerned.
         let hasCurrentPromptAttachments =
@@ -445,50 +435,14 @@ extension KeepTalkingClient {
         let currentDate = KeepTalkingEnvironmentContext.localDateTimeDescription()
         let platform = KeepTalkingEnvironmentContext.platform
 
-        let activeSideNotes =
-            (try? await persistedContext.$sideNotes
-                .query(on: localStore.database)
-                .filter(\.$isArchived == false)
-                .all()
-                .map(KeepTalkingSideNoteDTO.init)) ?? []
-
-        let systemPrompt = OpenAIConnector.keepTalkingSystemPrompt(
-            ktRunActionToolFunctionName: Self.runActionToolFunctionName,
-            ktSkillMetainfoToolFunctionName: Self.ktSkillMetainfoToolFunctionName,
-            attachmentListingToolFunctionName: Self.contextAttachmentListingToolFunctionName,
-            attachmentReaderToolFunctionName: Self.resourceReadToolFunctionName,
-            searchThreadsToolFunctionName: Self.searchThreadsToolFunctionName,
-            markTurningPointToolFunctionName: Self.markTurningPointToolFunctionName,
-            markChitterChatterToolFunctionName: Self.markChitterChatterToolFunctionName,
-            currentPromptIncludesAttachments: hasCurrentPromptAttachments,
-            currentPromptShouldAvoidAutomaticToolUse: hasCurrentPromptAttachments
-                && !allowAutomaticToolUse,
-            sideNotes: activeSideNotes,
-            contextTranscript: contextTranscript,
-            currentDate: currentDate,
-            platform: platform,
-            responseLanguages: agent.responseLanguages,
-            modelProfile: modelProfile
+        // Snap the requested effort onto one the model accepts (or drop it
+        // for a model that can't be steered) instead of letting the provider
+        // reject the turn.
+        let effectiveEffort =
+            modelProfile.map { $0.resolvedEffort(agent.reasoningEffort) } ?? agent.reasoningEffort
+        let turnConfiguration = AITurnConfiguration(
+            reasoning: effectiveEffort.map { AIReasoning(effort: $0) }
         )
-        // Fit the decay-selected history into the model's window: whatever the
-        // system prompt and this turn's message leave over, minus a fifth of
-        // the input budget held back for tool rounds within the run. The
-        // decay caps still bound a large window; this only ever trims.
-        if let inputBudget = modelProfile?.inputTokenBudget {
-            let fixedCost =
-                AIMessage.system(systemPrompt).approximateTokenCount
-                + userMessage.approximateTokenCount
-            let historyBudget = max(0, inputBudget - fixedCost - inputBudget / 5)
-            let trimmed = contextMessages.trimmedToTokenBudget(historyBudget)
-            if trimmed.droppedCount > 0 {
-                onLog?(
-                    "[ai] trimmed \(trimmed.droppedCount) of \(contextMessages.count) history message(s) to fit \(inputBudget)-token input budget"
-                )
-            }
-            contextMessages = trimmed.messages
-        }
-        let messages: [AIMessage] =
-            [AIMessage.system(systemPrompt)] + contextMessages + [userMessage]
 
         let assistantPublisher: AIOrchestrator.AssistantPublisher = { [self] payload in
             let (assistantText, messageType, speaker) = payload
@@ -567,112 +521,144 @@ extension KeepTalkingClient {
             }
         )
 
-        // Snap the requested effort onto one the model accepts (or drop it
-        // for a model that can't be steered) instead of letting the provider
-        // reject the turn.
-        let effectiveEffort =
-            modelProfile.map { $0.resolvedEffort(agent.reasoningEffort) } ?? agent.reasoningEffort
-        let turnConfiguration = AITurnConfiguration(
-            reasoning: effectiveEffort.map { AIReasoning(effort: $0) }
-        )
-        let orchestrator = AIOrchestrator(
-            dependencies: .init(
-                aiConnector: aiConnector,
-                turnRunner: { [aiConnector] messages, tools, model, toolChoice, stage, configuration, nativeExecutor in
-                    // One choke point for every image the run could carry —
-                    // the prompt's own, a natively read attachment, a produced
-                    // resource injected after an action — so a text-only model
-                    // never receives one.
-                    let messages =
-                        modelTakesImages
-                        ? messages
-                        : messages.map {
-                            $0.replacingImageParts(with: Self.unreadableImagePlaceholder)
-                        }
-                    // `nativeExecutor` is non-nil only for connectors that run
-                    // their own tool loop (Apple Intelligence); every other
-                    // provider returns its calls for the orchestrator to run.
-                    return try await aiConnector.completeTurn(
-                        messages: messages,
-                        tools: tools,
-                        model: model,
-                        toolChoice: toolChoice,
-                        stage: stage,
-                        configuration: configuration,
-                        toolExecutor: nativeExecutor
-                    )
-                },
-                assistantMessageBuilder: { [self] turn in
-                    assistantMessage(from: turn)
-                },
-                toolExecutor: { [self] toolCalls in
-                    try await executeAgentToolCalls(
-                        toolCalls,
-                        runtimeCatalog: runtimeCatalog,
-                        promptMessageID: promptMessageID,
-                        context: persistedContext,
-                        agentTurnID: agentTurnID,
-                        agentIntention: prompt,
-                        assistantPublisher: assistantPublisher,
-                        toolHintPublisher: toolHintPublisher
-                    )
-                },
-                toolTranscriptAdapter: { [self] executions in
-                    // Auto-inject produced resources (attachment/otb) so a file the
-                    // agent just requested — e.g. via ask-for-file — is CONSUMED this
-                    // turn, not handed back as a handle to optionally pull in later.
-                    await KeepTalkingIOManager(client: self)
-                        .transcriptMessagesForProducedResources(
-                            from: executions, context: persistedContext)
-                },
-                actAgent: actAgent,
-                assistantPublisher: assistantPublisher,
-                toolHintPublisher: toolHintPublisher,
-                toolNameResolver: { [self] toolCall in
-                    publishedToolName(
-                        for: toolCall,
-                        runtimeCatalog: runtimeCatalog,
-                        skillNameByActionID: skillNameByActionID,
-                        aliasLookup: aliasLookup
-                    )
-                },
-                toolHintResolver: { [self] toolCall, stage in
-                    guard var ctx = publishedToolHint(for: toolCall, stage: stage) else {
-                        return nil
-                    }
-                    // Patch actionName from the catalog stub when we have an actionID.
-                    if let actionID = ctx.actionID,
-                        let stub = runtimeCatalog.actionStubs.first(where: { $0.actionID == actionID })
-                    {
-                        ctx = .init(
-                            hint: ctx.hint,
-                            targetNodeID: ctx.targetNodeID ?? stub.ownerNodeID,
-                            actionID: ctx.actionID,
-                            actionName: stub.name,
-                            parameters: ctx.parameters
-                        )
-                    }
-                    return ctx
-                }
-            ),
-            configuration: .init(maxTurns: Self.maxAgentTurns)
-        )
-
-        // Always send `.auto`. `tool_choice: "none"` has poor cross-provider
-        // compatibility (some OpenAI-compatible backends reject or misroute
-        // it, especially in the attachments path). When we want to discourage
-        // automatic tool use we instead steer the model via the system prompt
-        // — see `currentPromptShouldAvoidAutomaticToolUse` above, which
-        // injects guidance into `keepTalkingSystemPrompt`.
-        return try await orchestrator.run(
-            messages: messages,
+        let turn = OrchestrationTurn(
+            agent: agent,
+            prompt: prompt,
+            userMessage: userMessage,
+            promptMessageID: promptMessageID,
+            agentTurnID: agentTurnID,
+            resumingCheckpoint: checkpoint != nil,
             tools: allTools,
-            model: model,
-            toolChoice: .auto,
             turnConfiguration: turnConfiguration,
-            checkpoint: checkpoint,
-            onCheckpoint: onCheckpoint
+            actionStubs: runtimeCatalog.actionStubs,
+            remoteActionCreationActions: runtimeCatalog.remoteActionCreationActions,
+            aliasLookup: aliasLookup,
+            hasCurrentPromptAttachments: hasCurrentPromptAttachments,
+            allowAutomaticToolUse: allowAutomaticToolUse,
+            currentDate: currentDate,
+            platform: platform
         )
+        // The transcript is built (consults fanned out and stitched in) before
+        // the loop starts; the loop runs inside, untouched.
+        return try await withOrchestrationTranscript(
+            persistedContext,
+            providerProfile: modelProfile,
+            alternativeStrategy: agent.orchestrationStrategy,
+            turn: turn
+        ) { transcript in
+            let orchestrator = AIOrchestrator(
+                dependencies: .init(
+                    aiConnector: aiConnector,
+                    turnRunner: {
+                        [aiConnector, role = transcript.role]
+                        messages, tools, model, toolChoice, stage, configuration, nativeExecutor in
+                        // One choke point for every image the run could carry —
+                        // the prompt's own, a natively read attachment, a produced
+                        // resource injected after an action — so a text-only model
+                        // never receives one.
+                        let messages =
+                            modelTakesImages
+                            ? messages
+                            : messages.map {
+                                $0.replacingImageParts(with: Self.unreadableImagePlaceholder)
+                            }
+                        var configuration = configuration ?? AITurnConfiguration()
+                        if configuration.telemetry == nil {
+                            configuration.telemetry = AITurnTelemetry(role: role, agentTurnID: agentTurnID)
+                        }
+                        // `nativeExecutor` is non-nil only for connectors that run
+                        // their own tool loop (Apple Intelligence); every other
+                        // provider returns its calls for the orchestrator to run.
+                        let result = try await aiConnector.completeTurn(
+                            messages: messages,
+                            tools: tools,
+                            model: model,
+                            toolChoice: toolChoice,
+                            stage: stage,
+                            configuration: configuration,
+                            toolExecutor: nativeExecutor
+                        )
+                        if let usage = result.usage {
+                            self.onLog?(
+                                "[ai.usage] turn=\(agentTurnID.uuidString.prefix(8)) role=\(configuration.telemetry?.role.rawValue ?? "main") \(usage.logDescription)"
+                            )
+                        }
+                        return result
+                    },
+                    assistantMessageBuilder: { [self] turn in
+                        assistantMessage(from: turn)
+                    },
+                    toolExecutor: { [self] toolCalls in
+                        try await executeAgentToolCalls(
+                            toolCalls,
+                            runtimeCatalog: runtimeCatalog,
+                            promptMessageID: promptMessageID,
+                            context: persistedContext,
+                            agentTurnID: agentTurnID,
+                            agentIntention: prompt,
+                            assistantPublisher: assistantPublisher,
+                            toolHintPublisher: toolHintPublisher,
+                            threadSearch: transcript.search
+                        )
+                    },
+                    toolTranscriptAdapter: { [self] executions in
+                        // Auto-inject produced resources (attachment/otb) so a file the
+                        // agent just requested — e.g. via ask-for-file — is CONSUMED this
+                        // turn, not handed back as a handle to optionally pull in later.
+                        await KeepTalkingIOManager(client: self)
+                            .transcriptMessagesForProducedResources(
+                                from: executions, context: persistedContext)
+                    },
+                    actAgent: actAgent,
+                    assistantPublisher: assistantPublisher,
+                    toolHintPublisher: toolHintPublisher,
+                    toolNameResolver: { [self] toolCall in
+                        publishedToolName(
+                            for: toolCall,
+                            runtimeCatalog: runtimeCatalog,
+                            skillNameByActionID: skillNameByActionID,
+                            aliasLookup: aliasLookup
+                        )
+                    },
+                    toolHintResolver: { [self] toolCall, stage in
+                        guard var ctx = publishedToolHint(for: toolCall, stage: stage) else {
+                            return nil
+                        }
+                        // Patch actionName from the catalog stub when we have an actionID.
+                        if let actionID = ctx.actionID,
+                            let stub = runtimeCatalog.actionStubs.first(where: { $0.actionID == actionID })
+                        {
+                            ctx = .init(
+                                hint: ctx.hint,
+                                targetNodeID: ctx.targetNodeID ?? stub.ownerNodeID,
+                                actionID: ctx.actionID,
+                                actionName: stub.name,
+                                parameters: ctx.parameters
+                            )
+                        }
+                        return ctx
+                    }
+                ),
+                configuration: .init(maxTurns: Self.maxAgentTurns)
+            )
+
+            // Always send `.auto`. `tool_choice: "none"` has poor cross-provider
+            // compatibility (some OpenAI-compatible backends reject or misroute
+            // it, especially in the attachments path). When we want to discourage
+            // automatic tool use we instead steer the model via the system prompt
+            // — see `currentPromptShouldAvoidAutomaticToolUse` above, which
+            // injects guidance into `keepTalkingSystemPrompt`.
+            return try await orchestrator.run(
+                messages: transcript.messages,
+                tools: allTools,
+                model: model,
+                toolChoice: .auto,
+                turnConfiguration: transcript.turnConfiguration,
+                checkpoint: checkpoint,
+                onCheckpoint: onCheckpoint
+            )
+
+        }
     }
 
     // TODO: questionable...

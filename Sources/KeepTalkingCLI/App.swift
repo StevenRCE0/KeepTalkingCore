@@ -8,6 +8,10 @@ struct KeepTalkingApp {
             await PluginLabCommand.run(Array(argv.dropFirst()))
             return
         }
+        if ProfileCommand.shouldHandle(argv) {
+            await ProfileCommand.run(argv)
+            return
+        }
         if QueryCommand.shouldHandle(argv) {
             await QueryCommand.run(argv)
             return

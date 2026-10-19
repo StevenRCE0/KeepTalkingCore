@@ -106,6 +106,29 @@ public final class AIStreamingAudioHandler: Sendable {
     }
 }
 
+/// Who made a call, for usage logs and connector middleware. Never sent to a provider,
+/// so calls that must share a prefix may still carry different labels.
+public struct AITurnTelemetry: Sendable, Equatable {
+    public enum Role: String, Sendable, Codable {
+        case main
+        case act
+        case consult
+        case collector
+        case other
+    }
+
+    public var role: Role
+    public var agentTurnID: UUID?
+    /// Free-form detail (a consult's thread, a probe's name).
+    public var label: String?
+
+    public init(role: Role, agentTurnID: UUID? = nil, label: String? = nil) {
+        self.role = role
+        self.agentTurnID = agentTurnID
+        self.label = label
+    }
+}
+
 public struct AITurnConfiguration: Sendable {
     public var reasoning: AIReasoning?
     public var temperature: Double?
@@ -115,6 +138,9 @@ public struct AITurnConfiguration: Sendable {
     public var seed: Int?
     public var responseFormat: AIResponseFormat?
     public var promptCacheKey: String?
+    /// A prompt-cache breakpoint after the tool list. Connectors without
+    /// explicit cache control ignore it.
+    public var toolsCacheBoundary: AICacheBoundary?
     public var endUserID: String?
 
     /// Output modalities requested for this turn (e.g. `["text", "audio"]`).
@@ -128,6 +154,8 @@ public struct AITurnConfiguration: Sendable {
     /// they arrive from the SSE stream, rather than accumulating them.
     /// The final `AITurnResult.audioOutput` still contains the full audio.
     public var streamingAudioHandler: AIStreamingAudioHandler?
+    /// Attribution for logs; connectors never send it.
+    public var telemetry: AITurnTelemetry?
 
     public init(
         reasoning: AIReasoning? = nil,
@@ -138,10 +166,12 @@ public struct AITurnConfiguration: Sendable {
         seed: Int? = nil,
         responseFormat: AIResponseFormat? = nil,
         promptCacheKey: String? = nil,
+        toolsCacheBoundary: AICacheBoundary? = nil,
         endUserID: String? = nil,
         modalities: [String]? = nil,
         audioOutput: AIAudioOutputConfig? = nil,
-        streamingAudioHandler: AIStreamingAudioHandler? = nil
+        streamingAudioHandler: AIStreamingAudioHandler? = nil,
+        telemetry: AITurnTelemetry? = nil
     ) {
         self.reasoning = reasoning
         self.temperature = temperature
@@ -151,10 +181,12 @@ public struct AITurnConfiguration: Sendable {
         self.seed = seed
         self.responseFormat = responseFormat
         self.promptCacheKey = promptCacheKey
+        self.toolsCacheBoundary = toolsCacheBoundary
         self.endUserID = endUserID
         self.modalities = modalities
         self.audioOutput = audioOutput
         self.streamingAudioHandler = streamingAudioHandler
+        self.telemetry = telemetry
     }
 
     public static let `default` = AITurnConfiguration()

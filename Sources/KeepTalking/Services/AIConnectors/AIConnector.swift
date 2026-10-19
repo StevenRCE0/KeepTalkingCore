@@ -18,6 +18,61 @@ public struct AIAudioOutput: Sendable {
     }
 }
 
+/// What one provider call consumed, as the provider reported it.
+///
+/// `inputTokens` counts every prompt token, cached or not, so
+/// `cacheReadTokens / inputTokens` is the hit ratio on every provider (Anthropic
+/// reports uncached input separately; its connector adds the cache counts
+/// back in).
+public struct AITurnUsage: Sendable, Equatable, Codable {
+    public var inputTokens: Int
+    public var outputTokens: Int
+    /// Prompt tokens served from the provider's prompt cache.
+    public var cacheReadTokens: Int
+    /// Prompt tokens written into the cache by this call.
+    public var cacheCreationTokens: Int
+    public var reasoningTokens: Int?
+    /// What the call cost, when the provider says (OpenRouter's `usage.cost`).
+    public var costUSD: Double?
+    /// The provider's id for the call (OpenRouter `gen-…`), for metering
+    /// lookups after the fact.
+    public var responseID: String?
+    /// The upstream that served it, when the provider says (OpenRouter).
+    public var provider: String?
+
+    public init(
+        inputTokens: Int,
+        outputTokens: Int,
+        cacheReadTokens: Int = 0,
+        cacheCreationTokens: Int = 0,
+        reasoningTokens: Int? = nil,
+        costUSD: Double? = nil,
+        responseID: String? = nil,
+        provider: String? = nil
+    ) {
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheCreationTokens = cacheCreationTokens
+        self.reasoningTokens = reasoningTokens
+        self.costUSD = costUSD
+        self.responseID = responseID
+        self.provider = provider
+    }
+
+    /// One log line, `in=… cached=… write=… out=… cost=…`.
+    public var logDescription: String {
+        var parts = [
+            "in=\(inputTokens)", "cached=\(cacheReadTokens)", "write=\(cacheCreationTokens)",
+            "out=\(outputTokens)",
+        ]
+        if let reasoningTokens { parts.append("reasoning=\(reasoningTokens)") }
+        if let costUSD { parts.append(String(format: "cost=$%.6f", costUSD)) }
+        if let provider { parts.append("provider=\(provider)") }
+        return parts.joined(separator: " ")
+    }
+}
+
 /// The result of a single AI turn: optional assistant text, optional reasoning
 /// content, any tool-call requests, and optional audio output.
 public struct AITurnResult: Sendable {
@@ -37,19 +92,42 @@ public struct AITurnResult: Sendable {
     /// must record the calls and their results but never execute them again.
     /// Only connectors whose capabilities report `executesToolsNatively` set it.
     public let toolsExecutedNatively: Bool
+    /// Token and cache accounting for the call, when the provider reports it.
+    public let usage: AITurnUsage?
 
     public init(
         assistantText: String?,
         thinking: String? = nil,
         toolCalls: [AIToolCall],
         audioOutput: AIAudioOutput? = nil,
-        toolsExecutedNatively: Bool = false
+        toolsExecutedNatively: Bool = false,
+        usage: AITurnUsage? = nil
     ) {
         self.assistantText = assistantText
         self.thinking = thinking
         self.toolCalls = toolCalls
         self.audioOutput = audioOutput
         self.toolsExecutedNatively = toolsExecutedNatively
+        self.usage = usage
+    }
+}
+
+// MARK: - System-row placement
+
+/// How a connector sends an `AIMessage.system` row that comes AFTER the first
+/// user/assistant row (rows before it always become the top-level system
+/// prompt).
+public enum AISystemRowPlacement: Sendable, Equatable {
+    /// In place, as `{"role": "system"}`.
+    case inline
+    /// In place, as a user-role block wrapped in a `<system>` tag — for
+    /// providers that hoist every system message to the top, which would move
+    /// per-turn text into the cached prefix.
+    case wrappedInUserTurn
+
+    /// The text a wrapped row carries.
+    public static func wrapped(_ text: String) -> String {
+        "<system>\n\(text)\n</system>"
     }
 }
 

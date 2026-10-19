@@ -37,6 +37,10 @@ public struct KeepTalkingAgentConfiguration: Sendable {
     /// Requested reasoning effort for the main loop. Snapped onto what the
     /// main model accepts before it is sent.
     public var reasoningEffort: AIReasoning.Effort?
+    /// How each turn's transcript is built (`withOrchestrationTranscript`):
+    /// layout, tiers, consults, and the search hand-over, sized to the main
+    /// model's window. `nil` builds `.legacy`, the decay-selected layout.
+    public var orchestrationStrategy: KeepTalkingOrchestrationStrategy?
     /// Preferred natural-language output languages. Empty means infer from
     /// the user.
     public var responseLanguages: [String]
@@ -45,8 +49,10 @@ public struct KeepTalkingAgentConfiguration: Sendable {
         main: Role,
         act: Role? = nil,
         reasoningEffort: AIReasoning.Effort? = nil,
-        responseLanguages: [String] = []
+        responseLanguages: [String] = [],
+        orchestrationStrategy: KeepTalkingOrchestrationStrategy? = nil
     ) {
+        self.orchestrationStrategy = orchestrationStrategy
         self.main = main
         self.act = act ?? main
         self.reasoningEffort = reasoningEffort

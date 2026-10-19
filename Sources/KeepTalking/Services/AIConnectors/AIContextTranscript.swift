@@ -66,23 +66,52 @@ extension KeepTalkingClient {
         actionStubs: [KeepTalkingActionStub],
         remoteActionCreationEntries: [KeepTalkingActionCreationCatalogEntry] = []
     ) async throws -> String {
+        let parts = try await agentContextTranscriptParts(
+            context,
+            actionStubs: actionStubs,
+            remoteActionCreationEntries: remoteActionCreationEntries
+        )
+        return [parts.perTurn, parts.stable].filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+
+    /// The context transcript split by how often it changes: `stable` (the
+    /// action catalog and action-creation peers) moves only when actions or
+    /// grants do; `perTurn` (thread map, node names, attachments, voice
+    /// transcripts) can move every turn. The legacy layout renders both in the
+    /// system prompt, per-turn first; the orchestrated one keeps `stable` there
+    /// and sends `perTurn` in the trailing turn-context row.
+    ///
+    /// `threadMap` overrides the legacy decay-selection thread map; `nodeMessages`
+    /// overrides the messages node names are collected from.
+    func agentContextTranscriptParts(
+        _ context: KeepTalkingContext,
+        actionStubs: [KeepTalkingActionStub],
+        remoteActionCreationEntries: [KeepTalkingActionCreationCatalogEntry] = [],
+        threadMap: String? = nil,
+        nodeIDs: Set<UUID>? = nil
+    ) async throws -> (stable: String, perTurn: String) {
         guard let contextID = context.id else {
-            return ""
+            return ("", "")
         }
         // Scoped view: this context's per-context aliases overlay the global
         // ones for every name the transcript renders.
         let aliasLookup = try await aliasLookup().scoped(to: contextID)
 
-        let (_, threadedSegments, selectedMessages) = try await loadContextSelection(
-            contextID: contextID
-        )
-
-        let threadMapSummary = renderThreadMapSummary(
-            segments: threadedSegments,
-            aliasLookup: aliasLookup
-        )
-
-        let allSelectedMessages = selectedMessages.flatMap(\.messages)
+        let threadMapSummary: String
+        let allSelectedMessages: [KeepTalkingContextMessage]
+        if let threadMap {
+            threadMapSummary = threadMap
+            allSelectedMessages = []
+        } else {
+            let (_, threadedSegments, selectedMessages) = try await loadContextSelection(
+                contextID: contextID
+            )
+            threadMapSummary = renderThreadMapSummary(
+                segments: threadedSegments,
+                aliasLookup: aliasLookup
+            )
+            allSelectedMessages = selectedMessages.flatMap(\.messages)
+        }
 
         // --- Attachment summary ---
         let attachmentCount = try await KeepTalkingContextAttachment.query(
@@ -138,7 +167,7 @@ extension KeepTalkingClient {
 
         // --- Node name summary (derived from selected messages) ---
         let nodeNameSummary = renderNodeNameSummary(
-            recentMessages: allSelectedMessages,
+            nodeIDs: nodeIDs ?? Self.senderNodeIDs(allSelectedMessages),
             aliasLookup: aliasLookup
         )
         let actionNodeSummary = renderActionNodeSummary(actionStubs, aliasLookup: aliasLookup)
@@ -147,12 +176,13 @@ extension KeepTalkingClient {
             aliasLookup: aliasLookup
         )
 
-        return [
-            threadMapSummary, nodeNameSummary, attachmentSummary,
-            voiceTranscriptSummary, actionNodeSummary, actionCreationPeerSummary,
-        ]
-        .filter { !$0.isEmpty }
-        .joined(separator: "\n\n")
+        let perTurn = [threadMapSummary, nodeNameSummary, attachmentSummary, voiceTranscriptSummary]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        let stable = [actionNodeSummary, actionCreationPeerSummary]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        return (stable, perTurn)
     }
 
     /// Returns the decay-weighted conversation history as proper API messages,
@@ -278,7 +308,7 @@ extension KeepTalkingClient {
 
     // MARK: - Thread rendering helpers
 
-    private func threadTopicName(
+    func threadTopicName(
         for thread: KeepTalkingThread,
         messages: [KeepTalkingContextMessage],
         aliasLookup: KeepTalkingAliasLookup
@@ -336,7 +366,7 @@ extension KeepTalkingClient {
     }
 
     /// Renders a single-line thread topic map injected before the transcript.
-    private func renderThreadMapSummary(
+    func renderThreadMapSummary(
         segments: [(thread: KeepTalkingThread, messages: [KeepTalkingContextMessage])],
         aliasLookup: KeepTalkingAliasLookup
     ) -> String {
@@ -472,18 +502,29 @@ extension KeepTalkingClient {
         }.joined(separator: "; ")
     }
 
-    func renderNodeNameSummary(
-        recentMessages: [KeepTalkingContextMessage],
-        aliasLookup: KeepTalkingAliasLookup
-    ) -> String {
-        var nodeIDs = Set(
-            recentMessages.compactMap { message -> UUID? in
+    static func senderNodeIDs(_ messages: [KeepTalkingContextMessage]) -> Set<UUID> {
+        Set(
+            messages.compactMap { message -> UUID? in
                 guard case .node(let nodeID) = message.sender else {
                     return nil
                 }
                 return nodeID
             }
         )
+    }
+
+    func renderNodeNameSummary(
+        recentMessages: [KeepTalkingContextMessage],
+        aliasLookup: KeepTalkingAliasLookup
+    ) -> String {
+        renderNodeNameSummary(nodeIDs: Self.senderNodeIDs(recentMessages), aliasLookup: aliasLookup)
+    }
+
+    func renderNodeNameSummary(
+        nodeIDs senderNodeIDs: Set<UUID>,
+        aliasLookup: KeepTalkingAliasLookup
+    ) -> String {
+        var nodeIDs = senderNodeIDs
         nodeIDs.insert(config.node)
 
         let sortedNodeIDs = nodeIDs.sorted { $0.uuidString < $1.uuidString }
