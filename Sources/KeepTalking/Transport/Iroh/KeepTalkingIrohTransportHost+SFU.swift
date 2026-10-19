@@ -1,5 +1,8 @@
 #if canImport(IrohLib)
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import IrohLib
 
 /// The SFU session: one connection to `kt-sfu` (`keeptalking/sfu/2`), kept

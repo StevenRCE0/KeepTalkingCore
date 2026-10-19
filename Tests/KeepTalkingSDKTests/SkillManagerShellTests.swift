@@ -35,9 +35,13 @@ struct SkillManagerShellTests {
         return nil
     }
 
+    /// Execution needs a platform script executor; without one the shell
+    /// tool is neither offered nor runnable.
+    static let canExecute = DefaultSkillScriptExecutor.current != nil
+
     // MARK: - Tool surface
 
-    @Test("kt_shell is advertised to the agent when execution is available")
+    @Test("kt_shell is advertised to the agent when execution is available", .enabled(if: Self.canExecute, "no script executor on this platform"))
     func shellToolIsExposed() async throws {
         let manager = makeManager()
         let context = SkillManifestContext(
@@ -49,7 +53,7 @@ struct SkillManagerShellTests {
 
     // MARK: - Execution
 
-    @Test("kt_shell runs a command and reports stdout + exit code")
+    @Test("kt_shell runs a command and reports stdout + exit code", .enabled(if: Self.canExecute, "no script executor on this platform"))
     func shellRunsCommand() async throws {
         let workspace = try makeFixtureDirectory()
         defer { try? FileManager.default.removeItem(at: workspace) }
@@ -63,7 +67,7 @@ struct SkillManagerShellTests {
         #expect(block.contains("hello-shell"))
     }
 
-    @Test("kt_shell is a real shell: pipes and redirection work")
+    @Test("kt_shell is a real shell: pipes and redirection work", .enabled(if: Self.canExecute, "no script executor on this platform"))
     func shellSupportsPipesAndRedirection() async throws {
         let workspace = try makeFixtureDirectory()
         defer { try? FileManager.default.removeItem(at: workspace) }
@@ -81,7 +85,7 @@ struct SkillManagerShellTests {
         #expect(redirected.contains("exit_code: 0"))
     }
 
-    @Test("kt_shell uses the thread workspace as its working directory")
+    @Test("kt_shell uses the thread workspace as its working directory", .enabled(if: Self.canExecute, "no script executor on this platform"))
     func shellUsesWorkspaceAsCwd() async throws {
         let workspace = try makeFixtureDirectory()
         defer { try? FileManager.default.removeItem(at: workspace) }
@@ -97,7 +101,7 @@ struct SkillManagerShellTests {
         #expect((try? String(contentsOf: probe, encoding: .utf8)) == "CWD-OK")
     }
 
-    @Test("kt_shell exposes the workspace as $KT_WORKSPACE")
+    @Test("kt_shell exposes the workspace as $KT_WORKSPACE", .enabled(if: Self.canExecute, "no script executor on this platform"))
     func shellInjectsWorkspaceEnvironmentVariable() async throws {
         let workspace = try makeFixtureDirectory()
         defer { try? FileManager.default.removeItem(at: workspace) }
@@ -115,7 +119,7 @@ struct SkillManagerShellTests {
         #expect((try? String(contentsOf: probe, encoding: .utf8)) == "WS-ENV-OK")
     }
 
-    @Test("kt_shell expands a manifest resource handle to the real path")
+    @Test("kt_shell expands a manifest resource handle to the real path", .enabled(if: Self.canExecute, "no script executor on this platform"))
     func shellExpandsManifestHandle() async throws {
         let workspace = try makeFixtureDirectory()
         defer { try? FileManager.default.removeItem(at: workspace) }
@@ -142,7 +146,7 @@ struct SkillManagerShellTests {
         #expect(block.contains("exit_code: 0"))
     }
 
-    @Test("kt_shell scrubs the absolute resource path back to its handle")
+    @Test("kt_shell scrubs the absolute resource path back to its handle", .enabled(if: Self.canExecute, "no script executor on this platform"))
     func shellSanitizesAbsolutePaths() async throws {
         let workspace = try makeFixtureDirectory()
         defer { try? FileManager.default.removeItem(at: workspace) }
@@ -185,7 +189,7 @@ struct SkillManagerShellTests {
 
     // MARK: - Tool-call dispatch (the path the agent's tool calls flow through)
 
-    @Test("a kt_shell tool call routes through executeSkillToolCalls")
+    @Test("a kt_shell tool call routes through executeSkillToolCalls", .enabled(if: Self.canExecute, "no script executor on this platform"))
     func shellRoutesThroughToolCallDispatch() async throws {
         let workspace = try makeFixtureDirectory()
         defer { try? FileManager.default.removeItem(at: workspace) }
@@ -212,6 +216,7 @@ struct SkillManagerShellTests {
 
     // MARK: - Sandboxed exec
 
+    #if os(macOS)
     @Test("kt_shell can exec system tools under the seatbelt sandbox")
     func shellExecsSystemToolsUnderSandbox() async throws {
         let workspace = try makeFixtureDirectory()
@@ -238,4 +243,5 @@ struct SkillManagerShellTests {
         #expect(block.contains("SANDBOXED-OK"))
         #expect(block.contains("exit_code: 0"))
     }
+    #endif
 }

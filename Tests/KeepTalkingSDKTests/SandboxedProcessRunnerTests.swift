@@ -1,3 +1,5 @@
+// `SandboxedProcessRunner` is macOS-only.
+#if os(macOS)
 import Foundation
 import Testing
 
@@ -94,3 +96,4 @@ struct SandboxedProcessRunnerTests {
         return directory
     }
 }
+#endif

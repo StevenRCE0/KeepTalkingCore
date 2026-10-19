@@ -2,8 +2,14 @@
 import Foundation
 import IrohLib
 import NIOConcurrencyHelpers
+#if canImport(Network)
 import Network
+#endif
+#if canImport(os)
 import os
+#else
+import Logging
+#endif
 
 /// The process-wide transport: one per process, owned by the host app and
 /// handed to every client as `KeepTalkingTransport.iroh(host)`. Each client's
@@ -225,8 +231,10 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
     public func shutdown() async {
         let (endpoint, tasks, ios, sfu) = state.withLockedValue { state in
             state.isShutDown = true
+            #if canImport(Network)
             state.pathMonitor?.cancel()
             state.pathMonitor = nil
+            #endif
             let ios = Array(state.io.values)
             let sfu = (state.sfu.connection, Array(state.sfu.doorbells.values))
             let tasks = state.tasks
@@ -273,7 +281,9 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
                 Task { await self.sfuLoop(endpoint) },
                 Task { await self.maintenanceLoop() },
             ]
+            #if canImport(Network)
             state.pathMonitor = startPathMonitor()
+            #endif
             return true
         }
         guard installed else {
@@ -552,12 +562,23 @@ public final class KeepTalkingIrohTransportHost: @unchecked Sendable {
 
     // MARK: - Log
 
+    #if canImport(os)
     static let logger = Logger(subsystem: "KeepTalkingSDK", category: "transport")
+    #else
+    /// No unified log off Apple platforms. swift-log prints `info` and up by
+    /// default, so these go out at `debug`, where Apple's `info` sits in
+    /// practice: kept out of the way unless someone asks for them.
+    static let logger = Logging.Logger(label: "KeepTalkingSDK.transport")
+    #endif
 
     /// Records an event for `instruments()`, and in the system log (Xcode's
     /// console) under KeepTalkingSDK / transport.
     func log(_ text: String) {
+        #if canImport(os)
         Self.logger.info("\(text, privacy: .public)")
+        #else
+        Self.logger.debug("\(text)")
+        #endif
         state.withLockedValue { state in
             state.nextEventID += 1
             state.events.append(.init(id: state.nextEventID, at: Date(), text: text))
@@ -727,8 +748,10 @@ extension KeepTalkingIrohTransportHost {
         var demand: [Data: Instant] = [:]
         var sfu = SFUState()
         var bluetooth = BluetoothState()
+        #if canImport(Network)
         /// Watches the system's network path while the endpoint is bound.
         var pathMonitor: NWPathMonitor?
+        #endif
         /// The last path seen, for the log; nil before the first.
         var path: String?
         var pathSatisfied = true

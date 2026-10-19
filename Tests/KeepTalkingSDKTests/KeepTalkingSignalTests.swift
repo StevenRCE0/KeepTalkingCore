@@ -34,7 +34,11 @@ struct KeepTalkingSignalTests {
 
         await values.waitForCount(50)
         #expect(values.snapshot == Array(0..<50))
+        #if canImport(Darwin)
+        // swift-testing on Linux runs the main actor off the main thread, so
+        // the thread is only a proxy for main-actor isolation on Darwin.
         #expect(onMainThread.snapshot.allSatisfy { $0 })
+        #endif
     }
 
     @Test("observeOnMain on a state signal replays current first")

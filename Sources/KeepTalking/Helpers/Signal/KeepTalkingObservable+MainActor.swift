@@ -18,8 +18,12 @@ extension KeepTalkingObservable {
         _ handler: @escaping @MainActor @Sendable (Value) async -> Void
     ) -> KeepTalkingSignalSubscription {
         observe { value in
-            Task { @MainActor in
-                await withDatabaseLane(lane) { await handler(value) }
+            // The lane is bound around creating the task, which inherits it,
+            // rather than inside: the async `withValue` suspends before the
+            // handler starts, and on Linux that alone let later values
+            // overtake earlier ones.
+            KeepTalkingDatabaseLane.$explicit.withValue(lane) {
+                _ = Task { @MainActor () -> Void in await handler(value) }
             }
         }
     }

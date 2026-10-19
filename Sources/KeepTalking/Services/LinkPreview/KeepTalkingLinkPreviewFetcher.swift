@@ -53,7 +53,22 @@ public final class KeepTalkingLinkPreviewFetcher: KeepTalkingLinkPreviewFetching
 
     private let session: URLSession
 
+    #if canImport(FoundationNetworking)
+    /// corelibs has no `URLSession.bytes(for:)`, so Linux reads through a
+    /// delegate session instead — one for the process, since corelibs can't
+    /// survive invalidating a session that has completed a request.
+    private static let linuxStreamer = LinuxStreamingSession(
+        configuration: makeConfiguration(),
+        allowsRedirect: { $0.url.map(LinkPreviewAddressPolicy.allows) ?? false }
+    )
+    #endif
+
     public init() {
+        session = URLSession(
+            configuration: Self.makeConfiguration(), delegate: RedirectGuard(), delegateQueue: nil)
+    }
+
+    private static func makeConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
@@ -65,7 +80,7 @@ public final class KeepTalkingLinkPreviewFetcher: KeepTalkingLinkPreviewFetching
             "User-Agent": Self.userAgent,
             "Accept-Language": Locale.preferredLanguages.prefix(3).joined(separator: ","),
         ]
-        session = URLSession(configuration: configuration, delegate: RedirectGuard(), delegateQueue: nil)
+        return configuration
     }
 
     deinit {
@@ -134,19 +149,35 @@ public final class KeepTalkingLinkPreviewFetcher: KeepTalkingLinkPreviewFetching
         guard await LinkPreviewAddressPolicy.admits(url) else { return nil }
         var request = URLRequest(url: url)
         request.setValue(accept, forHTTPHeaderField: "Accept")
+        #if canImport(FoundationNetworking)
+        guard let opened = try? await Self.linuxStreamer.open(request) else { return nil }
+        defer { opened.cancel() }
+        let response: URLResponse = opened.response
+        #else
         guard let (bytes, response) = try? await session.bytes(for: request) else { return nil }
         defer { bytes.task.cancel() }
+        #endif
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
             let mimeType = http.mimeType?.lowercased(), typeMatches(mimeType)
         else { return nil }
 
         var body = Data()
         do {
+            #if canImport(FoundationNetworking)
+            reading: for try await chunk in opened.body {
+                for byte in chunk {
+                    body.append(byte)
+                    if body.count >= limit { break reading }
+                    if stopsAtHeadEnd, byte == UInt8(ascii: ">"), Self.closesHead(body) { break reading }
+                }
+            }
+            #else
             for try await byte in bytes {
                 body.append(byte)
                 if body.count >= limit { break }
                 if stopsAtHeadEnd, byte == UInt8(ascii: ">"), Self.closesHead(body) { break }
             }
+            #endif
         } catch {
             return nil
         }

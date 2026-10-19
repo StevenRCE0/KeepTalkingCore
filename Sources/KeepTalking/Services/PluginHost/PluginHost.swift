@@ -305,7 +305,15 @@ public actor KeepTalkingPluginHost {
     /// ~104-byte Unix socket path limit besides. So prefer the **app-group**
     /// container (shared by design, and short enough), and fall back to plain
     /// Application Support for unsandboxed hosts like the CLI.
+    ///
+    /// Off Apple platforms there is no app sandbox and no app group to escape,
+    /// and Application Support is not where a Unix socket belongs. The runtime
+    /// dir is the equivalent on both counts: `XDG_RUNTIME_DIR` is per-user,
+    /// already the convention for sockets, and short enough that the node-named
+    /// socket clears the length limit — which `~/.local/share` would not on a
+    /// long username. It is also what `keeptalkingd` binds its own socket in.
     public static func socketDirectory() -> URL {
+        #if canImport(Darwin)
         if let groupID = Bundle.main.object(
             forInfoDictionaryKey: "KEEP_TALKING_APP_GROUP") as? String,
             let container = FileManager.default.containerURL(
@@ -318,6 +326,13 @@ public actor KeepTalkingPluginHost {
                 for: .applicationSupportDirectory, in: .userDomainMask
             ).first ?? URL(fileURLWithPath: NSTemporaryDirectory())
         return base.appending(path: "KeepTalking")
+        #else
+        let runtime =
+            ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"]
+            ?? NSTemporaryDirectory()
+        return URL(fileURLWithPath: runtime, isDirectory: true)
+            .appendingPathComponent("keeptalking", isDirectory: true)
+        #endif
     }
 
     /// The socket for a given node, beside the discovery file plugins read.

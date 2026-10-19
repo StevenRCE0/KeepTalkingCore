@@ -1,3 +1,5 @@
+// The workspace harvest lives in the macOS half of the IO manager.
+#if os(macOS)
 import Foundation
 import Testing
 
@@ -43,3 +45,4 @@ struct WorkspaceHarvestTests {
         #expect(harvested(since: third).isEmpty)
     }
 }
+#endif

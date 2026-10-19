@@ -979,25 +979,62 @@ public actor MCPManager {
         url: URL,
         bundleHeaders: [String: String],
         authorizer: (any HTTPClientAuthorizer)?
-    ) async -> HTTPClientTransport {
+    ) async -> any Transport {
         let sanitizedHeaders = await injectedHTTPHeaders(
             actionID: actionID,
             bundleHeaders: bundleHeaders,
             excludingAuthorization: authorizer != nil
         )
+        return Self.httpTransport(endpoint: url, authorizer: authorizer, headers: sanitizedHeaders)
+    }
+
+    /// How long the HTTP pre-flight handshake may take.
+    ///
+    /// On Linux the stream-only authorization probe is skipped (see
+    /// `resolveStreamAuthorizationChallenge`), so a server's sign-in runs
+    /// inside this handshake — a 401, the authorizer, the browser — and it
+    /// gets the budget the live connect does. Elsewhere the probe meets the
+    /// challenge first, and the handshake keeps the short connect timeout, so
+    /// a server that never answers still fails fast.
+    private nonisolated func preflightTimeoutSeconds(hasAuthorizer: Bool) -> TimeInterval {
+        #if canImport(FoundationNetworking)
+        return hasAuthorizer ? interactiveConnectTimeoutSeconds : connectTimeoutSeconds
+        #else
+        return connectTimeoutSeconds
+        #endif
+    }
+
+    /// The Streamable HTTP transport for this platform.
+    ///
+    /// On Linux, swift-sdk's `HTTPClientTransport` cannot stream: corelibs
+    /// Foundation has no `URLSession.bytes(for:)`, so it waits for a response
+    /// body to end, and a server that answers with an event stream it keeps
+    /// open is never read. ``LinuxStreamingHTTPTransport`` keeps the same
+    /// requests and OAuth handling and reads the stream as it arrives.
+    private static func httpTransport(
+        endpoint: URL,
+        authorizer: (any HTTPClientAuthorizer)?,
+        headers: [String: String]
+    ) -> any Transport {
+        let requestModifier: @Sendable (URLRequest) -> URLRequest = { request in
+            var modifiedRequest = request
+            for (key, value) in headers {
+                modifiedRequest.setValue(value, forHTTPHeaderField: key)
+            }
+            return modifiedRequest
+        }
+        #if canImport(FoundationNetworking)
+        return LinuxStreamingHTTPTransport(
+            endpoint: endpoint, authorizer: authorizer, requestModifier: requestModifier)
+        #else
         return HTTPClientTransport(
-            endpoint: url,
-            configuration: URLSessionConfiguration.default,
+            endpoint: endpoint,
+            configuration: .default,
             streaming: true,
             authorizer: authorizer,
-            requestModifier: { request in
-                var modifiedRequest = request
-                for (key, value) in sanitizedHeaders {
-                    modifiedRequest.setValue(value, forHTTPHeaderField: key)
-                }
-                return modifiedRequest
-            }
+            requestModifier: requestModifier
         )
+        #endif
     }
 
     /// Resolves an authorization challenge that the server raises only on the
@@ -1023,6 +1060,15 @@ public actor MCPManager {
         guard authorizer.authorizationHeader(for: url) == nil else {
             return
         }
+        #if canImport(FoundationNetworking)
+        // corelibs Foundation has no `URLSession.bytes(for:)`, and reading the
+        // body with `data(for:)` would park on a server that opens the stream.
+        // The pre-flight is skipped here: a challenge on the POST path or in
+        // `initialize`'s `_meta` still reaches the authorizer, as before this
+        // probe existed. A server that challenges only on its event stream
+        // does not reach OAuth on Linux until there is a streaming probe.
+        return
+        #else
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = connectTimeoutSeconds
@@ -1067,6 +1113,7 @@ public actor MCPManager {
             operationKey: "GET",
             session: .shared
         )
+        #endif
     }
 
     /// Connects an HTTP MCP action, resolving an authorization challenge carried
@@ -1334,25 +1381,14 @@ public actor MCPManager {
                 name:
                     "KeepTalking:preflight:\(nodeConfig.node.uuidString):\(actionID.uuidString)"
             )
-            let transport = HTTPClientTransport(
-                endpoint: endpoint,
-                configuration: .default,
-                streaming: true,
-                authorizer: authorizer,
-                requestModifier: { request in
-                    var modifiedRequest = request
-                    for (key, value) in headers {
-                        modifiedRequest.setValue(value, forHTTPHeaderField: key)
-                    }
-                    return modifiedRequest
-                }
-            )
+            let transport = Self.httpTransport(
+                endpoint: endpoint, authorizer: authorizer, headers: headers)
 
             do {
                 let initialization = try await Self.connectClient(
                     client,
                     transport: IncrementingRequestIDTransport(base: transport),
-                    timeoutSeconds: connectTimeoutSeconds
+                    timeoutSeconds: preflightTimeoutSeconds(hasAuthorizer: authorizer != nil)
                 )
                 if attempt == 0, let authorizer,
                     let challenge = Self.authorizationChallenge(
