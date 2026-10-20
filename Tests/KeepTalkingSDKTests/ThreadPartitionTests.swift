@@ -489,6 +489,34 @@ struct ThreadPartitionTests {
         #expect(try await layout(node).isPartition)
     }
 
+    @Test("a context typed into in one visit adopts the held live thread on its first message")
+    func firstSentMessageAdoptsHeldLiveThread() async throws {
+        let node = try await makeNode()
+
+        // Entering the empty context holds the live row; only sends follow,
+        // with no second entry to re-thread.
+        let held = try await node.client.ensureContextMainThread(for: contextID)
+        for text in ["one", "two", "three"] {
+            try await node.client.send(text, in: contextID)
+        }
+        let ids = try await KeepTalkingContextMessage.query(on: node.store.database)
+            .filter(\.$context.$id == contextID)
+            .all()
+            .sortedForSync()
+            .compactMap(\.id)
+
+        let adopted = try await layout(node)
+        #expect(try await threads(node).map(\.id) == [held.id])
+        #expect(adopted.starts == [ids[0]])
+        #expect(adopted.isPartition)
+
+        // And a turning point now has a thread to split.
+        #expect(try await node.client.markTurningPoint(at: ids[1], in: contextID))
+        let split = try await layout(node)
+        #expect(split.starts == [ids[0], ids[1]])
+        #expect(split.isPartition)
+    }
+
     // MARK: - Naming
 
     @Test("a turning point on the first message names the leading thread")

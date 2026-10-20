@@ -199,6 +199,7 @@ extension KeepTalkingClient {
 
         // updatedAt is advanced by the touch middleware when the message saves.
         try await message.save(on: localStore.database)
+        await adoptHeldLiveThread(in: try persistedContext.requireID())
         let savedAttachments = try await persistOutgoingAttachments(
             preparedAttachments,
             in: persistedContext,
@@ -254,6 +255,18 @@ extension KeepTalkingClient {
         }
     }
 
+    /// The message is stored whether or not threading follows: a failure here
+    /// leaves the held row for the next re-threading, as before.
+    private func adoptHeldLiveThread(in contextID: UUID) async {
+        do {
+            try await adoptHeldLiveThreadIfNeeded(in: contextID)
+        } catch {
+            onLog?(
+                "[client/threads] adopting the held live thread failed context=\(contextID.uuidString.lowercased()) error=\(error.localizedDescription)"
+            )
+        }
+    }
+
     private func outgoingMessageContext(
         for contextID: UUID
     ) async throws -> KeepTalkingContext {
@@ -284,6 +297,11 @@ extension KeepTalkingClient {
     {
         let applied = try await saveIncomingMessages(
             [message], in: message.$context.id)
+        // A live envelope only: a sync re-threads once every page has landed
+        // (`threadAfterSync`), not over the part landed so far.
+        if applied {
+            await adoptHeldLiveThread(in: message.$context.id)
+        }
         // A message may have arrived after attachment DTOs that referenced it
         // (separate envelopes, separate Tasks). Re-drive any that were parked
         // waiting for this parent.

@@ -1,10 +1,11 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import Testing
 
 @testable import KeepTalkingSDK
+
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 @Suite(.serialized)
 struct PassKVServiceTests {
@@ -272,14 +273,11 @@ private final class PassKVURLProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func startLoading() {
-        // corelibs marks URLProtocol's Sendable conformance unavailable, so the
-        // class's @unchecked Sendable doesn't take there and the task can't
-        // capture self; it gets the same instance through an unchecked let.
-        #if canImport(FoundationNetworking)
+        // corelibs, and Foundation as of the 27 SDKs, mark URLProtocol's
+        // Sendable conformance unavailable, so the class's @unchecked Sendable
+        // doesn't take and the task can't capture self; it gets the same
+        // instance through an unchecked let.
         nonisolated(unsafe) let loader = self
-        #else
-        let loader = self
-        #endif
         Task {
             do {
                 let recorder = try #require(Self.recorder)

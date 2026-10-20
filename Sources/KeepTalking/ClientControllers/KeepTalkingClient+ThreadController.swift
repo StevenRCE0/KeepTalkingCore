@@ -56,6 +56,22 @@ extension KeepTalkingClient {
         }
     }
 
+    /// Re-threads once the context holds a message while the live row held
+    /// before its first (see `ensureContextMainThread`) still has no start.
+    ///
+    /// Nothing else re-threads a context that only gains messages, so one
+    /// created and typed into in a single visit kept that row: no span on
+    /// the timeline, and no owning thread to mark a turning point in.
+    func adoptHeldLiveThreadIfNeeded(in contextID: UUID) async throws {
+        let held = try await KeepTalkingThread.query(on: localStore.database)
+            .filter(\.$context.$id == contextID)
+            .filter(\.$state == .contextMain)
+            .filter(\.$startMessage.$id == nil)
+            .count()
+        guard held > 0 else { return }
+        try await applyLocalTurningPointMarkThreading(in: contextID)
+    }
+
     private func liveRows(in contextID: UUID) async throws -> [KeepTalkingThread] {
         try await KeepTalkingThread.query(on: localStore.database)
             .filter(\.$context.$id == contextID)
