@@ -567,6 +567,7 @@ extension KeepTalkingClient {
         .filter(\.$node.$id, .equal, config.node)
         .all()
         let sortedLocalActions = deduplicatedAndSortedActions(localActions)
+        let actionAppearances = try await ownActionAppearances()
 
         let relations =
             (try await KeepTalkingNodeRelation.query(
@@ -605,6 +606,7 @@ extension KeepTalkingClient {
             for action in relationActions {
                 if let advertised = await advertisedAction(
                     from: action,
+                    appearance: action.id.flatMap { actionAppearances[$0] },
                     recipient: recipientNode,
                     context: currentContext
                 ) {
@@ -1071,8 +1073,28 @@ extension KeepTalkingClient {
         )
     }
 
+    /// The user's global alias look for each action, by action — what this
+    /// node advertises as its actions' appearance. Context-scoped aliases
+    /// stay local: an action's look is the same in every context.
+    private func ownActionAppearances() async throws -> [UUID: KeepTalkingMappingAppearance] {
+        let rows = try await KeepTalkingMapping.query(on: localStore.database)
+            .filter(\.$kind, .equal, .alias)
+            .filter(\.$action.$id, .notEqual, nil)
+            .filter(\.$scopeContext.$id, .equal, nil)
+            .filter(\.$deletedAt, .equal, nil)
+            .all()
+        var appearances: [UUID: KeepTalkingMappingAppearance] = [:]
+        for row in rows {
+            guard let actionID = row.$action.id, let appearance = row.appearance?.withoutAvatar
+            else { continue }
+            appearances[actionID] = appearance
+        }
+        return appearances
+    }
+
     private func advertisedAction(
         from action: KeepTalkingAction,
+        appearance: KeepTalkingMappingAppearance? = nil,
         recipient: KeepTalkingNode? = nil,
         context: KeepTalkingContext? = nil
     ) async -> KeepTalkingAdvertisedAction? {
@@ -1219,7 +1241,8 @@ extension KeepTalkingClient {
             availability: availability,
             tools: advertisedTools,
             createdAt: action.createdAt,
-            lastUsed: action.lastUsed
+            lastUsed: action.lastUsed,
+            appearance: appearance
         )
     }
 

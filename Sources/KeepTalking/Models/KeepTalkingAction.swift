@@ -514,6 +514,12 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
     @OptionalField(key: "disabled")
     public var disabled: Bool?
 
+    /// How the owner draws this action, as it advertised it — set on a
+    /// remote action's mirror only. The local user's own look for any action
+    /// is its alias (`KeepTalkingMappingTarget.action`), drawn over this one.
+    @OptionalField(key: "appearance")
+    public var appearance: KeepTalkingMappingAppearance?
+
     @Timestamp(key: "created_at", on: .create)
     public var createdAt: Date?
 

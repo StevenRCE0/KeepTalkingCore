@@ -1801,6 +1801,7 @@ extension KeepTalkingClient {
                 incomingAction.blockingAuthorisation
             if !isLocallyHosted {
                 persistedAction.disabled = incomingAction.availability == .disabled
+                persistedAction.appearance = incomingAction.appearance?.withoutAvatar
             }
             persistedAction.createdAt =
                 incomingAction.createdAt ?? persistedAction.createdAt ?? .now

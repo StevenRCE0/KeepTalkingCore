@@ -151,6 +151,19 @@ extension KeepTalkingClient {
         }
     }
 
+    /// Re-sends this node's status in its context, so peers pick up an edit
+    /// to what it advertises — its actions' appearance, say — without waiting
+    /// for the next heartbeat.
+    public func republishNodeStatus() async {
+        do {
+            try await broadcastCurrentNodeStatus(
+                in: try await ensure(config.contextID, for: KeepTalkingContext.self, strict: true)
+            )
+        } catch {
+            debug("node status republish failed error=\(error.localizedDescription)")
+        }
+    }
+
     // MARK: - What comes in
 
     /// Keeps what `nodeID` shared about itself in this client's context —

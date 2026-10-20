@@ -87,6 +87,10 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
     public let tools: [String]?
     public let createdAt: Date?
     public let lastUsed: Date?
+    /// The owner's own global alias look for this action — colour and icon
+    /// only: avatars live in the blob store, which doesn't sync for actions.
+    /// Nil when it has none; absent from older peers, which reads the same.
+    public let appearance: KeepTalkingMappingAppearance?
 
     public init(
         actionID: UUID,
@@ -99,7 +103,8 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
         availability: KeepTalkingAdvertisedActionAvailability,
         tools: [String]? = nil,
         createdAt: Date? = nil,
-        lastUsed: Date? = nil
+        lastUsed: Date? = nil,
+        appearance: KeepTalkingMappingAppearance? = nil
     ) {
         self.actionID = actionID
         self.ownerNodeID = ownerNodeID
@@ -112,5 +117,6 @@ public struct KeepTalkingAdvertisedAction: Codable, Sendable {
         self.tools = tools
         self.createdAt = createdAt
         self.lastUsed = lastUsed
+        self.appearance = appearance?.withoutAvatar
     }
 }

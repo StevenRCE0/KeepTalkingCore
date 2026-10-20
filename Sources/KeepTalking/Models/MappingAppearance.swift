@@ -72,6 +72,14 @@ public struct KeepTalkingMappingAppearance: Codable, Hashable, Sendable {
         )
     }
 
+    /// What can travel inline, without blob syncing: everything but the
+    /// avatar. Nil when that leaves nothing.
+    var withoutAvatar: Self? {
+        var copy = normalized()
+        copy.avatar = nil
+        return copy.isEmpty ? nil : copy
+    }
+
     /// Blobs this appearance keeps alive.
     var blobIDs: Set<String> {
         avatar.map { [$0.blobID] } ?? []
