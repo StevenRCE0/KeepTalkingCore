@@ -24,10 +24,12 @@ private func makeFixture(
 ) async throws -> Fixture {
     let nodeID = UUID()
     let contextID = UUID()
+    let store = try await KeepTalkingInMemoryStore.make()
+    try await KeepTalkingClient.createContext(contextID: contextID, on: store.database)
     let client = KeepTalkingClient(
         config: KeepTalkingConfig(contextID: contextID, node: nodeID),
         transport: multiplexer.transport,
-        localStore: try await KeepTalkingInMemoryStore.make()
+        localStore: store
     )
     let lifecycle = SignalRecorder<KeepTalkingClientLifecycle>()
     client.lifecycle.observe { lifecycle.record($0) }

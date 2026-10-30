@@ -386,7 +386,7 @@ extension KeepTalkingClient {
         recipientNodeID: UUID,
         purpose: String
     ) async throws -> KeepTalkingAsymmetricCipherEnvelope {
-        let node = try await ensure(recipientNodeID, for: KeepTalkingNode.self)
+        let node = try await KeepTalkingNode.findOrCreate(recipientNodeID, on: localStore.database)
 
         let localKeyMaterial = try await localKeyAgreementMaterial(to: node)
         let recipientCandidate = try await remoteKeyAgreementPublicKeys(

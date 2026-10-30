@@ -42,11 +42,7 @@ extension KeepTalkingClient {
             )
         )
         do {
-            let context = try await ensure(
-                contextID,
-                for: KeepTalkingContext.self,
-                strict: true
-            )
+            let context = try await requireContext(contextID)
             let persistedContextID = try context.requireID()
 
             // Messages: the shared summary→tail→chunk reconcile (see runSyncReconcile).

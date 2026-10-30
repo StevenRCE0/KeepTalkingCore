@@ -159,7 +159,7 @@ extension KeepTalkingClient {
         on database: any Database,
         callbackForBroadcasting: ((String) async -> Void)? = nil
     ) async throws {
-        let context = try await ensureContext(contextID, on: database)
+        let context = try await Self.requireContext(contextID, on: database)
         let alias = try await requireActionTag(aliasID, on: database)
         let action = try await requireTaggedAction(alias, on: database)
         let hostNode = try await resolveGrantHostNode(
@@ -209,11 +209,7 @@ extension KeepTalkingClient {
         grantScope: KeepTalkingActionScope? = nil,
         lane: KeepTalkingGrantLane = .other
     ) async throws {
-        let selfNode = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
+        let selfNode = try await requireNode(config.node)
 
         try await Self.stageAliasPermissionWithTrustInvitation(
             contextID: contextID,
@@ -251,11 +247,7 @@ extension KeepTalkingClient {
         eligibility: KeepTalkingRelationEligibility = .trustedOnly,
         lane: KeepTalkingGrantLane = .other
     ) async throws {
-        let node = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
+        let node = try await requireNode(config.node)
         try await Self.grantAliasPermission(
             aliasID: aliasID,
             toNodeID: toNodeID,
@@ -291,11 +283,7 @@ extension KeepTalkingClient {
         scope: KeepTalkingActionPermissionScope,
         eligibility: KeepTalkingRelationEligibility = .trustedOnly
     ) async throws {
-        let node = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
+        let node = try await requireNode(config.node)
         try await Self.setAliasPermissionScope(
             aliasID: aliasID,
             toNodeID: toNodeID,
@@ -370,11 +358,7 @@ extension KeepTalkingClient {
         eligibility: KeepTalkingRelationEligibility = .trustedOnly,
         lane: KeepTalkingGrantLane = .other
     ) async throws {
-        let node = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
+        let node = try await requireNode(config.node)
         try await Self.revokeAliasPermission(
             aliasID: aliasID,
             fromNodeID: fromNodeID,

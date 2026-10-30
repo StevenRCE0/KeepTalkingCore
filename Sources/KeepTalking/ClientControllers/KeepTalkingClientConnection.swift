@@ -343,7 +343,7 @@ final class KeepTalkingClientConnection: Sendable {
             await client.acpManager.setAuthHandler(client.acpAuthHandler)
             #endif
             try ensureCurrentConnect(generation)
-            _ = try await client.ensure(config.contextID, for: KeepTalkingContext.self)
+            _ = try await client.requireContext(config.contextID)
             let secret = try await client.ensureGroupChatSecret(for: config.contextID)
             try ensureCurrentConnect(generation)
 

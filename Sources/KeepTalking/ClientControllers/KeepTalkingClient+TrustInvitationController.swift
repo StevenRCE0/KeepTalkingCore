@@ -100,7 +100,7 @@ extension KeepTalkingClient {
         in contextID: UUID,
         claimingSlot slotID: UUID? = nil
     ) async throws -> KeepTalkingTrustOutcome {
-        try await ensureContext(contextID)
+        _ = try await requireContext(contextID)
         guard try await loadGroupChatSecret(for: contextID) != nil else {
             throw KeepTalkingTrustError.contextSecretMissing(contextID)
         }
@@ -177,7 +177,7 @@ extension KeepTalkingClient {
         lastError: String? = nil,
         on database: any Database
     ) async throws -> KeepTalkingTrustInvitation {
-        let context = try await ensureContext(contextID, on: database)
+        let context = try await Self.requireContext(contextID, on: database)
         let now = Date.now
 
         if let existing = try await KeepTalkingTrustInvitation.query(on: database)
@@ -246,7 +246,7 @@ extension KeepTalkingClient {
         invitation.resolvedAt = status.isTerminal ? invitation.updatedAt : nil
         invitation.lastError = lastError
         try await invitation.save(on: database)
-        let context = try await ensureContext(invitation.$context.id, on: database)
+        let context = try await Self.requireContext(invitation.$context.id, on: database)
         try await applyTrustInvitationRelationSideEffects(
             context: context,
             inviterNodeID: invitation.inviterNodeID,
@@ -387,18 +387,13 @@ extension KeepTalkingClient {
         contextID: UUID,
         on database: any Database
     ) async throws -> Bool {
-        let context = try await ensureContext(contextID, on: database)
+        let context = try await Self.requireContext(contextID, on: database)
         return try await preferredTrustedRelation(
             from: fromNodeID,
             to: toNodeID,
             allowing: context,
             on: database
         ) != nil
-    }
-
-    @discardableResult
-    func ensureContext(_ contextID: UUID) async throws -> KeepTalkingContext {
-        try await Self.ensureContext(contextID, on: localStore.database)
     }
 
     private static func applyTrustInvitationRelationSideEffects(
@@ -439,46 +434,37 @@ extension KeepTalkingClient {
         in context: KeepTalkingContext,
         on database: any Database
     ) async throws {
-        let relations = try await relations(
+        let relations = try await KeepTalkingNodeRelation.rows(
             from: fromNodeID,
             to: toNodeID,
             on: database
         )
-
         if relations.contains(where: { $0.relationship.isTrustedOrOwner }) {
             return
         }
 
-        if let relation = relations.first(where: {
-            if case .preTrusted = $0.relationship {
-                return true
-            }
-            return false
-        }) {
-            guard case .preTrusted(let contexts) = relation.relationship else {
-                return
-            }
-            relation.relationship = .preTrusted(
-                contexts.merging(context).sortedByID()
-            )
-            try await relation.save(on: database)
-            return
-        }
-
-        if let relation = relations.first(where: { $0.relationship == .pending }) {
-            relation.relationship = .preTrusted([context])
-            try await relation.save(on: database)
-            return
-        }
-
-        let fromNode = try await ensureNode(fromNodeID, on: database)
-        let toNode = try await ensureNode(toNodeID, on: database)
-        let relation = try KeepTalkingNodeRelation(
-            from: fromNode,
-            to: toNode,
-            relationship: .preTrusted([context])
+        try await KeepTalkingNode.findOrCreate(fromNodeID, on: database)
+        try await KeepTalkingNode.findOrCreate(toNodeID, on: database)
+        let relation = try await KeepTalkingNodeRelation.firstOrCreate(
+            from: fromNodeID,
+            to: toNodeID,
+            initial: .preTrusted([context]),
+            accepting: { !$0.isTrustedOrOwner },
+            on: database
         )
-        try await relation.save(on: database)
+        switch relation.relationship {
+            case .preTrusted(let contexts):
+                let merged = contexts.merging(context).sortedByID()
+                if merged != contexts {
+                    relation.relationship = .preTrusted(merged)
+                    try await relation.save(on: database)
+                }
+            case .pending:
+                relation.relationship = .preTrusted([context])
+                try await relation.save(on: database)
+            case .owner, .trusted, .trustedInAllContext:
+                return
+        }
     }
 
     private static func removePreTrustedContext(
@@ -487,7 +473,7 @@ extension KeepTalkingClient {
         context: KeepTalkingContext,
         on database: any Database
     ) async throws {
-        let relations = try await relations(
+        let relations = try await KeepTalkingNodeRelation.rows(
             from: fromNodeID,
             to: toNodeID,
             on: database
@@ -533,48 +519,6 @@ extension KeepTalkingClient {
         }
     }
 
-    private static func relations(
-        from fromNodeID: UUID,
-        to toNodeID: UUID,
-        on database: any Database
-    ) async throws -> [KeepTalkingNodeRelation] {
-        try await KeepTalkingNodeRelation.query(on: database)
-            .filter(\.$from.$id, .equal, fromNodeID)
-            .filter(\.$to.$id, .equal, toNodeID)
-            .all()
-            .sorted {
-                let lhs = relationPriority($0.relationship)
-                let rhs = relationPriority($1.relationship)
-                return lhs == rhs
-                    ? ($0.id?.uuidString ?? "") < ($1.id?.uuidString ?? "")
-                    : lhs > rhs
-            }
-    }
-
-    private static func ensureNode(
-        _ nodeID: UUID,
-        on database: any Database
-    ) async throws -> KeepTalkingNode {
-        if let node = try await KeepTalkingNode.find(nodeID, on: database) {
-            return node
-        }
-
-        let node = KeepTalkingNode(id: nodeID)
-        try await node.save(on: database)
-        return node
-    }
-
-    static func ensureContext(
-        _ contextID: UUID,
-        on database: any Database
-    ) async throws -> KeepTalkingContext {
-        if let context = try await KeepTalkingContext.find(contextID, on: database) {
-            return context
-        }
-        let context = KeepTalkingContext(id: contextID)
-        try await context.save(on: database)
-        return context
-    }
 }
 
 extension Array where Element == KeepTalkingContext {

@@ -8,10 +8,15 @@ extension KeepTalkingClient {
         named name: String? = nil,
         on database: any Database
     ) async throws -> KeepTalkingContext {
-        let context = try await upsertContext(
-            KeepTalkingContext(id: contextID),
-            on: database
-        )
+        let context = KeepTalkingContext(id: contextID)
+        do {
+            try await context.create(on: database)
+        } catch {
+            guard try await KeepTalkingContext.find(contextID, on: database) != nil else {
+                throw error
+            }
+            throw KeepTalkingClientError.contextAlreadyExists(contextID)
+        }
 
         let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !trimmedName.isEmpty {
@@ -35,34 +40,17 @@ extension KeepTalkingClient {
         return context
     }
 
-    func upsertContext(_ context: KeepTalkingContext) async throws
-        -> KeepTalkingContext
-    {
-        try await Self.upsertContext(context, on: localStore.database)
-    }
-
-    static func upsertContext(
-        _ context: KeepTalkingContext,
+    static func requireContext(
+        _ contextID: UUID,
         on database: any Database
     ) async throws -> KeepTalkingContext {
-        guard let contextID = context.id else {
-            try await context.save(on: database)
-            return context
+        guard let context = try await KeepTalkingContext.find(contextID, on: database) else {
+            throw KeepTalkingClientError.missingContext(contextID)
         }
-
-        if let existing = try await KeepTalkingContext.query(on: database)
-            .filter(\.$id, .equal, contextID)
-            .first()
-        {
-            // Forward-only: only advance (and only write) when newer.
-            if context.updatedAt > existing.updatedAt {
-                existing.updatedAt = context.updatedAt
-                try await existing.save(on: database)
-            }
-            return existing
-        }
-
-        try await context.save(on: database)
         return context
+    }
+
+    func requireContext(_ contextID: UUID) async throws -> KeepTalkingContext {
+        try await Self.requireContext(contextID, on: localStore.database)
     }
 }

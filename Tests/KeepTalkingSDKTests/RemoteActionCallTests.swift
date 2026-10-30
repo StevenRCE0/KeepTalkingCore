@@ -1103,8 +1103,8 @@ struct RemoteActionCallTests {
         #expect(received?.actionID == actionID)
     }
 
-    @Test("incoming remote action call creates a placeholder context when missing")
-    func incomingRemoteActionCallCreatesPlaceholderContext() async throws {
+    @Test("incoming remote action call for a context this node does not have is refused without a row")
+    func incomingRemoteActionCallRefusesMissingContext() async throws {
         let localStore = try await KeepTalkingInMemoryStore.make()
         let selfNodeID = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!
         let callerNodeID = UUID(uuidString: "BBBBBBBB-0000-0000-0000-000000000002")!
@@ -1176,10 +1176,7 @@ struct RemoteActionCallTests {
         .filter(\.$id, .equal, contextID)
         .first()
 
-        #expect(storedContext?.id == contextID)
-        await activityRecorder.waitForCount(2)
-        #expect(
-            activityRecorder.snapshot().map(\.phase.isEnded) == [false, true]
-        )
+        #expect(storedContext == nil)
+        #expect(activityRecorder.snapshot().isEmpty)
     }
 }

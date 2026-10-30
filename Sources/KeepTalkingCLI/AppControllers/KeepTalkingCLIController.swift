@@ -73,6 +73,17 @@ final class KeepTalkingCLIController {
         return try await KeepTalkingClient.makeDefaultLocalStore()
     }
 
+    func adoptContext(_ contextID: UUID) async throws {
+        do {
+            try await KeepTalkingClient.createContext(
+                contextID: contextID,
+                on: localStore.database
+            )
+        } catch KeepTalkingClientError.contextAlreadyExists {
+            return
+        }
+    }
+
     private func run() async throws {
         bindCallbacks(to: client)
 
@@ -87,6 +98,7 @@ final class KeepTalkingCLIController {
 
         printRuntimeConfig(currentConfig)
 
+        try await adoptContext(cliConfig.sdkConfig.contextID)
         try await client.connect()
         defer { client.disconnect() }
 

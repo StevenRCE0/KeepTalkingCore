@@ -232,9 +232,8 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             as: databaseID,
             isDefault: true
         )
-        // Bump a context's `updatedAt` on single-write child saves. The batched
-        // sync path bulk-inserts (bypassing middleware) and touches the context
-        // itself, so these don't double-fire. See ContextTouchMiddleware.
+        // Bump a context's `updatedAt` on single-write child saves, the sync
+        // path's per-row page inserts included. See ContextTouchMiddleware.
         manager.databases.middleware.use(
             ContextMessageTouchMiddleware(),
             on: databaseID

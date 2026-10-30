@@ -140,7 +140,7 @@ extension KeepTalkingClient {
     private func buildContextSyncSnapshot(
         for context: UUID
     ) async throws -> KeepTalkingContextSyncSnapshot {
-        _ = try await ensure(context, for: KeepTalkingContext.self)
+        _ = try await requireContext(context)
         let chunkSize = config.contextSyncChunkSize
         let database = localStore.database
         let messages = try await KeepTalkingContextScanQueue.readPaged(id: \.id) {

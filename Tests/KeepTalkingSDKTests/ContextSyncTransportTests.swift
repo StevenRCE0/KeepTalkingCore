@@ -826,6 +826,7 @@ struct ContextSyncTransportTests {
             contextID: UUID(uuidString: "82000000-0000-0000-0000-000000000000")!,
             node: UUID(uuidString: "AAAAAAAA-9999-9999-9999-999999999999")!
         )
+        try await KeepTalkingClient.createContext(contextID: config.contextID, on: localStore.database)
         let client = KeepTalkingClient(
             config: config,
             localStore: localStore

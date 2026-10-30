@@ -144,7 +144,7 @@ extension KeepTalkingClient {
         do {
             try sendEnvelope(KeepTalkingContextSyncEnvelope.aliasPush(try await ownAliasPush()))
             try await broadcastCurrentNodeStatus(
-                in: try await ensure(config.contextID, for: KeepTalkingContext.self, strict: true)
+                in: try await requireContext(config.contextID)
             )
         } catch {
             debug("alias publish failed error=\(error.localizedDescription)")
@@ -157,7 +157,7 @@ extension KeepTalkingClient {
     public func republishNodeStatus() async {
         do {
             try await broadcastCurrentNodeStatus(
-                in: try await ensure(config.contextID, for: KeepTalkingContext.self, strict: true)
+                in: try await requireContext(config.contextID)
             )
         } catch {
             debug("node status republish failed error=\(error.localizedDescription)")
@@ -191,9 +191,9 @@ extension KeepTalkingClient {
 
     private func receiveSharedAlias(_ alias: KeepTalkingSharedAlias, from nodeID: UUID) async throws {
         guard nodeID != config.node else { return }
-        _ = try await ensure(nodeID, for: KeepTalkingNode.self)
+        try await KeepTalkingNode.findOrCreate(nodeID, on: localStore.database)
         if let contextID = alias.contextID {
-            _ = try await ensure(contextID, for: KeepTalkingContext.self)
+            _ = try await requireContext(contextID)
         }
         guard
             try await Self.applySharedAlias(

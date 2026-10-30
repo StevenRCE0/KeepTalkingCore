@@ -176,7 +176,7 @@ extension KeepTalkingClient {
         }
 
         let node = try await getCurrentNodeInstance()
-        let persistedContext = try await upsertContext(context)
+        let persistedContext = try await requireContext(context.requireID())
         let sender = try sender ?? .node(node: node.requireID())
 
         let message = KeepTalkingContextMessage(
@@ -270,7 +270,7 @@ extension KeepTalkingClient {
     private func outgoingMessageContext(
         for contextID: UUID
     ) async throws -> KeepTalkingContext {
-        try await ensure(contextID, for: KeepTalkingContext.self)
+        try await requireContext(contextID)
     }
 
     private func preparedAttachments(
@@ -356,16 +356,7 @@ extension KeepTalkingClient {
             return false
         }
 
-        let latestTimestamp = newMessages.map(\.timestamp).max() ?? Date()
-        // upsertContext advances updatedAt to max(existing, latestTimestamp) — that
-        // IS the batch path's context touch (the bulk insert below bypasses the
-        // touch middleware, so nothing double-fires).
-        let persistedContext = try await upsertContext(
-            KeepTalkingContext(
-                id: contextID,
-                updatedAt: latestTimestamp
-            )
-        )
+        let persistedContext = try await requireContext(contextID)
         let resolvedContextID = try persistedContext.requireID()
 
         // Ensure each DISTINCT non-self sender once (was a per-row query+save).
@@ -464,12 +455,7 @@ extension KeepTalkingClient {
                 if let existing = contextsByID[parentContextID] {
                     persistedContext = existing
                 } else {
-                    let context = try await upsertContext(
-                        KeepTalkingContext(
-                            id: parentContextID,
-                            updatedAt: parentMessage.timestamp
-                        )
-                    )
+                    let context = try await requireContext(parentContextID)
                     contextsByID[parentContextID] = context
                     persistedContext = context
                 }
@@ -493,17 +479,11 @@ extension KeepTalkingClient {
                 )
                 continue
             }
-            let contextTimestamp = attachment.createdAt ?? Date()
             let persistedContext: KeepTalkingContext
             if let existing = contextsByID[attachment.contextID] {
                 persistedContext = existing
             } else {
-                let context = try await upsertContext(
-                    KeepTalkingContext(
-                        id: attachment.contextID,
-                        updatedAt: contextTimestamp
-                    )
-                )
+                let context = try await requireContext(attachment.contextID)
                 contextsByID[attachment.contextID] = context
                 persistedContext = context
             }
@@ -675,34 +655,13 @@ extension KeepTalkingClient {
             return
         }
 
-        let senderNode: KeepTalkingNode
-        if let existingSenderNode =
-            try await KeepTalkingNode
-            .query(on: localStore.database)
-            .filter(\.$id, .equal, nodeID)
-            .first()
-        {
-            senderNode = existingSenderNode
-        } else {
-            senderNode = KeepTalkingNode(id: nodeID)
-            try await senderNode.save(on: localStore.database)
-        }
-
-        let relationExists =
-            try await KeepTalkingNodeRelation
-            .query(on: localStore.database)
-            .filter(\.$from.$id, .equal, try node.requireID())
-            .filter(\.$to.$id, .equal, nodeID)
-            .count() > 0
-
-        if !relationExists {
-            let relationship = try KeepTalkingNodeRelation(
-                from: node,
-                to: senderNode,
-                relationship: .pending
-            )
-            try await relationship.save(on: localStore.database)
-        }
+        try await KeepTalkingNode.findOrCreate(nodeID, on: localStore.database)
+        try await KeepTalkingNodeRelation.firstOrCreate(
+            from: try node.requireID(),
+            to: nodeID,
+            initial: .pending,
+            on: localStore.database
+        )
     }
 
     func prepareLocalAttachments(
@@ -996,7 +955,7 @@ extension KeepTalkingClient {
             return existing
         }
 
-        _ = try await upsertContext(KeepTalkingContext(id: contextID))
+        _ = try await requireContext(contextID)
         let key = SymmetricKey(size: .bits256)
         let secret = key.withUnsafeBytes { Data($0) }
         try await keychain.set(.groupSecret(contextID: contextID), value: secret)
@@ -1014,7 +973,7 @@ extension KeepTalkingClient {
         }
 
         let previous = try await keychain.get(.groupSecret(contextID: contextID))
-        _ = try await upsertContext(KeepTalkingContext(id: contextID))
+        _ = try await requireContext(contextID)
         try await keychain.set(.groupSecret(contextID: contextID), value: secret)
         if contextID == config.contextID, previous != secret {
             try await connection.reattachIfConnected()

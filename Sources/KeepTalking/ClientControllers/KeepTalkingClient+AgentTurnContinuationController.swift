@@ -269,7 +269,7 @@ extension KeepTalkingClient {
         // 3. Execute locally
         // Load the correct context instance from our client state
         let contextID = request.contextID
-        let context = try await upsertContext(KeepTalkingContext(id: contextID))
+        let context = try await requireContext(contextID)
         let result = await executeActionCallRequest(request, context: context)
         await runPrimitiveActionPostResultHookIfNeeded(
             actionID: request.call.action,

@@ -84,7 +84,7 @@ There are no AI parameters: a client carries no connector and no model. Each AI 
 
 ### Connecting
 
-``KeepTalkingClient/connect()`` ensures the configured context row and its group secret exist, opens the context-sync request registries, attaches the context's room on the transport — starting the host if this is its first room — and persists this node. Only once all of that has succeeded does it commit the connection and start the maintenance heartbeat, the 13-second presence heartbeat, and the once-a-second statistics sampler. It throws at once when the client's transport is `.unavailable`.
+``KeepTalkingClient/connect()`` requires the configured context row (create it once with ``KeepTalkingClient/createContext(named:)`` or the static ``KeepTalkingClient/createContext(contextID:named:on:)``; without it `connect()` throws `missingContext`), makes sure its group secret exists, opens the context-sync request registries, attaches the context's room on the transport — starting the host if this is its first room — and persists this node. Only once all of that has succeeded does it commit the connection and start the maintenance heartbeat, the 13-second presence heartbeat, and the once-a-second statistics sampler. It throws at once when the client's transport is `.unavailable`.
 
 Attaching does not wait for peers. `connect()` returns as soon as the room exists on the transport; whether anyone is reachable yet is the room's status, read with ``KeepTalkingClient/transportStatus()`` or from the `lifecycle` signal (see <doc:Events>). A message sent before any route exists stays on the outbox and goes out when the room reports it can take sends.
 
@@ -96,7 +96,7 @@ Registering local action executors is deliberately *not* part of connecting: a f
 
 ### Creating or joining a context
 
-``KeepTalkingClient/createContext(named:)`` creates the context identified by the client's own `config.contextID`, optionally gives it an alias, and generates the context's group chat secret. Use it when this node originates the conversation.
+``KeepTalkingClient/createContext(named:)`` creates the context identified by the client's own `config.contextID`, optionally gives it an alias, and generates the context's group chat secret. Use it when this node originates the conversation; a context that already exists throws `contextAlreadyExists`.
 
 Joining an existing context is the mirror image: you already know the context UUID and you need its secret, which travels out of band or through the trust-invitation handshake. Build a configuration for that context, construct a client, install the shared secret with ``KeepTalkingClient/setGroupChatSecret(_:for:)``, and connect. ``KeepTalkingClient/ensureGroupChatSecret(for:)`` returns the stored secret or mints one when none exists, so it is the safe read path once a context is established. Both calls also persist the context row, so a freshly joined context is immediately usable. The secret also addresses the context's room on the transport, so installing a different secret on a client that is already connected moves it: the client detaches and attaches again under the new secret, keeping its identity, so nothing that holds the client has to rebuild it.
 

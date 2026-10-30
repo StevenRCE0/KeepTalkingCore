@@ -172,11 +172,7 @@ extension KeepTalkingClient {
         var remoteActionCreationEntries: [KeepTalkingActionCreationCatalogEntry] = []
         let lazyRegistry = KeepTalkingLazyToolRegistry()
 
-        let selfNode = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
+        let selfNode = try await requireNode(config.node)
 
         let localActions = try await selfNode.$actions.query(
             on: localStore.database

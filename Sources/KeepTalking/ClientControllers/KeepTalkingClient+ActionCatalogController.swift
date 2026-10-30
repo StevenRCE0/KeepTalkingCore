@@ -20,9 +20,9 @@ extension KeepTalkingClient {
         context: KeepTalkingContext?
     ) async -> KeepTalkingActionCatalogResult {
         do {
-            let remoteNode = try await ensure(
+            let remoteNode = try await KeepTalkingNode.findOrCreate(
                 request.callerNodeID,
-                for: KeepTalkingNode.self
+                on: localStore.database
             )
 
             let deduplicatedQueries = deduplicatedCatalogQueries(
@@ -64,10 +64,7 @@ extension KeepTalkingClient {
     func handleIncomingActionCatalogRequest(
         _ request: KeepTalkingActionCatalogRequest
     ) async throws {
-        let context = try await ensure(
-            request.contextID,
-            for: KeepTalkingContext.self
-        )
+        let context = try await requireContext(request.contextID)
 
         let result = await executeActionCatalogRequest(
             request,

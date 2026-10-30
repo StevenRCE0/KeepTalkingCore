@@ -512,9 +512,9 @@ extension KeepTalkingClient {
         let action = try await resolveLocalActionForExecution(
             actionID: request.call.action
         )
-        let callerNode = try await ensure(
+        let callerNode = try await KeepTalkingNode.findOrCreate(
             request.callerNodeID,
-            for: KeepTalkingNode.self
+            on: localStore.database
         )
 
         if action.disabled == true {
@@ -678,9 +678,7 @@ extension KeepTalkingClient {
                     )
                 }
                 do {
-                    let context = try await self.upsertContext(
-                        KeepTalkingContext(id: request.contextID)
-                    )
+                    let context = try await self.requireContext(request.contextID)
                     let execute: @Sendable () async -> KeepTalkingActionCallResult = {
                         await self.executeActionCallRequest(
                             request,

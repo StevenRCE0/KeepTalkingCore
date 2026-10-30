@@ -346,7 +346,7 @@ extension KeepTalkingClient {
             )
         }
 
-        let persistedContext = try await upsertContext(context)
+        let persistedContext = try await requireContext(context.requireID())
 
         // Snapshot the latest message ID now (= user's prompt) before the AI
         // publishes any response messages.  Passed into the tool executors so
@@ -1052,15 +1052,8 @@ extension KeepTalkingClient {
     public func registerLocalActionsInExecutors() async throws {
         await ensureMCPToolChangeObserverInstalled()
 
-        let selfNode = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
-        let context = try await ensure(
-            config.contextID,
-            for: KeepTalkingContext.self
-        )
+        let selfNode = try await requireNode(config.node)
+        let context = try await requireContext(config.contextID)
         let localActions = try await selfNode.$actions.query(
             on: localStore.database
         ).all()

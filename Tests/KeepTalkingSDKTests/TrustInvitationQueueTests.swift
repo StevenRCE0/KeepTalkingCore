@@ -33,6 +33,7 @@ struct TrustInvitationQueueTests {
         let contextID = UUID()
         let inviterID = UUID()
         let recipientID = UUID()
+        try await KeepTalkingContext(id: contextID).save(on: store.database)
 
         let first = try await KeepTalkingClient.upsertTrustInvitation(
             contextID: contextID,
@@ -94,6 +95,8 @@ struct TrustInvitationQueueTests {
         let recipientID = UUID()
         let firstContextID = UUID()
         let secondContextID = UUID()
+        try await KeepTalkingContext(id: firstContextID).save(on: store.database)
+        try await KeepTalkingContext(id: secondContextID).save(on: store.database)
 
         try await KeepTalkingClient.upsertTrustInvitation(
             contextID: firstContextID,

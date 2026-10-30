@@ -69,7 +69,7 @@ extension KeepTalkingClient {
         guard payload.to == config.node else { return }
         guard payload.from != config.node else { return }
 
-        try await ensureContext(payload.contextID)
+        _ = try await requireContext(payload.contextID)
         guard let contextSecret = try await loadGroupChatSecret(for: payload.contextID) else {
             throw KeepTalkingTrustError.contextSecretMissing(payload.contextID)
         }
@@ -228,7 +228,7 @@ extension KeepTalkingClient {
         // The responder's chosen scope arrives here. Resolve into the
         // model + cache on the pending session so the rest of the flow
         // (transcript binding, persistence) sees the same value.
-        let context = try await ensureContext(payload.contextID)
+        let context = try await requireContext(payload.contextID)
         let scope = Self.modelScope(from: payload.scope, context: context)
         session.scope = scope
         session.scopeWire = payload.scope

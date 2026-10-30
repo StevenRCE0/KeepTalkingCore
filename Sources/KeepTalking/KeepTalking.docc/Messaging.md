@@ -30,9 +30,8 @@ advanced *forward-only* by writes to those children — an incoming batch of old
 messages must never drag a context's last-activity time backwards. Single-model
 writes (sending a message, updating a continuation state, saving an attachment)
 advance it through a model middleware whose update is conditioned on the child being
-newer. The batched sync path uses a bulk insert, which bypasses middleware, so there
-the context is touched directly by the same forward-only upsert — which likewise
-only writes when the incoming value is newer than the stored one.
+newer. The sync path saves its page one row at a time inside a single transaction, so
+those writes advance it through the same middleware.
 
 ### Creating a context
 
@@ -49,7 +48,9 @@ same row-and-alias work against any Fluent database without a client. It is the 
 for hosts that own a store but have not brought a per-context client up yet — a
 daemon backend materialising a context on request, or a view model preparing a
 conversation before anyone connects. It does not mint a secret, because secrets are
-client-and-keychain concerns.
+client-and-keychain concerns. Both forms insert exactly one row: creating a context
+that already exists throws `KeepTalkingClientError.contextAlreadyExists` rather than
+silently adopting it.
 
 A name is optional in both forms. It is trimmed of surrounding whitespace, and an
 empty result simply means no alias is recorded — the context is still perfectly
@@ -59,22 +60,25 @@ usable, it just displays by identifier.
 
 Joining is the mirror image of creating. You already know the context UUID, and what
 you need is its group secret, which reaches you out of band or through the trust
-invitation handshake. Build a configuration for that context, construct a client,
-install the shared secret with ``KeepTalkingClient/setGroupChatSecret(_:for:)``, and
-connect.
+invitation handshake. Register the context row with the static
+``KeepTalkingClient/createContext(contextID:named:on:)`` — once, like any other
+context — then build a configuration for it, construct a client, install the shared
+secret with ``KeepTalkingClient/setGroupChatSecret(_:for:)``, and connect.
 
 ```swift
+try await KeepTalkingClient.createContext(contextID: joinedContextID, on: store.database)
 let config = existingConfig.withContextID(joinedContextID)
 let client = KeepTalkingClient(config: config, localStore: store, keychain: keychain)
 try await client.setGroupChatSecret(sharedSecret, for: joinedContextID)
 try await client.connect()
 ```
 
-``KeepTalkingClient/connect()`` ensures the configured context row exists, so there
-is no separate "register the context" step on the joining side. Do *not* reach for
-``KeepTalkingClient/createContext(named:)`` here: it would mint a brand-new secret
-that no peer holds, and the resulting client would be unable to read or write the
-conversation it thinks it joined.
+Nothing on the joining side creates the row for you: ``KeepTalkingClient/setGroupChatSecret(_:for:)``
+and ``KeepTalkingClient/connect()`` both throw `missingContext` for a context this
+node has not registered, so a secret is never stored for a context that does not
+exist. Do *not* reach for ``KeepTalkingClient/createContext(named:)`` here: it would
+mint a brand-new secret that no peer holds, and the resulting client would be unable
+to read or write the conversation it thinks it joined.
 
 ### Group chat secrets and what they gate
 
@@ -82,9 +86,9 @@ Each context has one 256-bit symmetric key, stored in the keychain under
 ``KeepTalkingKeychainKey/groupSecret(contextID:)`` — never in the model database.
 ``KeepTalkingClient/ensureGroupChatSecret(for:)`` returns the stored secret or mints
 one if none exists, and ``KeepTalkingClient/setGroupChatSecret(_:for:)`` replaces it
-with a secret you obtained elsewhere. Both make sure the context row exists before
-they write a secret; `setGroupChatSecret` rejects empty data rather than storing an
-unusable key.
+with a secret you obtained elsewhere. Both require the context row to exist before
+they write a secret, throwing `missingContext` otherwise; `setGroupChatSecret` rejects
+empty data rather than storing an unusable key.
 
 The secret is what makes a context private, and it gates more than chat text:
 
@@ -128,7 +132,7 @@ replicated; refusing it at creation is what stops it from becoming a permanently
 retrying outbox row that also stalls the sync page containing it.
 
 Past that guard the ordering is the important part, and it is local-first. The
-client resolves the current node, upserts the context, defaults the sender to this
+client resolves the current node, requires the context row, defaults the sender to this
 node when none is given, saves the message with a time-ordered UUIDv7 primary key,
 persists any attachments, and — if `emitLocalEnvelope` is true — fires the local
 envelope sink so the UI can render the message immediately instead of waiting for it

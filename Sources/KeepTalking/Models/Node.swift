@@ -72,3 +72,14 @@ extension KeepTalkingNode: Codable {
         )
     }
 }
+
+extension KeepTalkingNode {
+    @discardableResult
+    public static func findOrCreate(_ id: UUID, on database: any Database) async throws -> KeepTalkingNode {
+        try await firstOrCreate(
+            on: database,
+            matching: { $0.filter(\.$id == id) },
+            create: { KeepTalkingNode(id: id) }
+        )
+    }
+}

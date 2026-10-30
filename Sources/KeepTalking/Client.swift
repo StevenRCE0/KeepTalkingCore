@@ -47,6 +47,7 @@ public enum KeepTalkingClientError: LocalizedError {
     case missingRelation
     case missingContextSecret(UUID)
     case missingContext(UUID?)
+    case contextAlreadyExists(UUID)
     case invalidTurningPoint(UUID)
     case invalidContinuationMessage
     case notAuthorized
@@ -143,6 +144,8 @@ public enum KeepTalkingClientError: LocalizedError {
                 return "Missing context secret for context: \(contextID)"
             case .missingContext(let contextID):
                 return "Context not found: \(String(describing: contextID))"
+            case .contextAlreadyExists(let contextID):
+                return "Context already exists: \(contextID)"
             case .invalidTurningPoint(let messageID):
                 return "Message cannot be used as a turning point (not found or is the first message): \(messageID)"
             case .invalidContinuationMessage:
@@ -530,10 +533,14 @@ public final class KeepTalkingClient: @unchecked Sendable {
             await self.delegationCoordinator.setOrchestratorSummon {
                 [weak self] contextID, prompt, _ in
                 guard let self else { return }
-                let context =
-                    (try? await self.upsertContext(KeepTalkingContext(id: contextID)))
-                    ?? KeepTalkingContext(id: contextID)
-                _ = try? await self.runAI(prompt: prompt, in: context)
+                do {
+                    let context = try await self.requireContext(contextID)
+                    _ = try await self.runAI(prompt: prompt, in: context)
+                } catch {
+                    self.onLog?(
+                        "[delegation] orchestrator summon failed context=\(contextID.uuidString.lowercased()) error=\(error.localizedDescription)"
+                    )
+                }
             }
         }
 

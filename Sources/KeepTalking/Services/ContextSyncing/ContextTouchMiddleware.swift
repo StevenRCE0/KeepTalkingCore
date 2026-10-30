@@ -3,10 +3,9 @@ import Foundation
 
 // Touch a context's `updatedAt` whenever one of its children is written through a
 // single-model save (sending a message, a continuation-state update, an attachment
-// write, …). The batched sync path uses `Collection.create(on:)`, which is a bulk
-// insert that BYPASSES model middleware — there the context is touched directly by
-// `upsertContext`, so these middlewares don't double-fire. See
-// `KeepTalkingClient+MessagingController.saveIncomingMessages`.
+// write, …). The sync path saves its page per row inside one transaction, so it
+// goes through here too; a bulk `Collection.create(on:)` would bypass model
+// middleware and leave the context untouched.
 //
 // The touch is forward-only (`filter(updated_at < date)`) so an out-of-order or
 // older child write can never regress the context's last-activity time, and it's a

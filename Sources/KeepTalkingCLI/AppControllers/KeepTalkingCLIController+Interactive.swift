@@ -265,6 +265,7 @@ extension KeepTalkingCLIController {
         bindCallbacks(to: candidateClient)
 
         do {
+            try await adoptContext(nextContextID)
             try await candidateClient.connect()
             if createGroupSecret {
                 _ = try await candidateClient.ensureGroupChatSecret(

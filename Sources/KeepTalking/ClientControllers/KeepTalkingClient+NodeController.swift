@@ -179,56 +179,31 @@ extension KeepTalkingClient {
     ) async throws -> String {
         let localNodeID = try localNode.requireID()
 
-        let remoteNode: KeepTalkingNode
-        if let existing = try await KeepTalkingNode.query(
+        try await KeepTalkingNode.findOrCreate(targetNodeID, on: database)
+
+        let initial: KeepTalkingRelationship
+        if own {
+            initial = .owner
+        } else {
+            switch scope {
+                case .allContexts:
+                    initial = .trustedInAllContext
+                case .context(let context):
+                    initial = .trusted([context])
+            }
+        }
+        let relation = try await KeepTalkingNodeRelation.firstOrCreate(
+            from: localNodeID,
+            to: targetNodeID,
+            initial: initial,
             on: database
         )
-        .filter(\.$id, .equal, targetNodeID)
-        .first() {
-            remoteNode = existing
-        } else {
-            remoteNode = KeepTalkingNode(id: targetNodeID)
-            try await remoteNode.save(on: database)
-        }
-
-        let relation: KeepTalkingNodeRelation
-
-        if let existingRelation =
-            try await KeepTalkingNodeRelation
-            .query(on: database)
-            .filter(\.$from.$id, .equal, localNodeID)
-            .filter(\.$to.$id, .equal, targetNodeID)
-            .first()
-        {
-            existingRelation.relationship =
-                own
-                ? .owner
-                : mergedTrustRelationship(
-                    current: existingRelation.relationship,
-                    requestedScope: scope
-                )
-            try await existingRelation.save(on: database)
-
-            relation = existingRelation
-        } else {
-            let newRelationship: KeepTalkingRelationship
-            if own {
-                newRelationship = .owner
-            } else {
-                switch scope {
-                    case .allContexts:
-                        newRelationship = .trustedInAllContext
-                    case .context(let context):
-                        newRelationship = .trusted([context])
-                }
-            }
-
-            relation = try KeepTalkingNodeRelation(
-                from: localNode,
-                to: remoteNode,
-                relationship: newRelationship
-            )
-
+        let merged =
+            own
+            ? KeepTalkingRelationship.owner
+            : mergedTrustRelationship(current: relation.relationship, requestedScope: scope)
+        if merged != relation.relationship {
+            relation.relationship = merged
             try await relation.save(on: database)
         }
 
@@ -360,38 +335,17 @@ extension KeepTalkingClient {
             relation: KeepTalkingNodeRelation?, identityKey: KeepTalkingNodeIdentityKey?
         )
     {
-        guard let localNode = try await KeepTalkingNode.find(localNodeID, on: database) else {
+        guard try await KeepTalkingNode.find(localNodeID, on: database) != nil else {
             throw KeepTalkingClientError.missingNode
         }
 
-        let remoteNode: KeepTalkingNode
-        if let existing = try await KeepTalkingNode.query(
+        try await KeepTalkingNode.findOrCreate(sourceNodeID, on: database)
+        let relation = try await KeepTalkingNodeRelation.firstOrCreate(
+            from: sourceNodeID,
+            to: localNodeID,
+            initial: .pending,
             on: database
         )
-        .filter(\.$id, .equal, sourceNodeID)
-        .first() {
-            remoteNode = existing
-        } else {
-            remoteNode = KeepTalkingNode(id: sourceNodeID)
-            try await remoteNode.save(on: database)
-        }
-
-        let relation: KeepTalkingNodeRelation
-        if let existingRelation = try await KeepTalkingNodeRelation.query(
-            on: database
-        )
-        .filter(\.$from.$id, .equal, sourceNodeID)
-        .filter(\.$to.$id, .equal, localNodeID)
-        .first() {
-            relation = existingRelation
-        } else {
-            relation = try KeepTalkingNodeRelation(
-                from: remoteNode,
-                to: localNode,
-                relationship: .pending
-            )
-            try await relation.save(on: database)
-        }
 
         guard relation.id != nil else {
             return (nil, nil)
@@ -418,19 +372,14 @@ extension KeepTalkingClient {
             .filter(\.$to.$id, .equal, localNodeID)
             .all()
 
-            let preservedLocalRelation: KeepTalkingNodeRelation
-            if let existing = localRelations.first {
-                preservedLocalRelation = existing
-                if existing.relationship != .owner {
-                    existing.relationship = .owner
-                    try await existing.save(on: database)
-                }
-            } else {
-                preservedLocalRelation = try KeepTalkingNodeRelation(
-                    from: localNode,
-                    to: localNode,
-                    relationship: .owner
-                )
+            let preservedLocalRelation = try await KeepTalkingNodeRelation.firstOrCreate(
+                from: localNodeID,
+                to: localNodeID,
+                initial: .owner,
+                on: database
+            )
+            if preservedLocalRelation.relationship != .owner {
+                preservedLocalRelation.relationship = .owner
                 try await preservedLocalRelation.save(on: database)
             }
 
@@ -551,15 +500,8 @@ extension KeepTalkingClient {
     ) async throws
         -> KeepTalkingNodeStatus
     {
-        let node = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
-        let currentContext = try await ensure(
-            config.contextID,
-            for: KeepTalkingContext.self
-        )
+        let node = try await requireNode(config.node)
+        let currentContext = try await requireContext(config.contextID)
 
         let localActions = try await KeepTalkingAction.query(
             on: localStore.database
@@ -767,7 +709,7 @@ extension KeepTalkingClient {
             return
         }
 
-        let statusContext = try await ensure(status.contextID, for: KeepTalkingContext.self)
+        let statusContext = try await requireContext(status.contextID)
         let grantsForLocal = status.nodeRelations.filter {
             $0.toNodeID == config.node && $0.relationship.isTrustedOrOwner
         }
@@ -782,16 +724,11 @@ extension KeepTalkingClient {
             }
         }
 
-        var incomingRelations =
-            try await KeepTalkingNodeRelation
-            .query(on: localStore.database)
-            .filter(\.$from.$id, .equal, remoteNodeID)
-            .filter(\.$to.$id, .equal, config.node)
-            .all()
-            .sorted {
-                Self.relationPriority($0.relationship)
-                    > Self.relationPriority($1.relationship)
-            }
+        var incomingRelations = try await KeepTalkingNodeRelation.rows(
+            from: remoteNodeID,
+            to: config.node,
+            on: localStore.database
+        )
 
         let incomingRelation: KeepTalkingNodeRelation
         if let existingIncomingRelation = incomingRelations.first(where: {
@@ -799,17 +736,15 @@ extension KeepTalkingClient {
         }) {
             incomingRelation = existingIncomingRelation
         } else if !desiredActions.isEmpty {
-            let remoteNode = try await ensure(
-                remoteNodeID,
-                for: KeepTalkingNode.self
+            try await KeepTalkingNode.findOrCreate(remoteNodeID, on: localStore.database)
+            _ = try await getCurrentNodeInstance()
+            let createdRelation = try await KeepTalkingNodeRelation.firstOrCreate(
+                from: remoteNodeID,
+                to: config.node,
+                initial: .pending,
+                accepting: { $0.isTrustedOrOwner || $0 == .pending },
+                on: localStore.database
             )
-            let selfNode = try await getCurrentNodeInstance()
-            let createdRelation = try KeepTalkingNodeRelation(
-                from: remoteNode,
-                to: selfNode,
-                relationship: .pending
-            )
-            try await createdRelation.save(on: localStore.database)
             incomingRelation = createdRelation
             incomingRelations.append(createdRelation)
         } else {
@@ -924,11 +859,7 @@ extension KeepTalkingClient {
         in context: KeepTalkingContext,
         from nodes: [KeepTalkingNode]?
     ) async throws -> [UUID: KeepTalkingNodeStatus] {
-        let selfNode = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
+        let selfNode = try await requireNode(config.node)
 
         var outgoingRelations = try await selfNode.$outgoingNodeRelations.get(
             on: localStore.database
@@ -960,41 +891,14 @@ extension KeepTalkingClient {
     }
 
     func getCurrentNodeInstance() async throws -> KeepTalkingNode {
-        if let node = try await KeepTalkingNode.query(on: localStore.database)
-            .filter(\.$id, .equal, config.node)
-            .first()
-        {
-            return node
-        }
-
-        let node = KeepTalkingNode(id: config.node)
-        try await node.save(on: localStore.database)
-
-        return node
+        try await KeepTalkingNode.findOrCreate(config.node, on: localStore.database)
     }
 
-    func ensure<NodeType: Model>(
-        _ id: NodeType.IDValue,
-        for _: NodeType.Type,
-        strict: Bool = false
-    ) async throws -> NodeType {
-        if let entity = try await NodeType.find(
-            id,
-            on: localStore.database
-        ) {
-            return entity
-        }
-
-        if strict {
+    func requireNode(_ nodeID: UUID) async throws -> KeepTalkingNode {
+        guard let node = try await KeepTalkingNode.find(nodeID, on: localStore.database) else {
             throw KeepTalkingClientError.missingNode
         }
-
-        let entity = NodeType()
-        entity.id = id
-
-        try await entity.save(on: localStore.database)
-
-        return entity
+        return node
     }
 
     func persistMyNode(_ explicitNode: KeepTalkingNode? = nil)
@@ -1021,23 +925,9 @@ extension KeepTalkingClient {
             return
         }
 
-        if let existing = try await KeepTalkingNode.query(
-            on: localStore.database
-        )
-        .filter(\.$id, .equal, incomingNodeID)
-        .first() {
-            existing.lastSeenAt = max(existing.lastSeenAt, incoming.lastSeenAt)
-            existing.contextWakeHandles = incoming.contextWakeHandles
-            try await existing.save(on: localStore.database)
-            return
-        }
-
-        let node = KeepTalkingNode(
-            id: incomingNodeID,
-            lastSeenAt: incoming.lastSeenAt
-        )
+        let node = try await KeepTalkingNode.findOrCreate(incomingNodeID, on: localStore.database)
+        node.lastSeenAt = max(node.lastSeenAt, incoming.lastSeenAt)
         node.contextWakeHandles = incoming.contextWakeHandles
-
         try await node.save(on: localStore.database)
     }
 
@@ -1046,18 +936,8 @@ extension KeepTalkingClient {
             return
         }
 
-        let node: KeepTalkingNode
-        if let existing = try await KeepTalkingNode.query(
-            on: localStore.database
-        )
-        .filter(\.$id, .equal, nodeID)
-        .first() {
-            node = existing
-        } else {
-            node = KeepTalkingNode(id: nodeID)
-        }
+        let node = try await KeepTalkingNode.findOrCreate(nodeID, on: localStore.database)
         node.lastSeenAt = Date()
-
         try await node.save(on: localStore.database)
     }
 
@@ -1268,11 +1148,7 @@ extension KeepTalkingClient {
 
     public func broadcastLocalNodeState(reason: String) async {
         do {
-            let currentContext = try await ensure(
-                config.contextID,
-                for: KeepTalkingContext.self,
-                strict: true
-            )
+            let currentContext = try await requireContext(config.contextID)
 
             try await announceCurrentNode()
             try await broadcastCurrentNodeStatus(in: currentContext)
@@ -1324,26 +1200,15 @@ extension KeepTalkingClient {
     private func ensureLocalIdentityRelation() async throws
         -> KeepTalkingNodeRelation
     {
-        let localNode = try await getCurrentNodeInstance()
-        let relation: KeepTalkingNodeRelation
-
-        if let existing = try await KeepTalkingNodeRelation.query(
+        _ = try await getCurrentNodeInstance()
+        let relation = try await KeepTalkingNodeRelation.firstOrCreate(
+            from: config.node,
+            to: config.node,
+            initial: .owner,
             on: localStore.database
         )
-        .filter(\.$from.$id, .equal, config.node)
-        .filter(\.$to.$id, .equal, config.node)
-        .first() {
-            if existing.relationship != .owner {
-                existing.relationship = .owner
-                try await existing.save(on: localStore.database)
-            }
-            relation = existing
-        } else {
-            relation = try KeepTalkingNodeRelation(
-                from: localNode,
-                to: localNode,
-                relationship: .owner
-            )
+        if relation.relationship != .owner {
+            relation.relationship = .owner
             try await relation.save(on: localStore.database)
         }
 

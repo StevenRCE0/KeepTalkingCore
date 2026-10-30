@@ -9,21 +9,6 @@ import FluentKit
 import Foundation
 
 extension KeepTalkingClient {
-    static func relationPriority(_ relationship: KeepTalkingRelationship) -> Int {
-        switch relationship {
-            case .owner:
-                return 4
-            case .trustedInAllContext:
-                return 3
-            case .trusted:
-                return 2
-            case .preTrusted:
-                return 1
-            case .pending:
-                return 0
-        }
-    }
-
     static func preferredTrustedRelation(
         from fromNodeID: UUID,
         to toNodeID: UUID,
@@ -47,18 +32,7 @@ extension KeepTalkingClient {
         eligibility: KeepTalkingRelationEligibility = .trustedOnly,
         on database: any Database
     ) async throws -> [KeepTalkingNodeRelation] {
-        try await KeepTalkingNodeRelation
-            .query(on: database)
-            .filter(\.$from.$id, .equal, fromNodeID)
-            .filter(\.$to.$id, .equal, toNodeID)
-            .all()
-            .sorted(by: {
-                let lhs = relationPriority($0.relationship)
-                let rhs = relationPriority($1.relationship)
-                return lhs == rhs
-                    ? ($0.id?.uuidString ?? "") < ($1.id?.uuidString ?? "")
-                    : lhs > rhs
-            })
+        try await KeepTalkingNodeRelation.rows(from: fromNodeID, to: toNodeID, on: database)
             .filter { relation in
                 switch eligibility {
                     case .trustedOnly:
@@ -135,12 +109,11 @@ extension KeepTalkingClient {
         }
 
         guard
-            let ownershipRelation =
-                try await KeepTalkingNodeRelation
-                .query(on: database)
-                .filter(\.$from.$id == authorizingNodeID)
-                .filter(\.$to.$id == hostNodeID)
-                .first(),
+            let ownershipRelation = try await KeepTalkingNodeRelation.strongest(
+                from: authorizingNodeID,
+                to: hostNodeID,
+                on: database
+            ),
             ownershipRelation.relationship == .owner,
             let hostNode = try await KeepTalkingNode.find(
                 hostNodeID,
@@ -933,11 +906,7 @@ extension KeepTalkingClient {
         eligibility: KeepTalkingRelationEligibility = .trustedOnly,
         lane: KeepTalkingGrantLane = .other
     ) async throws {
-        let selfNode = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
+        let selfNode = try await requireNode(config.node)
 
         try await Self.grantActionPermission(
             actionID: actionID,
@@ -985,12 +954,11 @@ extension KeepTalkingClient {
         let database = localStore.database
 
         guard
-            let ownerRelation =
-                try await KeepTalkingNodeRelation
-                .query(on: database)
-                .filter(\.$from.$id == selfNodeID)
-                .filter(\.$to.$id == targetNodeID)
-                .first(),
+            let ownerRelation = try await KeepTalkingNodeRelation.strongest(
+                from: selfNodeID,
+                to: targetNodeID,
+                on: database
+            ),
             ownerRelation.relationship == .owner
         else {
             throw KeepTalkingClientError.relationNotTrustedOrOwned(targetNodeID)
@@ -1043,9 +1011,7 @@ extension KeepTalkingClient {
             let scope: KeepTalkingActionPermissionScope =
                 if case .all = grant.approvingContext { .all } else { .context(context) }
 
-            let selfNode = try await ensure(
-                selfNodeID, for: KeepTalkingNode.self, strict: true
-            )
+            let selfNode = try await requireNode(selfNodeID)
             try await Self.grantActionPermission(
                 actionID: actionID,
                 toNodeID: targetNodeID,
@@ -1113,7 +1079,7 @@ extension KeepTalkingClient {
                     case .revoke:
                         let context: KeepTalkingContext?
                         if let contextID = entry.key.contextID {
-                            context = try await ensureContext(contextID, on: database)
+                            context = try await Self.requireContext(contextID, on: database)
                         } else {
                             context = nil
                         }
@@ -1138,11 +1104,7 @@ extension KeepTalkingClient {
         transaction: KeepTalkingGrantTransaction,
         lane: KeepTalkingGrantLane = .other
     ) async throws {
-        let selfNode = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
+        let selfNode = try await requireNode(config.node)
 
         try await Self.grantActionPermission(
             transaction: transaction,
@@ -1184,7 +1146,7 @@ extension KeepTalkingClient {
         on database: any Database,
         callbackForBroadcasting: ((String) async -> Void)? = nil
     ) async throws {
-        let context = try await ensureContext(contextID, on: database)
+        let context = try await Self.requireContext(contextID, on: database)
         guard let action = try await KeepTalkingAction.find(actionID, on: database) else {
             throw KeepTalkingClientError.actionNotHostedLocally(actionID)
         }
@@ -1235,11 +1197,7 @@ extension KeepTalkingClient {
         grantScope: KeepTalkingActionScope? = nil,
         lane: KeepTalkingGrantLane = .other
     ) async throws {
-        let selfNode = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
+        let selfNode = try await requireNode(config.node)
 
         try await Self.stageActionPermissionWithTrustInvitation(
             contextID: contextID,
@@ -1485,11 +1443,7 @@ extension KeepTalkingClient {
         eligibility: KeepTalkingRelationEligibility = .trustedOnly,
         lane: KeepTalkingGrantLane = .other
     ) async throws {
-        let selfNode = try await ensure(
-            config.node,
-            for: KeepTalkingNode.self,
-            strict: true
-        )
+        let selfNode = try await requireNode(config.node)
 
         try await Self.revokeActionPermission(
             actionID: actionID,
