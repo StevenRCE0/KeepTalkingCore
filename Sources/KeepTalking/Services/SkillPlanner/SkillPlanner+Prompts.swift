@@ -115,6 +115,14 @@ extension KeepTalkingSkillPlanner {
             improve the plan; don't search for things you already know confidently.
             """
             : ""
+        let webFetchGuidance =
+            webFetchProvider != nil
+            ? """
+
+            You have web_fetch to read a page in full — a doc page web_search turned \
+            up, or a link the user gave. Fetch only pages whose detail the plan needs.
+            """
+            : ""
 
         return """
             You are a KeepTalking action classifier and planner.
@@ -207,7 +215,7 @@ extension KeepTalkingSkillPlanner {
               what's changing. Don't re-ask for resources the user already \
               granted. Finalize again when the revision is complete.
             \(probeGuidance)
-            \(webSearchGuidance)
+            \(webSearchGuidance)\(webFetchGuidance)
             """
     }
 

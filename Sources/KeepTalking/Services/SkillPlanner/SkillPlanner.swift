@@ -102,6 +102,8 @@ public actor KeepTalkingSkillPlanner {
     /// tool list so it can look up current information (API docs, package
     /// names, service capabilities) while planning.
     let webSearchProvider: KeepTalkingClient.WebSearchProvider?
+    /// Same source and switches as `webSearchProvider`; adds `web_fetch`.
+    let webFetchProvider: KeepTalkingClient.WebFetchProvider?
 
     /// Mutable state for the currently-open planning session. Persisted across
     /// turns on the actor so `continuePlanning` can resume the same transcript
@@ -150,12 +152,14 @@ public actor KeepTalkingSkillPlanner {
         aiConnector: any AIConnector,
         model: String = "gpt-5-codex",
         actAgent: AIOrchestrator.ACTAgent? = nil,
-        webSearchProvider: KeepTalkingClient.WebSearchProvider? = nil
+        webSearchProvider: KeepTalkingClient.WebSearchProvider? = nil,
+        webFetchProvider: KeepTalkingClient.WebFetchProvider? = nil
     ) {
         self.skillManager = SkillManager(aiConnector: aiConnector)
         self.model = model
         self.actAgent = actAgent
         self.webSearchProvider = webSearchProvider
+        self.webFetchProvider = webFetchProvider
     }
 
     // MARK: - Public

@@ -4,6 +4,10 @@ public protocol StandaloneWebSearchBackend: Sendable {
     func search(query: String) async throws -> String
 }
 
+public protocol StandaloneWebFetchBackend: Sendable {
+    func fetch(url: String) async throws -> String
+}
+
 public struct StandaloneWebSearchConfiguration: Sendable {
     public enum Kind: String, Sendable, Codable {
         case exa

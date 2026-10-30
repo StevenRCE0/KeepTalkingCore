@@ -19,7 +19,7 @@ struct ExecutorRegistrationSignalTests {
             config: KeepTalkingConfig(contextID: contextID, node: nodeID),
             primitiveRegistry: KeepTalkingPrimitiveRegistry(
                 toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
-                callAction: { _, _, _ in KeepTalkingPrimitiveActionResponse(text: "done") }
+                callAction: { _, _, _, _ in KeepTalkingPrimitiveActionResponse(text: "done") }
             ),
             localStore: store
         )

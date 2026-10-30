@@ -47,6 +47,8 @@ public actor KeepTalkingWorkspacePlanner {
     /// Optional web search, sourced from the same self-node configuration the
     /// main agent uses. Adds the shared `web_search` tool when set.
     let webSearchProvider: KeepTalkingClient.WebSearchProvider?
+    /// Same source and switches as `webSearchProvider`; adds `web_fetch`.
+    let webFetchProvider: KeepTalkingClient.WebFetchProvider?
 
     /// Mutable state for the currently-open planning session. Persisted across
     /// turns on the actor so `continuePlanning` resumes the same transcript and
@@ -98,11 +100,13 @@ public actor KeepTalkingWorkspacePlanner {
     public init(
         aiConnector: any AIConnector,
         model: String = "gpt-5-codex",
-        webSearchProvider: KeepTalkingClient.WebSearchProvider? = nil
+        webSearchProvider: KeepTalkingClient.WebSearchProvider? = nil,
+        webFetchProvider: KeepTalkingClient.WebFetchProvider? = nil
     ) {
         self.aiConnector = aiConnector
         self.model = model
         self.webSearchProvider = webSearchProvider
+        self.webFetchProvider = webFetchProvider
     }
 
     // MARK: - Public

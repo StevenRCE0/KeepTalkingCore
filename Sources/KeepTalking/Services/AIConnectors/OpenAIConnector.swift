@@ -22,42 +22,8 @@ public enum OpenAIConnectorBackend: Sendable {
 }
 
 public actor OpenAIConnector: AIConnector {
-    public static func keepTalkingSystemPrompt(
-        ktRunActionToolFunctionName: String,
-        ktSkillMetainfoToolFunctionName: String,
-        attachmentListingToolFunctionName: String,
-        attachmentReaderToolFunctionName: String,
-        searchThreadsToolFunctionName: String,
-        markTurningPointToolFunctionName: String,
-        markChitterChatterToolFunctionName: String,
-        currentPromptIncludesAttachments: Bool,
-        currentPromptShouldAvoidAutomaticToolUse: Bool,
-        sideNotes: [KeepTalkingSideNoteDTO] = [],
-        contextTranscript: String,
-        currentDate: String,
-        platform: String,
-        responseLanguages: [String] = [],
-        modelProfile: AIModelProfile? = nil,
-        layout: AIPromptPresets.Layout = .legacy
-    ) -> String {
-        AIPromptPresets.systemPrompt(
-            ktRunActionToolFunctionName: ktRunActionToolFunctionName,
-            ktSkillMetainfoToolFunctionName: ktSkillMetainfoToolFunctionName,
-            attachmentListingToolFunctionName: attachmentListingToolFunctionName,
-            attachmentReaderToolFunctionName: attachmentReaderToolFunctionName,
-            searchThreadsToolFunctionName: searchThreadsToolFunctionName,
-            markTurningPointToolFunctionName: markTurningPointToolFunctionName,
-            markChitterChatterToolFunctionName: markChitterChatterToolFunctionName,
-            currentPromptIncludesAttachments: currentPromptIncludesAttachments,
-            currentPromptShouldAvoidAutomaticToolUse: currentPromptShouldAvoidAutomaticToolUse,
-            sideNotes: sideNotes,
-            contextTranscript: contextTranscript,
-            currentDate: currentDate,
-            platform: platform,
-            responseLanguages: responseLanguages,
-            modelProfile: modelProfile,
-            layout: layout
-        )
+    public static func keepTalkingSystemPrompt(_ factors: [OrchestrationPromptFactor]) -> String {
+        AIPromptPresets.render(factors)
     }
 
     public enum ConnectorError: Error, LocalizedError {

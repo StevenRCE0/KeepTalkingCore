@@ -1116,7 +1116,7 @@ struct RemoteActionCallTests {
             ),
             primitiveRegistry: KeepTalkingPrimitiveRegistry(
                 toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
-                callAction: { _, _, _ in KeepTalkingPrimitiveActionResponse(text: "opened") }
+                callAction: { _, _, _, _ in KeepTalkingPrimitiveActionResponse(text: "opened") }
             ),
             localStore: localStore
         )

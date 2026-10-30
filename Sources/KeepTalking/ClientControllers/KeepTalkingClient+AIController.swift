@@ -29,6 +29,16 @@ extension KeepTalkingClient {
     static let archiveSideNoteToolFunctionName = "kt_archive_side_note"
     static let sendFileToolFunctionName = "kt_send_file"
     static let webSearchFunctionName = "web_search"
+    static let webFetchFunctionName = "web_fetch"
+    static let promptToolNames = AIPromptToolNames([
+        .runAction: runActionToolFunctionName,
+        .skillMetainfo: ktSkillMetainfoToolFunctionName,
+        .attachmentListing: contextAttachmentListingToolFunctionName,
+        .attachmentReader: resourceReadToolFunctionName,
+        .searchThreads: searchThreadsToolFunctionName,
+        .markTurningPoint: markTurningPointToolFunctionName,
+        .markChitterChatter: markChitterChatterToolFunctionName,
+    ])
     static let maxAgentTurns = 32
     static let maxAINativeAttachmentBytes = 8 * 1024 * 1024
     /// Images are judged after downscaling, not by their size on disk — a
@@ -363,6 +373,7 @@ extension KeepTalkingClient {
 
         // TODO: be able to switch off in the configurations
         let webSearchTool = Self.makeWebSearchTool()
+        let webFetchTool = Self.makeWebFetchTool()
         let ktSkillMetainfoTool = makeKtSkillMetainfoTool()
         let attachmentListingTool = makeContextAttachmentListingTool()
         let attachmentReadTool = makeResourceReadTool()
@@ -394,6 +405,7 @@ extension KeepTalkingClient {
                 createActionTool,
                 evaluateJSTool,
                 webSearchTool,
+                webFetchTool,
                 markTurningPointTool,
                 markChitterChatterTool,
                 makeUpdateSideNoteTool(),
@@ -815,7 +827,7 @@ extension KeepTalkingClient {
                 if !query.isEmpty { params["query"] = query }
                 if let topK { params["top_k"] = String(topK) }
                 return .init(
-                    hint: .searchingMemory,
+                    hint: .thinkingBack,
                     actionName: query.isEmpty
                         ? nil : String(query.prefix(80)),
                     parameters: params.isEmpty ? nil : params
@@ -830,6 +842,17 @@ extension KeepTalkingClient {
                     actionName: query.isEmpty
                         ? nil : String(query.prefix(80)),
                     parameters: query.isEmpty ? nil : ["query": query]
+                )
+            case Self.webFetchFunctionName:
+                let args = (try? decodeToolArguments(toolCall.argumentsJSON)) ?? [:]
+                let url =
+                    args["url"]?.stringValue?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return .init(
+                    hint: .readingWeb,
+                    actionName: url.isEmpty
+                        ? nil : String(url.prefix(80)),
+                    parameters: url.isEmpty ? nil : ["url": url]
                 )
             case Self.evaluateJSToolFunctionName:
                 let args = (try? decodeToolArguments(toolCall.argumentsJSON)) ?? [:]
@@ -1370,7 +1393,7 @@ extension KeepTalkingClient {
             "[ai/tools] meta_tools=\(Self.runActionToolFunctionName),\(Self.ktSkillMetainfoToolFunctionName)"
         )
         onLog?(
-            "[ai/tools] built_ins=\(Self.contextAttachmentListingToolFunctionName),\(Self.resourceReadToolFunctionName),\(Self.contextAttachmentUpdateMetadataToolFunctionName),\(Self.searchThreadsToolFunctionName),\(Self.evaluateJSToolFunctionName),web_search_preview,\(Self.markTurningPointToolFunctionName),\(Self.markChitterChatterToolFunctionName)"
+            "[ai/tools] built_ins=\(Self.contextAttachmentListingToolFunctionName),\(Self.resourceReadToolFunctionName),\(Self.contextAttachmentUpdateMetadataToolFunctionName),\(Self.searchThreadsToolFunctionName),\(Self.evaluateJSToolFunctionName),web_search_preview,\(Self.webFetchFunctionName),\(Self.markTurningPointToolFunctionName),\(Self.markChitterChatterToolFunctionName)"
         )
     }
 }

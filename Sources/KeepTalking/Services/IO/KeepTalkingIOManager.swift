@@ -103,6 +103,43 @@ final class KeepTalkingIOManager {
         return KTResourceManifest.resolveAgentHandle(handleText, among: candidates)
     }
 
+    /// Scopes a primitive call around `body` with the run's KTRM: only the
+    /// resources the call names in `inputHandles` (context attachments and
+    /// caller-staged OTBs) appear, as read entries. Primitives run on iOS too,
+    /// so this is the cross-platform slice of `withActionRun` — no workspace,
+    /// output slots or sandbox policy.
+    func withPrimitiveRun<T>(
+        action: KeepTalkingAction,
+        request: KeepTalkingActionCallRequest,
+        _ body: (KTResourceManifest?) async throws -> T
+    ) async throws -> T {
+        guard action.acceptsFileInput, let handles = request.call.inputHandles, !handles.isEmpty
+        else { return try await body(nil) }
+        let prepared = try await staging.prepareInputs(action: action, request: request)
+        defer {
+            staging.cleanup(prepared)
+            Task { [store = staging.store] in
+                for handle in handles { await store.discardIfConsumable(handle: handle) }
+            }
+        }
+        let objectName = action.descriptor?.fileObjects(direction: .input).first?.name
+        let named = Set(handles)
+        let candidates =
+            prepared.attachments.filter { named.contains($0.id) }.map {
+                KTResourceManifest.Candidate(
+                    kind: .attachment, id: $0.id, path: $0.path, direction: .read,
+                    displayName: $0.displayName, isDirectory: false, objectName: objectName)
+            }
+            + prepared.otbInputs.map {
+                KTResourceManifest.Candidate(
+                    kind: .otb, id: $0.handle, path: $0.url, direction: .read,
+                    displayName: $0.url.lastPathComponent, isDirectory: false,
+                    objectName: objectName)
+            }
+        return try await body(
+            KTResourceManifest.build(grantedCandidates: candidates, umbrellaAttachmentsDir: nil))
+    }
+
     /// Why a staged handle won't resolve for this node — expired/never-staged,
     /// foreign (a handle that leaked from another peer), or vanished bytes.
     func stagedHandleStatus(_ handle: UUID) async -> KeepTalkingStagingIOStore.HandleStatus {

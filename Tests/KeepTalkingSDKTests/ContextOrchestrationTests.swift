@@ -410,13 +410,14 @@ struct ContextOrchestrationTests {
     func retrievalWindowShares() {
         let retrieval = KeepTalkingOrchestrationStrategy.legacy
         let profile = AIModelProfile(contextWindow: 200_000, maxOutputTokens: 8_000)  // 192k input
-        #expect(retrieval.verbatimTokens(for: profile) == 38_400)
         #expect(retrieval.chunkTokens(for: profile) == 76_800)
-        #expect(retrieval.verbatimTokens(for: nil) == 16_000)
+        #expect(retrieval.searchConsultTokens(for: profile) == 307_200)
+        #expect(retrieval.presentedTokens(for: profile) == 6_000, "capped for large windows")
+        #expect(retrieval.presentedTokens(for: smallWindow) == 1_228)
         #expect(retrieval.chunkTokens(for: nil) == 32_000, "unknown window: the measured 32k sweet spot")
     }
 
-    @Test("the plan fills the verbatim allowance in rank order, consults the rest, lists what is past the limit")
+    @Test("a search consults its hits in rank order, the best always, and lists what is past the limit")
     func searchPlan() {
         func retrieved(_ name: String, rows: Int) -> RetrievedThread {
             RetrievedThread(
@@ -428,26 +429,31 @@ struct ContextOrchestrationTests {
         let b = retrieved("b", rows: 40)
         let c = retrieved("c", rows: 80)
         let d = retrieved("d", rows: 5)
-        func handOver(consultant: ThreadSearchHandOver.Consultant?) -> ThreadSearchHandOver {
-            ThreadSearchHandOver(
-                verbatimTokens: a.tokens + d.tokens, chunkTokens: 32_000, consultTokens: b.tokens + 1,
-                consultant: consultant, consultEffort: nil, consultMaxOutputTokens: 1_200
-            )
+        func split(_ consultTokens: Int, _ ranked: [RetrievedThread]) -> (consulted: [String], listed: [String]) {
+            let split = ThreadSearchHandOver(
+                consultant: consultant(ScriptedModel()), userPrompt: nil, consultTokens: consultTokens
+            ).split(ranked)
+            return (split.consulted.map(\.thread.name), split.listed.map(\.thread.name))
         }
-        func deliveries(_ handOver: ThreadSearchHandOver) -> [String: ThreadSearchHandOver.Delivery] {
-            Dictionary(
-                uniqueKeysWithValues: handOver.deliveries([a, b, c, d]).map { ($0.thread.thread.name, $0.delivery) })
-        }
-        let consultant = ThreadSearchHandOver.Consultant(
-            connector: ScriptedModel(), model: "test", userPrompt: nil, agentTurnID: nil, promptCacheKey: nil)
-        #expect(
-            deliveries(handOver(consultant: consultant))
-                == ["a": .verbatim, "b": .answered, "c": .listed, "d": .verbatim],
-            "d still fits after b and c overflow")
-        #expect(
-            deliveries(handOver(consultant: nil)) == [
-                "a": .verbatim, "b": .newestRows, "c": .newestRows, "d": .verbatim,
-            ])
+        let roomy = split(a.tokens + b.tokens + d.tokens, [a, b, c, d])
+        #expect(roomy.consulted == ["a", "b", "d"], "d still fits after c overflows")
+        #expect(roomy.listed == ["c"])
+        #expect(split(1, [c, a]).consulted == ["c"], "the best hit is consulted even past the limit")
+    }
+
+    private func consultant(_ model: ScriptedModel, profile: AIModelProfile? = nil) -> ThreadConsultant {
+        ThreadConsultant(
+            strategy: .legacy, profile: profile, main: .init(connector: model, model: "test"), contextID: UUID(),
+            agentTurnID: UUID()
+        )
+    }
+
+    private func handOver(
+        _ model: ScriptedModel, profile: AIModelProfile? = nil, userPrompt: String? = nil
+    ) -> ThreadSearchHandOver {
+        ThreadSearchHandOver(
+            strategy: .legacy, profile: profile, consultant: consultant(model, profile: profile), userPrompt: userPrompt
+        )
     }
 
     private func search(
@@ -493,24 +499,34 @@ struct ContextOrchestrationTests {
     /// 8k window: 1,228 tokens verbatim, 2,457-token chunks.
     private let smallWindow = AIModelProfile(contextWindow: 8_192, maxOutputTokens: 2_048)
 
-    @Test("threads that fit come back whole and verbatim, with no consult")
-    func searchReturnsThreadsVerbatim() async throws {
+    @Test("a short hit is consulted too, and only what the consult answers comes back")
+    func searchConsultsShortThreads() async throws {
         let model = ScriptedModel()
         let surface = try await seededSurface(model)
-        let payload = try await search(
-            surface, "bravo",
-            handOver: ThreadSearchHandOver(
-                strategy: .legacy, profile: nil,
-                consultant: .init(
-                    connector: model, model: "test", userPrompt: nil, agentTurnID: nil, promptCacheKey: nil)
-            )
+        await model.setConsultReply(
+            #"{"relevant": [{"thread": "t1", "verdict": "answer", "facts": ["bravo ended on 3"], "refs": ["t1.4"]}]}"#
         )
-        let threads = payload["threads"] as? String ?? ""
-        #expect(threads.contains("— thread \"bravo\""))
-        #expect((0..<4).allSatisfy { threads.contains("bravo message \($0)") }, "every row, not an excerpt")
-        #expect(deliveries(payload)["bravo"] == "verbatim")
-        #expect(payload["answers"] == nil)
-        #expect(await model.requests.isEmpty, "nothing to consult")
+        let payload = try await search(surface, "bravo", handOver: handOver(model))
+        #expect(deliveries(payload)["bravo"] == "answered")
+        let answers = payload["answers"] as? [[String: Any]] ?? []
+        #expect(answers.first?["facts"] as? [String] == ["bravo ended on 3"])
+        #expect((payload["evidence"] as? String)?.contains("bravo message 3") == true)
+        #expect(payload["threads"] == nil, "no thread comes back unread")
+        let consults = await model.requests.filter { $0.configuration?.telemetry?.role == .consult }
+        #expect(consults.count == 1)
+        await surface.shutdown()
+    }
+
+    @Test("a hit the consult finds nothing in is left out of the result")
+    func searchLeavesOutIrrelevantThreads() async throws {
+        let model = ScriptedModel()
+        let surface = try await seededSurface(model)
+        let payload = try await search(surface, "bravo", handOver: handOver(model))
+        #expect(deliveries(payload)["bravo"] == nil)
+        #expect(payload["count"] as? Int == 0)
+        #expect((payload["answers"] as? [Any])?.isEmpty == true)
+        #expect(payload["evidence"] == nil)
+        #expect((payload["note"] as? String)?.contains("found nothing that answers the query") == true)
         await surface.shutdown()
     }
 
@@ -523,12 +539,7 @@ struct ContextOrchestrationTests {
         )
         let payload = try await search(
             surface, "echo",
-            handOver: ThreadSearchHandOver(
-                strategy: .legacy, profile: smallWindow,
-                consultant: .init(
-                    connector: model, model: "test", userPrompt: "what did echo settle on?",
-                    agentTurnID: nil, promptCacheKey: nil)
-            )
+            handOver: handOver(model, profile: smallWindow, userPrompt: "what did echo settle on?")
         )
         #expect(deliveries(payload)["echo"] == "answered")
         let answers = payload["answers"] as? [[String: Any]] ?? []
@@ -536,7 +547,7 @@ struct ContextOrchestrationTests {
         #expect((payload["evidence"] as? String)?.contains("t1.3 ") == true)
         #expect((payload["evidence"] as? String)?.contains("echo note 2:") == true, "row 3 is the third message")
         #expect((payload["threads"] as? String)?.contains("echo note") != true, "the long thread is not returned whole")
-        #expect((payload["note"] as? String)?.contains("too long to return whole") == true)
+        #expect((payload["note"] as? String)?.contains("Consultants read 1 matching thread(s)") == true)
 
         let consults = await model.requests.filter { $0.configuration?.telemetry?.role == .consult }
         #expect(consults.count > 1, "about 4k tokens over 2.4k chunks")
@@ -549,20 +560,6 @@ struct ContextOrchestrationTests {
         #expect(question.contains("Search query: echo"))
         #expect(question.contains("what did echo settle on?"))
         #expect(consults[0].messages[1].cacheBoundary == .durable, "each chunk is its own cached prefix")
-        await surface.shutdown()
-    }
-
-    @Test("without a consultant a long thread keeps its newest rows")
-    func searchWithoutConsultantKeepsNewestRows() async throws {
-        let model = ScriptedModel()
-        let surface = try await longThreadSurface(model)
-        let payload = try await search(
-            surface, "echo", handOver: ThreadSearchHandOver(strategy: .legacy, profile: smallWindow, consultant: nil))
-        #expect(deliveries(payload)["echo"] == "newest rows")
-        let newest = payload["newest_rows"] as? String ?? ""
-        #expect(newest.contains("echo note 119:"))
-        #expect(!newest.contains("echo note 0:"))
-        #expect(await model.requests.isEmpty)
         await surface.shutdown()
     }
 
@@ -588,6 +585,9 @@ struct ContextOrchestrationTests {
         let surface = try await seededSurface(model)
         // Connect-time bootstrap: mints the keypair the Output row seals to.
         try await surface.client.persistMyNode()
+        await model.setConsultReply(
+            #"{"relevant": [{"thread": "t1", "verdict": "answer", "facts": ["bravo ended on 3"], "refs": ["t1.4"]}]}"#
+        )
         for layout in [KeepTalkingOrchestrationStrategy.legacy, strategy(consults: false)] {
             await model.callToolOnce(
                 AIToolCall(id: "search-1", name: "kt_search_threads", argumentsJSON: #"{"query": "bravo"}"#))
@@ -599,7 +599,7 @@ struct ContextOrchestrationTests {
                 await model.requests.last { request in
                     request.messages.contains { $0.role == .tool }
                 }?.messages.last { $0.role == .tool }?.content?.text ?? ""
-            #expect(toolResult.contains("bravo message 3"), "the search returned the thread verbatim")
+            #expect(toolResult.contains("bravo ended on 3"), "the search returned the consult's answer")
 
             _ = try await surface.client.runDequeuedAIPrompt("and after that?", in: surface.contextID, agent: config)
             let next = await model.requests.last { request in
@@ -620,6 +620,22 @@ struct ContextOrchestrationTests {
                 return false
             }
         #expect(outputs.count == 2, "one sealed Output row per search")
+        await surface.shutdown()
+    }
+
+    @Test("a search whose consult finds nothing reveals nothing")
+    func irrelevantSearchRevealsNothing() async throws {
+        let model = ScriptedModel()
+        let surface = try await seededSurface(model)
+        try await surface.client.persistMyNode()
+        await model.callToolOnce(
+            AIToolCall(id: "search-1", name: "kt_search_threads", argumentsJSON: #"{"query": "bravo"}"#))
+        let config = KeepTalkingAgentConfiguration(main: .init(connector: model, model: "test"))
+        _ = try await surface.client.runDequeuedAIPrompt("what did bravo say?", in: surface.contextID, agent: config)
+        _ = try await surface.client.runDequeuedAIPrompt("and after that?", in: surface.contextID, agent: config)
+        let next = await model.requests.last { $0.messages.last?.content?.text.contains("and after that?") == true }
+        let text = next?.messages.compactMap { $0.content?.text }.joined(separator: "\n") ?? ""
+        #expect(!text.contains("Threads your earlier searches revealed"))
         await surface.shutdown()
     }
 

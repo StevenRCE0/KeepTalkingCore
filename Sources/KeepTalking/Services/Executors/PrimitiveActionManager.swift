@@ -64,7 +64,8 @@ public actor PrimitiveActionManager {
     public func callAction(
         action: KeepTalkingAction,
         call: KeepTalkingActionCall,
-        scope: KeepTalkingActionScope
+        scope: KeepTalkingActionScope,
+        manifest: KTResourceManifest? = nil
     ) async throws -> (
         content: [Tool.Content], isError: Bool?,
         outputFiles: [KeepTalkingLocalAttachmentInput]
@@ -80,7 +81,7 @@ public actor PrimitiveActionManager {
         // Primitives narrow by scope key (`.named` tokens); there is no class
         // wildcard, so only `.all` means "all keys". `nil` = all permitted.
         let allowedScopeKeys = scope.allowedNames(classWildcard: nil)
-        let response = try await registry.callAction(primitiveBundle, call, allowedScopeKeys)
+        let response = try await registry.callAction(primitiveBundle, call, allowedScopeKeys, manifest)
         return (
             content: [.text(text: response.text, annotations: nil, _meta: nil)],
             isError: response.isError,

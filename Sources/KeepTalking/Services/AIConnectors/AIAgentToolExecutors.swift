@@ -32,7 +32,7 @@ extension KeepTalkingClient {
         outputHandles: [KeepTalkingActionOutputHandle]? = nil,
         assistantPublisher: AIOrchestrator.AssistantPublisher? = nil,
         toolHintPublisher: AIOrchestrator.ToolHintPublisher? = nil,
-        threadSearch: ThreadSearchHandOver = .unconsulted
+        threadSearch: ThreadSearchHandOver? = nil
     ) async throws -> [AIOrchestrator.ToolExecution] {
         var executions: [AIOrchestrator.ToolExecution] = []
 
@@ -128,6 +128,24 @@ extension KeepTalkingClient {
                     )
                     continue
                 } else if functionName == Self.searchThreadsToolFunctionName {
+                    guard let threadSearch else {
+                        executions.append(
+                            .init(
+                                toolCall: toolCall,
+                                messages: [
+                                    toolMessage(
+                                        payload: jsonString([
+                                            "ok": false,
+                                            "error":
+                                                "\(Self.searchThreadsToolFunctionName) is only available to the main agent.",
+                                        ]),
+                                        toolCallID: toolCallID
+                                    )
+                                ]
+                            )
+                        )
+                        continue
+                    }
                     executions.append(
                         .init(
                             toolCall: toolCall,
@@ -186,6 +204,21 @@ extension KeepTalkingClient {
                             messages: [
                                 toolMessage(
                                     payload: try await executeWebSearchToolCall(
+                                        rawArguments: toolCall.argumentsJSON
+                                    ),
+                                    toolCallID: toolCallID
+                                )
+                            ]
+                        )
+                    )
+                    continue
+                } else if functionName == Self.webFetchFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: try await executeWebFetchToolCall(
                                         rawArguments: toolCall.argumentsJSON
                                     ),
                                     toolCallID: toolCallID
@@ -1236,6 +1269,27 @@ extension KeepTalkingClient {
         }
         let result = try await provider(query)
         return result
+    }
+
+    func executeWebFetchToolCall(rawArguments: String) async throws -> String {
+        let args = try decodeToolArguments(rawArguments)
+        guard
+            let raw = args["url"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+            let url = URL(string: raw),
+            let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+            url.host?.isEmpty == false
+        else {
+            return jsonString(["ok": false, "error": "invalid_url"])
+        }
+        guard let provider = webFetchProvider else {
+            return jsonString([
+                "ok": false,
+                "error": "web_fetch_not_configured",
+                "message":
+                    "No web fetch provider is set. Call setWebFetchProvider(_:) on the KeepTalkingClient.",
+            ])
+        }
+        return try await provider(url.absoluteString)
     }
 
     func decodeToolArguments(_ raw: String) throws -> [String: Value] {

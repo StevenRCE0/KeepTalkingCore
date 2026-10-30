@@ -25,7 +25,7 @@ struct PrimitiveActionManagerTests {
 
         let registry = KeepTalkingPrimitiveRegistry(
             toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
-            callAction: { primitive, incomingCall, allowedScopeKeys in
+            callAction: { primitive, incomingCall, allowedScopeKeys, _ in
                 #expect(primitive == bundle)
                 #expect(incomingCall.action == call.action)
                 #expect(incomingCall.arguments["url"]?.stringValue == "https://example.com")
@@ -84,7 +84,7 @@ struct PrimitiveActionManagerTests {
         )
         let registry = KeepTalkingPrimitiveRegistry(
             toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
-            callAction: { _, _, _ in KeepTalkingPrimitiveActionResponse(text: "unused") }
+            callAction: { _, _, _, _ in KeepTalkingPrimitiveActionResponse(text: "unused") }
         )
         let manager = PrimitiveActionManager(registry: registry)
 

@@ -47,6 +47,8 @@ public enum KeepTalkingWorkspacePlannerEvent: Sendable {
     case askingUser(question: String, context: String)
     /// The planner is searching the web for current information. Informational.
     case searchingWeb(query: String)
+    /// The planner is reading a web page (`web_fetch`). Informational.
+    case readingWeb(url: String)
     /// Planner declined to plan. Reuses the skill planner's decline taxonomy.
     case refusing(reason: String, category: KeepTalkingSkillPlannerDeclineKind)
     case finalizing

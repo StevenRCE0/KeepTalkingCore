@@ -8,7 +8,7 @@ extension KeepTalkingClient {
         rawArguments: String,
         remoteSemanticRetrievalActions remoteEntries: [KeepTalkingSemanticRetrievalCatalogEntry],
         context: KeepTalkingContext,
-        handOver: ThreadSearchHandOver = .unconsulted,
+        handOver: ThreadSearchHandOver,
         publisher: AIOrchestrator.ToolHintPublisher? = nil
     ) async throws -> String {
         let args = (try? decodeToolArguments(rawArguments)) ?? [:]
@@ -33,7 +33,7 @@ extension KeepTalkingClient {
             guard let threadID = UUID(uuidString: hit.threadID) else { continue }
             do {
                 read[hit.threadID] = try await retrievedThread(
-                    threadID, score: hit.score, aliasLookup: aliasLookup, ceilingTokens: handOver.readCeilingTokens
+                    threadID, score: hit.score, aliasLookup: aliasLookup, ceilingTokens: handOver.consultTokens
                 )
             } catch {
                 onLog?(
@@ -41,17 +41,13 @@ extension KeepTalkingClient {
                 )
             }
         }
-        let deliveries = handOver.deliveries(hits.compactMap { read[$0.threadID] })
-        let consultation = await handOver.consult(
-            deliveries.filter { $0.delivery == .answered }.map(\.thread), query: query, on: self
-        )
+        let (consulted, listed) = handOver.split(hits.compactMap { read[$0.threadID] })
+        let resolution = await handOver.consult(consulted, query: query, on: self)
         let result = handOver.toolResult(
-            query: query, hits: hits, read: read, deliveries: deliveries, consultation: consultation
+            query: query, hits: hits, read: read, consulted: consulted, listed: listed, resolution: resolution
         )
         await publishRevealedThreads(
-            deliveries.filter { $0.delivery == .verbatim || $0.delivery == .answered }.map(\.thread.thread.threadID),
-            query: query,
-            publisher: publisher
+            resolution?.findings.map(\.thread.threadID) ?? [], query: query, publisher: publisher
         )
         onLog?("[search-threads] query=\"\(query.prefix(80))\" hits=\(hits.count) \(result.log)")
         return jsonString(result.payload)

@@ -23,6 +23,7 @@ public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     /// titles). No scope means no access: a missing or empty key turns that
     /// operation off.
     case addToReminders = "add-to-reminders"
+    case composeEmail = "compose-email"
 }
 
 public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
@@ -70,7 +71,7 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
         KeepTalkingPrimitiveBundle(
             name: "open-with-url",
             indexDescription:
-                "Open a URL via the system API — websites open in the browser, deep-links open native apps directly. Use for: navigate or search on Maps, get directions, call or FaceTime someone, compose a message or email, search Apple Music or open radio, search the App Store, open Weather, Calendar, Voice Memos, Books, Apple News, TV, or HomeKit.",
+                "Open a URL via the system API — websites open in the browser, deep-links open native apps directly. Use for: navigate or search on Maps, get directions, call or FaceTime someone, compose a message, search Apple Music or open radio, search the App Store, open Weather, Calendar, Voice Memos, Books, Apple News, TV, or HomeKit.",
             action: .openWithURL
         ),
         KeepTalkingPrimitiveBundle(
@@ -102,6 +103,12 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
             indexDescription:
                 "Read (list reminders) and write (add reminders with title, optional due date, notes, priority) on the user's Reminders lists on the action host.",
             action: .addToReminders
+        ),
+        KeepTalkingPrimitiveBundle(
+            name: "compose-email",
+            indexDescription:
+                "Open a pre-filled email draft (recipients, subject, body, optional file attachments passed as input_handles) on the action host for the user to review and send. Never sends by itself.",
+            action: .composeEmail
         ),
     ]
 
@@ -157,8 +164,29 @@ extension KeepTalkingPrimitiveActionKind {
                     ]),
                 ]
             case .openWithURL, .addToReadingList, .askForFile,
-                .getCurrentlyPlayingMusic, .runMacOSShortcut:
+                .getCurrentlyPlayingMusic, .runMacOSShortcut, .composeEmail:
                 return [:]
+        }
+    }
+}
+
+extension KeepTalkingPrimitiveActionKind {
+    public var inputFileObjects: [KeepTalkingActionObject] {
+        switch self {
+            case .composeEmail:
+                return [
+                    KeepTalkingActionObject(
+                        name: "attachments",
+                        description:
+                            "Optional files to attach to the draft. Pass each file's handle in input_handles.",
+                        resource: .filePaths([]),
+                        direction: .input
+                    )
+                ]
+            case .openWithURL, .addToReadingList, .askForFile,
+                .getCurrentlyPlayingMusic, .runMacOSShortcut, .accessCalendar,
+                .addToReminders:
+                return []
         }
     }
 }
@@ -188,9 +216,16 @@ public struct KeepTalkingPrimitiveRegistry: Sendable {
     public let toolParameters: @Sendable (KeepTalkingPrimitiveActionKind) -> [String: AIProxyJSONValue]
     /// Executes a primitive call. `allowedScopeKeys` is the resolved per-grant
     /// scope-key allowlist (`nil` = no narrowing beyond the bundle's own scope).
+    /// `manifest` is the run's KTRM: the resources the call named in
+    /// `inputHandles`, readable for the duration of the call only. `nil` unless
+    /// the kind declares input files and the call named some.
     public let callAction:
-        @Sendable (KeepTalkingPrimitiveBundle, KeepTalkingActionCall, _ allowedScopeKeys: [String]?) async throws ->
-            KeepTalkingPrimitiveActionResponse
+        @Sendable (
+            KeepTalkingPrimitiveBundle,
+            KeepTalkingActionCall,
+            _ allowedScopeKeys: [String]?,
+            _ manifest: KTResourceManifest?
+        ) async throws -> KeepTalkingPrimitiveActionResponse
 
     public init(
         toolParameters: @escaping @Sendable (KeepTalkingPrimitiveActionKind) -> [String: AIProxyJSONValue],
@@ -198,7 +233,8 @@ public struct KeepTalkingPrimitiveRegistry: Sendable {
             @escaping @Sendable (
                 KeepTalkingPrimitiveBundle,
                 KeepTalkingActionCall,
-                _ allowedScopeKeys: [String]?
+                _ allowedScopeKeys: [String]?,
+                _ manifest: KTResourceManifest?
             ) async throws -> KeepTalkingPrimitiveActionResponse
     ) {
         self.toolParameters = toolParameters

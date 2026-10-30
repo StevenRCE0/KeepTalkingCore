@@ -45,9 +45,7 @@ public struct KeepTalkingOrchestrationStrategy: Sendable, Equatable {
 
     // MARK: 2. Chunking
 
-    /// What `kt_search_threads` returns word for word, in all; past it a
-    /// result is too long and consultants read it instead.
-    public var verbatimWindowShare: Double
+    public var presentedWindowShare: Double
     /// One consult's history chunk: the sweet spot for careful reading.
     public var chunkWindowShare: Double
     /// Ceiling on the stored-thread rows the turn context carries (consult
@@ -63,8 +61,6 @@ public struct KeepTalkingOrchestrationStrategy: Sendable, Equatable {
     /// How many of the newest chunks those consults read. Threads in older
     /// chunks are listed in the index by name only.
     public var consultWindowChunks: Int
-    /// Consult search results too long to return verbatim.
-    public var consultsLongSearchResults: Bool
     /// Most chunks one search consults.
     public var maximumSearchChunks: Int
     /// Live rows a turn's consult sees, so it can tell what the message refers to.
@@ -82,13 +78,12 @@ public struct KeepTalkingOrchestrationStrategy: Sendable, Equatable {
     public init(
         layout: Layout,
         revealedThreadsKept: Int = 5,
-        verbatimWindowShare: Double = 0.2,
+        presentedWindowShare: Double = 0.2,
         chunkWindowShare: Double = 0.4,
         presentedTranscriptTokenCap: Int = 6_000,
         outputReserveTokens: Int = 8_192,
         consultsStoredThreads: Bool = true,
         consultWindowChunks: Int = 2,
-        consultsLongSearchResults: Bool = true,
         maximumSearchChunks: Int = 4,
         consultLiveTailRows: Int = 8,
         consultEffort: AIReasoning.Effort = .low,
@@ -97,13 +92,12 @@ public struct KeepTalkingOrchestrationStrategy: Sendable, Equatable {
     ) {
         self.layout = layout
         self.revealedThreadsKept = revealedThreadsKept
-        self.verbatimWindowShare = verbatimWindowShare
+        self.presentedWindowShare = presentedWindowShare
         self.chunkWindowShare = chunkWindowShare
         self.presentedTranscriptTokenCap = presentedTranscriptTokenCap
         self.outputReserveTokens = outputReserveTokens
         self.consultsStoredThreads = consultsStoredThreads
         self.consultWindowChunks = consultWindowChunks
-        self.consultsLongSearchResults = consultsLongSearchResults
         self.maximumSearchChunks = maximumSearchChunks
         self.consultLiveTailRows = consultLiveTailRows
         self.consultEffort = consultEffort
@@ -127,13 +121,12 @@ public struct KeepTalkingOrchestrationStrategy: Sendable, Equatable {
         return max(1_000, Int(Double(window) * share))
     }
 
-    func verbatimTokens(for profile: AIModelProfile?) -> Int { Self.tokens(share: verbatimWindowShare, of: profile) }
     func chunkTokens(for profile: AIModelProfile?) -> Int { Self.tokens(share: chunkWindowShare, of: profile) }
     /// What one search's consultants read, in all.
     func searchConsultTokens(for profile: AIModelProfile?) -> Int { maximumSearchChunks * chunkTokens(for: profile) }
     /// Revealed threads and consult citations share this in the turn context.
     func presentedTokens(for profile: AIModelProfile?) -> Int {
-        min(verbatimTokens(for: profile), presentedTranscriptTokenCap)
+        min(Self.tokens(share: presentedWindowShare, of: profile), presentedTranscriptTokenCap)
     }
     func consultEffort(for profile: AIModelProfile?) -> AIReasoning.Effort? {
         profile.map { $0.resolvedEffort(consultEffort) } ?? consultEffort

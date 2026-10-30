@@ -33,7 +33,7 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
         }
     }
 
-    private struct NodeMetadata: Codable, Sendable {
+    private struct NodeMetadata: Codable, Equatable, Sendable {
         let name: String
         let purposes: [String]
     }
@@ -60,6 +60,7 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
         var ktOwnedNodes: [String]
         var nodeRecords: [String: NodeMetadata]
         var pairPublicKeys: [String: String]
+        var stored: [String: String] = [:]
 
         init(
             ktOwnedNodes: [String] = [],
@@ -131,7 +132,7 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
         var document = try await fetchDocument()
 
         document.ktOwnedNodes.removeAll { $0 == nodeID }
-        try await saveOwnedNodes(document.ktOwnedNodes)
+        try await saveOwnedNodes(document)
 
         try await deleteValue(forKey: nodeRecordKey(nodeID: nodeID))
         for key in document.pairPublicKeys.keys.sorted() {
@@ -411,6 +412,7 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
         var document = KVDocument()
 
         for item in list.items {
+            document.stored[item.key] = item.value
             if item.key == KVDocumentKey.ownedNodes {
                 guard let valueData = item.value.data(using: .utf8) else {
                     continue
@@ -453,23 +455,33 @@ public final class KeepTalkingPassKVService: KeepTalkingKVService,
     }
 
     private func saveDocument(_ document: KVDocument) async throws {
-        try await saveOwnedNodes(document.ktOwnedNodes)
+        try await saveOwnedNodes(document)
 
         let normalizedRecords = normalizeNodeRecords(document.nodeRecords)
         for (key, metadata) in normalizedRecords {
-            let metadataJSON = try encodeJSONString(metadata)
-            try await upsertValue(metadataJSON, forKey: key)
+            try await saveIfChanged(metadata, forKey: key, in: document)
         }
 
         let normalizedPairs = normalizePairPublicKeys(document.pairPublicKeys)
-        for (key, publicKey) in normalizedPairs {
+        for (key, publicKey) in normalizedPairs where document.stored[key] != publicKey {
             try await upsertValue(publicKey, forKey: key)
         }
     }
 
-    private func saveOwnedNodes(_ nodeIDs: [String]) async throws {
-        let ownedNodesJSON = try encodeJSONString(normalizeOwnedNodes(nodeIDs))
-        try await upsertValue(ownedNodesJSON, forKey: KVDocumentKey.ownedNodes)
+    private func saveOwnedNodes(_ document: KVDocument) async throws {
+        try await saveIfChanged(
+            normalizeOwnedNodes(document.ktOwnedNodes), forKey: KVDocumentKey.ownedNodes, in: document)
+    }
+
+    private func saveIfChanged<Value: Codable & Equatable>(
+        _ value: Value, forKey key: String, in document: KVDocument
+    ) async throws {
+        if let stored = document.stored[key]?.data(using: .utf8),
+            (try? decoder.decode(Value.self, from: stored)) == value
+        {
+            return
+        }
+        try await upsertValue(try encodeJSONString(value), forKey: key)
     }
 
     private func upsertValue(_ value: String, forKey key: String) async throws {

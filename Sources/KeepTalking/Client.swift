@@ -191,6 +191,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// mode (e.g. OpenRouter) where web search is a client-side function call rather than
     /// a built-in Responses API tool. Parameter: query string. Returns raw result text.
     public typealias WebSearchProvider = @Sendable (String) async throws -> String
+    /// Callback that fetches a URL for the `web_fetch` tool. Parameter: URL string.
+    /// Returns the page's readable text.
+    public typealias WebFetchProvider = @Sendable (String) async throws -> String
 
     public typealias LogHandler = @Sendable (String) -> Void
 
@@ -271,6 +274,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     let primitiveRegistry: KeepTalkingPrimitiveRegistry?
     var semanticSearchCallback: SemanticSearchCallback?
     var webSearchProvider: WebSearchProvider?
+    var webFetchProvider: WebFetchProvider?
     /// Builds link previews on the send path; nil sends messages without them.
     var linkPreviewFetcher: (any KeepTalkingLinkPreviewFetching)?
     /// Supplies the agent configuration for work the node runs without one
@@ -579,6 +583,10 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     public func setWebSearchProvider(_ provider: WebSearchProvider?) {
         webSearchProvider = provider
+    }
+
+    public func setWebFetchProvider(_ provider: WebFetchProvider?) {
+        webFetchProvider = provider
     }
 
     /// Installs the host's answer to "which models run this?" for work the

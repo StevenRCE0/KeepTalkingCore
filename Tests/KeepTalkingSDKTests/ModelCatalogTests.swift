@@ -146,19 +146,13 @@ struct ModelCatalogTests {
 
     static func prompt(_ profile: AIModelProfile?) -> String {
         OpenAIConnector.keepTalkingSystemPrompt(
-            ktRunActionToolFunctionName: KeepTalkingClient.runActionToolFunctionName,
-            ktSkillMetainfoToolFunctionName: KeepTalkingClient.ktSkillMetainfoToolFunctionName,
-            attachmentListingToolFunctionName: KeepTalkingClient.contextAttachmentListingToolFunctionName,
-            attachmentReaderToolFunctionName: KeepTalkingClient.resourceReadToolFunctionName,
-            searchThreadsToolFunctionName: KeepTalkingClient.searchThreadsToolFunctionName,
-            markTurningPointToolFunctionName: KeepTalkingClient.markTurningPointToolFunctionName,
-            markChitterChatterToolFunctionName: KeepTalkingClient.markChitterChatterToolFunctionName,
-            currentPromptIncludesAttachments: false,
-            currentPromptShouldAvoidAutomaticToolUse: false,
-            contextTranscript: "Available actions:\n- action: X",
-            currentDate: "2026-09-28 10:00",
-            platform: "macOS",
-            modelProfile: profile
+            OrchestrationPromptFactor.groupChat(
+                tools: KeepTalkingClient.promptToolNames,
+                contextTranscript: "Available actions:\n- action: X",
+                currentDate: "2026-09-28 10:00",
+                platform: "macOS",
+                modelProfile: profile
+            )
         )
     }
 

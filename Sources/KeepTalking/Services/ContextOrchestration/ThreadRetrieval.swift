@@ -35,226 +35,136 @@ struct RetrievedThread: Sendable {
 
 // MARK: - The hand-over
 
-/// What `kt_search_threads` hands back for the threads it found. Sizes come
-/// from the run's strategy and the main model's window; every thread then
-/// gets exactly one delivery, decided in rank order:
-///
-/// | delivery     | when                                                        |
-/// |--------------|-------------------------------------------------------------|
-/// | `verbatim`   | read whole here, and it still fits `verbatimTokens`         |
-/// | `answered`   | too long: consultants read it and answer the query          |
-/// | `newestRows` | too long and no consultant: its newest rows, within budget  |
-/// | `listed`     | past what one search's consultants read (`consultTokens`)   |
-/// | `excerpt`    | a peer's, in a context this node doesn't hold               |
 struct ThreadSearchHandOver: Sendable {
     enum Delivery: String, Sendable {
-        case verbatim
         case answered
-        case newestRows = "newest rows"
         case listed
         case excerpt
     }
 
-    /// The run's main model, lent to the consultants.
-    struct Consultant: Sendable {
-        let connector: any AIConnector
-        let model: String
-        /// The user's message this turn, read beside the query.
-        let userPrompt: String?
-        let agentTurnID: UUID?
-        let promptCacheKey: String?
-    }
-
-    /// What goes back word for word, in all.
-    let verbatimTokens: Int
-    /// One consult's chunk.
-    let chunkTokens: Int
-    /// What one search's consultants read, in all.
+    let consultant: ThreadConsultant
+    let userPrompt: String?
     let consultTokens: Int
-    /// Nil: long threads are cut to their newest rows instead.
-    let consultant: Consultant?
-    let consultEffort: AIReasoning.Effort?
-    let consultMaxOutputTokens: Int
-
-    /// How far back a thread is read: as much as this search could hand over.
-    var readCeilingTokens: Int { consultant == nil ? verbatimTokens : max(verbatimTokens, consultTokens) }
-    /// Rows the consultants cite, beside their answers.
-    var evidenceTokens: Int { max(1_000, verbatimTokens / 4) }
 }
 
 extension ThreadSearchHandOver {
-    init(strategy: KeepTalkingOrchestrationStrategy, profile: AIModelProfile?, consultant: Consultant?) {
+    init(
+        strategy: KeepTalkingOrchestrationStrategy, profile: AIModelProfile?, consultant: ThreadConsultant,
+        userPrompt: String?
+    ) {
         self.init(
-            verbatimTokens: strategy.verbatimTokens(for: profile),
-            chunkTokens: strategy.chunkTokens(for: profile),
-            consultTokens: strategy.searchConsultTokens(for: profile),
-            consultant: strategy.consultsLongSearchResults ? consultant : nil,
-            consultEffort: strategy.consultEffort(for: profile),
-            consultMaxOutputTokens: strategy.consultMaxOutputTokens
-        )
+            consultant: consultant, userPrompt: userPrompt, consultTokens: strategy.searchConsultTokens(for: profile))
     }
 
-    /// For a search outside a main run, with no model to consult on.
-    static let unconsulted = ThreadSearchHandOver(strategy: .legacy, profile: nil, consultant: nil)
-
-    // MARK: 1. Deliveries
-
-    /// One delivery per thread read here, `ranked` best first. Threads read
-    /// whole fill the verbatim allowance in rank order; the rest are too long
-    /// and go to the consultants up to `consultTokens`, or are cut without one.
-    func deliveries(_ ranked: [RetrievedThread]) -> [(thread: RetrievedThread, delivery: Delivery)] {
-        var verbatimLeft = verbatimTokens
-        var consultLeft = consultTokens
-        var consulting = false
-        return ranked.map { thread in
-            if thread.complete, thread.tokens <= verbatimLeft {
-                verbatimLeft -= thread.tokens
-                return (thread, .verbatim)
+    func split(_ ranked: [RetrievedThread]) -> (consulted: [RetrievedThread], listed: [RetrievedThread]) {
+        var left = consultTokens
+        var consulted: [RetrievedThread] = []
+        var listed: [RetrievedThread] = []
+        for thread in ranked {
+            guard consulted.isEmpty || thread.tokens <= left else {
+                listed.append(thread)
+                continue
             }
-            guard consultant != nil else { return (thread, .newestRows) }
-            if thread.tokens <= consultLeft || !consulting {
-                consultLeft -= thread.tokens
-                consulting = true
-                return (thread, .answered)
-            }
-            return (thread, .listed)
+            left -= thread.tokens
+            consulted.append(thread)
         }
+        return (consulted, listed)
     }
 
-    // MARK: 2. Consulting what is too long
-
-    struct Consultation: Sendable {
-        let resolution: ThreadConsultResolution
-        let chunkCount: Int
-        let failures: [String]
-    }
-
-    /// One consult per chunk of `threads`, all in parallel, asked the query.
     func consult(
         _ threads: [RetrievedThread], query: String, on client: KeepTalkingClient
-    ) async -> Consultation? {
-        guard let consultant, !threads.isEmpty else { return nil }
+    ) async -> ThreadConsultResolution? {
+        guard !threads.isEmpty else { return nil }
         // Chronological labels, so a chunk's text depends only on its threads.
         let labelled = threads.sorted(by: RetrievedThread.chronological).enumerated()
             .map { (label: "t\($0.offset + 1)", thread: $0.element.thread) }
-        let chunks = KeepTalkingClient.consultChunks(labelled, targetTokens: chunkTokens)
-        var configuration = AITurnConfiguration(
-            reasoning: consultEffort.map { AIReasoning(effort: $0) },
-            maxOutputTokens: consultMaxOutputTokens,
-            promptCacheKey: consultant.promptCacheKey
-        )
-        configuration.telemetry = AITurnTelemetry(role: .consult, agentTurnID: consultant.agentTurnID)
-        let outcomes = await client.runThreadConsults(
-            chunks,
-            brief: .search(query: query, userPrompt: consultant.userPrompt),
-            model: consultant.model,
-            connector: consultant.connector,
-            configuration: configuration
-        )
-        return Consultation(
-            resolution: .resolve(outcomes, presentedLastTurn: []),
-            chunkCount: chunks.count,
-            failures: outcomes.compactMap { outcome in outcome.failure.map { "chunk \(outcome.chunk.index): \($0)" } }
+        return await client.consult(
+            KeepTalkingClient.consultChunks(labelled, targetTokens: consultant.chunkTokens),
+            brief: .search(query: query, userPrompt: userPrompt),
+            with: consultant
         )
     }
 
-    // MARK: 3. The tool result
-
-    /// Every hit with its delivery, then what each delivery carries:
-    /// `threads` (verbatim), `answers` + `evidence` (consulted),
-    /// `newest_rows` (cut), and a `note` saying what happened.
     func toolResult(
         query: String,
         hits: [ThreadSearchHit],
         read: [String: RetrievedThread],
-        deliveries: [(thread: RetrievedThread, delivery: Delivery)],
-        consultation: Consultation?
+        consulted: [RetrievedThread],
+        listed: [RetrievedThread],
+        resolution: ThreadConsultResolution?
     ) -> (payload: [String: Any], log: String) {
-        let grouped = Dictionary(grouping: deliveries, by: \.delivery).mapValues { $0.map(\.thread) }
-        let verbatim = grouped[.verbatim] ?? []
-        let answered = grouped[.answered] ?? []
-        let cut = grouped[.newestRows] ?? []
-        let listed = grouped[.listed] ?? []
-        let deliveryByThread = Dictionary(
-            deliveries.map { ($0.thread.thread.threadID, $0.delivery) }, uniquingKeysWith: { first, _ in first }
-        )
+        let findings = resolution?.findings ?? []
+        let answeredIDs = Set(findings.map(\.thread.threadID))
+        let unread = consulted.filter {
+            resolution?.unread.contains($0.thread.threadID) == true && !answeredIDs.contains($0.thread.threadID)
+        }
+        let listedIDs = Set((listed + unread).map(\.thread.threadID))
+        let irrelevant = consulted.filter {
+            !answeredIDs.contains($0.thread.threadID) && !listedIDs.contains($0.thread.threadID)
+        }
         func names(_ threads: [RetrievedThread]) -> String {
             threads.map { "\"\($0.thread.name)\"" }.joined(separator: ", ")
         }
-        func were(_ threads: [RetrievedThread]) -> String { threads.count == 1 ? "was" : "were" }
 
-        var payload: [String: Any] = ["ok": true, "query": query, "count": hits.count]
+        var payload: [String: Any] = ["ok": true, "query": query]
         var notes: [String] = []
-        var log = "verbatim=\(verbatim.count) (≈\(verbatim.reduce(0) { $0 + $1.tokens })/\(verbatimTokens) tok)"
+        let consultedTokens = consulted.reduce(0) { $0 + $1.tokens }
+        var log = "consulted=\(consulted.count) (≈\(consultedTokens)/\(consultTokens) tok)"
 
-        if !verbatim.isEmpty {
-            payload["threads"] = KeepTalkingClient.verbatimTranscript(verbatim)
-        }
-        if !answered.isEmpty, let consultation {
-            let findings = consultation.resolution.findings
+        if let resolution {
             payload["answers"] = findings.map { finding -> [String: Any] in
                 var answer: [String: Any] = ["thread": finding.thread.name, "facts": finding.facts]
                 if !finding.constraints.isEmpty { answer["must_honour"] = finding.constraints }
                 return answer
             }
             let cited = PresentedTranscripts.window(
-                findings.flatMap { finding in
-                    finding.citedRows.map {
-                        PresentedTranscripts.Entry(
-                            threadID: finding.thread.threadID, threadName: finding.thread.name,
-                            label: $0.label, row: $0.row
-                        )
-                    }
-                },
-                budget: evidenceTokens,
-                cap: evidenceTokens
-            )
+                resolution.citedEntries, budget: consultant.citationTokens, cap: consultant.citationTokens)
             if !cited.text.isEmpty { payload["evidence"] = cited.text }
-            let tokens = answered.reduce(0) { $0 + $1.tokens }
-            notes.append(
-                "\(names(answered)) \(were(answered)) too long to return whole (about \(tokens) tokens; this model takes \(verbatimTokens) here), so consultants read \(answered.count == 1 ? "it" : "them") in full (\(consultation.chunkCount) chunk(s)) and "
-                    + (findings.isEmpty
-                        ? "found nothing that answers the query."
-                        : "answered the query: see answers, with the rows they cite in evidence.")
-            )
-            if !consultation.failures.isEmpty {
+            let summary =
+                "Consultants read \(consulted.count) matching thread(s) in full (\(resolution.consultedChunks) chunk(s))"
+            if findings.isEmpty {
+                notes.append(summary + " and found nothing that answers the query.")
+            } else {
+                notes.append(summary + ": see answers, with the rows they cite in evidence.")
+                if !irrelevant.isEmpty {
+                    notes.append("\(irrelevant.count) other match(es) held nothing for it and are left out.")
+                }
+            }
+            if !resolution.failures.isEmpty {
                 notes.append(
-                    "Some consults failed (\(consultation.failures.joined(separator: "; "))); their part was not read.")
+                    "Some consults failed (\(resolution.failures.joined(separator: "; ")))"
+                        + (unread.isEmpty ? "." : "; not read: \(names(unread))."))
             }
             log +=
-                " answered=\(answered.count) (≈\(tokens) tok, \(consultation.chunkCount) chunk(s)) → \(findings.count) answer(s)/\(cited.tokens) tok cited"
-                + (consultation.failures.isEmpty ? "" : " failures=[\(consultation.failures.joined(separator: "; "))]")
-        }
-        if !cut.isEmpty {
-            let used = verbatim.reduce(0) { $0 + $1.tokens }
-            let budget = max(verbatimTokens - used, verbatimTokens / 4)
-            let newest = PresentedTranscripts.window(cut.map(\.thread), budget: budget, cap: budget)
-            payload["newest_rows"] = newest.text
-            notes.append("\(names(cut)) \(were(cut)) too long to return whole; the newest rows are in newest_rows.")
-            if let note = newest.truncationNote { notes.append(note) }
-            log += " cut=\(cut.count) (→ \(newest.tokens) tok)"
+                " chunks=\(resolution.consultedChunks) → \(findings.count) answered/\(irrelevant.count) left out, \(cited.tokens) tok cited"
+                + (resolution.failures.isEmpty ? "" : " failures=[\(resolution.failures.joined(separator: "; "))]")
         }
         if !listed.isEmpty {
             notes.append("Not read (past what one search consults): \(names(listed)).")
             log += " listed=\(listed.count)"
         }
 
-        payload["results"] = hits.map { hit -> [String: Any] in
+        let leftOut = Set(irrelevant.map(\.thread.threadID))
+        payload["results"] = hits.compactMap { hit -> [String: Any]? in
+            let thread = read[hit.threadID]
+            if let thread, leftOut.contains(thread.thread.threadID) { return nil }
             var result: [String: Any] = [
                 "thread_id": hit.threadID,
-                "label": read[hit.threadID]?.thread.name ?? hit.label,
+                "label": thread?.thread.name ?? hit.label,
                 "score": hit.score,
                 "node_id": hit.nodeID,
                 "node_label": hit.nodeLabel,
             ]
-            if let thread = read[hit.threadID], let delivery = deliveryByThread[thread.thread.threadID] {
-                result["delivery"] = delivery.rawValue
+            if let thread {
+                result["delivery"] =
+                    (answeredIDs.contains(thread.thread.threadID) ? Delivery.answered : .listed).rawValue
             } else {
                 result["delivery"] = Delivery.excerpt.rawValue
                 result["excerpt"] = hit.excerpt
             }
             return result
         }
+        payload["count"] = (payload["results"] as? [Any])?.count ?? 0
         if !notes.isEmpty { payload["note"] = notes.joined(separator: " ") }
         log += " excerpts=\(hits.count - read.count)"
         return (payload, log)

@@ -50,7 +50,7 @@ struct ActionCallActivityTests {
             config: KeepTalkingConfig(contextID: contextID, node: nodeID),
             primitiveRegistry: KeepTalkingPrimitiveRegistry(
                 toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
-                callAction: { _, _, _ in
+                callAction: { _, _, _, _ in
                     await executions.record()
                     return KeepTalkingPrimitiveActionResponse(text: "done")
                 }
@@ -116,7 +116,7 @@ struct ActionCallActivityTests {
             ),
             primitiveRegistry: KeepTalkingPrimitiveRegistry(
                 toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
-                callAction: { _, call, _ in
+                callAction: { _, call, _, _ in
                     if case .bool(true) = call.arguments["wait"] {
                         try await Task.sleep(for: .seconds(30))
                     }

@@ -475,7 +475,9 @@ public final class KeepTalkingAction: Model, @unchecked Sendable {
                 return true
             case .plugin:
                 return descriptor?.fileObjects(direction: .input).isEmpty == false
-            case .mcpBundle, .primitive, .filesystem, .semanticRetrieval, .actionCreation, .acp:
+            case .primitive(let bundle):
+                return !bundle.action.inputFileObjects.isEmpty
+            case .mcpBundle, .filesystem, .semanticRetrieval, .actionCreation, .acp:
                 return false
         }
     }

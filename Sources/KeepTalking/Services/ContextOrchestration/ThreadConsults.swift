@@ -99,9 +99,9 @@ struct ThreadConsultBrief: Sendable {
             systemPrompt: turnSystemPrompt, liveTail: liveTail, question: userMessage, charter: turnCharter, label: nil)
     }
 
-    /// For `kt_search_threads`, over threads too long to hand back: answer
-    /// the query. The assistant never sees these rows, so every finding must
-    /// be the answer itself, never a note that something is there.
+    /// For `kt_search_threads`, over the threads it retrieved: answer the
+    /// query. The assistant never sees these rows, so every finding must be
+    /// the answer itself, never a note that something is there.
     static func search(query: String, userPrompt: String?) -> Self {
         var question = "Search query: \(query)"
         if let prompt = userPrompt?.trimmingCharacters(in: .whitespacesAndNewlines), !prompt.isEmpty {
@@ -137,7 +137,7 @@ struct ThreadConsultBrief: Sendable {
         """
 
     static let searchCharter = """
-        Consultation — answer the search. These threads were too long to hand to the assistant: it will not see these rows, only what you write, so your reply must BE the answer.
+        Consultation — answer the search. The assistant will not see these threads, only what you write, so your reply must BE the answer.
         Reply with ONLY a JSON object:
         {"relevant": [{"thread": "t2", "verdict": "answer", "facts": ["…"], "refs": ["t2.14"]}]}
         - verdict is ALWAYS "answer". NEVER report that something is present, mentioned or discussed, and never point to where it is: write the answer itself.
@@ -145,6 +145,38 @@ struct ThreadConsultBrief: Sendable {
         - refs: the labels of the rows the facts come from.
         - List only threads that hold part of the answer; {"relevant": []} when none do.
         """
+}
+
+struct ThreadConsultant: Sendable {
+    let connector: any AIConnector
+    let model: String
+    let configuration: AITurnConfiguration
+    let chunkTokens: Int
+    let citationTokens: Int
+}
+
+extension ThreadConsultant {
+    init(
+        strategy: KeepTalkingOrchestrationStrategy,
+        profile: AIModelProfile?,
+        main: KeepTalkingAgentConfiguration.Role,
+        contextID: UUID,
+        agentTurnID: UUID
+    ) {
+        var configuration = AITurnConfiguration(
+            reasoning: strategy.consultEffort(for: profile).map { AIReasoning(effort: $0) },
+            maxOutputTokens: strategy.consultMaxOutputTokens,
+            promptCacheKey: KeepTalkingClient.promptCacheKey(for: contextID)
+        )
+        configuration.telemetry = AITurnTelemetry(role: .consult, agentTurnID: agentTurnID)
+        self.init(
+            connector: main.connector,
+            model: main.model,
+            configuration: configuration,
+            chunkTokens: strategy.chunkTokens(for: profile),
+            citationTokens: strategy.presentedTokens(for: profile)
+        )
+    }
 }
 
 /// Every relevant thread the consults reported, merged across chunks.
@@ -167,6 +199,18 @@ struct ThreadConsultResolution: Sendable {
     var answering: ThreadConsultFinding?
     /// Several claimed it; the collector decides.
     var contestedClaims: [ThreadConsultFinding] = []
+    var failures: [String] = []
+    var unread: Set<UUID> = []
+
+    var citedEntries: [PresentedTranscripts.Entry] {
+        findings.flatMap { finding in
+            finding.citedRows.map {
+                PresentedTranscripts.Entry(
+                    threadID: finding.thread.threadID, threadName: finding.thread.name, label: $0.label, row: $0.row
+                )
+            }
+        }
+    }
 
     static func resolve(
         _ outcomes: [ThreadConsultOutcome],
@@ -217,7 +261,9 @@ struct ThreadConsultResolution: Sendable {
             consultedChunks: outcomes.count,
             consultedThreads: Set(outcomes.flatMap { $0.chunk.parts.map(\.threadLabel) }).count,
             answering: claims.count == 1 ? claims.first : nil,
-            contestedClaims: claims.count > 1 ? claims : []
+            contestedClaims: claims.count > 1 ? claims : [],
+            failures: outcomes.compactMap { outcome in outcome.failure.map { "chunk \(outcome.chunk.index): \($0)" } },
+            unread: Set(outcomes.filter { $0.failure != nil }.flatMap { $0.chunk.parts.map(\.thread.threadID) })
         )
     }
 
@@ -441,6 +487,21 @@ extension KeepTalkingClient {
             searchStart = text.index(after: open)
         }
         return nil
+    }
+
+    func consult(
+        _ chunks: [ConsultChunk],
+        brief: ThreadConsultBrief,
+        with consultant: ThreadConsultant,
+        presentedLastTurn: Set<UUID> = []
+    ) async -> ThreadConsultResolution {
+        .resolve(
+            await runThreadConsults(
+                chunks, brief: brief, model: consultant.model, connector: consultant.connector,
+                configuration: consultant.configuration
+            ),
+            presentedLastTurn: presentedLastTurn
+        )
     }
 
     /// One consult: the chunk under its brief, no tools, a JSON reply.

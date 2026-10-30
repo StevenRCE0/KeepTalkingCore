@@ -102,6 +102,8 @@ public enum KeepTalkingSkillPlannerEvent: Sendable {
     /// package names, service capabilities) to inform the plan. Informational
     /// — return nil.
     case searchingWeb(query: String)
+    /// The planner is reading a web page (`web_fetch`). Informational — return nil.
+    case readingWeb(url: String)
     /// Planner declined to plan. `category` distinguishes "blocked" (missing
     /// permission/info) from "too broad" (the request demands inappropriate
     /// access for a dedicated skill). The host surfaces `reason` to the user and

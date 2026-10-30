@@ -5,3 +5,9 @@ public protocol KeepTalkingWebSearchTool: Sendable {
         configuration: WebSearchToolConfiguration
     ) -> KeepTalkingClient.WebSearchProvider
 }
+
+public protocol KeepTalkingWebFetchTool: Sendable {
+    func makeFetchProvider(
+        configuration: WebSearchToolConfiguration
+    ) -> KeepTalkingClient.WebFetchProvider
+}

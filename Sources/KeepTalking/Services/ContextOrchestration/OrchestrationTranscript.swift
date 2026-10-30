@@ -74,8 +74,14 @@ extension KeepTalkingClient {
             excludingAgentTurnID: turn.excludedAgentTurnID
         )
         let plan = OrchestrationPlan(ledger, strategy: strategy, profile: providerProfile)
-        let consults = await fanOut(plan, turn: turn)
-        let transcript = try await stitch(plan, consults, context: context, turn: turn)
+        let consultant = ThreadConsultant(
+            strategy: strategy, profile: providerProfile, main: turn.agent.main, contextID: ledger.contextID,
+            agentTurnID: turn.agentTurnID
+        )
+        let resolution = await fanOut(plan, consultant: consultant, turn: turn)
+        let search = ThreadSearchHandOver(
+            strategy: strategy, profile: providerProfile, consultant: consultant, userPrompt: turn.prompt)
+        let transcript = try await stitch(plan, resolution, search: search, context: context, turn: turn)
         return try await body(transcript)
     }
 
@@ -279,16 +285,12 @@ struct OrchestrationPlan: Sendable {
 extension KeepTalkingClient {
     /// One consult per chunk, all in one task group, each asked the user's
     /// message over its chunk of stored history.
-    func fanOut(_ plan: OrchestrationPlan, turn: OrchestrationTurn) async -> [ThreadConsultOutcome] {
-        guard !plan.consultChunks.isEmpty else { return [] }
+    func fanOut(
+        _ plan: OrchestrationPlan, consultant: ThreadConsultant, turn: OrchestrationTurn
+    ) async -> ThreadConsultResolution? {
+        guard !plan.consultChunks.isEmpty else { return nil }
         let strategy = plan.strategy
-        var configuration = AITurnConfiguration(
-            reasoning: strategy.consultEffort(for: plan.profile).map { AIReasoning(effort: $0) },
-            maxOutputTokens: strategy.consultMaxOutputTokens,
-            promptCacheKey: Self.promptCacheKey(for: plan.ledger.contextID)
-        )
-        configuration.telemetry = AITurnTelemetry(role: .consult, agentTurnID: turn.agentTurnID)
-        return await runThreadConsults(
+        return await consult(
             plan.consultChunks,
             brief: .turn(
                 userMessage: Self.speakerTagged(turn.userMessage, node: config.node),
@@ -297,9 +299,9 @@ extension KeepTalkingClient {
                     .suffix(strategy.consultLiveTailRows)
                     .map(\.message)
             ),
-            model: turn.agent.main.model,
-            connector: turn.agent.main.connector,
-            configuration: configuration
+            with: consultant,
+            presentedLastTurn: strategy.claimsMarkTurningPoints
+                ? contextOrchestrationMemory[plan.ledger.contextID]?.presentedThreadStarts ?? [] : []
         )
     }
 }
@@ -309,31 +311,16 @@ extension KeepTalkingClient {
 extension KeepTalkingClient {
     func stitch(
         _ plan: OrchestrationPlan,
-        _ consults: [ThreadConsultOutcome],
+        _ resolution: ThreadConsultResolution?,
+        search: ThreadSearchHandOver,
         context: KeepTalkingContext,
         turn: OrchestrationTurn
     ) async throws -> OrchestrationTranscript {
         switch plan.strategy.layout {
-            case .legacy: return try await stitchLegacy(plan, context: context, turn: turn)
-            case .orchestrated: return try await stitchOrchestrated(plan, consults, context: context, turn: turn)
+            case .legacy: return try await stitchLegacy(plan, search: search, context: context, turn: turn)
+            case .orchestrated:
+                return try await stitchOrchestrated(plan, resolution, search: search, context: context, turn: turn)
         }
-    }
-
-    /// The search hand-over for the loop, on the run's main model.
-    private func searchHandOver(
-        _ plan: OrchestrationPlan, turn: OrchestrationTurn, promptCacheKey: String?
-    ) -> ThreadSearchHandOver {
-        ThreadSearchHandOver(
-            strategy: plan.strategy,
-            profile: plan.profile,
-            consultant: .init(
-                connector: turn.agent.main.connector,
-                model: turn.agent.main.model,
-                userPrompt: turn.prompt,
-                agentTurnID: turn.agentTurnID,
-                promptCacheKey: promptCacheKey
-            )
-        )
     }
 
     static func revealedSection(_ threads: [RetrievedThread]) -> String? {
@@ -345,7 +332,7 @@ extension KeepTalkingClient {
     /// the decay-selected history fitted to the window, then `user_n`.
     /// Threads earlier searches revealed ride in a system row after it.
     private func stitchLegacy(
-        _ plan: OrchestrationPlan, context: KeepTalkingContext, turn: OrchestrationTurn
+        _ plan: OrchestrationPlan, search: ThreadSearchHandOver, context: KeepTalkingContext, turn: OrchestrationTurn
     ) async throws -> OrchestrationTranscript {
         let contextTranscript = try await agentContextTranscript(
             context,
@@ -358,22 +345,18 @@ extension KeepTalkingClient {
             excludingAgentTurnID: turn.excludedAgentTurnID
         )
         let systemPrompt = OpenAIConnector.keepTalkingSystemPrompt(
-            ktRunActionToolFunctionName: Self.runActionToolFunctionName,
-            ktSkillMetainfoToolFunctionName: Self.ktSkillMetainfoToolFunctionName,
-            attachmentListingToolFunctionName: Self.contextAttachmentListingToolFunctionName,
-            attachmentReaderToolFunctionName: Self.resourceReadToolFunctionName,
-            searchThreadsToolFunctionName: Self.searchThreadsToolFunctionName,
-            markTurningPointToolFunctionName: Self.markTurningPointToolFunctionName,
-            markChitterChatterToolFunctionName: Self.markChitterChatterToolFunctionName,
-            currentPromptIncludesAttachments: turn.hasCurrentPromptAttachments,
-            currentPromptShouldAvoidAutomaticToolUse: turn.hasCurrentPromptAttachments
-                && !turn.allowAutomaticToolUse,
-            sideNotes: plan.ledger.sideNotes,
-            contextTranscript: contextTranscript,
-            currentDate: turn.currentDate,
-            platform: turn.platform,
-            responseLanguages: turn.agent.responseLanguages,
-            modelProfile: plan.profile
+            OrchestrationPromptFactor.groupChat(
+                tools: Self.promptToolNames,
+                currentPromptIncludesAttachments: turn.hasCurrentPromptAttachments,
+                currentPromptShouldAvoidAutomaticToolUse: turn.hasCurrentPromptAttachments
+                    && !turn.allowAutomaticToolUse,
+                sideNotes: plan.ledger.sideNotes,
+                contextTranscript: contextTranscript,
+                currentDate: turn.currentDate,
+                platform: turn.platform,
+                responseLanguages: turn.agent.responseLanguages,
+                modelProfile: plan.profile
+            )
         )
         let revealed = Self.revealedSection(plan.revealed).map { AIMessage.system($0) }
         // Fit the decay-selected history into the model's window: whatever the
@@ -399,7 +382,7 @@ extension KeepTalkingClient {
                 + [turn.userMessage],
             turnConfiguration: turn.turnConfiguration,
             role: .main,
-            search: searchHandOver(plan, turn: turn, promptCacheKey: turn.turnConfiguration.promptCacheKey)
+            search: search
         )
     }
 
@@ -408,7 +391,8 @@ extension KeepTalkingClient {
     /// threads into the turn context.
     private func stitchOrchestrated(
         _ plan: OrchestrationPlan,
-        _ consults: [ThreadConsultOutcome],
+        _ resolution: ThreadConsultResolution?,
+        search: ThreadSearchHandOver,
         context: KeepTalkingContext,
         turn: OrchestrationTurn
     ) async throws -> OrchestrationTranscript {
@@ -420,15 +404,7 @@ extension KeepTalkingClient {
         turnConfiguration.promptCacheKey = Self.promptCacheKey(for: contextID)
         turnConfiguration.toolsCacheBoundary = .durable
 
-        // The consults, resolved; a claim marks a turning point only when the
-        // strategy says so.
-        let resolution =
-            plan.consultChunks.isEmpty
-            ? nil
-            : ThreadConsultResolution.resolve(
-                consults,
-                presentedLastTurn: strategy.claimsMarkTurningPoints ? memory?.presentedThreadStarts ?? [] : []
-            )
+        // A claim marks a turning point only when the strategy says so.
         var claimMarked = false
         if strategy.claimsMarkTurningPoints, let answering = resolution?.answering,
             let promptMessageID = turn.promptMessageID
@@ -457,32 +433,27 @@ extension KeepTalkingClient {
             nodeIDs: nodeIDs
         )
         let systemPrompt = OpenAIConnector.keepTalkingSystemPrompt(
-            ktRunActionToolFunctionName: Self.runActionToolFunctionName,
-            ktSkillMetainfoToolFunctionName: Self.ktSkillMetainfoToolFunctionName,
-            attachmentListingToolFunctionName: Self.contextAttachmentListingToolFunctionName,
-            attachmentReaderToolFunctionName: Self.resourceReadToolFunctionName,
-            searchThreadsToolFunctionName: Self.searchThreadsToolFunctionName,
-            markTurningPointToolFunctionName: Self.markTurningPointToolFunctionName,
-            markChitterChatterToolFunctionName: Self.markChitterChatterToolFunctionName,
-            currentPromptIncludesAttachments: turn.hasCurrentPromptAttachments,
-            currentPromptShouldAvoidAutomaticToolUse: turn.hasCurrentPromptAttachments
-                && !turn.allowAutomaticToolUse,
-            sideNotes: [],
-            contextTranscript: parts.stable,
-            currentDate: turn.currentDate,
-            platform: turn.platform,
-            responseLanguages: turn.agent.responseLanguages,
-            modelProfile: plan.profile,
-            layout: .orchestrated
+            OrchestrationPromptFactor.groupChat(
+                tools: Self.promptToolNames,
+                contextTranscript: parts.stable,
+                currentDate: turn.currentDate,
+                platform: turn.platform,
+                responseLanguages: turn.agent.responseLanguages,
+                modelProfile: plan.profile,
+                layout: .orchestrated
+            )
         )
+        let currentPromptGuidance =
+            turn.hasCurrentPromptAttachments
+            ? OrchestrationPromptFactor.currentPromptAttachments(
+                attachmentListing: Self.promptToolNames[.attachmentListing],
+                attachmentReader: Self.promptToolNames[.attachmentReader],
+                avoidAutomaticToolUse: !turn.allowAutomaticToolUse
+            ).rendered
+            : ""
         let turnContext = OrchestratedPrompt.TurnContextParts(
             currentDate: turn.currentDate,
-            currentPromptGuidance: AIPromptPresets.currentPromptAttachmentGuidance(
-                attachmentListingToolFunctionName: Self.contextAttachmentListingToolFunctionName,
-                attachmentReaderToolFunctionName: Self.resourceReadToolFunctionName,
-                includesAttachments: turn.hasCurrentPromptAttachments,
-                shouldAvoidAutomaticToolUse: turn.hasCurrentPromptAttachments && !turn.allowAutomaticToolUse
-            ),
+            currentPromptGuidance: currentPromptGuidance,
             sideNotes: ledger.sideNotes,
             perTurnTranscript: parts.perTurn
         )
@@ -525,20 +496,14 @@ extension KeepTalkingClient {
         var sections: [String] = []
         var transcripts: PresentedTranscripts?
         if let resolution {
-            let cited = resolution.findings.flatMap { finding in
-                finding.citedRows.map {
-                    PresentedTranscripts.Entry(
-                        threadID: finding.thread.threadID, threadName: finding.thread.name, label: $0.label, row: $0.row
-                    )
-                }
-            }
+            let cited = resolution.citedEntries
             if !cited.isEmpty {
                 let window = plan.profile?.inputTokenBudget ?? 128_000
                 let budget =
                     window - rendered.prefixTokens - turnContext.row().approximateTokenCount
                     - strategy.outputReserveTokens
                 transcripts = PresentedTranscripts.window(
-                    cited, budget: budget, cap: strategy.presentedTranscriptTokenCap)
+                    cited, budget: budget, cap: strategy.presentedTokens(for: plan.profile))
             }
             sections += Self.collectorSections(
                 resolution: resolution, transcripts: transcripts, claimMarked: claimMarked)
@@ -556,9 +521,7 @@ extension KeepTalkingClient {
             "[orchestration] live=\"\(ledger.live?.name ?? "-")\" (\(rendered.liveRowIDs.count) rows) consulted=\(Set(plan.consultChunks.flatMap { $0.parts.map(\.threadLabel) }).count) index=\(plan.index.count) prefix≈\(rendered.prefixTokens) tok dirty=\(prefixDirty) revealed=\(plan.revealed.count)"
         )
         if let resolution {
-            let failures = consults.compactMap { outcome in
-                outcome.failure.map { "chunk \(outcome.chunk.index): \($0)" }
-            }
+            let failures = resolution.failures
             onLog?(
                 "[orchestration] consults \(plan.consultChunks.count) chunk(s) (\(plan.consultChunks.map { "\($0.threadCount)t/\($0.tokens)tok" }.joined(separator: ", "))) → \(resolution.findings.count) relevant thread(s): \(resolution.findings.map { "\"\($0.thread.name)\"=\($0.verdict.rawValue) \($0.facts.count)f/\($0.citedRows.count)r" }.joined(separator: ", "))"
                     + (resolution.answering.map { " resumes=\"\($0.thread.name)\"\(claimMarked ? " (marked)" : "")" }
@@ -581,7 +544,7 @@ extension KeepTalkingClient {
             messages: rendered.messages,
             turnConfiguration: turnConfiguration,
             role: plan.consultChunks.isEmpty ? .main : .collector,
-            search: searchHandOver(plan, turn: turn, promptCacheKey: turnConfiguration.promptCacheKey)
+            search: search
         )
     }
 

@@ -62,7 +62,7 @@ struct ProducedResourceAgentSurfaceTests {
         // The picker the phone would show, answering with the file it chose.
         let registry = KeepTalkingPrimitiveRegistry(
             toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
-            callAction: { _, _, _ in
+            callAction: { _, _, _, _ in
                 KeepTalkingPrimitiveActionResponse(
                     text: "Picked 1 file.",
                     outputFiles: [
@@ -86,6 +86,43 @@ struct ProducedResourceAgentSurfaceTests {
 
             try await expectConsumable(
                 handle, after: reply, on: surface, needle: "needle picked on the phone")
+        }
+    }
+
+    // MARK: - compose-email primitive
+
+    @Test("compose-email's KTRM carries the staged files its input handles name")
+    func composeEmailInputFiles() async throws {
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("invoice-\(UUID()).txt")
+        try Data("needle attached to an email".utf8).write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        let registry = KeepTalkingPrimitiveRegistry(
+            toolParameters: { _ in ["type": AIProxyJSONValue.string("object")] },
+            callAction: { _, _, _, manifest in
+                let received = (manifest?.entries ?? []).filter { $0.direction == .read }.map { entry in
+                    "\(entry.displayName)=\(entry.path.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? "unreadable")"
+                }
+                return KeepTalkingPrimitiveActionResponse(text: received.joined(separator: ";"))
+            })
+        try await AgentSurface.with(primitiveRegistry: registry) { surface in
+            let actionID = try await surface.mountPrimitive(
+                KeepTalkingPrimitiveBundle(
+                    name: "compose-email",
+                    indexDescription: "Opens an email draft.",
+                    action: .composeEmail))
+            let staged = try #require(
+                await surface.client.stagedFileStore.stageLocalFile(
+                    at: source, filename: "invoice.txt",
+                    callerNodeID: surface.client.config.node))
+
+            let reply = try await surface.call(
+                actionID: actionID, source: .primitive, operation: "compose-email",
+                arguments: ["subject": "Invoice"],
+                inputHandles: [staged.handle])
+            #expect(reply.ok, Comment(rawValue: reply.errorMessage + reply.text))
+            #expect(reply.text.contains("invoice.txt=needle attached to an email"))
         }
     }
 

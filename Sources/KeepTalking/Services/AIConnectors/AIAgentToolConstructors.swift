@@ -732,6 +732,28 @@ extension KeepTalkingClient {
         )
     }
 
+    static func makeWebFetchTool() -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.webFetchFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description:
+                "Fetch a web page or PDF by URL and return its readable text. Use it to read a link the user shared or a result from web_search.",
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "url": .object([
+                        "type": .string("string"),
+                        "description": .string("The absolute http(s) URL to fetch."),
+                    ])
+                ]),
+                "required": .array([.string("url")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
     func makeUpdateSideNoteTool() -> KeepTalkingActionToolDefinition {
         .init(
             functionName: Self.updateSideNoteToolFunctionName,

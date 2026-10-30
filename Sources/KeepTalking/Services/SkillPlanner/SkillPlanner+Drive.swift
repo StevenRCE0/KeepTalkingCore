@@ -238,6 +238,27 @@ extension KeepTalkingSkillPlanner {
                             result = "Error: web search failed — \(error.localizedDescription)"
                         }
 
+                    case KeepTalkingClient.webFetchFunctionName:
+                        let raw = (string(args["url"]) ?? "")
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard let url = URL(string: raw),
+                            ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                            url.host?.isEmpty == false
+                        else {
+                            result = "Error: web_fetch needs an absolute http(s) `url`."
+                            break
+                        }
+                        guard let webFetchProvider else {
+                            result = "Error: web fetch is not configured."
+                            break
+                        }
+                        _ = await onEvent?(.readingWeb(url: url.absoluteString))
+                        do {
+                            result = try await webFetchProvider(url.absoluteString)
+                        } catch {
+                            result = "Error: web fetch failed — \(error.localizedDescription)"
+                        }
+
                     #if os(macOS)
                         case Self.probeCommandTool:
                             let name = (string(args["name"]) ?? "")

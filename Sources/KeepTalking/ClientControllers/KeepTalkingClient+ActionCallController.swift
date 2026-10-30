@@ -275,11 +275,15 @@ extension KeepTalkingClient {
                 case .primitive:
                     var call = request.call
                     call.metadata.fields["caller_id"] = .string(request.callerNodeID.uuidString.lowercased())
-                    let primitiveResult = try await primitiveActionManager.callAction(
-                        action: action,
-                        call: call,
-                        scope: grant
-                    )
+                    let primitiveResult = try await KeepTalkingIOManager(client: self)
+                        .withPrimitiveRun(action: action, request: request) { manifest in
+                            try await primitiveActionManager.callAction(
+                                action: action,
+                                call: call,
+                                scope: grant,
+                                manifest: manifest
+                            )
+                        }
                     callResult = (
                         content: primitiveResult.content, isError: primitiveResult.isError
                     )

@@ -118,6 +118,59 @@ struct PassKVServiceTests {
             ])
         #expect(requests[1].storedOwnedNodes == [other])
     }
+
+    @Test("storing what the account already holds writes nothing")
+    func unchangedSyncWritesNothing() async throws {
+        let (service, recorder) = try await Self.service(listing: Self.syncedAccount)
+        try await service.storeNodeMetadata(
+            nodeID: Self.node, name: "node", purposes: [], publicKey: "node-to-other", trustedNodeID: Self.other)
+        let sent = await recorder.requests.map { "\($0.method) \($0.path)" }
+        #expect(sent == ["GET /api/kv"])
+    }
+
+    @Test("only the keys whose value changed are written")
+    func changedKeysAreWritten() async throws {
+        let (service, recorder) = try await Self.service(listing: Self.syncedAccount)
+        try await service.storeNodeMetadata(
+            nodeID: Self.node, name: "node", purposes: [], publicKey: "rotated", trustedNodeID: Self.other)
+        try await service.storeNodeMetadata(nodeID: Self.third, name: "third", purposes: [])
+
+        let requests = await recorder.requests
+        #expect(requests.map(\.method) == ["GET", "POST", "GET", "POST", "POST"])
+        #expect(
+            requests.map(\.path) == [
+                "/api/kv", "/api/kv/ktPair-\(Self.node):\(Self.other)",
+                "/api/kv", "/api/kv/ktOwnedNodes", "/api/kv/ktNode-\(Self.third)",
+            ])
+        #expect(requests[3].storedOwnedNodes == [Self.node, Self.other, Self.third])
+    }
+
+    private static let node = "00000000-0000-0000-0000-000000000001"
+    private static let other = "00000000-0000-0000-0000-000000000002"
+    private static let third = "00000000-0000-0000-0000-000000000003"
+
+    private static let syncedAccount: [[String: String]] = [
+        ["key": "ktOwnedNodes", "value": "[\"\(node)\",\"\(other)\"]"],
+        ["key": "ktNode-\(node)", "value": #"{"name":"node","purposes":[]}"#],
+        ["key": "ktNode-\(other)", "value": #"{"name":"other","purposes":[]}"#],
+        ["key": "ktPair-\(node):\(other)", "value": "node-to-other"],
+        ["key": "ktPair-\(other):\(node)", "value": "other-to-node"],
+    ]
+
+    private static func service(listing: [[String: String]]) async throws
+        -> (KeepTalkingPassKVService, PassKVRequestRecorder)
+    {
+        let recorder = PassKVRequestRecorder()
+        await recorder.setListResponse(listing)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PassKVURLProtocol.self]
+        PassKVURLProtocol.recorder = recorder
+        let service = KeepTalkingPassKVService(
+            baseURL: try #require(URL(string: "https://passkv.test")),
+            session: URLSession(configuration: config)
+        )
+        return (service, recorder)
+    }
 }
 
 /// A local node trusting one remote node with the context, whose device

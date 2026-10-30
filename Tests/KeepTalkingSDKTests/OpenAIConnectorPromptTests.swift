@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import KeepTalkingSDK
@@ -6,25 +7,12 @@ struct OpenAIConnectorPromptTests {
     @Test("system prompt routes actions through ACT")
     func actionsUseACTTool() {
         let prompt = OpenAIConnector.keepTalkingSystemPrompt(
-            ktRunActionToolFunctionName:
-                KeepTalkingClient.runActionToolFunctionName,
-            ktSkillMetainfoToolFunctionName:
-                KeepTalkingClient.ktSkillMetainfoToolFunctionName,
-            attachmentListingToolFunctionName:
-                KeepTalkingClient.contextAttachmentListingToolFunctionName,
-            attachmentReaderToolFunctionName:
-                KeepTalkingClient.resourceReadToolFunctionName,
-            searchThreadsToolFunctionName:
-                KeepTalkingClient.searchThreadsToolFunctionName,
-            markTurningPointToolFunctionName:
-                KeepTalkingClient.markTurningPointToolFunctionName,
-            markChitterChatterToolFunctionName:
-                KeepTalkingClient.markChitterChatterToolFunctionName,
-            currentPromptIncludesAttachments: false,
-            currentPromptShouldAvoidAutomaticToolUse: false,
-            contextTranscript: "",
-            currentDate: "2024-01-15T10:00:00Z",
-            platform: "macOS"
+            OrchestrationPromptFactor.groupChat(
+                tools: KeepTalkingClient.promptToolNames,
+                contextTranscript: "",
+                currentDate: "2024-01-15T10:00:00Z",
+                platform: "macOS"
+            )
         )
 
         // Asserted as invariant fragments rather than whole sentences: the
@@ -44,25 +32,14 @@ struct OpenAIConnectorPromptTests {
     @Test("system prompt prefers already provided attachments over attachment tools")
     func currentTurnAttachmentsArePreferred() {
         let prompt = OpenAIConnector.keepTalkingSystemPrompt(
-            ktRunActionToolFunctionName:
-                KeepTalkingClient.runActionToolFunctionName,
-            ktSkillMetainfoToolFunctionName:
-                KeepTalkingClient.ktSkillMetainfoToolFunctionName,
-            attachmentListingToolFunctionName:
-                KeepTalkingClient.contextAttachmentListingToolFunctionName,
-            attachmentReaderToolFunctionName:
-                KeepTalkingClient.resourceReadToolFunctionName,
-            searchThreadsToolFunctionName:
-                KeepTalkingClient.searchThreadsToolFunctionName,
-            markTurningPointToolFunctionName:
-                KeepTalkingClient.markTurningPointToolFunctionName,
-            markChitterChatterToolFunctionName:
-                KeepTalkingClient.markChitterChatterToolFunctionName,
-            currentPromptIncludesAttachments: true,
-            currentPromptShouldAvoidAutomaticToolUse: true,
-            contextTranscript: "",
-            currentDate: "2024-01-15T10:00:00Z",
-            platform: "macOS"
+            OrchestrationPromptFactor.groupChat(
+                tools: KeepTalkingClient.promptToolNames,
+                currentPromptIncludesAttachments: true,
+                currentPromptShouldAvoidAutomaticToolUse: true,
+                contextTranscript: "",
+                currentDate: "2024-01-15T10:00:00Z",
+                platform: "macOS"
+            )
         )
 
         #expect(
@@ -91,26 +68,13 @@ struct OpenAIConnectorPromptTests {
     @Test("system prompt includes response language preference")
     func responseLanguagePreferenceIsInjected() {
         let prompt = OpenAIConnector.keepTalkingSystemPrompt(
-            ktRunActionToolFunctionName:
-                KeepTalkingClient.runActionToolFunctionName,
-            ktSkillMetainfoToolFunctionName:
-                KeepTalkingClient.ktSkillMetainfoToolFunctionName,
-            attachmentListingToolFunctionName:
-                KeepTalkingClient.contextAttachmentListingToolFunctionName,
-            attachmentReaderToolFunctionName:
-                KeepTalkingClient.resourceReadToolFunctionName,
-            searchThreadsToolFunctionName:
-                KeepTalkingClient.searchThreadsToolFunctionName,
-            markTurningPointToolFunctionName:
-                KeepTalkingClient.markTurningPointToolFunctionName,
-            markChitterChatterToolFunctionName:
-                KeepTalkingClient.markChitterChatterToolFunctionName,
-            currentPromptIncludesAttachments: false,
-            currentPromptShouldAvoidAutomaticToolUse: false,
-            contextTranscript: "",
-            currentDate: "2024-01-15T10:00:00Z",
-            platform: "macOS",
-            responseLanguages: ["Chinese (Simplified)", "Japanese"]
+            OrchestrationPromptFactor.groupChat(
+                tools: KeepTalkingClient.promptToolNames,
+                contextTranscript: "",
+                currentDate: "2024-01-15T10:00:00Z",
+                platform: "macOS",
+                responseLanguages: ["Chinese (Simplified)", "Japanese"]
+            )
         )
 
         #expect(
@@ -118,5 +82,49 @@ struct OpenAIConnectorPromptTests {
                 "Respond only in these languages unless the user explicitly requests another language: Chinese (Simplified), Japanese."
             )
         )
+    }
+
+    @Test("a context style decides which sections exist and in what order")
+    func factorsAreTheStyle() {
+        let tools = KeepTalkingClient.promptToolNames
+        let noAnnotation: [OrchestrationPromptFactor] = [
+            .identity(opening: "You are a KeepTalking participant working on a canvas."),
+            .environment(platform: "macOS", currentDate: "2026-10-29 10:00", datePlacement: .systemPrompt),
+            .privacy,
+            .actionRouting(runAction: tools[.runAction], skillMetainfo: tools[.skillMetainfo]),
+            .conversationContext(transcript: "Available actions:\n- action: X", scope: .whole),
+        ]
+        let prompt = OpenAIConnector.keepTalkingSystemPrompt(noAnnotation)
+
+        #expect(prompt.hasPrefix("You are a KeepTalking participant working on a canvas."))
+        #expect(prompt.contains(tools[.runAction]))
+        #expect(!prompt.contains("THREAD ANNOTATION"))
+        #expect(!prompt.contains(tools[.markTurningPoint]))
+        #expect(!prompt.contains(tools[.searchThreads]))
+        #expect(prompt.hasSuffix("- action: X"))
+    }
+
+    @Test("the orchestrated group chat leaves per-turn detail to the turn context")
+    func orchestratedGroupChatDefersPerTurnDetail() {
+        let note = KeepTalkingSideNoteDTO(
+            key: "plan", value: "ship it", isArchived: false, versionCounter: 1, versionWriter: UUID()
+        )
+        let factors = OrchestrationPromptFactor.groupChat(
+            tools: KeepTalkingClient.promptToolNames,
+            currentPromptIncludesAttachments: true,
+            sideNotes: [note],
+            contextTranscript: "",
+            currentDate: "2026-10-29 10:00",
+            platform: "macOS",
+            layout: .orchestrated
+        )
+        let prompt = AIPromptPresets.render(factors)
+
+        #expect(!factors.contains(.sideNotes([note])))
+        #expect(factors.contains(.threadConsults(searchThreads: KeepTalkingClient.searchThreadsToolFunctionName)))
+        #expect(!prompt.contains("2026-10-29 10:00"))
+        #expect(!prompt.contains("ship it"))
+        #expect(!prompt.contains("already includes its newly attached files"))
+        #expect(prompt.contains("in the turn context at the end of the conversation"))
     }
 }

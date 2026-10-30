@@ -2001,12 +2001,14 @@ extension KeepTalkingClient {
     private static func defaultDescriptor(
         for bundle: KeepTalkingPrimitiveBundle
     ) -> KeepTalkingActionDescriptor {
-        KeepTalkingActionDescriptor(
+        let inputFiles = bundle.action.inputFileObjects
+        return KeepTalkingActionDescriptor(
             subject: nil,
             action: KeepTalkingActionWithDescription(
                 description: bundle.indexDescription
             ),
-            object: nil
+            object: nil,
+            objects: inputFiles.isEmpty ? nil : inputFiles
         )
     }
 

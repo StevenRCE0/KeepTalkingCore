@@ -361,7 +361,7 @@ public struct AIOrchestrator: @unchecked Sendable {
                 try await dependencies.assistantPublisher((assistantText, .message, nil))
             }
 
-            if let (name, messageType, parameters) = Self.toolHint(
+            for (name, messageType, parameters) in Self.toolHints(
                 for: turn,
                 stage: .execution,
                 toolNameResolver: dependencies.toolNameResolver,
@@ -402,15 +402,14 @@ public struct AIOrchestrator: @unchecked Sendable {
     }
 
     private func publishToolHint(for toolCalls: [ToolCall]) async throws {
-        guard
-            let (name, messageType, parameters) = Self.toolHint(
-                for: toolCalls,
-                stage: .execution,
-                toolNameResolver: dependencies.toolNameResolver,
-                toolHintResolver: dependencies.toolHintResolver
-            )
-        else { return }
-        try await dependencies.toolHintPublisher(name, messageType, parameters)
+        for (name, messageType, parameters) in Self.toolHints(
+            for: toolCalls,
+            stage: .execution,
+            toolNameResolver: dependencies.toolNameResolver,
+            toolHintResolver: dependencies.toolHintResolver
+        ) {
+            try await dependencies.toolHintPublisher(name, messageType, parameters)
+        }
     }
 
     private func executePendingToolCalls(
@@ -504,21 +503,53 @@ public struct AIOrchestrator: @unchecked Sendable {
         return executions
     }
 
-    /// Builds the tool-hint row for a turn. Returns the row's display name, the
+    /// Builds the tool-hint rows for a turn. Each row is its display name, the
     /// message type with `sealedParameters` still empty, and the parameters in
     /// the clear for the host to seal — see `ToolHintPublisher`.
-    static func toolHint(
+    static func toolHints(
         for turn: AITurnResult,
         stage: AIStage,
         toolNameResolver: ToolNameResolver,
         toolHintResolver: ToolHintResolver
-    ) -> (String, KeepTalkingContextMessage.MessageType, [String: String]?)? {
-        toolHint(
+    ) -> [(String, KeepTalkingContextMessage.MessageType, [String: String]?)] {
+        toolHints(
             for: turn.toolCalls,
             stage: stage,
             toolNameResolver: toolNameResolver,
             toolHintResolver: toolHintResolver
         )
+    }
+
+    /// Hints whose row reads only with its own call's detail (the query, the
+    /// URL), so each such call gets a row instead of joining the turn's.
+    static let rowPerCallHints: Set<IntermediateMessageHints> = [.searchingWeb, .readingWeb]
+
+    static func toolHints(
+        for toolCalls: [ToolCall],
+        stage: AIStage,
+        toolNameResolver: ToolNameResolver,
+        toolHintResolver: ToolHintResolver
+    ) -> [(String, KeepTalkingContextMessage.MessageType, [String: String]?)] {
+        var groups: [[ToolCall]] = []
+        var sharedGroupIndex: Int?
+        for toolCall in toolCalls {
+            if let hint = toolHintResolver(toolCall, stage)?.hint, rowPerCallHints.contains(hint) {
+                groups.append([toolCall])
+            } else if let sharedGroupIndex {
+                groups[sharedGroupIndex].append(toolCall)
+            } else {
+                sharedGroupIndex = groups.count
+                groups.append([toolCall])
+            }
+        }
+        return groups.compactMap {
+            toolHint(
+                for: $0,
+                stage: stage,
+                toolNameResolver: toolNameResolver,
+                toolHintResolver: toolHintResolver
+            )
+        }
     }
 
     static func toolHint(
@@ -616,8 +647,9 @@ public struct AIOrchestrator: @unchecked Sendable {
     public enum IntermediateMessageHints: String, Equatable, Sendable {
         case toolUse = "Using tool"
         case reasoning = "Reasoning"
-        case searchingMemory = "Searching for"
+        case thinkingBack = "Thinking back to"
         case searchingWeb = "Searching the web for"
+        case readingWeb = "Reading"
         case inspecting = "Inspecting"
         case computing = "Calculating"
     }

@@ -118,6 +118,9 @@ extension KeepTalkingWorkspacePlanner {
         if webSearchProvider != nil {
             tools.append(KeepTalkingClient.makeWebSearchTool())
         }
+        if webFetchProvider != nil {
+            tools.append(KeepTalkingClient.makeWebFetchTool())
+        }
         return tools
     }
 
