@@ -51,16 +51,14 @@ extension KeepTalkingClient {
         direction: KeepTalkingMessagePageDirection,
         limit: Int,
         attachments: KeepTalkingMessagePageAttachments = .rows,
+        counting: KeepTalkingMessagePageCounting = .allRows,
         on database: any Database
     ) async throws -> KeepTalkingMessagePage {
         let sql = try MessageRangeReader.sql(database)
-        // One past the page tells whether the range goes on.
-        var keys = try await MessageRangeReader.keys(
-            in: contextID, range: range, direction: direction, limit: limit + 1, on: sql
+        let (walked, hasMore) = try await MessageRangeReader.pageKeys(
+            in: contextID, range: range, direction: direction, limit: limit, counting: counting, on: sql
         )
-        let hasMore = keys.count > limit
-        if hasMore { keys.removeLast() }
-        if direction == .backward { keys.reverse() }
+        let keys = direction == .backward ? Array(walked.reversed()) : walked
         var page = try await MessageRangeReader.rows(for: keys, attachments: attachments, on: database)
         page.hasMore = hasMore
         return page
@@ -71,11 +69,12 @@ extension KeepTalkingClient {
         range: KeepTalkingMessageRange = .all,
         direction: KeepTalkingMessagePageDirection,
         limit: Int,
-        attachments: KeepTalkingMessagePageAttachments = .rows
+        attachments: KeepTalkingMessagePageAttachments = .rows,
+        counting: KeepTalkingMessagePageCounting = .allRows
     ) async throws -> KeepTalkingMessagePage {
         try await Self.messagePage(
             in: contextID, range: range, direction: direction, limit: limit,
-            attachments: attachments, on: localStore.database
+            attachments: attachments, counting: counting, on: localStore.database
         )
     }
 

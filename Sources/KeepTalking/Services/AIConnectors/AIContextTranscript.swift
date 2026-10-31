@@ -440,8 +440,13 @@ extension KeepTalkingClient {
             let nodeTag = stub.isCurrentNode ? "\(nodeName) (current)" : nodeName
             let desc = stub.description.trimmingCharacters(in: .whitespacesAndNewlines)
             let descSuffix = desc.isEmpty ? "" : "  description: \(desc)"
+            let availabilitySuffix =
+                stub.isAvailable
+                ? ""
+                : "  availability: unavailable"
+                    + (stub.unavailableReason.map { " (\($0))" } ?? "")
             var line =
-                "\(AIPromptPresets.actionCatalogEntryPrefix)\(stub.actionID.friendlyNameToken)  name: \(stub.name)  type: \(stub.kind.rawValue)  node: \(nodeTag)\(descSuffix)"
+                "\(AIPromptPresets.actionCatalogEntryPrefix)\(stub.actionID.friendlyNameToken)  name: \(stub.name)  type: \(stub.kind.rawValue)  node: \(nodeTag)\(availabilitySuffix)\(descSuffix)"
             if !stub.objectContracts.isEmpty {
                 line += "\n    objects: \(Self.renderObjectContracts(stub.objectContracts))"
             }
@@ -455,6 +460,7 @@ extension KeepTalkingClient {
             \(AIPromptPresets.actionCatalogHeading) (use \(Self.runActionToolFunctionName) to execute, \(Self.ktSkillMetainfoToolFunctionName) to inspect skill manifests):
             Pass an action's `action:` word-name as `action_id` — copy it exactly. It is three words because words survive copying: a mistyped word is caught and corrected, whereas a mistyped hex digit silently becomes a valid-looking id for nothing.
             Types: mcp=external server tools · skill=directory-based agent skill · primitive=built-in operation · filesystem=sandboxed file access + context blob bridge · semanticretrieval=remote thread-memory search
+            An `availability: unavailable` field marks an action that cannot run right now (the reason follows — e.g. its plugin is not connected): do not delegate to it; tell the user what it needs. It comes back on its own once that is fixed.
             A `resources:` line lists documents a plugin action declares (its guides and references, by uri): read one with \(Self.pluginResourcesToolFunctionName)(action_id, uri) before delegating when it would help frame the task.
             An `objects:` line lists an action's declared inputs/outputs (direction + whether it's a file) so you can plan data flow BETWEEN actions — feed one action's `out` to another's `in`. You never see or pass provider file paths; reference a produced file by the handle the action returns.
             A file `in` is REQUIRED and is never filled implicitly: an action does not see this conversation's attachments. You must pass that file's handle in `input_handles` on \(Self.runActionToolFunctionName) — get it from \(Self.contextAttachmentListingToolFunctionName) for a file already attached here, or from `kt_send_file` for a local file you hold. Calling such an action without a handle fails with "could not resolve its SOURCE".

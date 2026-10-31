@@ -176,6 +176,11 @@ extension KeepTalkingContextMessage {
         /// message id is derived deterministically from the session id, so
         /// concurrent sealers across nodes converge on one entry.
         case voiceCallSeal(sessionID: UUID)
+
+        public var isToolHint: Bool {
+            if case .intermediate = self { return true }
+            return false
+        }
     }
 
     public enum TranscriptSource: String, Codable, Sendable, Hashable {

@@ -16,6 +16,10 @@ extension KeepTalkingClient {
     private struct ACTResolvedAction: Sendable {
         let tools: [KeepTalkingActionToolDefinition]
         let promptContext: String
+        /// Why `tools` is empty when the resolver knows: the error code and
+        /// the sentence the main agent should relay, instead of the generic
+        /// "could not resolve tools".
+        var unavailable: (code: String, message: String)? = nil
     }
 
     // MARK: - Tool definition
@@ -259,6 +263,18 @@ extension KeepTalkingClient {
             stagedHandles = owned
             return owned
         }
+        var attachmentHandles: [UUID]?
+        func contextAttachmentHandles() async -> [UUID] {
+            if let attachmentHandles { return attachmentHandles }
+            var ids: [UUID] = []
+            if let contextID = try? context.requireID(),
+                let attachments = try? await contextAttachments(in: contextID)
+            {
+                ids = attachments.compactMap(\.id)
+            }
+            attachmentHandles = ids
+            return ids
+        }
         // ONE resolution per handle, settled once: the resolved list, the
         // repair log, and the failure report all derive from the same outcome
         // and cannot disagree. A handle that does not resolve used to be
@@ -287,7 +303,7 @@ extension KeepTalkingClient {
                         "handle": supplied,
                         "problem": "ambiguous",
                         "candidates": ids.map(\.friendlyNameToken).joined(separator: ", "),
-                        "hint": "More than one staged file plausibly matches. Retry with "
+                        "hint": "More than one resource plausibly matches. Retry with "
                             + "one of the candidates exactly.",
                     ])
                 case .unknown:
@@ -317,25 +333,46 @@ extension KeepTalkingClient {
                         + "with kt_send_file, or re-copy the handle from the "
                         + "produced_resources of the call that created it.")
             } else {
-                // Not a handle — a friendly name, or a handle mangled past
-                // parsing (dropped/extra character), which hex repair recovers.
-                var resolution = UUIDFriendlyName.resolve(supplied, among: await ownedHandles())
-                if case .unknown = resolution {
+                // The current word-code form (`KT_ATTACHMENT_HONEST_BOLD_FALCON`),
+                // a bare three-word name, or a handle mangled past parsing. A
+                // word code is a hash, so it only becomes an id against the
+                // handles that exist — the prefix picks the universe (OTBs this
+                // caller staged, or this context's attachments); a bare name
+                // tries both. Resolving against the staged store alone is what
+                // left every attachment word code "unrecognized".
+                let family = KTResourceManifest.parseAgentHandleCode(supplied)?.kind
+                var resolution: KTResourceManifest.Resolution = .unknown
+                var resolvedKind: KTResourceManifest.Kind?
+                if family == nil || family == .otb {
                     resolution = KTResourceManifest.resolveAgentHandle(
                         supplied, among: await ownedHandles())
+                    if case .unknown = resolution {} else { resolvedKind = .otb }
+                }
+                if case .unknown = resolution, family == nil || family == .attachment {
+                    resolution = KTResourceManifest.resolveAgentHandle(
+                        supplied, among: await contextAttachmentHandles())
+                    if case .unknown = resolution {} else { resolvedKind = .attachment }
                 }
                 settle(
                     resolution,
                     supplied: supplied,
-                    kind: nil,
-                    whenUnknown: "unrecognized",
-                    hint: "Not a resource handle. A handle looks like KT_OTB_<32 hex> "
-                        + "or KT_ATTACHMENT_<32 hex>, or the three-word `friendly` name "
-                        + "shown beside it — either works, but it must be copied exactly "
-                        + "from the resource that produced it. It is not a filename and "
-                        + "not a path. Re-read the produced_resources of the call that "
-                        + "created the file, or the context attachment listing, and copy "
-                        + "one of those two forms.")
+                    kind: resolvedKind,
+                    whenUnknown: family == nil ? "unrecognized" : "not_found",
+                    hint: family == nil
+                        ? "Not a resource handle. A handle looks like "
+                            + "KT_ATTACHMENT_<THREE_WORDS> or KT_OTB_<THREE_WORDS> (e.g. "
+                            + "KT_ATTACHMENT_HONEST_BOLD_FALCON), or the bare three-word "
+                            + "name shown beside it — either works, but it must be copied "
+                            + "exactly from the resource that produced it. It is not a "
+                            + "filename and not a path. Re-read the produced_resources of "
+                            + "the call that created the file, or the context attachment "
+                            + "listing, and copy one of those two forms."
+                        : "Well-formed, but nothing on this node matches. A "
+                            + "KT_ATTACHMENT_… handle must name a file attached to THIS "
+                            + "context (see the context attachment listing); a KT_OTB_… "
+                            + "handle must have been staged here by you and not yet "
+                            + "expired. Copy the handle exactly from that listing or from "
+                            + "the produced_resources that minted it.")
             }
         }
         let inputHandles = resolvedInputHandles.map(\.id)
@@ -433,9 +470,9 @@ extension KeepTalkingClient {
                     payload: jsonString([
                         "ok": false,
                         "action_id": actionID.uuidString.lowercased(),
-                        "error": "act_agent_no_tools",
-                        "message":
-                            "ACT agent could not resolve tools for this action.",
+                        "error": resolvedAction.unavailable?.code ?? "act_agent_no_tools",
+                        "message": resolvedAction.unavailable?.message
+                            ?? "ACT agent could not resolve tools for this action.",
                     ]),
                     toolCallID: toolCallID
                 )
@@ -927,7 +964,11 @@ extension KeepTalkingClient {
             .filter { $0.actionID == actionID }
 
         guard !stub.isCurrentNode else {
-            return .init(tools: catalogDefinitions, promptContext: "")
+            if !catalogDefinitions.isEmpty {
+                return .init(tools: catalogDefinitions, promptContext: "")
+            }
+            return try await hydratedLocalPluginAction(
+                actionID: actionID, stub: stub, runtimeCatalog: runtimeCatalog)
         }
         guard
             let action = try await KeepTalkingAction.find(
@@ -998,6 +1039,64 @@ extension KeepTalkingClient {
             runtimeCatalog: runtimeCatalog
         )
         return .init(tools: definitions, promptContext: "")
+    }
+
+    /// A LOCAL instance with no tool in the runtime catalog was dormant when
+    /// that catalog was built — its plugin was away. The host invalidates the
+    /// catalog on reconnect, but a turn already running on the stale copy
+    /// lands here: if the plugin is back, publish its tool now instead of
+    /// failing the run; if it is not, name the plugin so the agent can tell
+    /// the user what to start.
+    private func hydratedLocalPluginAction(
+        actionID: UUID,
+        stub: KeepTalkingActionStub,
+        runtimeCatalog: KeepTalkingActionRuntimeCatalog
+    ) async throws -> ACTResolvedAction {
+        #if os(macOS)
+        guard
+            let action = try await KeepTalkingAction.find(actionID, on: localStore.database),
+            case .plugin(let bundle) = action.payload
+        else {
+            return .init(tools: [], promptContext: "")
+        }
+        let liveKind = await pluginHost.catalogue.resolvedKind(
+            catalogID: bundle.catalogID, kindName: bundle.kindName)
+        guard let liveKind, liveKind.isAvailable else {
+            var pluginName = liveKind?.catalogName
+            if pluginName == nil {
+                pluginName = await pluginHost.catalogue.catalogue(bundle.catalogID)?.name
+            }
+            actLog(
+                "incoming-schema action=\(actionID.uuidString.lowercased()) source=local_plugin result=\(liveKind == nil ? "unknown_kind" : "not_connected") kind=\(bundle.kindName)"
+            )
+            let message =
+                pluginName.map {
+                    "The plugin providing this action (\"\($0)\") is not connected to this node, so the action cannot run right now. Tell the user to start KT Companion (or that plugin); the action comes back on its own once it reconnects."
+                }
+                ?? "The plugin kind \"\(bundle.kindName)\" behind this action is not registered on this node — its plugin has never connected here since the action was created. Tell the user to install and start that plugin."
+            return .init(
+                tools: [],
+                promptContext: "",
+                unavailable: (code: "plugin_not_connected", message: message))
+        }
+        let definition = makePluginActionProxyDefinition(
+            actionID: actionID,
+            ownerNodeID: stub.ownerNodeID,
+            bundle: bundle,
+            descriptor: action.descriptor,
+            inputSchema: liveKind.inputSchema
+                .flatMap { KeepTalkingActionToolDefinition.jsonSchema(from: $0) },
+            supportsWakeAssist: action.blockingAuthorisation == true
+        )
+        await cacheACTHydratedDefinitions(
+            [definition], for: actionID, runtimeCatalog: runtimeCatalog)
+        actLog(
+            "incoming-schema action=\(actionID.uuidString.lowercased()) source=local_plugin result=hydrated kind=\(bundle.kindName)"
+        )
+        return .init(tools: [definition], promptContext: "")
+        #else
+        return .init(tools: [], promptContext: "")
+        #endif
     }
 
     private func cacheACTHydratedDefinitions(

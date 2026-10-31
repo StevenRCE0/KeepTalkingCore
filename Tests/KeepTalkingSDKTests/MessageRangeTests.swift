@@ -63,6 +63,34 @@ struct MessageRangeTests {
         #expect(backward == fixture.sortedIDs)
     }
 
+    @Test("tool hints ride along without filling a page", arguments: [1, 3, 50])
+    func toolHintsDoNotCount(pageSize: Int) async throws {
+        let fixture = try await Fixture.make(messages: 300) { $0 % 7 > 1 }
+        defer { fixture.finish() }
+
+        for direction in [KeepTalkingMessagePageDirection.forward, .backward] {
+            var seen: [[KeepTalkingContextMessage]] = []
+            var range = KeepTalkingMessageRange.all
+            while true {
+                let page = try await KeepTalkingClient.messagePage(
+                    in: fixture.contextID, range: range, direction: direction,
+                    limit: pageSize, attachments: .none, counting: .excludingToolHints, on: fixture.database
+                )
+                seen.append(page.messages)
+                let counted = page.messages.count(where: { !$0.type.isToolHint })
+                if page.hasMore {
+                    #expect(counted == pageSize)
+                } else {
+                    #expect(counted <= pageSize)
+                }
+                guard page.hasMore, let edge = direction == .forward ? page.lastKey : page.firstKey else { break }
+                range = direction == .forward ? range.after(edge) : range.before(edge)
+            }
+            let ids = (direction == .forward ? seen : seen.reversed()).flatMap { $0.compactMap(\.id) }
+            #expect(ids == fixture.sortedIDs)
+        }
+    }
+
     @Test("a range bounded by tied rows keeps exactly the rows inside it")
     func boundsAreExactAcrossTies() async throws {
         let fixture = try await Fixture.make(messages: 60)
@@ -221,7 +249,8 @@ private struct Fixture {
 
     /// `count` messages with sub-millisecond spacing; of every five rows the
     /// last four share one timestamp, so ties are broken by id alone.
-    static func make(messages count: Int) async throws -> Fixture {
+    static func make(messages count: Int, toolHintAt isToolHint: (Int) -> Bool = { _ in false }) async throws -> Fixture
+    {
         let store = try await KeepTalkingInMemoryStore.make()
         let contextID = UUID()
         try await KeepTalkingContext(id: contextID).save(on: store.database)
@@ -239,7 +268,8 @@ private struct Fixture {
             previous = timestamp
             let message = KeepTalkingContextMessage(
                 id: UUID(), context: KeepTalkingContext(id: contextID), sender: sender,
-                content: "message \(index)", timestamp: Date(timeIntervalSince1970: timestamp)
+                content: "message \(index)", timestamp: Date(timeIntervalSince1970: timestamp),
+                type: isToolHint(index) ? .intermediate(hint: "Inspecting") : .message
             )
             try await message.save(on: store.database)
             messages.append(message)

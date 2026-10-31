@@ -194,6 +194,7 @@ public enum AIPromptPresets {
             }
         }
         var entry = "\(actionCatalogEntryPrefix)\(action)  name: \(name)"
+        if let availability = field("availability") { entry += "  availability: \(availability)" }
         if !description.isEmpty { entry += "  description: \(description)" }
         return entry
     }

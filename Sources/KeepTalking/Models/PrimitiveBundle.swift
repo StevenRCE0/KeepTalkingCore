@@ -12,7 +12,8 @@ public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     /// Access the user's calendar with read (list events) and write (add event) operations.
     /// Operations are selected by the tool's `operation` argument; per-operation
     /// calendar scope lives on `KeepTalkingPrimitiveBundle.scope` keyed by
-    /// `"read"` / `"write"` (each value is a list of calendar titles). No scope
+    /// `"read"` / `"write"` (each value is a list of calendar titles), plus
+    /// `"availability"`: calendars listed only as anonymous busy blocks. No scope
     /// means no access: a missing or empty key turns that operation off. The grant
     /// further narrows which keys the caller may invoke via the grant scope's
     /// `.named(<key>)` tokens (`KeepTalkingActionScope`).
@@ -95,7 +96,7 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
         KeepTalkingPrimitiveBundle(
             name: "access-calendar",
             indexDescription:
-                "Read (list events in a date range) and write (add events) on the user's calendars on the action host.",
+                "Read (list events in a date range) and write (add events) on the user's calendars on the action host. Callers granted only availability see busy times, not event details.",
             action: .accessCalendar
         ),
         KeepTalkingPrimitiveBundle(
@@ -143,6 +144,13 @@ extension KeepTalkingPrimitiveActionKind {
                         "items": .object(["type": .string("string")]),
                         "description": .string(
                             "Calendar titles this action may add events to. Empty/omitted disables writing entirely — creating events becomes unavailable (it does not mean \"all calendars\"). Every event names its target calendar; there is no default or system fallback."
+                        ),
+                    ]),
+                    "availability": .object([
+                        "type": .string("array"),
+                        "items": .object(["type": .string("string")]),
+                        "description": .string(
+                            "Calendar titles whose events a caller without `read` sees only as merged, anonymous busy blocks — times only, no titles, locations, notes or calendar names. Grant a peer this key instead of `read` to share free/busy without the details. Empty/omitted means no busy view."
                         ),
                     ]),
                 ]

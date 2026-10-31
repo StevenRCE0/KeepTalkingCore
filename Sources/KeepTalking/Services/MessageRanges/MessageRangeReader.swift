@@ -51,13 +51,54 @@ enum MessageRangeReader {
         return try await sql.raw(statement).all().map(decodeKey)
     }
 
+    static func pageKeys(
+        in contextID: UUID,
+        range: KeepTalkingMessageRange,
+        direction: KeepTalkingMessagePageDirection,
+        limit: Int,
+        counting: KeepTalkingMessagePageCounting,
+        on sql: any SQLDatabase
+    ) async throws -> (keys: [KeepTalkingMessageKey], hasMore: Bool) {
+        guard counting == .excludingToolHints else {
+            var keys = try await Self.keys(in: contextID, range: range, direction: direction, limit: limit + 1, on: sql)
+            let hasMore = keys.count > limit
+            if hasMore { keys.removeLast() }
+            return (keys, hasMore)
+        }
+        var keys: [KeepTalkingMessageKey] = []
+        var counted = 0
+        var rest = range
+        while true {
+            let statement = keysStatement(
+                in: contextID, range: rest, direction: direction, limit: limit + 1, flaggingToolHints: true
+            )
+            let rows = try await sql.raw(statement).all()
+            for row in rows {
+                if try row.decode(column: "tool_hint", as: Int.self) == 0 {
+                    if counted == limit { return (keys, true) }
+                    counted += 1
+                }
+                keys.append(try decodeKey(row))
+            }
+            guard rows.count == limit + 1, let last = keys.last else { return (keys, false) }
+            rest = direction == .forward ? rest.after(last) : rest.before(last)
+        }
+    }
+
     static func keysStatement(
         in contextID: UUID,
         range: KeepTalkingMessageRange,
         direction: KeepTalkingMessagePageDirection,
-        limit: Int
+        limit: Int,
+        flaggingToolHints: Bool = false
     ) -> SQLQueryString {
-        var statement: SQLQueryString = "SELECT id, timestamp FROM \(ident: table) WHERE "
+        var statement: SQLQueryString = "SELECT id, timestamp"
+        if flaggingToolHints {
+            statement.appendLiteral(#", message_type LIKE '{"intermediate":%' AS tool_hint"#)
+        }
+        statement.appendLiteral(" FROM ")
+        statement.appendInterpolation(ident: table)
+        statement.appendLiteral(" WHERE ")
         appendPredicate(contextID: contextID, range: range, to: &statement)
         switch direction {
             case .forward: statement.appendLiteral(" ORDER BY timestamp ASC, id ASC")

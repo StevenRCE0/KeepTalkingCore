@@ -235,9 +235,42 @@ extension KeepTalkingClient {
             switch action.payload {
                 case .plugin(let bundle):
                     var resources: [KeepTalkingActionResourceContract] = []
+                    // The dormancy check is about the LOCAL plugin host, so it
+                    // may only be asked about a LOCAL instance. A remote
+                    // Catalogue action's plugin lives on the owning node and is
+                    // absent from this node's catalogue store by definition —
+                    // running the guard against it dropped every remote
+                    // catalogue action, and compiling the whole registration
+                    // out off-macOS dropped them on iOS entirely. Remote
+                    // instances register with the permissive parameter shape
+                    // (`nil` schema): the kind's real `inputSchema` is
+                    // deliberately not advertised and is retrieved at
+                    // inspection time from the node holding the plugin.
+                    var pluginSchema: [String: AIProxyJSONValue]?
+                    var unavailableReason: String?
                     #if os(macOS)
                     if isCurrentNode {
                         resources = await declaredResourceContracts(for: bundle)
+                        // A local Catalogue instance is DORMANT until its
+                        // plugin is connected and has re-declared its
+                        // catalogue: it stays listed, marked unavailable, with
+                        // no callable tool — publishing one would offer the
+                        // model something that can only fail. The saved action
+                        // comes back the moment the companion returns: the
+                        // host invalidates this catalog on every connection
+                        // event, so the next turn rebuilds it live.
+                        let liveKind = await pluginHost.catalogue.resolvedKind(
+                            catalogID: bundle.catalogID, kindName: bundle.kindName)
+                        if let liveKind, liveKind.isAvailable {
+                            pluginSchema = liveKind.inputSchema
+                                .flatMap { KeepTalkingActionToolDefinition.jsonSchema(from: $0) }
+                        } else if let liveKind {
+                            unavailableReason =
+                                "plugin \"\(liveKind.catalogName)\" is not connected to this node"
+                        } else {
+                            unavailableReason =
+                                "plugin kind \"\(bundle.kindName)\" is not registered on this node"
+                        }
                     }
                     #endif
                     // Catalogue instances expose one agent tool each; the
@@ -254,42 +287,11 @@ extension KeepTalkingClient {
                             supportsWakeAssist: supportsWakeAssist,
                             isCurrentNode: isCurrentNode,
                             objectContracts: objectContracts,
-                            resources: resources
+                            resources: resources,
+                            isAvailable: unavailableReason == nil,
+                            unavailableReason: unavailableReason
                         ))
-                    // The dormancy check is about the LOCAL plugin host, so it
-                    // may only be asked about a LOCAL instance. A remote
-                    // Catalogue action's plugin lives on the owning node and is
-                    // absent from this node's catalogue store by definition —
-                    // running the guard against it dropped every remote
-                    // catalogue action, and compiling the whole registration
-                    // out off-macOS dropped them on iOS entirely, leaving the
-                    // stub above advertising an action with no callable route.
-                    let pluginSchema: [String: AIProxyJSONValue]?
-                    #if os(macOS)
-                    if isCurrentNode {
-                        // A local Catalogue instance is DORMANT until its
-                        // plugin is connected and has re-declared its
-                        // catalogue: publishing a tool for an absent plugin
-                        // would offer the model something that can only fail.
-                        // The saved action stays intact and comes back the
-                        // moment the companion returns.
-                        guard
-                            let liveKind = await pluginHost.catalogue.resolvedKind(
-                                catalogID: bundle.catalogID, kindName: bundle.kindName),
-                            liveKind.isAvailable
-                        else { continue }
-                        pluginSchema = liveKind.inputSchema
-                            .flatMap { KeepTalkingActionToolDefinition.jsonSchema(from: $0) }
-                    } else {
-                        pluginSchema = nil
-                    }
-                    #else
-                    pluginSchema = nil
-                    #endif
-                    // Remote instances register with the permissive parameter
-                    // shape (`nil` schema): the kind's real `inputSchema` is
-                    // deliberately not advertised and is retrieved at
-                    // inspection time from the node holding the plugin.
+                    guard unavailableReason == nil else { continue }
                     let pluginDefinition = makePluginActionProxyDefinition(
                         actionID: actionID,
                         ownerNodeID: ownerNodeID,

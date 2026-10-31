@@ -32,6 +32,8 @@ public struct KeepTalkingActionStub: Sendable {
     /// Resources a plugin action declares (its MCP server's guides and
     /// references), read with the plugin-resources meta tool.
     public let resources: [KeepTalkingActionResourceContract]
+    public let isAvailable: Bool
+    public let unavailableReason: String?
 
     public init(
         actionID: UUID,
@@ -42,7 +44,9 @@ public struct KeepTalkingActionStub: Sendable {
         supportsWakeAssist: Bool,
         isCurrentNode: Bool,
         objectContracts: [KeepTalkingObjectContract] = [],
-        resources: [KeepTalkingActionResourceContract] = []
+        resources: [KeepTalkingActionResourceContract] = [],
+        isAvailable: Bool = true,
+        unavailableReason: String? = nil
     ) {
         self.actionID = actionID
         self.ownerNodeID = ownerNodeID
@@ -53,6 +57,8 @@ public struct KeepTalkingActionStub: Sendable {
         self.isCurrentNode = isCurrentNode
         self.objectContracts = objectContracts
         self.resources = resources
+        self.isAvailable = isAvailable
+        self.unavailableReason = unavailableReason
     }
 }
 

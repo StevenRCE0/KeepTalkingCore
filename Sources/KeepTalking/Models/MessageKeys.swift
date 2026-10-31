@@ -106,6 +106,14 @@ public enum KeepTalkingMessagePageAttachments: Sendable {
     case rowsAndBlobRecords
 }
 
+/// Which rows a page's `limit` counts.
+public enum KeepTalkingMessagePageCounting: Sendable {
+    case allRows
+    /// A chat folds a run of tool hints (`.intermediate`) into one line, so
+    /// they ride along with the rows around them instead of filling the page.
+    case excludingToolHints
+}
+
 /// Messages from a range, oldest first, with the exact keys the store holds
 /// for them.
 public struct KeepTalkingMessagePage: Sendable {

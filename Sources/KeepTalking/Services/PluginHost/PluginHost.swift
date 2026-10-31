@@ -376,6 +376,17 @@ public actor KeepTalkingPluginHost {
     }
 
     private func emit(_ event: KTPPHostEvent) {
+        switch event {
+            case .connected, .kindsRegistered, .disconnected:
+                // A runtime catalog built while this plugin was away lists its
+                // instances dormant (stub, no tool) and would stay cached that
+                // way for the life of the process.
+                Task { [hostNodeID] in
+                    await KeepTalkingActionCatalogCache.shared.invalidate(nodeID: hostNodeID)
+                }
+            case .listening, .log:
+                break
+        }
         eventHandler?(event)
     }
 

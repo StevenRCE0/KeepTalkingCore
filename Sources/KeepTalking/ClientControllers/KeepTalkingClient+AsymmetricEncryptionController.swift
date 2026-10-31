@@ -458,7 +458,14 @@ extension KeepTalkingClient {
             throw KeepTalkingClientError.malformedEncryptedActionCall
         }
 
-        let localKeyMaterial = try await localKeyAgreementMaterial(
+        // Both ends rotate keys and a pair can hold more than one relation, so
+        // walk every (ours × theirs) pair rather than assuming the newest local
+        // key is the one the sender sealed against. Taking only the newest local
+        // material here is what left a host unable to open a payload the caller
+        // had sealed against one of the host's other relation keys, while the
+        // caller's own `decryptAsymmetricPayloadAsSender` — which already walks
+        // all pairs — still opened it.
+        let localKeyMaterials = try await localKeyAgreementMaterials(
             localNodeID: localNodeID,
             remoteNodeID: remoteNodeID,
             on: database,
@@ -471,21 +478,23 @@ extension KeepTalkingClient {
         )
         let sealed = try AES.GCM.SealedBox(combined: envelope.ciphertext)
 
-        for (index, senderCandidate) in senderPublicKeys.enumerated() {
-            debug?(
-                "[asym.decrypt] purpose=\(purpose) sender=\(envelope.senderNodeID.uuidString.lowercased()) recipient=\(envelope.recipientNodeID.uuidString.lowercased()) localPublicKey=\(localKeyMaterial.publicKeyBase64) remotePublicKey=\(senderCandidate.publicKeyBase64) relation=\(senderCandidate.relationID.uuidString.lowercased()) candidate=\(index + 1)/\(senderPublicKeys.count) cipherBytes=\(envelope.ciphertext.count)"
-            )
-
-            let sharedSecret = try localKeyMaterial.privateKey
-                .sharedSecretFromKeyAgreement(with: senderCandidate.publicKey)
-            let symmetricKey = asymmetricEnvelopeSymmetricKey(
-                from: sharedSecret
-            )
-            if let decrypted = try? AES.GCM.open(sealed, using: symmetricKey) {
+        for localKeyMaterial in localKeyMaterials {
+            for (index, senderCandidate) in senderPublicKeys.enumerated() {
                 debug?(
-                    "[asym.decrypt] success purpose=\(purpose) sender=\(envelope.senderNodeID.uuidString.lowercased()) relation=\(senderCandidate.relationID.uuidString.lowercased())"
+                    "[asym.decrypt] purpose=\(purpose) sender=\(envelope.senderNodeID.uuidString.lowercased()) recipient=\(envelope.recipientNodeID.uuidString.lowercased()) localPublicKey=\(localKeyMaterial.publicKeyBase64) localRelation=\(localKeyMaterial.relationID.uuidString.lowercased()) remotePublicKey=\(senderCandidate.publicKeyBase64) relation=\(senderCandidate.relationID.uuidString.lowercased()) candidate=\(index + 1)/\(senderPublicKeys.count) cipherBytes=\(envelope.ciphertext.count)"
                 )
-                return decrypted
+
+                let sharedSecret = try localKeyMaterial.privateKey
+                    .sharedSecretFromKeyAgreement(with: senderCandidate.publicKey)
+                let symmetricKey = asymmetricEnvelopeSymmetricKey(
+                    from: sharedSecret
+                )
+                if let decrypted = try? AES.GCM.open(sealed, using: symmetricKey) {
+                    debug?(
+                        "[asym.decrypt] success purpose=\(purpose) sender=\(envelope.senderNodeID.uuidString.lowercased()) localRelation=\(localKeyMaterial.relationID.uuidString.lowercased()) relation=\(senderCandidate.relationID.uuidString.lowercased())"
+                    )
+                    return decrypted
+                }
             }
         }
 
