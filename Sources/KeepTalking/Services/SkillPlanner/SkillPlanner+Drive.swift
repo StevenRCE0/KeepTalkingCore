@@ -366,7 +366,7 @@ extension KeepTalkingSkillPlanner {
                                 }
                                 if !strings.isEmpty { out[key] = strings }
                             }
-                            return out
+                            return kind.resolvingOpposingScopes(out)
                         }()
 
                         var finalScope: [String: [String]]? =
@@ -401,6 +401,7 @@ extension KeepTalkingSkillPlanner {
                                     }
                                     if !strings.isEmpty { resolved[key] = strings }
                                 }
+                                resolved = kind.resolvingOpposingScopes(resolved)
                                 finalScope = resolved.isEmpty ? nil : resolved
                             }
                         }

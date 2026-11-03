@@ -9,20 +9,7 @@ public enum KeepTalkingPrimitiveActionKind: String, Codable, Sendable,
     case askForFile = "ask-for-file"
     case getCurrentlyPlayingMusic = "get-currently-playing-music"
     case runMacOSShortcut = "run-macos-shortcut"
-    /// Access the user's calendar with read (list events) and write (add event) operations.
-    /// Operations are selected by the tool's `operation` argument; per-operation
-    /// calendar scope lives on `KeepTalkingPrimitiveBundle.scope` keyed by
-    /// `"read"` / `"write"` (each value is a list of calendar titles), plus
-    /// `"availability"`: calendars listed only as anonymous busy blocks. No scope
-    /// means no access: a missing or empty key turns that operation off. The grant
-    /// further narrows which keys the caller may invoke via the grant scope's
-    /// `.named(<key>)` tokens (`KeepTalkingActionScope`).
     case accessCalendar = "access-calendar"
-    /// Read (list reminders) and write (add reminders) on the user's Reminders
-    /// lists. The read scope lives under `"read"` and the write scope under
-    /// `"lists"` on `KeepTalkingPrimitiveBundle.scope` (each a list of list
-    /// titles). No scope means no access: a missing or empty key turns that
-    /// operation off.
     case addToReminders = "add-to-reminders"
     case composeEmail = "compose-email"
 }
@@ -32,22 +19,8 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
     public var name: String
     public var indexDescription: String
     public var action: KeepTalkingPrimitiveActionKind
-    /// The name of the macOS Shortcut to run. Only used when `action == .runMacOSShortcut`.
     public var shortcutName: String?
-    /// Generic scope bag — the set of constraints the action host applies before
-    /// executing this primitive (parallels `KeepTalkingFilesystemBundle.rootPath`
-    /// and the per-tool scope on MCP servers). The keys and value shapes are
-    /// defined per `KeepTalkingPrimitiveActionKind`; each handler is responsible
-    /// for documenting the scope keys it understands via its `scopeSchema` and
-    /// for enforcing them at call time. For kinds that declare scope keys
-    /// (calendar, Reminders), no scope means no access: a missing or empty key
-    /// turns that operation off, never "everything". Kinds without scope keys
-    /// ignore it.
-    ///
-    /// Example (calendar): `["read": ["Work", "Personal"], "write": ["Personal"]]`.
     public var scope: [String: [String]]?
-    /// When true, remote calls use the blocking-authorisation continuation model
-    /// (the remote user must interactively respond before the action returns).
     public var blockingAuthorisation: Bool
 
     public init(
@@ -121,13 +94,6 @@ public struct KeepTalkingPrimitiveBundle: KeepTalkingActionBundle, Equatable {
 }
 
 extension KeepTalkingPrimitiveActionKind {
-    /// JSON-schema fragments describing the scope keys this action kind
-    /// accepts on `KeepTalkingPrimitiveBundle.scope`. Empty means this kind
-    /// does not accept scoping. Each value is a JSON-schema fragment (an
-    /// AIProxyJSONValue object) for that scope key. The agent is expected to
-    /// honor these shapes when proposing a `scope` argument to the
-    /// `kt_create_primitive` tool, and host-side handlers are expected to
-    /// validate against them at execution time.
     public var scopeSchema: [String: AIProxyJSONValue] {
         switch self {
             case .accessCalendar:
@@ -150,8 +116,9 @@ extension KeepTalkingPrimitiveActionKind {
                         "type": .string("array"),
                         "items": .object(["type": .string("string")]),
                         "description": .string(
-                            "Calendar titles whose events a caller without `read` sees only as merged, anonymous busy blocks — times only, no titles, locations, notes or calendar names. Grant a peer this key instead of `read` to share free/busy without the details. Empty/omitted means no busy view."
+                            "Calendar titles shared as availability only: events appear as merged, anonymous busy blocks — times only, no titles, locations, notes or calendar names. A calendar is in `read` or here, never both. Empty/omitted means no availability view."
                         ),
+                        Self.opposesKeyword: .array([.string("read")]),
                     ]),
                 ]
             case .addToReminders:
@@ -179,6 +146,39 @@ extension KeepTalkingPrimitiveActionKind {
 }
 
 extension KeepTalkingPrimitiveActionKind {
+    /// The schema keyword naming the scope keys a key never shares an item
+    /// with. On a conflict the declaring key keeps the item.
+    public static let opposesKeyword = "x-opposes"
+
+    public func scopeKeys(opposing key: String) -> [String] {
+        var opposing = declaredOpposition(of: key)
+        for other in scopeSchema.keys where declaredOpposition(of: other).contains(key) {
+            if !opposing.contains(other) { opposing.append(other) }
+        }
+        return opposing.sorted()
+    }
+
+    public func resolvingOpposingScopes(_ scope: [String: [String]]) -> [String: [String]] {
+        var resolved = scope
+        for key in scopeSchema.keys.sorted() {
+            guard let claimed = scope[key].map(Set.init) else { continue }
+            for opposed in declaredOpposition(of: key) {
+                let kept = resolved[opposed]?.filter { !claimed.contains($0) } ?? []
+                resolved[opposed] = kept.isEmpty ? nil : kept
+            }
+        }
+        return resolved
+    }
+
+    private func declaredOpposition(of key: String) -> [String] {
+        guard case .object(let field)? = scopeSchema[key],
+            case .array(let names)? = field[Self.opposesKeyword]
+        else { return [] }
+        return names.compactMap { if case .string(let name) = $0 { name } else { nil } }
+    }
+}
+
+extension KeepTalkingPrimitiveActionKind {
     public var inputFileObjects: [KeepTalkingActionObject] {
         switch self {
             case .composeEmail:
@@ -202,11 +202,6 @@ extension KeepTalkingPrimitiveActionKind {
 public struct KeepTalkingPrimitiveActionResponse: Sendable {
     public let text: String
     public let isError: Bool
-    /// Files this primitive PRODUCED (e.g. ask-for-file's picked files). The
-    /// execution layer routes them per the call's output persistence switch —
-    /// durable summoned attachment(s) or private OTB — landing as the call's
-    /// `producedResources`, uniform with skill/action outputs. Empty for
-    /// primitives that only return text.
     public let outputFiles: [KeepTalkingLocalAttachmentInput]
 
     public init(
