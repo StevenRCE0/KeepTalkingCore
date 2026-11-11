@@ -23,6 +23,7 @@ struct OrchestrationTurn: Sendable {
     let allowAutomaticToolUse: Bool
     let currentDate: String
     let platform: String
+    let workspaces: [KeepTalkingWorkspaceSection]
 
     var excludedAgentTurnID: UUID? { resumingCheckpoint ? agentTurnID : nil }
 }
@@ -78,10 +79,15 @@ extension KeepTalkingClient {
             strategy: strategy, profile: providerProfile, main: turn.agent.main, contextID: ledger.contextID,
             agentTurnID: turn.agentTurnID
         )
-        let resolution = await fanOut(plan, consultant: consultant, turn: turn)
+        async let threadConsults = fanOut(plan, consultant: consultant, turn: turn)
+        async let workspaceConsults = consultWorkspaces(
+            turn.workspaces, strategy: strategy, brief: workspaceBrief(plan, turn: turn), with: consultant)
+        let resolution = await threadConsults
+        let workspaces = await workspaceConsults
         let search = ThreadSearchHandOver(
             strategy: strategy, profile: providerProfile, consultant: consultant, userPrompt: turn.prompt)
-        let transcript = try await stitch(plan, resolution, search: search, context: context, turn: turn)
+        let transcript = try await stitch(
+            plan, resolution, workspaces: workspaces, search: search, context: context, turn: turn)
         return try await body(transcript)
     }
 
@@ -304,6 +310,16 @@ extension KeepTalkingClient {
                 ? contextOrchestrationMemory[plan.ledger.contextID]?.presentedThreadStarts ?? [] : []
         )
     }
+
+    func workspaceBrief(_ plan: OrchestrationPlan, turn: OrchestrationTurn) -> ThreadConsultBrief {
+        .workspace(
+            userMessage: Self.speakerTagged(turn.userMessage, node: config.node),
+            liveTail: (plan.ledger.live?.rows ?? [])
+                .filter { $0.id != turn.promptMessageID }
+                .suffix(plan.strategy.consultLiveTailRows)
+                .map(\.message)
+        )
+    }
 }
 
 // MARK: - 4. Stitching
@@ -312,6 +328,7 @@ extension KeepTalkingClient {
     func stitch(
         _ plan: OrchestrationPlan,
         _ resolution: ThreadConsultResolution?,
+        workspaces: [WorkspaceConsultFinding],
         search: ThreadSearchHandOver,
         context: KeepTalkingContext,
         turn: OrchestrationTurn
@@ -319,7 +336,8 @@ extension KeepTalkingClient {
         switch plan.strategy.layout {
             case .legacy: return try await stitchLegacy(plan, search: search, context: context, turn: turn)
             case .orchestrated:
-                return try await stitchOrchestrated(plan, resolution, search: search, context: context, turn: turn)
+                return try await stitchOrchestrated(
+                    plan, resolution, workspaces: workspaces, search: search, context: context, turn: turn)
         }
     }
 
@@ -351,6 +369,7 @@ extension KeepTalkingClient {
                 currentPromptShouldAvoidAutomaticToolUse: turn.hasCurrentPromptAttachments
                     && !turn.allowAutomaticToolUse,
                 sideNotes: plan.ledger.sideNotes,
+                workspaces: turn.workspaces,
                 contextTranscript: contextTranscript,
                 currentDate: turn.currentDate,
                 platform: turn.platform,
@@ -392,6 +411,7 @@ extension KeepTalkingClient {
     private func stitchOrchestrated(
         _ plan: OrchestrationPlan,
         _ resolution: ThreadConsultResolution?,
+        workspaces: [WorkspaceConsultFinding],
         search: ThreadSearchHandOver,
         context: KeepTalkingContext,
         turn: OrchestrationTurn
@@ -492,8 +512,22 @@ extension KeepTalkingClient {
             }
         }
 
-        // The turn context: findings, the rows they cite, revealed threads.
-        var sections: [String] = []
+        var sections: [String] = workspaces.map {
+            Self.workspaceSection(
+                $0, snapshotTool: Self.promptToolNames[.workspaceSnapshot],
+                mutateTool: Self.promptToolNames[.workspaceMutate]
+            )
+        }
+        let consultedWorkspaces = workspaces.filter(\.consulted)
+        if !consultedWorkspaces.isEmpty {
+            onLog?(
+                "[orchestration] workspace consults "
+                    + consultedWorkspaces.map {
+                        "\"\($0.section.manifest.title)\"="
+                            + ($0.failure.map { "failed: \($0)" } ?? "\($0.relevant ? $0.facts.count : 0)f")
+                    }.joined(separator: ", ")
+            )
+        }
         var transcripts: PresentedTranscripts?
         if let resolution {
             let cited = resolution.citedEntries
@@ -543,7 +577,7 @@ extension KeepTalkingClient {
         return OrchestrationTranscript(
             messages: rendered.messages,
             turnConfiguration: turnConfiguration,
-            role: plan.consultChunks.isEmpty ? .main : .collector,
+            role: plan.consultChunks.isEmpty && consultedWorkspaces.isEmpty ? .main : .collector,
             search: search
         )
     }

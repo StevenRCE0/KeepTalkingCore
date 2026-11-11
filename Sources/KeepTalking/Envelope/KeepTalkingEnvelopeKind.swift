@@ -36,6 +36,11 @@ public enum KeepTalkingEnvelopeKind: String, Codable, Sendable {
     /// Blob negotiation: who wants a blob, who has it, and the pull that
     /// opens its stream. The bytes never ride an envelope.
     case blobTransfer
+    case workspaceDelta
+    case workspaceStage
+    case workspaceViewport
+    case workspaceCatalog
+    case workspaceResources
 
     /// Trust handshake kinds, handled before the sender is trusted.
     var isTrustHandshake: Bool {

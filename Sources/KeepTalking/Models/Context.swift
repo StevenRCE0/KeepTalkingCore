@@ -68,6 +68,12 @@ public final class KeepTalkingContext: Model, Equatable, Hashable,
     @OptionalField(key: "deleted_messages")
     public var deletedMessages: [KeepTalkingMessageTombstone]?
 
+    /// Local-only, like `consumedMarks`: each node decides for itself.
+    @OptionalField(key: "accept_deletion")
+    var acceptDeletion: Bool?
+
+    public var acceptsDeletion: Bool { acceptDeletion ?? true }
+
     @Children(for: \.$context)
     public var messages: [KeepTalkingContextMessage]
 

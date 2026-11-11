@@ -72,6 +72,7 @@ public struct KTPPKindDeclaration: Codable, Sendable, Equatable {
     public var capabilities: [String]?
     public var remoteAuthorisable: Bool?
     public var blockingAuthorisation: Bool?
+    public var access: KTPPAccessDeclaration?
 
     /// The recognized declared capability set: `capabilities` filtered to the
     /// fixed vocabulary (unknown tokens dropped — a plugin bug or a newer
@@ -79,6 +80,11 @@ public struct KTPPKindDeclaration: Codable, Sendable, Equatable {
     public var declaredCapabilities: Set<KTPPPluginCapability> {
         Set((capabilities ?? []).compactMap(KTPPPluginCapability.init(rawValue:)))
     }
+}
+
+public struct KTPPAccessDeclaration: Codable, Sendable, Equatable {
+    public var level: String
+    public var summary: String
 }
 
 public struct KTPPSubTool: Codable, Sendable, Equatable {

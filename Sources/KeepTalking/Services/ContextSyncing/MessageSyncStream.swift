@@ -162,9 +162,14 @@ extension KeepTalkingClient {
             return try await query.sort(\.$id, .ascending).range(..<limit).all()
         }
 
+        // Rows a refusing node kept travel no further than that node.
+        let deleted = try await deletedMessageIDs(in: context)
+
         return KeepTalkingContextSyncSnapshot(
             context: context,
-            messages: messages,
+            messages: messages.filter { message in
+                message.id.map { !deleted.contains($0) } ?? true
+            },
             attachments: attachments,
             chunkSize: chunkSize
         )

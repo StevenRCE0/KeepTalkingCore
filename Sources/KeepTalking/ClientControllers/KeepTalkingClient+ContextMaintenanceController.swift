@@ -85,6 +85,8 @@ extension KeepTalkingClient {
                 await drainOutbox()
                 guard maintenanceIsActive(generation) else { return }
                 recoverAttachmentsInBackground(with: node)
+                guard maintenanceIsActive(generation) else { return }
+                await broadcastWorkspaceStages()
 
             case .heartbeat:
                 await runHeartbeatMaintenance(generation: generation)

@@ -35,7 +35,11 @@ extension KeepTalkingEnvelopeKind {
                 .voiceCallEnded,
                 .requestAck,
                 .encryptedRequestAck,
-                .blobTransfer:
+                .blobTransfer,
+                .workspaceStage,
+                .workspaceViewport,
+                .workspaceCatalog,
+                .workspaceResources:
                 return .init(lane: .control, isIdempotent: true)
             case .trustRequest:
                 // A second trust request mints a fresh ephemeral key and
@@ -52,7 +56,8 @@ extension KeepTalkingEnvelopeKind {
                 .actionCatalogResult,
                 .encryptedActionCatalogRequest,
                 .encryptedActionCatalogResult,
-                .encryptedAgentTurnContinuationResponse:
+                .encryptedAgentTurnContinuationResponse,
+                .workspaceDelta:
                 return .init(lane: .interactive, isIdempotent: true)
             case .node,
                 .nodeStatus,

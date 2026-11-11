@@ -37,19 +37,18 @@ public enum OrchestrationPromptFactor: Sendable, Equatable {
     case toolResultPolicy
     case threadConsults(searchThreads: String)
     case sideNotes([KeepTalkingSideNoteDTO])
+    case workspace(KeepTalkingWorkspaceSection, snapshotTool: String, mutateTool: String)
     case conversationContext(transcript: String, scope: ConversationContextScope)
     case threadAnnotation(markTurningPoint: String, markChitterChatter: String, liveTopic: TurnDetailPlacement)
 }
 
 extension OrchestrationPromptFactor {
-    /// The group-chat context style: a participant among nodes, with thread
-    /// memory, side notes and turning-point annotation. A model that cannot
-    /// call tools gets only the conversation.
     public static func groupChat(
         tools: AIPromptToolNames,
         currentPromptIncludesAttachments: Bool = false,
         currentPromptShouldAvoidAutomaticToolUse: Bool = false,
         sideNotes: [KeepTalkingSideNoteDTO] = [],
+        workspaces: [KeepTalkingWorkspaceSection] = [],
         contextTranscript: String,
         currentDate: String,
         platform: String,
@@ -70,7 +69,9 @@ extension OrchestrationPromptFactor {
                 .responseLanguages(responseLanguages),
                 .privacy,
             ]
-            if !orchestrated { factors.append(.sideNotes(sideNotes)) }
+            if !orchestrated {
+                factors.append(.sideNotes(sideNotes))
+            }
             factors.append(.conversationContext(transcript: contextTranscript, scope: scope))
             return factors
         }
@@ -114,6 +115,9 @@ extension OrchestrationPromptFactor {
             factors.append(.threadConsults(searchThreads: tools[.searchThreads]))
         } else {
             factors.append(.sideNotes(sideNotes))
+            factors += workspaces.map {
+                .workspace($0, snapshotTool: tools[.workspaceSnapshot], mutateTool: tools[.workspaceMutate])
+            }
         }
         factors += [
             .conversationContext(transcript: contextTranscript, scope: scope),

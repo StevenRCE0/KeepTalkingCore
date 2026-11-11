@@ -220,14 +220,19 @@ extension KeepTalkingClient {
                     await refreshPluginInstanceDescriptorIfStale(action)
                     let (pluginOutput, produced) = try await KeepTalkingIOManager(client: self)
                         .withActionRun(action: action, request: request, grant: grant) { run in
-                            try await pluginHost.callActionDetailed(
+                            try await companionLink.callActionDetailed(
                                 action: action,
                                 call: request.call,
                                 scope: grant,
+                                node: config.node,
                                 callerNodeID: request.callerNodeID,
                                 contextID: request.contextID,
                                 manifest: run.manifest,
-                                runDirectory: run.workspaceDirectory
+                                runDirectory: run.workspaceDirectory,
+                                actTurn: { [weak self] turn, call in
+                                    guard let self else { throw KTPPHostError.companionUnavailable }
+                                    return try await self.performPluginACTTurn(turn, boundTo: call)
+                                }
                             )
                         }
                     callResult = (content: pluginOutput.content, isError: pluginOutput.isError)

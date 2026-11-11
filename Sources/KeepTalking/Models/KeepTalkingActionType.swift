@@ -15,7 +15,6 @@ public enum KeepTalkingActionType: String, CaseIterable, Identifiable, Hashable 
     case shortcut = "Shortcut"
     case filesystem = "Filesystem"
     case acp = "ACP"
-    /// Kinds contributed by paired plugins — the Catalogue group.
     case catalogue = "Catalogue"
 
     public var id: Self { self }

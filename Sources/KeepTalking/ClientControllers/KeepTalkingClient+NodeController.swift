@@ -1137,7 +1137,7 @@ extension KeepTalkingClient {
         _ bundle: KeepTalkingPluginBundle
     ) async -> KeepTalkingAdvertisedActionAvailability {
         #if os(macOS)
-        return await pluginHost.catalogue.isConnected(bundle.catalogID)
+        return await companionLink.catalogue.isConnected(bundle.catalogID)
             ? .available : .connecting
         #else
         // `.plugin` rows are only ever minted on a node that runs a plugin

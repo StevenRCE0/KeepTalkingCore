@@ -781,6 +781,85 @@ extension KeepTalkingClient {
         )
     }
 
+    func makeWorkspaceSnapshotTool(manifests: [KeepTalkingWorkspaceManifest]) -> KeepTalkingActionToolDefinition {
+        .init(
+            functionName: Self.workspaceSnapshotToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description: AIPromptPresets.ToolDescriptions.workspaceSnapshot,
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "schema": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "Which workspace: one of "
+                                + manifests.map { "`\($0.schema)` (\($0.title))" }.joined(separator: ", ")
+                                + "."),
+                    ]),
+                    "granularity": .object([
+                        "type": .string("string"),
+                        "enum": .array([.string("selection"), .string("viewport"), .string("full")]),
+                        "description": .string("How much of the workspace to read."),
+                    ]),
+                ]),
+                "required": .array([.string("schema"), .string("granularity")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
+    func makeWorkspaceMutateTool(manifests: [KeepTalkingWorkspaceManifest]) -> KeepTalkingActionToolDefinition {
+        let guides = manifests.map { manifest in
+            "`\(manifest.schema)` (\(manifest.title)) accepts: \(manifest.mutations.joined(separator: ", "))."
+                + (manifest.mutationGuide.map { " \($0)" } ?? "")
+        }
+        return .init(
+            functionName: Self.workspaceMutateToolFunctionName,
+            actionID: UUID(),
+            ownerNodeID: UUID(),
+            source: .primitive,
+            description:
+                "Change a workspace of this context. Each mutation is one operation with a payload in that workspace's own schema; people see the result at once and the next turn's snapshot reflects it. "
+                + "A payload may name a context attachment as `resourceHandle` (its KT_ATTACHMENT_<...> handle, exactly as the attachment listing gives it); the workspace receives that attachment inlined as `resource` {id, name, mimeType, dataURL}. Images only. "
+                + guides.joined(separator: " "),
+            parameters: [
+                "type": .string("object"),
+                "properties": .object([
+                    "schema": .object([
+                        "type": .string("string"),
+                        "description": .string("Which workspace to change, by schema."),
+                    ]),
+                    "mutations": .object([
+                        "type": .string("array"),
+                        "description": .string("Applied in order."),
+                        "items": .object([
+                            "type": .string("object"),
+                            "properties": .object([
+                                "operation": .object([
+                                    "type": .string("string"),
+                                    "description": .string("One of the operations the workspace accepts."),
+                                ]),
+                                "payload": .object([
+                                    "type": .string("object"),
+                                    "description": .string("The operation's payload, in the workspace's schema."),
+                                ]),
+                                "targetElementID": .object([
+                                    "type": .string("string"),
+                                    "description": .string("The element to update or remove; omit when adding."),
+                                ]),
+                            ]),
+                            "required": .array([.string("operation"), .string("payload")]),
+                        ]),
+                    ]),
+                ]),
+                "required": .array([.string("schema"), .string("mutations")]),
+                "additionalProperties": .bool(false),
+            ]
+        )
+    }
+
     func makeArchiveSideNoteTool() -> KeepTalkingActionToolDefinition {
         .init(
             functionName: Self.archiveSideNoteToolFunctionName,

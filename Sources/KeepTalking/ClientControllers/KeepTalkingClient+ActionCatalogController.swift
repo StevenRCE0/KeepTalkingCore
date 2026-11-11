@@ -301,7 +301,7 @@ extension KeepTalkingClient {
                     }
                     #if os(macOS)
                     guard
-                        let declaration = await pluginHost.catalogue.kind(
+                        let declaration = await companionLink.catalogue.kind(
                             catalogID: bundle.catalogID,
                             kindName: bundle.kindName
                         )
@@ -319,7 +319,7 @@ extension KeepTalkingClient {
                             allowedTools.contains($0.name)
                         }
                     }
-                    let isAvailable = await pluginHost.catalogue.isConnected(
+                    let isAvailable = await companionLink.catalogue.isConnected(
                         bundle.catalogID
                     )
                     return KeepTalkingActionCatalogItemResult(

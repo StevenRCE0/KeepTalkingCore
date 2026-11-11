@@ -374,6 +374,120 @@ struct MessageDeletionTests {
         #expect(try await blobExists() == false)
     }
 
+    // MARK: - Refusing deletions
+
+    @Test("a context accepts deletions until told otherwise")
+    func acceptsDeletionByDefault() async throws {
+        let node = try await makeNode()
+        #expect(try await node.client.acceptsDeletion(in: contextID))
+        try await node.client.setAcceptsDeletion(false, in: contextID)
+        #expect(try await node.client.acceptsDeletion(in: contextID) == false)
+    }
+
+    @Test("a refusing node keeps the rows yet still records and relays the tombstones")
+    func refusalKeepsRows() async throws {
+        let a = try await makeNode()
+        let b = try await makeNode()
+        let ids = [UUID(), UUID(), UUID()]
+        try await seed(a, ids: ids)
+        try await seed(b, ids: ids)
+        try await b.client.setAcceptsDeletion(false, in: contextID)
+
+        try await a.client.deleteMessages([ids[1]], in: contextID)
+        let tombstones = try await a.client.messageTombstones(in: contextID)
+        try await b.client.mergeMessageDeletions(tombstones, contextID: contextID)
+
+        let held = try await KeepTalkingContextMessage.query(on: b.store.database).count()
+        #expect(held == 3)
+        #expect(try await b.client.messageTombstones(in: contextID) == tombstones)
+        #expect(
+            try await b.client.messageDeletionDigest(in: contextID)
+                == a.client.messageDeletionDigest(in: contextID)
+        )
+        let summary = try await b.client.messageDeletionSummary(in: contextID)
+        #expect(summary.keptMessageIDs == [ids[1]])
+        #expect(summary.removed.isEmpty)
+    }
+
+    @Test("a refused tombstone naming no row here reads as removed")
+    func refusalWithoutRowReadsAsRemoved() async throws {
+        let node = try await makeNode()
+        try await node.client.setAcceptsDeletion(false, in: contextID)
+        let tombstone = KeepTalkingMessageTombstone(
+            messageID: UUID(),
+            timestamp: Date(timeIntervalSince1970: 5)
+        )
+        try await node.client.mergeMessageDeletions([tombstone], contextID: contextID)
+
+        let summary = try await node.client.messageDeletionSummary(in: contextID)
+        #expect(summary.keptMessageIDs.isEmpty)
+        #expect(summary.removed == [tombstone])
+    }
+
+    @Test("kept rows leave the sync summary, so peers stop seeing a divergence")
+    func keptRowsStayOutOfSync() async throws {
+        let a = try await makeNode()
+        let b = try await makeNode()
+        let ids = [UUID(), UUID(), UUID()]
+        try await seed(a, ids: ids)
+        try await seed(
+            Node(store: b.store, client: b.client, context: b.context, nodeID: a.nodeID),
+            ids: ids
+        )
+        try await b.client.setAcceptsDeletion(false, in: contextID)
+
+        try await a.client.deleteMessages([ids[0]], in: contextID)
+        try await b.client.mergeMessageDeletions(
+            try await a.client.messageTombstones(in: contextID),
+            contextID: contextID
+        )
+
+        let local = try await a.client.contextSyncSnapshot(for: contextID)
+        let remote = try await b.client.contextSyncSnapshot(for: contextID)
+        #expect(local.summary == remote.summary)
+    }
+
+    @Test("the local user's delete still takes a kept row")
+    func localDeleteOverridesRefusal() async throws {
+        let node = try await makeNode()
+        let ids = [UUID(), UUID()]
+        try await seed(node, ids: ids)
+        try await node.client.setAcceptsDeletion(false, in: contextID)
+        try await node.client.mergeMessageDeletions(
+            [KeepTalkingMessageTombstone(messageID: ids[0], timestamp: Date(timeIntervalSince1970: 1))],
+            contextID: contextID
+        )
+
+        let deleted = try await node.client.deleteMessages([ids[0]], in: contextID)
+
+        #expect(deleted == [ids[0]])
+        let summary = try await node.client.messageDeletionSummary(in: contextID)
+        #expect(summary.keptMessageIDs.isEmpty)
+        #expect(summary.removed.map(\.messageID) == [ids[0]])
+    }
+
+    @Test("accepting again governs later tombstones and leaves kept rows alone")
+    func acceptingAgainLeavesKeptRows() async throws {
+        let node = try await makeNode()
+        let ids = [UUID(), UUID()]
+        try await seed(node, ids: ids)
+        try await node.client.setAcceptsDeletion(false, in: contextID)
+        try await node.client.mergeMessageDeletions(
+            [KeepTalkingMessageTombstone(messageID: ids[0], timestamp: Date(timeIntervalSince1970: 1))],
+            contextID: contextID
+        )
+
+        try await node.client.setAcceptsDeletion(true, in: contextID)
+        try await node.client.mergeMessageDeletions(
+            [KeepTalkingMessageTombstone(messageID: ids[1], timestamp: Date(timeIntervalSince1970: 2))],
+            contextID: contextID
+        )
+
+        let summary = try await node.client.messageDeletionSummary(in: contextID)
+        #expect(summary.keptMessageIDs == [ids[0]])
+        #expect(summary.removed.map(\.messageID) == [ids[1]])
+    }
+
     // MARK: - Set paging
 
     @Test("a tombstone set spanning several pages converges whole")

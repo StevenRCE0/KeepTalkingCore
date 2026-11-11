@@ -1,18 +1,6 @@
 import FluentKit
 import Foundation
 
-/// Message deletion: a grow-only tombstone set on the context, merged by union.
-///
-/// Every path that learns of a tombstone — a local delete, a peer's push, a
-/// summary exchange — goes through `mergeMessageDeletions`, so the cleanup a
-/// deleted row needs is written once:
-///
-/// - thread boundaries move off it *before* it goes, because `kt_threads`'
-///   start/end foreign keys are `onDelete: .setNull`, and a nulled end turns a
-///   stored thread into a second live one;
-/// - its attachments cascade away, and the blobs they held are pruned through
-///   the usual reference check, so a blob another message shares stays;
-/// - intake refuses the id from then on, so no peer can sync it back.
 extension KeepTalkingClient {
 
     // MARK: - Public
@@ -57,7 +45,11 @@ extension KeepTalkingClient {
                 }
             }
 
-        let fresh = try await mergeMessageDeletions(tombstones, contextID: contextID)
+        let fresh = try await mergeMessageDeletions(
+            tombstones,
+            contextID: contextID,
+            overridingRefusal: true
+        )
         guard !fresh.isEmpty else { return [] }
 
         // The same move the marking node makes after storing a mark. Peers
@@ -85,29 +77,61 @@ extension KeepTalkingClient {
         try await Self.messageTombstones(in: contextID, on: localStore.database)
     }
 
+    public func acceptsDeletion(in contextID: UUID) async throws -> Bool {
+        try await requireContext(contextID).acceptsDeletion
+    }
+
+    public func setAcceptsDeletion(_ accepts: Bool, in contextID: UUID) async throws {
+        try await messageDeletionGate.run(for: contextID) { [self] in
+            let context = try await requireContext(contextID)
+            context.acceptDeletion = accepts
+            try await context.save(on: localStore.database)
+        }
+    }
+
+    public func messageDeletionSummary(
+        in contextID: UUID
+    ) async throws -> KeepTalkingMessageDeletionSummary {
+        let db = localStore.database
+        let tombstones = try await Self.messageTombstones(in: contextID, on: db)
+        guard !tombstones.isEmpty else { return KeepTalkingMessageDeletionSummary() }
+        let kept = try await Self.heldMessageIDs(
+            among: tombstones.map(\.messageID),
+            in: contextID,
+            on: db
+        )
+        return KeepTalkingMessageDeletionSummary(
+            keptMessageIDs: kept,
+            removed: tombstones.filter { !kept.contains($0.messageID) }
+        )
+    }
+
     // MARK: - Merge
 
-    /// Unions `tombstones` into the context's set and deletes whatever they
-    /// name locally. Returns the tombstones that were new here; an empty result
-    /// means nothing changed.
     @discardableResult
     func mergeMessageDeletions(
         _ tombstones: [KeepTalkingMessageTombstone],
-        contextID: UUID
+        contextID: UUID,
+        overridingRefusal: Bool = false
     ) async throws -> [KeepTalkingMessageTombstone] {
         guard !tombstones.isEmpty else { return [] }
         return try await messageDeletionGate.run(for: contextID) { [self] in
             // The shrink rewrites thread rows too; a re-threading reading them
             // mid-shrink would write back boundaries on rows about to go.
             try await threadingGate.run(for: contextID) { [self] in
-                try await applyMessageDeletions(tombstones, contextID: contextID)
+                try await applyMessageDeletions(
+                    tombstones,
+                    contextID: contextID,
+                    overridingRefusal: overridingRefusal
+                )
             }
         }
     }
 
     private func applyMessageDeletions(
         _ tombstones: [KeepTalkingMessageTombstone],
-        contextID: UUID
+        contextID: UUID,
+        overridingRefusal: Bool
     ) async throws -> [KeepTalkingMessageTombstone] {
         let outcome = try await localStore.database.transaction {
             db -> MessageDeletionOutcome? in
@@ -121,24 +145,37 @@ extension KeepTalkingClient {
             for tombstone in tombstones where known.insert(tombstone.messageID).inserted {
                 fresh.append(tombstone)
             }
-            guard !fresh.isEmpty else { return nil }
+            let applied = overridingRefusal ? tombstones : fresh
+            guard !applied.isEmpty else { return nil }
 
-            held.append(contentsOf: fresh)
-            context.deletedMessages = held.sorted { $0.pageKey < $1.pageKey }
-            try await context.save(on: db)
+            if !fresh.isEmpty {
+                held.append(contentsOf: fresh)
+                context.deletedMessages = held.sorted { $0.pageKey < $1.pageKey }
+                try await context.save(on: db)
+            }
 
-            var outcome = MessageDeletionOutcome(fresh: fresh)
-            try await Self.removeMessages(
-                Set(fresh.map(\.messageID)),
-                in: context,
-                outcome: &outcome,
-                on: db
-            )
+            var outcome = MessageDeletionOutcome(fresh: applied)
+            let appliedIDs = applied.map(\.messageID)
+            if overridingRefusal || context.acceptsDeletion {
+                try await Self.removeMessages(
+                    Set(appliedIDs),
+                    in: context,
+                    outcome: &outcome,
+                    on: db
+                )
+            } else {
+                outcome.keptMessageIDs = try await Self.heldMessageIDs(
+                    among: appliedIDs,
+                    in: contextID,
+                    on: db
+                )
+            }
             return outcome
         }
         guard let outcome else { return [] }
 
         let freshIDs = outcome.fresh.map(\.messageID)
+            .filter { !outcome.keptMessageIDs.contains($0) }
         discardOrphanAttachments(forParentMessageIDs: freshIDs)
         for threadID in outcome.deletedThreadIDs {
             await sealThreadWorkspace(threadID)
@@ -161,11 +198,13 @@ extension KeepTalkingClient {
             KeepTalkingMessageDeletion(
                 contextID: contextID,
                 messageIDs: freshIDs,
+                keptMessageIDs: outcome.fresh.map(\.messageID)
+                    .filter(outcome.keptMessageIDs.contains),
                 prunedBlobIDs: prunedBlobIDs
             )
         )
         onLog?(
-            "[delete] context=\(contextID.uuidString.lowercased()) tombstoned=\(freshIDs.count) removed=\(outcome.removedMessageIDs.count) threadsDeleted=\(outcome.deletedThreadIDs.count) blobsPruned=\(prunedBlobIDs.count)"
+            "[delete] context=\(contextID.uuidString.lowercased()) tombstoned=\(outcome.fresh.count) kept=\(outcome.keptMessageIDs.count) removed=\(outcome.removedMessageIDs.count) threadsDeleted=\(outcome.deletedThreadIDs.count) blobsPruned=\(prunedBlobIDs.count)"
         )
         return outcome.fresh
     }
@@ -174,6 +213,7 @@ extension KeepTalkingClient {
     private struct MessageDeletionOutcome: Sendable {
         let fresh: [KeepTalkingMessageTombstone]
         var removedMessageIDs: [UUID] = []
+        var keptMessageIDs: Set<UUID> = []
         var blobIDs: Set<String> = []
         var deletedThreadIDs: [UUID] = []
         var threadsChanged = false
@@ -336,6 +376,19 @@ extension KeepTalkingClient {
         on database: any Database
     ) async throws -> [KeepTalkingMessageTombstone] {
         try await KeepTalkingContext.find(contextID, on: database)?.deletedMessages ?? []
+    }
+
+    private static func heldMessageIDs(
+        among messageIDs: [UUID],
+        in contextID: UUID,
+        on database: any Database
+    ) async throws -> Set<UUID> {
+        Set(
+            try await KeepTalkingContextMessage.query(on: database)
+                .filter(\.$context.$id == contextID)
+                .filter(\.$id ~~ messageIDs)
+                .all(\.$id)
+        )
     }
 
     func deletedMessageIDs(in contextID: UUID) async throws -> Set<UUID> {

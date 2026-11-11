@@ -150,7 +150,7 @@ struct PluginResourcesWireTests {
         let bundle = KeepTalkingPluginBundle(
             name: "MarkItDown", catalogID: UUID(), kindName: kind.kindName)
 
-        let descriptor = KeepTalkingPluginHost.descriptor(for: bundle, kind: kind)
+        let descriptor = KeepTalkingCompanionLink.descriptor(for: bundle, kind: kind)
         let objects = try #require(descriptor.objects)
         // Unknown-direction and empty-name declarations are dropped, never
         // re-interpreted — a plugin bug must not widen file acceptance.
@@ -193,7 +193,7 @@ struct PluginResourcesWireTests {
             name: "MarkItDown", catalogID: UUID(), kindName: kind.kindName)
         let action = KeepTalkingAction(
             payload: .plugin(bundle), remoteAuthorisable: true, blockingAuthorisation: false)
-        action.descriptor = KeepTalkingPluginHost.descriptor(for: bundle, kind: kind)
+        action.descriptor = KeepTalkingCompanionLink.descriptor(for: bundle, kind: kind)
 
         let namedAttachment = UUID.v7()
         let bystander = UUID.v7()
@@ -306,14 +306,14 @@ struct PluginResourcesWireTests {
         #expect(bare.declaredCapabilities.isEmpty)
 
         // Kind ceiling ∩ instance narrowing, fail-closed on both dials.
-        #expect(KeepTalkingPluginHost.actCapabilityPermitted(kind: declared, instanceScope: nil))
-        #expect(!KeepTalkingPluginHost.actCapabilityPermitted(kind: bare, instanceScope: nil))
-        #expect(!KeepTalkingPluginHost.actCapabilityPermitted(kind: nil, instanceScope: nil))
+        #expect(KeepTalkingCompanionLink.actCapabilityPermitted(kind: declared, instanceScope: nil))
+        #expect(!KeepTalkingCompanionLink.actCapabilityPermitted(kind: bare, instanceScope: nil))
+        #expect(!KeepTalkingCompanionLink.actCapabilityPermitted(kind: nil, instanceScope: nil))
         #expect(
-            !KeepTalkingPluginHost.actCapabilityPermitted(
+            !KeepTalkingCompanionLink.actCapabilityPermitted(
                 kind: declared, instanceScope: .object(["capabilities": .array([])])))
         #expect(
-            KeepTalkingPluginHost.actCapabilityPermitted(
+            KeepTalkingCompanionLink.actCapabilityPermitted(
                 kind: declared,
                 instanceScope: .object(["capabilities": .array([.string("act")])])))
     }
@@ -386,81 +386,50 @@ struct PluginResourcesWireTests {
     }
     #endif
 
-    @Test("ACT consent is per-catalog, fail-closed, and persisted")
+    @Test("ACT consent is per-catalog, fail-closed, and survives a new catalog snapshot")
     func actConsent() async {
         let store = KeepTalkingPluginCatalogueStore(fileURL: nil)
-        let catalogID = UUID.v7()
-        // Unknown catalog reads false; setting on it is a no-op.
+        let catalogID = KeepTalkingPluginCatalogueStore.derivedCatalogID(pluginName: "MarkItDown")
         #expect(await store.allowsACT(catalogID) == false)
         await store.setAllowsACT(true, catalogID: catalogID)
         #expect(await store.allowsACT(catalogID) == false)
 
-        await store.upsertCatalog(
-            catalogID: catalogID,
-            info: KTPPPluginInfo(name: "MarkItDown", vendor: "kt", version: "0.1.0"),
-            role: nil)
-        // Known but untoggled: still false (off by default).
+        let plugin = KTPPWire.CatalogPlugin(name: "MarkItDown", vendor: "kt", version: "0.1.0", connected: true)
+        await store.apply([plugin])
         #expect(await store.allowsACT(catalogID) == false)
         await store.setAllowsACT(true, catalogID: catalogID)
         #expect(await store.allowsACT(catalogID) == true)
-        // A new session (upsert) must not reset the user's choice.
-        await store.upsertCatalog(
-            catalogID: catalogID,
-            info: KTPPPluginInfo(name: "MarkItDown", vendor: "kt", version: "0.2.0"),
-            role: nil)
+        await store.apply([KTPPWire.CatalogPlugin(name: "MarkItDown", vendor: "kt", version: "0.2.0", connected: true)])
         #expect(await store.allowsACT(catalogID) == true)
         await store.setAllowsACT(false, catalogID: catalogID)
         #expect(await store.allowsACT(catalogID) == false)
     }
 
-    @Test("catalogue merges same-name catalogs into the earliest, with aliases")
-    func catalogueDedupe() async throws {
+    @Test("a catalogue file with retired pairing fields still loads, consent intact")
+    func catalogueLoadsRetiredFields() async throws {
         let file = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("kt-cat-\(UUID().uuidString.prefix(8)).json")
         defer { try? FileManager.default.removeItem(at: file) }
 
-        // What the pairing era left behind: one plugin re-paired on every app
-        // relaunch, one catalog row per relaunch (legacy bare-array format).
-        let ids = [UUID.v7(), UUID.v7(), UUID.v7()]
-        let entries = ids.enumerated().map { index, id in
-            KeepTalkingPluginCatalogueEntry(
-                catalogID: id, name: "MarkItDown", vendor: "kt", version: "0.1.0",
-                role: nil,
-                kinds: [
-                    KTPPKindDeclaration(
-                        kindName: "markitdown-convert", displayName: "Convert",
-                        indexDescription: "", inputSchema: nil, scopeSchema: nil,
-                        defaultScope: nil, subTools: nil, objects: nil,
-                        capabilities: nil, remoteAuthorisable: nil,
-                        blockingAuthorisation: nil)
-                ],
-                meters: [], manifestVersion: "0.1.0",
-                pairedAt: Date(timeIntervalSince1970: Double(1000 + index)),
-                lastSeenAt: Date(timeIntervalSince1970: Double(2000 + index)),
-                allowsACT: index == 1 ? true : nil)
-        }
-        let data = try JSONEncoder().encode(entries)
+        let id = UUID.v7()
+        let entry = KeepTalkingPluginCatalogueEntry(
+            catalogID: id, name: "MarkItDown", vendor: "kt", version: "0.1.0",
+            kinds: [], meters: [], manifestVersion: "0.1.0",
+            lastSeenAt: Date(timeIntervalSince1970: 2000), allowsACT: true)
+        var row = try #require(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(entry))
+                as? [String: Any])
+        row["pairedAt"] = 1000.0
+        let data = try JSONSerialization.data(withJSONObject: [
+            "entries": [row],
+            "aliases": [UUID.v7().uuidString: id.uuidString],
+        ])
         try data.write(to: file)
 
         let store = KeepTalkingPluginCatalogueStore(fileURL: file)
-        // One survivor: the earliest pairing; the rest alias onto it.
-        let survivors = await store.catalogues()
-        #expect(survivors.count == 1)
-        #expect(survivors.first?.catalogID == ids[0])
-        for id in ids {
-            #expect(await store.canonicalCatalogID(id) == ids[0])
-        }
-        // Consent granted on ANY duplicate survives the merge; a session
-        // named "MarkItDown" resolves to the canonical row.
-        #expect(await store.allowsACT(ids[0]) == true)
-        #expect(await store.catalogID(forPluginName: "MarkItDown") == ids[0])
-        #expect(await store.kind(catalogID: ids[0], kindName: "markitdown-convert") != nil)
-
-        // The dedupe persists: a reload sees one entry and the alias map.
-        await store.persistNow()
-        let reloaded = KeepTalkingPluginCatalogueStore(fileURL: file)
-        #expect(await reloaded.catalogues().count == 1)
-        #expect(await reloaded.canonicalCatalogID(ids[2]) == ids[0])
+        #expect(await store.catalogues().map(\.catalogID) == [id])
+        #expect(await store.allowsACT(id) == true)
+        #expect(await store.catalogID(forPluginName: "MarkItDown") == id)
     }
 
     @Test("a plugin never seen before gets a stable catalog id derived from its name")
@@ -481,7 +450,7 @@ struct PluginResourcesWireTests {
             name: "Browser", catalogID: UUID(), kindName: "browser-task")
         let action = KeepTalkingAction(
             payload: .plugin(bundle), remoteAuthorisable: true, blockingAuthorisation: false)
-        action.descriptor = KeepTalkingPluginHost.descriptor(for: bundle, kind: nil)
+        action.descriptor = KeepTalkingCompanionLink.descriptor(for: bundle, kind: nil)
         #expect(!action.acceptsFileInput)
 
         // Output-only kinds accept no pushed input bytes either.
@@ -497,7 +466,7 @@ struct PluginResourcesWireTests {
             capabilities: nil,
             remoteAuthorisable: nil,
             blockingAuthorisation: nil)
-        action.descriptor = KeepTalkingPluginHost.descriptor(for: bundle, kind: outputOnly)
+        action.descriptor = KeepTalkingCompanionLink.descriptor(for: bundle, kind: outputOnly)
         #expect(!action.acceptsFileInput)
     }
 }

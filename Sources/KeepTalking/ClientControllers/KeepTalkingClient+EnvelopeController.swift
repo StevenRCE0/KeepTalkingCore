@@ -12,6 +12,7 @@ extension KeepTalkingClient {
         handlers.registerActionCatalogHandlers(for: self)
         handlers.registerVoiceCallHandlers(for: self)
         handlers.registerBlobTransferHandlers(for: self)
+        handlers.registerWorkspaceHandlers(for: self)
         let applied = try await handlers.handle(envelope)
         // The voice session always sees the envelope: its own handlers do their
         // own duplicate classification, and suppressing here would hide call

@@ -67,6 +67,8 @@ public struct KeepTalkingOrchestrationStrategy: Sendable, Equatable {
     public var consultLiveTailRows: Int
     public var consultEffort: AIReasoning.Effort
     public var consultMaxOutputTokens: Int
+    public var consultsWorkspaces: Bool
+    public var workspaceConsultMinimumTokens: Int
 
     // MARK: 4. Stitching
 
@@ -88,6 +90,8 @@ public struct KeepTalkingOrchestrationStrategy: Sendable, Equatable {
         consultLiveTailRows: Int = 8,
         consultEffort: AIReasoning.Effort = .low,
         consultMaxOutputTokens: Int = 1_200,
+        consultsWorkspaces: Bool = true,
+        workspaceConsultMinimumTokens: Int = 800,
         claimsMarkTurningPoints: Bool = false
     ) {
         self.layout = layout
@@ -102,6 +106,8 @@ public struct KeepTalkingOrchestrationStrategy: Sendable, Equatable {
         self.consultLiveTailRows = consultLiveTailRows
         self.consultEffort = consultEffort
         self.consultMaxOutputTokens = consultMaxOutputTokens
+        self.consultsWorkspaces = consultsWorkspaces
+        self.workspaceConsultMinimumTokens = workspaceConsultMinimumTokens
         self.claimsMarkTurningPoints = claimsMarkTurningPoints
     }
 

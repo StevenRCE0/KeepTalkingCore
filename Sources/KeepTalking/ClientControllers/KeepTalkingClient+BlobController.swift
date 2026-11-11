@@ -49,26 +49,16 @@ extension KeepTalkingClient {
         try await record.save(on: localStore.database)
     }
 
-    /// The distinct blob IDs `contextID` references: its attachments', plus
-    /// the avatars (own and suggested) of mappings that name the context or
-    /// are scoped to it.
-    /// Capture this *before* deleting the context — the cascade wipes those
-    /// rows, after which the link is gone.
+    /// The blobs `contextID`'s rows claim. Capture this *before* deleting
+    /// the context: the cascade takes the claims with the rows.
     public static func blobIDsReferenced(
         byContextID contextID: UUID,
         on database: any Database
     ) async throws -> Set<String> {
-        let blobIDs = try await KeepTalkingContextAttachment.query(on: database)
-            .filter(\.$context.$id, .equal, contextID)
-            .all(\.$blobID)
-        let mappingBlobIDs = try await mappingBlobIDs(
-            KeepTalkingMapping.query(on: database)
-                .group(.or) { group in
-                    group.filter(\.$context.$id == contextID)
-                    group.filter(\.$scopeContext.$id == contextID)
-                }
-        )
-        return mappingBlobIDs.union(blobIDs)
+        Set(
+            try await KeepTalkingBlobClaim.query(on: database)
+                .filter(\.$context.$id == contextID)
+                .all(\.$blobID))
     }
 
     /// Stores `data` in the blob store, outside any context, and returns its
@@ -119,31 +109,16 @@ extension KeepTalkingClient {
         )
     }
 
-    /// Given blob IDs that *were* referenced by something now deleted, delete
-    /// the record + on-disk bytes for any that nothing references any more — no
-    /// attachment anywhere in the store, and no live mapping appearance. Blobs
-    /// are shared by `blob_id` string alone (no FK), so deleting one owner can
-    /// strand a blob another still uses — hence the per-blob reference check.
-    /// Returns the blob IDs that were pruned.
     @discardableResult
     public static func pruneStrayBlobs(
         among candidateBlobIDs: Set<String>,
         on database: any Database,
         blobStore: KeepTalkingBlobStore
     ) async throws -> [String] {
+        guard !candidateBlobIDs.isEmpty else { return [] }
+        let claimed = try await KeepTalkingBlobClaim.claimed(among: candidateBlobIDs, on: database)
         var pruned: [String] = []
-        let appearanceBlobIDs = try await appearanceBlobIDs(
-            among: candidateBlobIDs,
-            on: database
-        )
-        for blobID in candidateBlobIDs where !appearanceBlobIDs.contains(blobID) {
-            let remainingReferences =
-                try await KeepTalkingContextAttachment
-                .query(on: database)
-                .filter(\.$blobID, .equal, blobID)
-                .count()
-            guard remainingReferences == 0 else { continue }
-
+        for blobID in candidateBlobIDs.subtracting(claimed).sorted() {
             let record = try await KeepTalkingBlobRecord.query(on: database)
                 .filter(\.$id, .equal, blobID)
                 .first()
@@ -157,12 +132,6 @@ extension KeepTalkingClient {
         return pruned
     }
 
-    /// Sweep the entire store for stray blobs — records no attachment and no
-    /// live mapping appearance references — and delete each one's record +
-    /// on-disk bytes.
-    /// Unscoped counterpart to the per-context prune; use it for an explicit
-    /// "reclaim space" action or a periodic housekeeping pass. Returns the
-    /// pruned blob IDs.
     @discardableResult
     public static func pruneAllStrayBlobs(
         on database: any Database,
@@ -265,7 +234,7 @@ extension KeepTalkingClient {
         }
     }
 
-    private func announceWantedBlobs(_ blobIDs: [String], in contextID: UUID) async throws {
+    func announceWantedBlobs(_ blobIDs: [String], in contextID: UUID) async throws {
         guard !blobIDs.isEmpty else { return }
         let due = await blobPulls.dueForAnnouncement(blobIDs)
         guard !due.isEmpty else { return }
@@ -620,7 +589,7 @@ extension KeepTalkingClient {
             }
     }
 
-    private func blobRecord(
+    func blobRecord(
         for blobID: String
     ) async throws -> KeepTalkingBlobRecord? {
         try await KeepTalkingBlobRecord.query(on: localStore.database)

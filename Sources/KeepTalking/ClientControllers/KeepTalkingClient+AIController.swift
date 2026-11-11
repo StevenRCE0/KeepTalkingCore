@@ -29,6 +29,8 @@ extension KeepTalkingClient {
     static let archiveSideNoteToolFunctionName = "kt_archive_side_note"
     static let sendFileToolFunctionName = "kt_send_file"
     static let webSearchFunctionName = "web_search"
+    static let workspaceSnapshotToolFunctionName = "kt_workspace_snapshot"
+    static let workspaceMutateToolFunctionName = "kt_workspace_mutate"
     static let webFetchFunctionName = "web_fetch"
     static let promptToolNames = AIPromptToolNames([
         .runAction: runActionToolFunctionName,
@@ -38,6 +40,8 @@ extension KeepTalkingClient {
         .searchThreads: searchThreadsToolFunctionName,
         .markTurningPoint: markTurningPointToolFunctionName,
         .markChitterChatter: markChitterChatterToolFunctionName,
+        .workspaceSnapshot: workspaceSnapshotToolFunctionName,
+        .workspaceMutate: workspaceMutateToolFunctionName,
     ])
     static let maxAgentTurns = 32
     static let maxAINativeAttachmentBytes = 8 * 1024 * 1024
@@ -415,6 +419,7 @@ extension KeepTalkingClient {
                 // Offered only while some local plugin action declares resources.
                 + (modelTakesTools && runtimeCatalog.actionStubs.contains { !$0.resources.isEmpty }
                     ? [makePluginResourcesTool()] : [])
+                + (modelTakesTools ? workspaceTools() : [])
         let skillNameByActionID = skillNamesByActionID(
             routesByFunctionName: runtimeCatalog.routesByFunctionName
         )
@@ -533,6 +538,7 @@ extension KeepTalkingClient {
             }
         )
 
+        let workspaces = await workspaceSections()
         let turn = OrchestrationTurn(
             agent: agent,
             prompt: prompt,
@@ -548,7 +554,8 @@ extension KeepTalkingClient {
             hasCurrentPromptAttachments: hasCurrentPromptAttachments,
             allowAutomaticToolUse: allowAutomaticToolUse,
             currentDate: currentDate,
-            platform: platform
+            platform: platform,
+            workspaces: workspaces
         )
         // The transcript is built (consults fanned out and stitched in) before
         // the loop starts; the loop runs inside, untouched.
@@ -1207,8 +1214,7 @@ extension KeepTalkingClient {
                         #endif
                     case .plugin:
                         // Nothing to register: the executor is a plugin process
-                        // that attaches on its own and is already known to the
-                        // host through pairing. Availability is the session,
+                        // that attaches on its own. Availability is the session,
                         // not a registration step.
                         return
                 }

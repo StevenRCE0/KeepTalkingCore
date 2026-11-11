@@ -17,7 +17,6 @@ public struct KeepTalkingPluginBundle: KeepTalkingActionBundle, Equatable {
     /// User-editable instance label; defaults to the kind's display name.
     public var name: String
     public var indexDescription: String
-    /// The paired plugin catalog that provides the kind.
     public var catalogID: UUID
     /// Stable kind key within that catalog.
     public var kindName: String
@@ -91,6 +90,7 @@ public struct KeepTalkingPluginActionKindSummary: Codable, Sendable, Identifiabl
     /// listed while a plugin is offline (instances and grants outlive it), just
     /// marked unavailable.
     public let isAvailable: Bool
+    public let access: KTPPAccessDeclaration?
 
     public init(
         catalogID: UUID,
@@ -105,7 +105,8 @@ public struct KeepTalkingPluginActionKindSummary: Codable, Sendable, Identifiabl
         subTools: [String] = [],
         remoteAuthorisable: Bool = true,
         blockingAuthorisation: Bool = false,
-        isAvailable: Bool
+        isAvailable: Bool,
+        access: KTPPAccessDeclaration? = nil
     ) {
         self.catalogID = catalogID
         self.catalogName = catalogName
@@ -120,6 +121,7 @@ public struct KeepTalkingPluginActionKindSummary: Codable, Sendable, Identifiabl
         self.remoteAuthorisable = remoteAuthorisable
         self.blockingAuthorisation = blockingAuthorisation
         self.isAvailable = isAvailable
+        self.access = access
     }
 
     /// Scope keys in stable display order, for form generation.

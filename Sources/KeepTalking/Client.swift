@@ -260,10 +260,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
     #if os(macOS)
     let scopeManager: ScopeManager
     let acpManager: ACPManager
-    /// Shared per-node KTPP host. Constructed eagerly but INERT — it listens
-    /// only after `enablePluginHost()`, so a node that never uses plugins pays
-    /// nothing beyond reading the Catalogue file.
-    public let pluginHost: KeepTalkingPluginHost
+    public let companionLink: KeepTalkingCompanionLink
     #endif
     let blobStore: KeepTalkingBlobStore
     /// Per-thread isolated execution workspaces (scratch/output dirs used as the
@@ -284,6 +281,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
     /// handed in (see `KeepTalkingAgentConfiguration`).
     var agentConfigurationProvider: AgentConfigurationProvider?
     var jsRuntime: (any KeepTalkingJSRuntime)?
+    var workspaceProviders: [any KeepTalkingWorkspaceProviding] = []
+    var workspaceLiftCache: [String: KeepTalkingWorkspaceSection] = [:]
+    var workspaceFollowMode: KeepTalkingWorkspaceFollowMode = .free
     /// Background work `init` started against the store (the orphan-workspace
     /// reap). A host that shuts the store down under a live client awaits it
     /// first via `awaitStartupWork()`; the store cannot serve a query after
@@ -491,7 +491,7 @@ public final class KeepTalkingClient: @unchecked Sendable {
         self.filesystemActionManager = FilesystemActionManager()
         #if os(macOS)
         self.scopeManager = ScopeManager(sandbox: SeatbeltSandbox())
-        self.pluginHost = KeepTalkingPluginHost.shared(forNode: config.node)
+        self.companionLink = KeepTalkingCompanionLink.shared
         self.acpManager = ACPManager(
             nodeConfig: config,
             stdioTransportLauncher: stdioTransportLauncher,
@@ -625,6 +625,9 @@ public final class KeepTalkingClient: @unchecked Sendable {
 
     func notifyBlobAvailabilityChange(contextID: UUID, blobID: String) {
         signals.blobAvailabilityChanges.send(.init(contextID: contextID, blobID: blobID))
+        if contextID == config.contextID {
+            Task { [weak self] in await self?.offerWorkspaceStagesIfArrived(blobID: blobID) }
+        }
     }
 
     /// Creates the default local store, preferring SQLite and falling back to memory.

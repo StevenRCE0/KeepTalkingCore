@@ -2,9 +2,8 @@
 //  KeepTalkingClient+PluginController.swift
 //  KeepTalking
 //
-//  Public surface for the Catalogue: enabling the plugin host, browsing the
-//  kinds connected plugins provide, and minting action instances from them —
-//  the plugin analogue of the primitive creation flow.
+//  The Catalogue on a client: browsing the kinds connected plugins provide,
+//  minting instances from them, and the ACT turn plugin calls run.
 //
 
 #if os(macOS)
@@ -22,7 +21,7 @@ import MCP
 enum KTPPActAttachmentRendering {
 
     /// Text/base64 payload cap (bytes of source content).
-    static let textByteCap = KeepTalkingPluginHost.maxActAttachmentBytes
+    static let textByteCap = KeepTalkingCompanionLink.maxActAttachmentBytes
     /// Raw-byte cap for base64-embedded binary (base64 inflates 4/3).
     static let binaryByteCap = 64 * 1024
     /// Post-downscale ceiling for an inlined image; beyond it the image
@@ -77,21 +76,6 @@ enum KTPPActAttachmentRendering {
 }
 
 extension KeepTalkingClient {
-
-    // MARK: Host lifecycle
-
-    /// Starts the KTPP listener. Off by default: a node that never uses
-    /// plugins never opens a socket. Also wires the ACT seam: the actor gates
-    /// (call binding, consent, budget); this client supplies the model turn.
-    public func enablePluginHost() async throws {
-        await pluginHost.setACTHandler { [weak self] request, callContext in
-            guard let self else {
-                throw KTPPHostError.notConnected(callContext.catalogID)
-            }
-            return try await self.performPluginACTTurn(request, boundTo: callContext)
-        }
-        try await pluginHost.start()
-    }
 
     /// One bounded, tool-less ACT turn on THIS node's local connector — the
     /// AI seam behind `host.act.request`. Always the plugin host node's own
@@ -176,56 +160,24 @@ extension KeepTalkingClient {
         )
     }
 
-    /// Heals a Catalogue instance left behind by host evolution, at dispatch
-    /// time, in two ways:
-    /// 1. **Catalog aliasing** — an instance minted against a pairing that was
-    ///    later deduped away (the re-pair-per-relaunch era) re-targets the
-    ///    canonical catalog, so its calls reach the connected plugin again.
-    /// 2. **Descriptor staleness** — an instance minted before kind
-    ///    declarations carried `objects` (pre-v1.1) re-materializes its
-    ///    descriptor from the CURRENT declaration; without that,
-    ///    `acceptsFileInput` stays false and no staged resource ever binds to
-    ///    the declared names the plugin handler looks up.
-    /// The minimal arm of the base doc's §12.1 kind-evolution story.
     func refreshPluginInstanceDescriptorIfStale(_ action: KeepTalkingAction) async {
-        guard case .plugin(var bundle) = action.payload else { return }
-        var mutated = false
-
-        let canonical = await pluginHost.catalogue.canonicalCatalogID(bundle.catalogID)
-        if canonical != bundle.catalogID {
-            onLog?(
-                "[plugin] healing instance catalog "
-                    + "\(bundle.catalogID.uuidString.lowercased().prefix(8)) → "
-                    + "\(canonical.uuidString.lowercased().prefix(8)) "
-                    + "action=\(action.id?.uuidString.lowercased().prefix(8) ?? "?")")
-            bundle.catalogID = canonical
-            action.payload = .plugin(bundle)
-            mutated = true
-        }
-
-        // Re-materialize whenever the declared objects or the kind's
-        // description and the instance's differ — added (pre-v1.1 instances)
-        // or dropped/renamed/reworded by a newer declaration — so the agent
-        // never plans around a stale object or instruction.
-        if let kind = await pluginHost.catalogue.kind(
-            catalogID: bundle.catalogID, kindName: bundle.kindName),
+        guard case .plugin(let bundle) = action.payload,
+            let kind = await companionLink.catalogue.kind(
+                catalogID: bundle.catalogID, kindName: bundle.kindName),
             Set((kind.objects ?? []).map { "\($0.name)|\($0.direction)" })
                 != Set(
                     (action.descriptor?.objects ?? []).map {
                         "\($0.name ?? "")|\($0.direction.rawValue)"
                     })
-                || KeepTalkingPluginHost.descriptor(for: bundle, kind: kind).action?.description
+                || KeepTalkingCompanionLink.descriptor(for: bundle, kind: kind).action?.description
                     != action.descriptor?.action?.description
-        {
-            action.descriptor = KeepTalkingPluginHost.descriptor(for: bundle, kind: kind)
-            onLog?(
-                "[plugin] healed stale instance descriptor "
-                    + "action=\(action.id?.uuidString.lowercased().prefix(8) ?? "?") "
-                    + "kind=\(bundle.kindName) objects=\(kind.objects?.count ?? 0)")
-            mutated = true
-        }
+        else { return }
 
-        guard mutated else { return }
+        action.descriptor = KeepTalkingCompanionLink.descriptor(for: bundle, kind: kind)
+        onLog?(
+            "[plugin] healed stale instance descriptor "
+                + "action=\(action.id?.uuidString.lowercased().prefix(8) ?? "?") "
+                + "kind=\(bundle.kindName) objects=\(kind.objects?.count ?? 0)")
         do {
             try await action.save(on: localStore.database)
         } catch {
@@ -237,27 +189,11 @@ extension KeepTalkingClient {
     /// Per-catalog ACT consent: may this catalog's plugins use the node's AI
     /// provider while executing calls? OFF until the user flips it.
     public func setPluginCatalogACTConsent(_ allowed: Bool, catalogID: UUID) async {
-        await pluginHost.catalogue.setAllowsACT(allowed, catalogID: catalogID)
+        await companionLink.catalogue.setAllowsACT(allowed, catalogID: catalogID)
     }
 
     public func pluginCatalogAllowsACT(_ catalogID: UUID) async -> Bool {
-        await pluginHost.catalogue.allowsACT(catalogID)
-    }
-
-    public func disablePluginHost() async {
-        await pluginHost.stop()
-    }
-
-    /// Makes plugin calls verifiable — see `KeepTalkingCallAttestor`. Calls
-    /// are unattested until one is set.
-    public func setPluginCallAttestor(_ attestor: any KeepTalkingCallAttestor) async {
-        await pluginHost.setAttestor(attestor)
-    }
-
-    public func setPluginEventHandler(
-        _ handler: (@Sendable (KTPPHostEvent) -> Void)?
-    ) async {
-        await pluginHost.setEventHandler(handler)
+        await companionLink.catalogue.allowsACT(catalogID)
     }
 
     // MARK: Catalogue
@@ -265,20 +201,20 @@ extension KeepTalkingClient {
     /// Known plugin catalogs and their declared kinds — persisted, so this
     /// answers even while every plugin is offline.
     public func pluginCatalogues() async -> [KeepTalkingPluginCatalogueEntry] {
-        await pluginHost.catalogue.catalogues()
+        await companionLink.catalogue.catalogues()
     }
 
     /// Every kind a user could instantiate right now, for the Catalogue group
     /// in the action-creation UI. The direct analogue of
     /// `KeepTalkingClient.availablePrimitiveActions`.
     public func availablePluginKinds() async -> [KeepTalkingPluginActionKindSummary] {
-        await pluginHost.catalogue.availableKinds()
+        await companionLink.catalogue.availableKinds()
     }
 
     public func pluginKindSummary(
         catalogID: UUID, kindName: String
     ) async -> KeepTalkingPluginActionKindSummary? {
-        await pluginHost.catalogue.summary(catalogID: catalogID, kindName: kindName)
+        await companionLink.catalogue.summary(catalogID: catalogID, kindName: kindName)
     }
 
     /// The choices `kind`'s plugin offers right now for one scope key (keys
@@ -290,9 +226,9 @@ extension KeepTalkingClient {
         scope: [String: Value] = [:],
         query: String? = nil
     ) async throws -> [KTPPScopeOption] {
-        try await pluginHost.scopeOptions(
-            catalogID: await pluginHost.catalogue.canonicalCatalogID(kind.catalogID),
-            kindName: kind.kindName, key: key, scope: scope, query: query)
+        try await companionLink.scopeOptions(
+            catalogID: kind.catalogID, kindName: kind.kindName, key: key, scope: scope, query: query,
+            from: config.node)
     }
 
     // MARK: Instantiation
@@ -309,18 +245,18 @@ extension KeepTalkingClient {
         scope: [String: Value]? = nil,
         node: KeepTalkingNode
     ) async throws -> KeepTalkingAction {
-        let bundle = try await pluginHost.makeInstanceBundle(
+        let bundle = try await companionLink.makeInstanceBundle(
             catalogID: catalogID, kindName: kindName, name: name, scope: scope)
-        let summary = await pluginHost.catalogue.summary(
+        let summary = await companionLink.catalogue.summary(
             catalogID: catalogID, kindName: kindName)
         // Materialize the kind's declared file objects onto the instance
         // descriptor — the seam that flips `acceptsFileInput` and drives input
         // staging / output slots for this instance's calls (resources doc §3.3).
-        let kind = await pluginHost.catalogue.kind(
+        let kind = await companionLink.catalogue.kind(
             catalogID: catalogID, kindName: kindName)
         return try await Self.registerAction(
             payload: .plugin(bundle),
-            descriptor: KeepTalkingPluginHost.descriptor(for: bundle, kind: kind),
+            descriptor: KeepTalkingCompanionLink.descriptor(for: bundle, kind: kind),
             remoteAuthorisable: summary?.remoteAuthorisable ?? true,
             blockingAuthorisation: bundle.blockingAuthorisation,
             node: node,
@@ -366,21 +302,10 @@ extension KeepTalkingClient {
         )
     }
 
-    /// Forgets a paired plugin catalog and its kinds. Instances already minted
-    /// from those kinds are NOT deleted — they are separate rows the user
-    /// created, so removing them stays an explicit, separate decision.
     public func forgetPluginCatalogue(_ catalogID: UUID) async {
-        await pluginHost.catalogue.removeCatalog(catalogID)
+        await companionLink.catalogue.removeCatalog(catalogID)
     }
 
-    /// Bridges plugin-initiated proposals (`host.action.create`) to a
-    /// confirmation UI. The closure receives the proposal and returns the
-    /// created action id, or nil when the user declines.
-    public func setPluginActionProposalHandler(
-        _ handler: (@Sendable (KeepTalkingPluginActionProposal) async -> UUID?)?
-    ) async {
-        await pluginHost.setActionProposalHandler(handler)
-    }
 }
 
 #endif

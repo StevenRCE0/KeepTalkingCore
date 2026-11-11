@@ -1059,12 +1059,12 @@ extension KeepTalkingClient {
         else {
             return .init(tools: [], promptContext: "")
         }
-        let liveKind = await pluginHost.catalogue.resolvedKind(
+        let liveKind = await companionLink.catalogue.resolvedKind(
             catalogID: bundle.catalogID, kindName: bundle.kindName)
         guard let liveKind, liveKind.isAvailable else {
             var pluginName = liveKind?.catalogName
             if pluginName == nil {
-                pluginName = await pluginHost.catalogue.catalogue(bundle.catalogID)?.name
+                pluginName = await companionLink.catalogue.catalogue(bundle.catalogID)?.name
             }
             actLog(
                 "incoming-schema action=\(actionID.uuidString.lowercased()) source=local_plugin result=\(liveKind == nil ? "unknown_kind" : "not_connected") kind=\(bundle.kindName)"

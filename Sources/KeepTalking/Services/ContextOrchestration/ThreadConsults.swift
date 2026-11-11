@@ -88,7 +88,11 @@ struct ThreadConsultBrief: Sendable {
     /// System and chunk (the cached prefix), then the live tail, the question
     /// and the charter.
     func messages(for chunk: ConsultChunk) -> [AIMessage] {
-        [.system(systemPrompt), AIMessage.system(chunk.text).withCacheBoundary(.durable)]
+        messages(prefix: chunk.text)
+    }
+
+    func messages(prefix: String) -> [AIMessage] {
+        [.system(systemPrompt), AIMessage.system(prefix).withCacheBoundary(.durable)]
             + liveTail + [question, .system(charter)]
     }
 

@@ -52,8 +52,21 @@ public enum KeepTalkingMessageDeletionScope: Sendable, Equatable {
 /// or by merge.
 public struct KeepTalkingMessageDeletion: Sendable, Equatable {
     public let contextID: UUID
-    /// Every id the merge newly tombstoned, held locally or not.
     public let messageIDs: [UUID]
+    public let keptMessageIDs: [UUID]
     /// Blob ids whose last referencing attachment went with those messages.
     public let prunedBlobIDs: [String]
+}
+
+public struct KeepTalkingMessageDeletionSummary: Sendable, Equatable {
+    public let keptMessageIDs: Set<UUID>
+    public let removed: [KeepTalkingMessageTombstone]
+
+    public init(
+        keptMessageIDs: Set<UUID> = [],
+        removed: [KeepTalkingMessageTombstone] = []
+    ) {
+        self.keptMessageIDs = keptMessageIDs
+        self.removed = removed
+    }
 }

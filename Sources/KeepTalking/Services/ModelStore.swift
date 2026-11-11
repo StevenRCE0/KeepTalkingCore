@@ -242,6 +242,10 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             ContextAttachmentTouchMiddleware(),
             on: databaseID
         )
+        manager.databases.middleware.use(AttachmentBlobClaimMiddleware(), on: databaseID)
+        manager.databases.middleware.use(MappingBlobClaimMiddleware(), on: databaseID)
+        manager.databases.middleware.use(WorkspaceStageBlobClaimMiddleware(), on: databaseID)
+        manager.databases.middleware.use(WorkspaceResourceBlobClaimMiddleware(), on: databaseID)
         manager.migrations.add(
             CreateKeepTalkingNodesMigration(),
             CreateKeepTalkingActionsMigration(),
@@ -275,6 +279,11 @@ public final class KeepTalkingModelStore: KeepTalkingLocalStore,
             AddKeepTalkingMappingSharingMigration(),
             CreateKeepTalkingContextWiseAliasRelationsMigration(),
             AddKeepTalkingActionAppearanceMigration(),
+            CreateKeepTalkingContextWorkspacesMigration(),
+            AddContextAcceptDeletionMigration(),
+            CreateKeepTalkingWorkspaceResourcesMigration(),
+            CreateKeepTalkingWorkspaceStagesMigration(),
+            CreateKeepTalkingBlobClaimsMigration(),
             to: databaseID
         )
     }

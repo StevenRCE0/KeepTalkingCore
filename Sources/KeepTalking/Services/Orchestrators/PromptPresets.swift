@@ -257,6 +257,9 @@ public enum AIPromptPresets {
         public static let updateSideNote =
             "Create or update a side note in the current context. Key identifies the topic; writing to an existing key replaces it. Active notes are shown at the top of every turn. Use to track plans, open questions, or state that must survive across turns."
 
+        public static let workspaceSnapshot =
+            "Read a workspace of this context at a granularity: `selection` (what is selected plus its neighbours), `viewport` (what people currently see) or `full` (everything). The turn already carries one snapshot; call this for more detail or after a change. Returns the workspace's compact text and stats."
+
         public static let archiveSideNote =
             "Archive a side note by key. Archived notes no longer appear in future turns. Use when a topic is fully resolved."
     }
@@ -543,6 +546,19 @@ extension OrchestrationPromptFactor {
 
             case .sideNotes(let notes):
                 return AIPromptPresets.sideNotesSection(notes).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            case .workspace(let section, let snapshotTool, let mutateTool):
+                let writing =
+                    section.manifest.mutations.isEmpty
+                    ? "It is read-only for you."
+                    : "To change it, call \(mutateTool) with mutations in its own schema (the tool text says how); people see your edits at once."
+                return """
+                    § Workspace: \(section.manifest.title)
+                    Kind: \(section.manifest.kind.rawValue). Schema: \(section.manifest.schema). Granularity: \(section.snapshot.granularity.rawValue).
+                    Stats: \(section.snapshot.stats.summaryLine).
+                    This is a live view of the workspace as it is right now, not history; it is rebuilt every turn. For more of it, call \(snapshotTool) with schema "\(section.manifest.schema)" and a granularity. \(writing)
+                    \(section.snapshot.liftedText)
+                    """
 
             case .conversationContext(let transcript, let scope):
                 switch scope {

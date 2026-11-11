@@ -47,7 +47,7 @@ extension KeepTalkingClient {
         else {
             return fail("unknown_plugin_action", "\(stub.name) is no longer a plugin action.")
         }
-        let catalogID = await pluginHost.catalogue.canonicalCatalogID(bundle.catalogID)
+        let catalogID = bundle.catalogID
         let declared = stub.resources
         let uri = args["uri"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !uri.isEmpty else {
@@ -71,8 +71,8 @@ extension KeepTalkingClient {
 
         let contents: [Resource.Content]
         do {
-            contents = try await pluginHost.readResource(
-                catalogID: catalogID, kindName: bundle.kindName, uri: uri)
+            contents = try await companionLink.readResource(
+                catalogID: catalogID, kindName: bundle.kindName, uri: uri, from: config.node)
         } catch {
             return fail("resource_unavailable", error.localizedDescription)
         }
@@ -86,7 +86,7 @@ extension KeepTalkingClient {
                 part["text"] = clipped(text, maxCharacters: maxCharacters)
                 if text.count > maxCharacters { part["truncated_from_characters"] = text.count }
             } else if let blob = content.blob, let data = Data(base64Encoded: blob) {
-                let name = KeepTalkingPluginHost.resourceFileName(uri: content.uri, fallback: "resource")
+                let name = KeepTalkingCompanionLink.resourceFileName(uri: content.uri, fallback: "resource")
                 let directory = FileManager.default.temporaryDirectory
                     .appendingPathComponent("kt-plugin-resource-\(UUID().uuidString)", isDirectory: true)
                 defer { try? FileManager.default.removeItem(at: directory) }

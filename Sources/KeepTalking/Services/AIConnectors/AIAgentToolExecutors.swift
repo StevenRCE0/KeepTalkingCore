@@ -252,6 +252,33 @@ extension KeepTalkingClient {
                         )
                     )
                     continue
+                } else if functionName == Self.workspaceSnapshotToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: await executeWorkspaceSnapshotToolCall(
+                                        rawArguments: toolCall.argumentsJSON),
+                                    toolCallID: toolCallID
+                                )
+                            ]
+                        )
+                    )
+                    continue
+                } else if functionName == Self.workspaceMutateToolFunctionName {
+                    executions.append(
+                        .init(
+                            toolCall: toolCall,
+                            messages: [
+                                toolMessage(
+                                    payload: await executeWorkspaceMutateToolCall(rawArguments: toolCall.argumentsJSON),
+                                    toolCallID: toolCallID
+                                )
+                            ]
+                        )
+                    )
+                    continue
                 } else if functionName == Self.updateSideNoteToolFunctionName {
                     executions.append(
                         .init(

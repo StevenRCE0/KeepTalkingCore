@@ -85,6 +85,10 @@ public final class KeepTalkingClientSignals: Sendable {
     /// or was swept out of a call. Carries the context; re-read the set via
     /// `voiceCallPresence.participants(in:)`. Driven by the presence registry.
     public let voiceCallPresenceChanges = KeepTalkingSignal<UUID>()
+    public let workspaceChanges = KeepTalkingSignal<KeepTalkingWorkspaceChange>()
+    public let workspaceStages = KeepTalkingSignal<KeepTalkingWorkspacePendingStage>()
+    public let workspaceViewports = KeepTalkingSignal<KeepTalkingWorkspaceViewportUpdate>()
+    public let workspaceCatalogChanges = KeepTalkingSignal<UUID>()
 
     init() {}
 }

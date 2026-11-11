@@ -156,6 +156,16 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
                     try cast(KeepTalkingBlobTransferEnvelope.self),
                     forKey: .payload
                 )
+            case .workspaceDelta:
+                try container.encode(try cast(KeepTalkingWorkspaceDeltaPayload.self), forKey: .payload)
+            case .workspaceStage:
+                try container.encode(try cast(KeepTalkingWorkspaceStagePayload.self), forKey: .payload)
+            case .workspaceViewport:
+                try container.encode(try cast(KeepTalkingWorkspaceViewportPayload.self), forKey: .payload)
+            case .workspaceCatalog:
+                try container.encode(try cast(KeepTalkingWorkspaceCatalogPayload.self), forKey: .payload)
+            case .workspaceResources:
+                try container.encode(try cast(KeepTalkingWorkspaceResourcesPayload.self), forKey: .payload)
         }
     }
 
@@ -309,6 +319,16 @@ public struct KeepTalkingEnvelopePacket: Codable, Sendable {
                     KeepTalkingBlobTransferEnvelope.self,
                     forKey: .payload
                 )
+            case .workspaceDelta:
+                return try container.decode(KeepTalkingWorkspaceDeltaPayload.self, forKey: .payload)
+            case .workspaceStage:
+                return try container.decode(KeepTalkingWorkspaceStagePayload.self, forKey: .payload)
+            case .workspaceViewport:
+                return try container.decode(KeepTalkingWorkspaceViewportPayload.self, forKey: .payload)
+            case .workspaceCatalog:
+                return try container.decode(KeepTalkingWorkspaceCatalogPayload.self, forKey: .payload)
+            case .workspaceResources:
+                return try container.decode(KeepTalkingWorkspaceResourcesPayload.self, forKey: .payload)
         }
     }
 }

@@ -2,22 +2,18 @@ import Foundation
 import KeepTalkingSDK
 import MCP
 
-/// KTPP lab host — the Phase-1 demo driver for plugin action catalogs.
+/// Attaches to the KT Companion as one identity: lists the Catalogue, drives a
+/// call end to end, or accepts plugin proposals. A second lab with its own
+/// `--node` is a second identity online.
 ///
-/// Serves the plugin socket via `KeepTalkingPluginHost`, lists the plugins
-/// that connect and the kinds they push, and can drive a call end to end —
-/// printing the result, the reported usage, and the attestation verdict.
-///
-///     KeepTalking pluginlab [--socket <path>] [--call <kind>] [--args <json>]
-///                           [--scope <json>] [--wait <secs>] [--stay]
+///     KeepTalking pluginlab [--socket <path>] [--node <uuid>] [--label <name>]
+///                           [--call <kind>] [--args <json>] [--scope <json>]
+///                           [--wait <secs>] [--catalogue] [--accept-proposals] [--stay]
 enum PluginLabCommand {
     private struct Args {
-        /// Defaults to a node-derived path like the app's. In practice you
-        /// pass `--socket` (or run the app, which owns the real one): the lab
-        /// is a headless stand-in for the app host, not a second listener
-        /// competing with it.
-        var socketPath: String = KeepTalkingPluginHost.socketPath(forNode: UUID.v7())
-        var node: UUID?
+        var socketPath = KeepTalkingCompanionLink.socketPath()
+        var node = UUID.v7()
+        var label = "pluginlab"
         var call: String?
         var callArguments: [String: Value] = [:]
         var instanceScope: Value?
@@ -37,214 +33,105 @@ enum PluginLabCommand {
             Foundation.exit(0)
         } catch {
             stderr("error: \(error.localizedDescription)")
-            usage()
+            stderr(
+                "usage: KeepTalking pluginlab [--socket <path>] [--node <uuid>] [--label <name>] [--call <kind>] [--args <json>] [--scope <json>] [--wait <secs>] [--catalogue] [--accept-proposals] [--stay]"
+            )
             Foundation.exit(1)
         }
     }
 
     private static func run(_ args: Args) async throws {
-        let hostNodeID = args.node ?? UUID.v7()
-        let host = KeepTalkingPluginHost(hostNodeID: hostNodeID, socketPath: args.socketPath)
-
-        await host.setEventHandler { event in
+        let link = KeepTalkingCompanionLink(socketPath: args.socketPath)
+        await link.setEventHandler { event in
             switch event {
-                case .listening(let socketPath):
-                    print("[pluginlab] listening socket=\(socketPath)")
-                    print("[pluginlab] discovery=\((socketPath as NSString).deletingLastPathComponent)/ktpp.json")
-                case .kindsRegistered(let catalogID, let kinds):
-                    print(
-                        "[pluginlab] kinds registered catalog=\(catalogID.uuidString.lowercased()) manifest=\(kinds.manifestVersion)"
-                    )
-                    for kind in kinds.kinds {
-                        print("            - \(kind.kindName): \(kind.indexDescription)")
-                        if let scopeSchema = kind.scopeSchema, case .object(let keys) = scopeSchema {
-                            print("              scope keys: \(keys.keys.sorted().joined(separator: ", "))")
-                        }
-                    }
-                    for meter in kinds.meters ?? [] {
-                        print("            meter \(meter.name) (per \(meter.quantum))")
-                    }
-                case .connected(let catalogID, let info, let role):
-                    print("[pluginlab] connected catalog=\(catalogID.uuidString.lowercased())")
-                    print(
-                        "            plugin=\(info.name) v\(info.version) by \(info.vendor)\(role.map { " (\($0))" } ?? "")"
-                    )
-                case .disconnected(let catalogID):
-                    print("[pluginlab] disconnected catalog=\(catalogID.uuidString.lowercased())")
-                case .log(let message):
-                    print("[pluginlab] \(message)")
+                case .attached: print("[pluginlab] attached socket=\(args.socketPath)")
+                case .detached: print("[pluginlab] detached")
+                case .catalogChanged: print("[pluginlab] catalog changed")
+                case .log(let message): print("[pluginlab] \(message)")
             }
         }
-
-        // Stands in for the app's confirmation sheet: accept plugin-proposed
-        // action creation and report the instance it would have minted.
         if args.acceptProposals {
-            await host.setActionProposalHandler { proposal in
-                let instanceID = UUID.v7()
-                print("")
-                print("=== action proposal from \(proposal.catalogName) ===")
-                print("kind: \(proposal.kindName)")
-                print("name: \(proposal.suggestedName)")
-                if let reason = proposal.reason { print("reason: \(reason)") }
-                if let scope = proposal.suggestedScope {
-                    print("suggested scope: \(compactJSON(scope))")
-                }
-                print("→ approved (lab); instance=\(instanceID.uuidString.lowercased())")
-                return instanceID
-            }
+            await link.setActionProposalHandler(
+                { proposal in
+                    print("[pluginlab] proposal from \(proposal.catalogName): \(proposal.kindName) — approved")
+                    return UUID.v7()
+                }, forNode: args.node)
         }
-
-        try await host.start()
-        print("[pluginlab] host node=\(hostNodeID.uuidString.lowercased())")
-        print("[pluginlab] export KT_PLUGIN_SOCKET=\(args.socketPath)")
+        await link.attach(node: args.node, label: args.label)
+        await link.start()
+        print("[pluginlab] node=\(args.node.uuidString.lowercased()) label=\(args.label)")
 
         if args.showCatalogue {
-            // Give a connecting companion a moment to register before reading.
-            try await Task.sleep(nanoseconds: 4_000_000_000)
-            let kinds = await host.catalogue.availableKinds()
-            print("")
-            print("=== Catalogue (\(kinds.count) kind(s) available to instantiate) ===")
-            for kind in kinds {
-                print("- \(kind.displayName)  [\(kind.kindName)]")
-                print("    from: \(kind.catalogName) (\(kind.vendor))  available=\(kind.isAvailable)")
-                print("    scope keys: \(kind.scopeKeys.joined(separator: ", "))")
+            try await Task.sleep(for: .seconds(3))
+            for kind in await link.catalogue.availableKinds() {
+                print("- \(kind.displayName) [\(kind.kindName)] from \(kind.catalogName)")
             }
         }
 
         if let kindName = args.call {
-            print("[pluginlab] waiting up to \(Int(args.waitSeconds))s for a companion registering '\(kindName)' …")
-            let catalogID = try await host.waitForKind(kindName, timeout: args.waitSeconds)
-
-            // The lab mints an ephemeral instance the way the app's Add-action
-            // flow would mint a persistent one (primitive-style instantiation).
-            let instanceID = UUID.v7()
-            print("[pluginlab] instantiated kind=\(kindName) instance=\(instanceID.uuidString.lowercased())")
-            if let scope = args.instanceScope {
-                print("[pluginlab] instance scope=\(compactJSON(scope))")
+            let deadline = Date.now.addingTimeInterval(args.waitSeconds)
+            var kind = await link.catalogue.availableKinds().first { $0.kindName == kindName }
+            while kind == nil, Date.now < deadline {
+                try await Task.sleep(for: .milliseconds(500))
+                kind = await link.catalogue.availableKinds().first { $0.kindName == kindName }
             }
-
-            let outcome = try await host.callKind(
-                catalogID: catalogID,
-                kindName: kindName,
-                arguments: args.callArguments,
-                instanceID: instanceID,
-                instanceScope: args.instanceScope
-            )
-
-            print("")
-            print("=== call result (isError=\(outcome.isError)) ===")
-            printContent(outcome.content)
-            print("")
-            print("=== usage ===")
-            for entry in outcome.usage {
-                print("\(entry.meter) = \(entry.units)")
-            }
+            guard let kind else { throw LabError("no connected plugin provides '\(kindName)'") }
+            let outcome = try await link.callKind(
+                catalogID: kind.catalogID, kindName: kindName, arguments: args.callArguments,
+                instanceID: UUID.v7(), instanceScope: args.instanceScope, node: args.node)
+            print("=== result (isError=\(outcome.isError)) ===")
+            print(compactJSON(outcome.content))
+            for entry in outcome.usage { print("\(entry.meter) = \(entry.units)") }
             print("attestation: \(outcome.record.verdict)")
-
             if !args.stay {
-                await host.stop()
+                await link.stop()
                 return
             }
         }
 
-        print("[pluginlab] serving — Ctrl-C to exit")
-        while true {
-            try await Task.sleep(nanoseconds: 3_600_000_000_000)
-        }
-    }
-
-    private static func printContent(_ content: Value) {
-        if case .array(let items) = content {
-            for item in items {
-                if case .object(let fields) = item,
-                    case .string(let type)? = fields["type"],
-                    type == "text",
-                    case .string(let text)? = fields["text"]
-                {
-                    print(text)
-                } else {
-                    print(compactJSON(item))
-                }
-            }
-        } else {
-            print(compactJSON(content))
-        }
+        print("[pluginlab] attached — Ctrl-C to exit")
+        while true { try await Task.sleep(for: .seconds(3600)) }
     }
 
     private static func compactJSON(_ value: Value) -> String {
-        guard let data = try? JSONEncoder().encode(value),
-            let string = String(data: data, encoding: .utf8)
-        else { return "\(value)" }
-        return string
+        (try? JSONEncoder().encode(value)).flatMap { String(data: $0, encoding: .utf8) } ?? "\(value)"
     }
 
     private static func parse(_ args: [String]) throws -> Args {
         var parsed = Args()
         var iterator = args.makeIterator()
+        func value(_ flag: String) throws -> String {
+            guard let value = iterator.next() else { throw LabError("\(flag) requires a value") }
+            return value
+        }
+        func json(_ flag: String) throws -> Value {
+            try JSONDecoder().decode(Value.self, from: Data(try value(flag).utf8))
+        }
         while let flag = iterator.next() {
             switch flag {
-                case "--socket":
-                    parsed.socketPath = try requireValue(&iterator, for: flag)
+                case "--socket": parsed.socketPath = try value(flag)
                 case "--node":
-                    // Serve the same path a given node's app would, so a
-                    // companion paired to that node reconnects unchanged.
-                    let raw = try requireValue(&iterator, for: flag)
-                    guard let node = UUID(uuidString: raw) else {
-                        throw LabError.badFlag("--node needs a UUID")
-                    }
+                    guard let node = UUID(uuidString: try value(flag)) else { throw LabError("--node needs a UUID") }
                     parsed.node = node
-                    parsed.socketPath = KeepTalkingPluginHost.socketPath(forNode: node)
-                case "--call":
-                    parsed.call = try requireValue(&iterator, for: flag)
+                case "--label": parsed.label = try value(flag)
+                case "--call": parsed.call = try value(flag)
                 case "--args":
-                    let json = try requireValue(&iterator, for: flag)
-                    let value = try JSONDecoder().decode(Value.self, from: Data(json.utf8))
-                    guard case .object(let fields) = value else {
-                        throw LabError.badFlag("--args must be a JSON object")
-                    }
+                    guard case .object(let fields) = try json(flag) else { throw LabError("--args must be an object") }
                     parsed.callArguments = fields
-                case "--scope":
-                    let json = try requireValue(&iterator, for: flag)
-                    parsed.instanceScope = try JSONDecoder().decode(Value.self, from: Data(json.utf8))
-                case "--wait":
-                    parsed.waitSeconds = TimeInterval(try requireValue(&iterator, for: flag)) ?? 120
-                case "--stay":
-                    parsed.stay = true
-                case "--catalogue":
-                    parsed.showCatalogue = true
-                case "--accept-proposals":
-                    parsed.acceptProposals = true
-                default:
-                    throw LabError.badFlag("unknown flag \(flag)")
+                case "--scope": parsed.instanceScope = try json(flag)
+                case "--wait": parsed.waitSeconds = TimeInterval(try value(flag)) ?? 120
+                case "--stay": parsed.stay = true
+                case "--catalogue": parsed.showCatalogue = true
+                case "--accept-proposals": parsed.acceptProposals = true
+                default: throw LabError("unknown flag \(flag)")
             }
         }
         return parsed
     }
 
-    private static func requireValue(
-        _ iterator: inout IndexingIterator<[String]>, for flag: String
-    ) throws -> String {
-        guard let value = iterator.next() else {
-            throw LabError.badFlag("\(flag) requires a value")
-        }
-        return value
-    }
-
-    private enum LabError: LocalizedError {
-        case badFlag(String)
-        var errorDescription: String? {
-            if case .badFlag(let message) = self { return message }
-            return nil
-        }
-    }
-
-    private static func usage() {
-        stderr(
-            """
-            Usage:
-              KeepTalking pluginlab [--socket <path>] [--call <kind>] [--args <json>] \
-            [--scope <json>] [--wait <secs>] [--stay]
-            """)
+    private struct LabError: LocalizedError {
+        let errorDescription: String?
+        init(_ message: String) { errorDescription = message }
     }
 
     private static func stderr(_ message: String) {

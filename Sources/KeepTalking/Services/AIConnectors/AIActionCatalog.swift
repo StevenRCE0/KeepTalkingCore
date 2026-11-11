@@ -259,7 +259,7 @@ extension KeepTalkingClient {
                         // comes back the moment the companion returns: the
                         // host invalidates this catalog on every connection
                         // event, so the next turn rebuilds it live.
-                        let liveKind = await pluginHost.catalogue.resolvedKind(
+                        let liveKind = await companionLink.catalogue.resolvedKind(
                             catalogID: bundle.catalogID, kindName: bundle.kindName)
                         if let liveKind, liveKind.isAvailable {
                             pluginSchema = liveKind.inputSchema
@@ -533,7 +533,7 @@ extension KeepTalkingClient {
     func declaredResourceContracts(
         for bundle: KeepTalkingPluginBundle
     ) async -> [KeepTalkingActionResourceContract] {
-        let kind = await pluginHost.catalogue.kind(
+        let kind = await companionLink.catalogue.kind(
             catalogID: bundle.catalogID, kindName: bundle.kindName)
         return (kind?.resources ?? []).compactMap { $0.sanitized() }.map { resource in
             KeepTalkingActionResourceContract(

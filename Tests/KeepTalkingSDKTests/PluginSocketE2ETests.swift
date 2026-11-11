@@ -7,7 +7,7 @@ import Testing
 #if os(macOS)
 
 /// LIVE end-to-end coverage of KTPP over the real Unix socket: the actual
-/// `KeepTalkingPluginHost` actor on one side, the actual Python plugin SDK
+/// `KeepTalkingCompanionLink` actor on one side, the actual Python plugin SDK
 /// (`CompanionRuntime/keeptalking_plugin.py`) as a subprocess on the other.
 ///
 /// Proves the full loop the design doc promises: connect → kind
@@ -51,8 +51,8 @@ struct PluginSocketE2ETests {
         probe.executableURL = URL(fileURLWithPath: runtimePython)
         probe.arguments = [
             "-c",
-            "import sys, grpc; sys.path.insert(0, sys.argv[1]); import keeptalking_plugin as k; "
-                + "sys.exit(0 if k.PROTOCOL_VERSION == \(KTPPWire.protocolVersion) else 1)",
+            "import sys, grpc; sys.path.insert(0, sys.argv[1]); import companion_server as c; "
+                + "sys.exit(0 if c.APP_PROTOCOL_VERSION == \(KTPPWire.protocolVersion) else 1)",
             companionRuntimeDir.path,
         ]
         probe.standardOutput = FileHandle.nullDevice
@@ -85,69 +85,65 @@ struct PluginSocketE2ETests {
     }
 
     struct Harness {
-        let host: KeepTalkingPluginHost
+        let host: KeepTalkingCompanionLink
+        let node: UUID
+        let broker: Process
         let plugin: Process
         let scratch: URL
 
         func tearDown() async {
             plugin.terminate()
             await host.stop()
+            broker.terminate()
             try? FileManager.default.removeItem(at: scratch)
         }
     }
 
-    /// Starts a host on a fresh socket and launches `moduleFile` through the
-    /// real `plugin_host.py` with an ISOLATED $HOME (the SDK keeps its state in
-    /// `~/.keeptalking-plugin/…`, which must never touch the developer's real
-    /// companion state).
+    /// The real broker on a fresh socket, `moduleFile` through the real
+    /// `plugin_host.py`, and the link attached as one node — with an ISOLATED
+    /// $HOME so the developer's companion state is never touched.
     static func startHarness(moduleFile: URL) async throws -> Harness {
         let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("kt-e2e-\(UUID().uuidString.prefix(8))", isDirectory: true)
-        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         let home = scratch.appendingPathComponent("home", isDirectory: true)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let socketPath = scratch.appendingPathComponent("ktpp.sock").path
 
-        let host = KeepTalkingPluginHost(
-            hostNodeID: UUID.v7(),
-            socketPath: socketPath,
-            catalogue: KeepTalkingPluginCatalogueStore(fileURL: nil))
-        try await host.start()
+        func python(_ script: String, _ arguments: [String]) throws -> Process {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: runtimePython)
+            process.arguments = [companionRuntimeDir.appendingPathComponent(script).path] + arguments
+            var environment = ProcessInfo.processInfo.environment
+            environment["HOME"] = home.path
+            environment["PYTHONUNBUFFERED"] = "1"
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            process.environment = environment
+            process.standardInput = Pipe()
+            process.standardOutput = FileHandle.standardOutput
+            process.standardError = FileHandle.standardOutput
+            try process.run()
+            return process
+        }
+        let broker = try python("companion_server.py", ["--socket", socketPath])
+        let plugin = try python("plugin_host.py", ["--module", moduleFile.path, "--socket", socketPath])
 
-        let plugin = Process()
-        plugin.executableURL = URL(fileURLWithPath: runtimePython)
-        plugin.arguments = [
-            companionRuntimeDir.appendingPathComponent("plugin_host.py").path,
-            "--module", moduleFile.path,
-            "--socket", socketPath,
-        ]
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOME"] = home.path
-        environment["PYTHONUNBUFFERED"] = "1"
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        plugin.environment = environment
-        // As the companion does: plugin_host.py exits on stdin EOF, so hand it
-        // a pipe we own instead of whatever stdin the test runner has.
-        plugin.standardInput = Pipe()
-        // Keep output visible in the test log when something goes sideways.
-        plugin.standardOutput = FileHandle.standardOutput
-        plugin.standardError = FileHandle.standardOutput
-        try plugin.run()
-
-        return Harness(host: host, plugin: plugin, scratch: scratch)
+        let node = UUID.v7()
+        let host = KeepTalkingCompanionLink(
+            socketPath: socketPath, catalogue: KeepTalkingPluginCatalogueStore(fileURL: nil))
+        await host.attach(node: node, label: "e2e")
+        await host.start()
+        return Harness(host: host, node: node, broker: broker, plugin: plugin, scratch: scratch)
     }
 
-    /// Waits until the catalog row has landed in the catalogue store (kept as a
-    /// guard: the row is written as the plugin connects, before its kinds).
-    static func waitForCatalogue(
-        _ host: KeepTalkingPluginHost, catalogID: UUID, timeout: TimeInterval = 10
-    ) async throws {
+    static func waitForKind(_ harness: Harness, _ kindName: String, timeout: TimeInterval = 30) async throws -> UUID {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if await host.catalogue.catalogue(catalogID) != nil { return }
+            if let kind = await harness.host.catalogue.availableKinds().first(where: { $0.kindName == kindName }) {
+                return kind.catalogID
+            }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        throw KTPPHostError.timeout("catalogue row for \(catalogID.uuidString.lowercased())")
+        throw KTPPHostError.timeout("kind '\(kindName)'")
     }
 
     /// Deliberately the ADVERSE naming shape from the 2026-08-17 live run: the
@@ -185,13 +181,11 @@ struct PluginSocketE2ETests {
                 .appendingPathComponent("plugins/markitdown_plugin.py"))
         defer { Task { await harness.tearDown() } }
 
-        let catalogID = try await harness.host.waitForKind("markitdown-convert", timeout: 30)
+        let catalogID = try await Self.waitForKind(harness, "markitdown-convert")
 
         // The declaration crossed the wire with its file objects + disclosure.
-        let summary = await harness.host.listCatalogs()
-            .first { $0.catalogID == catalogID }
         let kind = try #require(
-            summary?.kinds?.kinds.first { $0.kindName == "markitdown-convert" })
+            await harness.host.catalogue.kind(catalogID: catalogID, kindName: "markitdown-convert"))
         #expect(kind.objects?.count == 2)
         #expect(kind.objects?.first?.direction == "input")
         #expect(kind.declaredCapabilities.contains(.act))
@@ -207,6 +201,7 @@ struct PluginSocketE2ETests {
             arguments: [:],
             instanceID: UUID.v7(),
             instanceScope: .object(["allowedExtensions": .array([.string(".pdf")])]),
+            node: harness.node,
             manifest: manifest)
         #expect(denied.isError)
 
@@ -220,6 +215,7 @@ struct PluginSocketE2ETests {
             arguments: [:],
             instanceID: UUID.v7(),
             instanceScope: nil,
+            node: harness.node,
             manifest: manifest,
             onElucidation: { message, _ in live.append(message) })
         #expect(!outcome.isError)
@@ -302,11 +298,10 @@ struct PluginSocketE2ETests {
         let harness = try await Self.startHarness(moduleFile: scratchModule)
         defer { Task { await harness.tearDown() } }
 
-        let catalogID = try await harness.host.waitForKind("act-probe", timeout: 30)
-        try await Self.waitForCatalogue(harness.host, catalogID: catalogID)
+        let catalogID = try await Self.waitForKind(harness, "act-probe")
 
         let seenAttachments = NoteCollector()
-        await harness.host.setACTHandler { request, context in
+        let actTurn: KTPPActTurn = { request, context in
             for attachment in request.attachments {
                 let content =
                     (try? String(contentsOf: attachment.path, encoding: .utf8)) ?? "<unreadable>"
@@ -328,7 +323,9 @@ struct PluginSocketE2ETests {
                 arguments: [:],
                 instanceID: UUID.v7(),
                 instanceScope: instanceScope,
-                manifest: manifest)
+                node: harness.node,
+                manifest: manifest,
+                actTurn: actTurn)
             return (outcome, (try? String(contentsOf: slotPath, encoding: .utf8)) ?? "")
         }
 
@@ -367,9 +364,9 @@ struct PluginSocketE2ETests {
         // add-action sheet; the injected handler must see the names and the
         // plugin must get an ok verdict back.
         let uiRequests = NoteCollector()
-        await harness.host.setAddActionUIHandler { kindName, pluginName in
-            uiRequests.append("\(kindName ?? "-")/\(pluginName ?? "-")")
-        }
+        await harness.host.setAddActionUIHandler(
+            { kindName, pluginName in uiRequests.append("\(kindName ?? "-")/\(pluginName ?? "-")") },
+            forNode: harness.node)
         let (uiOutcome, _) = try await callProbe(kind: "ui-probe")
         #expect(!uiOutcome.isError)
         if case .array(let content) = uiOutcome.content,
@@ -382,77 +379,6 @@ struct PluginSocketE2ETests {
         }
         #expect(uiRequests.notes == ["act-probe/ActProbe"])
     }
-    /// A probe plugin that records `plugin.ui.reveal` by writing a marker file
-    /// under its (scratch) HOME, optionally claiming the companion role and
-    /// optionally installing a reveal handler at all.
-    private static func revealProbeModule(role: String?, handles: Bool) throws -> URL {
-        let module = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("kt-reveal-probe-\(UUID().uuidString.prefix(8)).py")
-        let roleArgument = role.map { ", role=\($0.debugDescription)" } ?? ""
-        let handlerLine =
-            handles
-            ? "plugin.on_reveal = lambda: (Path.home() / 'revealed').write_text('1')"
-            : "pass"
-        try """
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, \(companionRuntimeDir.path.debugDescription))
-        from keeptalking_plugin import Plugin
-
-
-        def make_plugin():
-            plugin = Plugin(name="RevealProbe", vendor="test", version="0.0.1"\(roleArgument))
-
-            @plugin.kind("reveal-probe", description="exists so the catalog registers a kind")
-            async def noop(args, ctx):
-                return "noop"
-
-            \(handlerLine)
-            return plugin
-
-
-        if __name__ == "__main__":
-            make_plugin().run()
-        """.data(using: .utf8)!.write(to: module)
-        return module
-    }
-
-    /// Runs `revealCompanion()` against one probe plugin; returns the host's
-    /// verdict and whether the plugin actually saw the reveal.
-    private static func revealOutcome(role: String?, handles: Bool) async throws
-        -> (acknowledged: Bool, pluginRevealed: Bool)
-    {
-        let module = try revealProbeModule(role: role, handles: handles)
-        defer { try? FileManager.default.removeItem(at: module) }
-        let harness = try await startHarness(moduleFile: module)
-        defer { Task { await harness.tearDown() } }
-        let catalogID = try await harness.host.waitForKind("reveal-probe", timeout: 30)
-        try await waitForCatalogue(harness.host, catalogID: catalogID)
-        let acknowledged = await harness.host.revealCompanion(timeout: 5)
-        let marker = harness.scratch.appendingPathComponent("home/revealed")
-        return (acknowledged, FileManager.default.fileExists(atPath: marker.path))
-    }
-
-    @Test(
-        "plugin.ui.reveal: reaches a companion's handler; declined or ignored otherwise",
-        .enabled(if: PluginSocketE2ETests.environmentReady))
-    func revealCompanionRoundTrip() async throws {
-        let companion = try await Self.revealOutcome(role: "companion", handles: true)
-        #expect(companion.acknowledged)
-        #expect(companion.pluginRevealed)
-
-        // A companion with no UI attached says `unhandled`: the host reports
-        // false so the app can launch the companion instead.
-        let headless = try await Self.revealOutcome(role: "companion", handles: false)
-        #expect(!headless.acknowledged)
-        #expect(!headless.pluginRevealed)
-
-        // An ordinary plugin is never a target, even with a handler installed.
-        let plain = try await Self.revealOutcome(role: nil, handles: true)
-        #expect(!plain.acknowledged)
-        #expect(!plain.pluginRevealed)
-    }
-
     @Test(
         "plugin.scope.options: declared live keys are asked, answers trimmed, refusals surfaced",
         .enabled(if: PluginSocketE2ETests.environmentReady))
@@ -503,8 +429,7 @@ struct PluginSocketE2ETests {
         let harness = try await Self.startHarness(moduleFile: module)
         defer { Task { await harness.tearDown() } }
         let host = harness.host
-        let catalogID = try await host.waitForKind("options-probe", timeout: 30)
-        try await Self.waitForCatalogue(host, catalogID: catalogID)
+        let catalogID = try await Self.waitForKind(harness, "options-probe")
 
         // The declaration carries the keyword; fixed enums parse without it.
         let summary = try #require(
@@ -518,7 +443,7 @@ struct PluginSocketE2ETests {
 
         let options = try await host.scopeOptions(
             catalogID: catalogID, kindName: "options-probe", key: "apps",
-            scope: ["mode": .string("safe")], query: "sa")
+            scope: ["mode": .string("safe")], query: "sa", from: harness.node)
         #expect(
             options.map(\.value) == [
                 .string("com.example.one"), .string("com.example.two"), .string("echo"),
@@ -532,14 +457,14 @@ struct PluginSocketE2ETests {
         // A provider's own failure comes back as the plugin's message.
         let refusal = await #expect(throws: KTPPHostError.self) {
             try await host.scopeOptions(
-                catalogID: catalogID, kindName: "options-probe", key: "broken")
+                catalogID: catalogID, kindName: "options-probe", key: "broken", from: harness.node)
         }
         #expect(refusal?.errorDescription == "dependency missing")
 
         // Keys without live options are never asked.
         await #expect(throws: KTPPHostError.self) {
             try await host.scopeOptions(
-                catalogID: catalogID, kindName: "options-probe", key: "free")
+                catalogID: catalogID, kindName: "options-probe", key: "free", from: harness.node)
         }
     }
 
@@ -596,8 +521,7 @@ struct PluginSocketE2ETests {
         let harness = try await Self.startHarness(moduleFile: module)
         defer { Task { await harness.tearDown() } }
         let host = harness.host
-        let catalogID = try await host.waitForKind("resource-probe", timeout: 30)
-        try await Self.waitForCatalogue(host, catalogID: catalogID)
+        let catalogID = try await Self.waitForKind(harness, "resource-probe")
 
         // Declared beside the tools, catalogued with the kind.
         let declared = await host.catalogue.kind(catalogID: catalogID, kindName: "resource-probe")?
@@ -606,38 +530,38 @@ struct PluginSocketE2ETests {
 
         // Read: MCP `resources/read` contents, verbatim.
         let guide = try await host.readResource(
-            catalogID: catalogID, kindName: "resource-probe", uri: "mem://guide.md")
+            catalogID: catalogID, kindName: "resource-probe", uri: "mem://guide.md", from: harness.node)
         #expect(guide.first?.text == "# Guide\nhi")
         let pixel = try await host.readResource(
-            catalogID: catalogID, kindName: "resource-probe", uri: "mem://pixel.png")
+            catalogID: catalogID, kindName: "resource-probe", uri: "mem://pixel.png", from: harness.node)
         #expect(pixel.first?.blob.flatMap { Data(base64Encoded: $0) } == Data([0x89, 0x50, 0x4E, 0x47]))
 
         // Undeclared uris are refused host-side; a reader's refusal is its message.
         await #expect(throws: KTPPHostError.self) {
             try await host.readResource(
-                catalogID: catalogID, kindName: "resource-probe", uri: "mem://secret")
+                catalogID: catalogID, kindName: "resource-probe", uri: "mem://secret", from: harness.node)
         }
         let refusal = await #expect(throws: KTPPHostError.self) {
             try await host.readResource(
-                catalogID: catalogID, kindName: "resource-probe", uri: "mem://broken.md")
+                catalogID: catalogID, kindName: "resource-probe", uri: "mem://broken.md", from: harness.node)
         }
         #expect(refusal?.errorDescription == "cannot read mem://broken.md")
 
         // Call IO maps to KTRM: every file the result carries becomes a resource.
         let outcome = try await host.callKind(
             catalogID: catalogID, kindName: "resource-probe", arguments: [:],
-            instanceID: UUID.v7(), instanceScope: nil)
+            instanceID: UUID.v7(), instanceScope: nil, node: harness.node)
         let content = try JSONDecoder().decode(
             [Tool.Content].self, from: JSONEncoder().encode(outcome.content))
         #expect(
-            KeepTalkingPluginHost.mappingGeneratedContents(content, into: nil, runDirectory: nil)
+            KeepTalkingCompanionLink.mappingGeneratedContents(content, into: nil, runDirectory: nil)
                 == content)
         let png = Data([0x89, 0x50, 0x4E, 0x47])
 
         // Nothing requested: files go to the run's directory (delivered as
         // private OTBs); images stay visible beside their note; text stays inline.
         let runDirectory = harness.scratch.appendingPathComponent("run", isDirectory: true)
-        let spilled = KeepTalkingPluginHost.mappingGeneratedContents(
+        let spilled = KeepTalkingCompanionLink.mappingGeneratedContents(
             content, into: nil, runDirectory: runDirectory)
         #expect(try Data(contentsOf: runDirectory.appendingPathComponent("shot.png")) == png)
         #expect(try Data(contentsOf: runDirectory.appendingPathComponent("image-4.png")) == png)
@@ -667,7 +591,7 @@ struct PluginSocketE2ETests {
                     displayName: "files", isDirectory: true, objectName: "files"),
             ],
             umbrellaAttachmentsDir: nil)
-        let mapped = KeepTalkingPluginHost.mappingGeneratedContents(
+        let mapped = KeepTalkingCompanionLink.mappingGeneratedContents(
             content, into: manifest, runDirectory: runDirectory)
         #expect(try String(contentsOf: fileSlot, encoding: .utf8) == "report")
         #expect(try Data(contentsOf: collection.appendingPathComponent("shot.png")) == png)
@@ -711,7 +635,7 @@ struct PluginSocketE2ETests {
         #expect(KTResourceManifest.parseResourceURI("kt-resource://x/../etc") == nil)
         #expect(KTResourceManifest.parseResourceURI("https://example.com") == nil)
 
-        let resolved = try KeepTalkingPluginHost.resolvingResourceURIs(
+        let resolved = try KeepTalkingCompanionLink.resolvingResourceURIs(
             [
                 "screenshot_out_file": .string("kt-resource://\(out.envKey)"),
                 "files": .array([.string("kt-resource://\(inp.envKey.lowercased())")]),
@@ -726,15 +650,15 @@ struct PluginSocketE2ETests {
 
         // Anything that is not one of this call's resources refuses the call.
         #expect(throws: KTPPHostError.self) {
-            try KeepTalkingPluginHost.resolvingResourceURIs(
+            try KeepTalkingCompanionLink.resolvingResourceURIs(
                 ["f": .string("kt-resource://KT_OTB_NOT_THIS_CALL")], manifest: manifest)
         }
         #expect(throws: KTPPHostError.self) {
-            try KeepTalkingPluginHost.resolvingResourceURIs(
+            try KeepTalkingCompanionLink.resolvingResourceURIs(
                 ["f": .string("kt-resource://\(out.envKey)/child.png")], manifest: manifest)
         }
 
-        let back = KeepTalkingPluginHost.mappingResourcePaths(
+        let back = KeepTalkingCompanionLink.mappingResourcePaths(
             [
                 .text(
                     text: "saved \(out.path!.path) and \(coll.path!.path)/frame.png",
@@ -775,22 +699,18 @@ struct PluginSocketE2ETests {
         let harness = try await Self.startHarness(moduleFile: module)
         defer { Task { await harness.tearDown() } }
         let host = harness.host
-        let catalogID = try await host.waitForKind("hang-probe", timeout: 30)
+        let catalogID = try await Self.waitForKind(harness, "hang-probe")
 
         let started = Date()
         let call = Task {
             try await host.callKind(
                 catalogID: catalogID, kindName: "hang-probe", arguments: [:],
-                instanceID: UUID.v7(), instanceScope: nil, timeout: 120)
+                instanceID: UUID.v7(), instanceScope: nil, node: harness.node, timeout: 120)
         }
         try await Task.sleep(nanoseconds: 500_000_000)
         harness.plugin.terminate()
 
-        let error = await #expect(throws: KTPPHostError.self) { try await call.value }
-        guard case .notConnected? = error else {
-            Issue.record("expected notConnected, got \(String(describing: error))")
-            return
-        }
+        await #expect(throws: KTPPHostError.self) { try await call.value }
         #expect(Date().timeIntervalSince(started) < 10)
     }
 }

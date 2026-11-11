@@ -29,6 +29,12 @@ extension KeepTalkingClient {
         if functionName == Self.searchThreadsToolFunctionName {
             return "search thread memory"
         }
+        if functionName == Self.workspaceSnapshotToolFunctionName {
+            return "read the workspace"
+        }
+        if functionName == Self.workspaceMutateToolFunctionName {
+            return "edit the workspace"
+        }
         if functionName == Self.createActionToolFunctionName {
             return "request action creation"
         }

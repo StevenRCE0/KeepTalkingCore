@@ -276,18 +276,6 @@ extension KeepTalkingClient {
         signals.mappingChanges.send(())
     }
 
-    /// Blobs a live mapping references — its avatar or a suggested one —
-    /// among `candidates`.
-    static func appearanceBlobIDs(
-        among candidates: Set<String>,
-        on database: any Database
-    ) async throws -> Set<String> {
-        guard !candidates.isEmpty else { return [] }
-        return try await mappingBlobIDs(
-            KeepTalkingMapping.query(on: database).filter(\.$deletedAt == nil)
-        ).intersection(candidates)
-    }
-
     /// Every blob the rows `query` matches reference, avatars and suggested
     /// avatars alike.
     static func mappingBlobIDs(

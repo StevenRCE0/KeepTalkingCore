@@ -9,6 +9,8 @@ public enum AIPromptTool: String, Sendable, Hashable, CaseIterable {
     case searchThreads
     case markTurningPoint
     case markChitterChatter
+    case workspaceSnapshot
+    case workspaceMutate
 }
 
 /// Maps each `AIPromptTool` the prompt mentions to the function name the
